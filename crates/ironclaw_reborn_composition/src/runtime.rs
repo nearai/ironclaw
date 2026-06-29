@@ -3487,11 +3487,12 @@ fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError
             if trimmed.is_empty() {
                 return Ok(None);
             }
-            let parsed = trimmed.parse::<u32>().map_err(|error| {
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("{key} must be a positive integer: {error}"),
-                }
-            })?;
+            let parsed =
+                trimmed
+                    .parse::<u32>()
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("{key} must be a positive integer: {error}"),
+                    })?;
             if parsed == 0 {
                 return Err(RebornRuntimeError::InvalidArgument {
                     reason: format!("{key} must be greater than zero"),

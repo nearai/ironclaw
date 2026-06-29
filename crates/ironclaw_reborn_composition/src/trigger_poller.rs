@@ -2,7 +2,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "slack-v2-host-beta")]
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "slack-v2-host-beta")]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -74,11 +76,9 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
-    /// Late-binding dispatcher for the post-submit delivery hook. It buffers
-    /// accepted-fire settlements during runtime startup until
-    /// `RebornRuntime::set_trigger_post_submit_hook` installs the real hook.
+    /// Late-binding slot for the post-submit delivery hook.
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) post_submit_hook_dispatch: Arc<PostSubmitHookDispatch>,
+    pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
 
 pub(crate) fn spawn_trigger_poller(
@@ -91,7 +91,7 @@ pub(crate) fn spawn_trigger_poller(
     settings.worker.validate()?;
     #[cfg(feature = "slack-v2-host-beta")]
     let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
-        Arc::new(PostSubmitHookObserver::new(deps.post_submit_hook_dispatch));
+        Arc::new(PostSubmitHookObserver::new(deps.post_submit_hook_slot));
     #[cfg(feature = "slack-v2-host-beta")]
     let trusted_submitter = deps.trusted_submitter;
     #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -118,88 +118,8 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
-/// Late-bound delivery dispatcher shared by the runtime and trigger poller.
-///
-/// Runtime construction starts the poller before Slack mounts are fully built.
-/// Accepted fires that settle in that startup window are buffered here and
-/// replayed once `set_trigger_post_submit_hook` installs the Slack hook. The
-/// startup buffer is bounded to match Slack's pending-delivery admission cap;
-/// if the hook is delayed long enough to fill the buffer, the oldest settlement
-/// is dropped before accepting a newer one.
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) struct PostSubmitHookDispatch {
-    state: Mutex<PostSubmitHookDispatchState>,
-}
-
 #[cfg(feature = "slack-v2-host-beta")]
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
-
-#[cfg(feature = "slack-v2-host-beta")]
-#[derive(Default)]
-struct PostSubmitHookDispatchState {
-    hook: Option<Arc<dyn PostSubmitDeliveryHook>>,
-    pending: VecDeque<TriggerAcceptedFireSettlement>,
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-impl PostSubmitHookDispatch {
-    pub(crate) fn new() -> Self {
-        Self {
-            state: Mutex::new(PostSubmitHookDispatchState::default()),
-        }
-    }
-
-    pub(crate) fn install_hook(&self, hook: Arc<dyn PostSubmitDeliveryHook>) -> bool {
-        let pending = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state.hook.is_some() {
-                return false;
-            }
-            state.hook = Some(Arc::clone(&hook));
-            std::mem::take(&mut state.pending)
-        };
-        for event in pending {
-            spawn_post_submit_delivery(Arc::clone(&hook), event);
-        }
-        true
-    }
-
-    pub(crate) fn is_hook_installed(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .hook
-            .is_some()
-    }
-
-    fn dispatch_or_buffer(&self, event: TriggerAcceptedFireSettlement) {
-        let hook = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match state.hook.as_ref() {
-                Some(hook) => Arc::clone(hook),
-                None => {
-                    if state.pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
-                        state.pending.pop_front();
-                        tracing::debug!(
-                            target = "ironclaw::reborn::trigger_poller",
-                            pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
-                            "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
-                        );
-                    }
-                    state.pending.push_back(event);
-                    return;
-                }
-            }
-        };
-        spawn_post_submit_delivery(hook, event);
-    }
-}
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn spawn_post_submit_delivery(
@@ -217,13 +137,70 @@ fn spawn_post_submit_delivery(
 /// worker has persisted the accepted run/thread mapping.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookObserver {
-    pub(crate) dispatch: Arc<PostSubmitHookDispatch>,
+    pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+    pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
+    drain_scheduled: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
 impl PostSubmitHookObserver {
-    fn new(dispatch: Arc<PostSubmitHookDispatch>) -> Self {
-        Self { dispatch }
+    fn new(hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>) -> Self {
+        Self {
+            hook_slot,
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            drain_scheduled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
+                pending.pop_front();
+                tracing::warn!(
+                    target = "ironclaw::reborn::trigger_poller",
+                    pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
+                    "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
+                );
+            }
+            pending.push_back(event);
+        }
+        self.ensure_drain_task();
+    }
+
+    fn ensure_drain_task(&self) {
+        if self
+            .drain_scheduled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let hook_slot = Arc::clone(&self.hook_slot);
+        let pending = Arc::clone(&self.pending);
+        let drain_scheduled = Arc::clone(&self.drain_scheduled);
+        tokio::spawn(async move {
+            loop {
+                if let Some(hook) = hook_slot.get().cloned() {
+                    let buffered = {
+                        let mut pending = pending
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        pending.drain(..).collect::<Vec<_>>()
+                    };
+                    for event in buffered {
+                        spawn_post_submit_delivery(Arc::clone(&hook), event);
+                    }
+                    drain_scheduled.store(false, Ordering::Release);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        });
     }
 }
 
@@ -231,7 +208,15 @@ impl PostSubmitHookObserver {
 #[async_trait]
 impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
-        self.dispatch.dispatch_or_buffer(event);
+        let Some(hook) = self.hook_slot.get().cloned() else {
+            tracing::debug!(
+                target = "ironclaw::reborn::trigger_poller",
+                "post-submit hook not installed; buffering trigger settlement"
+            );
+            self.buffer_until_hook_installed(event);
+            return;
+        };
+        spawn_post_submit_delivery(hook, event);
     }
 }
 
@@ -353,9 +338,7 @@ mod tests {
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
 
-        use super::super::{
-            POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookDispatch, PostSubmitHookObserver,
-        };
+        use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
         use crate::slack_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
@@ -453,8 +436,8 @@ mod tests {
         #[tokio::test]
         async fn uninstalled_hook_buffers_until_hook_is_installed() {
             let run_id = TurnRunId::new();
-            let dispatch = Arc::new(PostSubmitHookDispatch::new());
-            let observer = PostSubmitHookObserver::new(Arc::clone(&dispatch));
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot));
             let recording = Arc::new(RecordingHook::default());
 
             observer
@@ -467,10 +450,10 @@ mod tests {
                     .is_err(),
                 "settlement must be buffered while hook is not installed"
             );
-            assert!(
-                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>),
-                "first hook install must succeed"
-            );
+            hook_slot
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+                .ok()
+                .expect("first hook install must succeed");
 
             let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
                 .await
@@ -480,8 +463,8 @@ mod tests {
 
         #[tokio::test]
         async fn uninstalled_hook_buffer_drops_oldest_when_full() {
-            let dispatch = Arc::new(PostSubmitHookDispatch::new());
-            let observer = PostSubmitHookObserver::new(Arc::clone(&dispatch));
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot));
             let recording = Arc::new(RecordingHook::default());
             let run_ids: Vec<_> = (0..=POST_SUBMIT_HOOK_PENDING_CAPACITY)
                 .map(|_| TurnRunId::new())
@@ -493,10 +476,10 @@ mod tests {
                     .await;
             }
 
-            assert!(
-                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>),
-                "first hook install must succeed"
-            );
+            hook_slot
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+                .ok()
+                .expect("first hook install must succeed");
 
             let calls = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -526,12 +509,13 @@ mod tests {
         #[tokio::test]
         async fn filled_slot_settlement_invokes_hook_with_run_id_and_scope() {
             let run_id = TurnRunId::new();
-            let dispatch = Arc::new(PostSubmitHookDispatch::new());
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
             let recording = Arc::new(RecordingHook::default());
-            assert!(
-                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-            );
-            let observer = PostSubmitHookObserver::new(dispatch);
+            hook_slot
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+                .ok()
+                .expect("hook install");
+            let observer = PostSubmitHookObserver::new(hook_slot);
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
@@ -562,16 +546,19 @@ mod tests {
         #[tokio::test]
         async fn filled_slot_slow_hook_does_not_block_observer() {
             let run_id = TurnRunId::new();
-            let dispatch = Arc::new(PostSubmitHookDispatch::new());
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let completed = Arc::new(AtomicBool::new(false));
-            assert!(dispatch.install_hook(Arc::new(BlockingHook {
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
-                completed: Arc::clone(&completed),
-            }) as Arc<dyn PostSubmitDeliveryHook>));
-            let observer = PostSubmitHookObserver::new(dispatch);
+            hook_slot
+                .set(Arc::new(BlockingHook {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    completed: Arc::clone(&completed),
+                }) as Arc<dyn PostSubmitDeliveryHook>)
+                .ok()
+                .expect("hook install");
+            let observer = PostSubmitHookObserver::new(hook_slot);
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
