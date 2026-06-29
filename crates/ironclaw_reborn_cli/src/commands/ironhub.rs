@@ -90,6 +90,10 @@ struct IronHubInstallCommand {
     #[arg(long)]
     expected_artifact_digest: Option<String>,
 
+    /// Install from a private org-scoped signed manifest URL instead of the public catalog.
+    #[arg(long)]
+    private_manifest_url: Option<String>,
+
     /// Output the lifecycle response as JSON.
     #[arg(long)]
     json: bool,
@@ -136,6 +140,7 @@ impl IronHubCommand {
                         acknowledge_unverified: command.acknowledge_unverified,
                         expected_version: command.expected_version,
                         expected_artifact_digest: command.expected_artifact_digest,
+                        private_manifest_url: command.private_manifest_url,
                     },
                 },
                 command.json,

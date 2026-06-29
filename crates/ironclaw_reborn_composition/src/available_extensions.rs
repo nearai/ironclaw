@@ -2149,7 +2149,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/fixture.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search"
 effects = ["network"]
@@ -2158,7 +2164,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "fixture.write"
 description = "Write"
 effects = ["external_write"]
@@ -2167,10 +2173,13 @@ visibility = "model"
 input_schema_ref = "schemas/write.input.json"
 output_schema_ref = "schemas/write.output.json"
 "#;
-        let manifest = ExtensionManifest::parse(
+        let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
+            .expect("default host api contracts");
+        let manifest = ExtensionManifest::parse_with_host_api_contracts(
             MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &contracts,
         )
         .expect("manifest");
         let package = ExtensionPackage::from_manifest(

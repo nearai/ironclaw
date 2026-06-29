@@ -135,7 +135,9 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationProductFacade,
     CodexLoginStart, ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, LlmActiveSelection,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubInstallKind,
+    IronhubLinkError, IronhubLinkService, IronhubRegisterRequest, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductAgentBoundCaller,

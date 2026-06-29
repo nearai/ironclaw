@@ -29,6 +29,8 @@ use super::model::{
 use super::render::render_reborn_ironhub_response;
 use super::service::IronHubService;
 
+const TEST_CATALOG_GENERATED_AT: &str = "2026-01-01T00:00:00Z";
+
 #[test]
 fn signed_manifest_verifies_known_test_vector() {
     let envelope = br#"{"v":1,"key_id":"test-vector","manifest_b64":"eyJ2ZXJzaW9uIjoiMSIsImdlbmVyYXRlZF9hdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwicmVsZWFzZV90YWciOiJ0ZXN0IiwicmVwbyI6Im5lYXJhaS9pcm9uaHViIiwidG9vbHMiOltdLCJza2lsbHMiOltdfQ","sig":"KjsUDgi1enj3iTPNQI6gU1Bwxf01hIUItlFvX9PxgWNybPPrJNIV7vFG-G8hJOalFMwFs5zQHrxbtFDZAlgtBg"}"#;
@@ -132,6 +134,92 @@ fn unverified_install_requires_acknowledgement() {
     .expect("acknowledged unverified content can proceed");
     assert_eq!(allowed.0, IronHubEntryKind::Skill);
     assert_eq!(allowed.1, IronHubProvenance::New);
+}
+
+#[test]
+fn private_provenance_requires_private_manifest_source() {
+    let manifest = IronHubManifest {
+        version: "1".to_string(),
+        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        release_tag: "test".to_string(),
+        repo: "nearai/ironhub".to_string(),
+        tools: Vec::new(),
+        skills: vec![IronHubSkillEntry {
+            name: "org-skill".to_string(),
+            trunk: String::new(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            provenance: IronHubProvenance::Private,
+            skill_md: IronHubArtifact {
+                url: "https://hub.ironclaw.com/org-skill/SKILL.md".to_string(),
+                size_bytes: 1,
+                sha256: "c".repeat(64),
+            },
+        }],
+    };
+
+    let rejected = classify_gate_and_digest(
+        &manifest,
+        "org-skill",
+        Some(IronHubEntryKind::Skill),
+        &IronHubInstallOptions::default(),
+    )
+    .expect_err("private provenance without a private manifest source is rejected");
+    assert!(rejected.to_string().contains("claims private provenance"));
+
+    let allowed = classify_gate_and_digest(
+        &manifest,
+        "org-skill",
+        Some(IronHubEntryKind::Skill),
+        &IronHubInstallOptions {
+            private_manifest_url: Some("https://hub.ironclaw.com/org/manifest".to_string()),
+            ..IronHubInstallOptions::default()
+        },
+    )
+    .expect("a private manifest source allows private provenance");
+    assert_eq!(allowed.1, IronHubProvenance::Private);
+}
+
+#[tokio::test]
+async fn install_rejects_replayed_older_manifest_for_same_catalog() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    let catalog_url = "https://replay-catalog.example.com/catalog/manifest.json";
+    let older_url = "https://replay-catalog.example.com/private/older-manifest.json";
+    let egress = Arc::new(RecordingIronHubEgress::new([
+        (
+            catalog_url,
+            signed_manifest(empty_manifest_json("2026-02-02T00:00:00Z")),
+        ),
+        (
+            older_url,
+            signed_manifest(empty_manifest_json("2026-02-01T00:00:00Z")),
+        ),
+    ]));
+    let service = ironhub_service(root, egress, catalog_url).await;
+
+    service
+        .execute(super::model::IronHubCommand::Search {
+            query: String::new(),
+        })
+        .await
+        .expect("the newer catalog manifest is accepted");
+
+    let rejected = service
+        .execute(super::model::IronHubCommand::Install {
+            name: "replay-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(older_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("an older manifest for the same catalog host and repo is a replay");
+    assert!(
+        rejected.to_string().contains("replay rejected"),
+        "{rejected}"
+    );
 }
 
 #[test]
@@ -250,7 +338,7 @@ async fn install_rejects_artifact_sha256_mismatch_before_reborn_write() {
     let skill_url = "https://hub.ironclaw.com/tests/mismatch/SKILL.md";
     let manifest = signed_manifest(skill_manifest_json(
         "checksum-skill",
-        "2026-01-01T00:00:00Z",
+        TEST_CATALOG_GENERATED_AT,
         skill_url,
         &sha256_hex(b"expected skill"),
         IronHubProvenance::Official,
@@ -293,7 +381,7 @@ async fn install_skill_and_tool_materialize_into_reborn_management() {
     let manifest = signed_manifest(mixed_manifest_json(MixedManifestFixture {
         skill_name: "installed-skill",
         tool_name: "installed-tool",
-        generated_at: "2026-01-02T00:00:00Z",
+        generated_at: TEST_CATALOG_GENERATED_AT,
         skill_url,
         skill_sha: &sha256_hex(skill_bytes),
         wasm_url,
@@ -340,12 +428,96 @@ async fn install_skill_and_tool_materialize_into_reborn_management() {
 }
 
 #[tokio::test]
+async fn install_resolves_skill_from_private_manifest_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    let public_manifest_url = "https://hub.ironclaw.com/tests/private/public-manifest.json";
+    let private_manifest_url =
+        "https://hub.ironclaw.com/tests/private/org-manifest.json?token=test-capability-token";
+    let skill_url = "https://hub.ironclaw.com/tests/private/SKILL.md";
+    let skill_bytes = b"# private skill\n";
+    let private_manifest = signed_manifest(skill_manifest_json(
+        "private-skill",
+        TEST_CATALOG_GENERATED_AT,
+        skill_url,
+        &sha256_hex(skill_bytes),
+        IronHubProvenance::Private,
+    ));
+    let egress = Arc::new(RecordingIronHubEgress::new([
+        (
+            public_manifest_url,
+            signed_manifest(empty_manifest_json(TEST_CATALOG_GENERATED_AT)),
+        ),
+        (private_manifest_url, private_manifest),
+        (skill_url, skill_bytes.to_vec()),
+    ]));
+    let service = ironhub_service(root.clone(), egress, public_manifest_url).await;
+
+    let installed = service
+        .execute(super::model::IronHubCommand::Install {
+            name: "private-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_manifest_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("install resolves the skill from the private manifest");
+
+    assert_eq!(installed.phase, LifecyclePhase::Installed);
+    assert!(root.join("skills/private-skill/SKILL.md").exists());
+}
+
+#[tokio::test]
+async fn install_allows_private_artifacts_on_configured_catalog_host() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    let catalog_url = "https://private-hub.example.com/api/catalog/manifest.json";
+    let private_manifest_url =
+        "https://private-hub.example.com/api/private-artifacts/manifest.json?token=test-token";
+    let skill_url = "https://private-hub.example.com/api/private-artifacts/SKILL.md";
+    let skill_bytes = b"# scoped skill\n";
+    let private_manifest = signed_manifest(skill_manifest_json(
+        "scoped-skill",
+        TEST_CATALOG_GENERATED_AT,
+        skill_url,
+        &sha256_hex(skill_bytes),
+        IronHubProvenance::Official,
+    ));
+    let egress = Arc::new(RecordingIronHubEgress::new([
+        (
+            catalog_url,
+            signed_manifest(empty_manifest_json(TEST_CATALOG_GENERATED_AT)),
+        ),
+        (private_manifest_url, private_manifest),
+        (skill_url, skill_bytes.to_vec()),
+    ]));
+    let service = ironhub_service(root.clone(), egress, catalog_url).await;
+
+    let installed = service
+        .execute(super::model::IronHubCommand::Install {
+            name: "scoped-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_manifest_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("install succeeds when private artifacts share the configured catalog host");
+
+    assert_eq!(installed.phase, LifecyclePhase::Installed);
+    assert!(root.join("skills/scoped-skill/SKILL.md").exists());
+}
+
+#[tokio::test]
 async fn fetch_manifest_uses_runtime_egress_host_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest_url = "https://hub.ironclaw.com/tests/policy/manifest.json";
     let egress = Arc::new(RecordingIronHubEgress::new([(
         manifest_url,
-        signed_manifest(empty_manifest_json("2026-01-03T00:00:00Z")),
+        signed_manifest(empty_manifest_json(TEST_CATALOG_GENERATED_AT)),
     )]));
     let service = ironhub_service(
         dir.path().join("local-dev"),
@@ -390,7 +562,7 @@ async fn concurrent_manifest_cache_miss_fetches_once() {
     let egress = Arc::new(
         RecordingIronHubEgress::new([(
             manifest_url,
-            signed_manifest(empty_manifest_json("2026-01-04T00:00:00Z")),
+            signed_manifest(empty_manifest_json(TEST_CATALOG_GENERATED_AT)),
         )])
         .with_delay(Duration::from_millis(50)),
     );
