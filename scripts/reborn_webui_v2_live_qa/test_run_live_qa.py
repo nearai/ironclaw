@@ -899,6 +899,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 True,
             )
         )
+        self.assertEqual(
+            extensions_by_case["qa_6c_gmail_to_sheet_live_chat"]["google-drive"].get(
+                "required_tools",
+            ),
+            ["google-drive.list_files"],
+        )
         self.assertTrue(
             extensions_by_case["qa_6e_gmail_to_sheet_delivery"]["gmail"].get(
                 "ensure_installed",

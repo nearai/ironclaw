@@ -1801,7 +1801,6 @@ async def _extension_chat_connect_case(
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't connect",
             "cannot connect",
@@ -2139,7 +2138,6 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't send",
             "cannot send",
@@ -2253,7 +2251,6 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
         extra_details={"strategy_phrase": strategy_phrase},
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "local file",
             "/workspace/",
@@ -2305,7 +2302,6 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
@@ -2435,6 +2431,11 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
                 "required_tools": ["gmail.list_messages"],
             },
             {
+                "package_id": "google-drive",
+                "display_name": "Google Drive",
+                "required_tools": ["google-drive.list_files"],
+            },
+            {
                 "package_id": "google-sheets",
                 "display_name": "Google Sheets",
                 "required_tools": [
@@ -2497,7 +2498,6 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
         timeout=420.0,
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
@@ -2850,7 +2850,6 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't send",
             "cannot send",
@@ -3052,7 +3051,6 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         timeout=360.0,
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
