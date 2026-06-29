@@ -92,12 +92,12 @@ impl ToolSpec {
     }
 
     fn tool_definition(&self, capability_id: &CapabilityId) -> ProviderToolDefinition {
-        ProviderToolDefinition {
-            capability_id: capability_id.clone(),
-            name: self.tool_name.clone(),
-            description: self.description.clone(),
-            parameters: self.parameters_schema.clone(),
-        }
+        ProviderToolDefinition::from_typed_parts(
+            capability_id.clone(),
+            self.tool_name.clone(),
+            self.description.clone(),
+            self.parameters_schema.clone(),
+        )
     }
 }
 
@@ -127,20 +127,14 @@ fn external_tool_capability_id(
 fn provider_tool_name_for_external_tool(
     tool_name: &str,
 ) -> Result<ProviderToolName, AgentLoopHostError> {
-    let sanitized: String = tool_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    ProviderToolName::new(sanitized).map_err(|_| {
+    let provider_tool_name = tool_name.to_ascii_lowercase();
+    ProviderToolDefinition::validate_name(&provider_tool_name).map_err(|error| {
         AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "external tool name cannot be represented as a provider tool name",
+            error.kind,
+            format!(
+                "external tool name cannot be represented as a provider tool name: {}",
+                error.safe_summary
+            ),
         )
     })
 }
@@ -347,17 +341,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             capability_id: capability_id.clone(),
             input_ref,
             effective_capability_ids: vec![capability_id],
-            provider_replay: Some(ProviderToolCallReplay {
-                provider_id: tool_call.provider_id,
-                provider_model_id: tool_call.provider_model_id,
+            provider_replay: Some(ProviderToolCallReplay::from_tool_call(
+                tool_call,
                 provider_turn_id,
-                provider_call_id: tool_call.id,
-                provider_tool_name: tool_call.name,
-                arguments: tool_call.arguments,
-                response_reasoning: tool_call.response_reasoning,
-                reasoning: tool_call.reasoning,
-                signature: tool_call.signature,
-            }),
+            )),
         })
     }
 

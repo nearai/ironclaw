@@ -218,23 +218,32 @@ async fn require_approval_for_profile_policy(
             reason: DenyReason::PolicyDenied,
         };
     }
-    // 2. Hard floor: never auto-approve / never satisfiable by a stored grant.
+    // 2. A matching one-shot approval lease satisfies the current resume. This
+    //    must beat explicit ask_each_time and hard-floor gates: those settings
+    //    require a fresh human approval for each new invocation, but the lease
+    //    is the durable proof that this invocation was just approved.
+    //
+    // Fingerprinted approval leases are not ambient grants: CapabilityHost's
+    // `resume_json` path excludes them from normal grant loading, then validates
+    // the blocked run's approval_request_id, approval request metadata, and
+    // invocation fingerprint before injecting the matching lease grant into this
+    // resume context. This predicate therefore recognizes the already selected
+    // resume lease; it is not the lease lookup boundary.
+    if has_matching_one_shot_approval_grant(context, descriptor, &gate_effects) {
+        return decision;
+    }
+    // 3. Hard floor: never auto-approve / never satisfiable by a stored grant.
     if gate_policy.effects_force_approval(&gate_effects) {
         return require_approval();
     }
-    // 3. Explicit per-tool `ask_each_time` → always gate, ignoring the global
-    //    auto-approve setting and any stored always-allow grant.
+    // 4. Explicit per-tool `ask_each_time` → always gate fresh invocations,
+    //    ignoring the global auto-approve setting and any stored always-allow
+    //    grant.
     if matches!(tool_override, Some(ToolPermissionOverride::AskEachTime)) {
         return require_approval();
     }
-    // 4. Capability deliberately exempt from the gate (in-turn consent).
+    // 5. Capability deliberately exempt from the gate (in-turn consent).
     if gate_policy.capability_exempt_from_approval(&descriptor.id) {
-        return decision;
-    }
-    // 5. A matching one-shot approval lease satisfies the gate, regardless of
-    //    the global setting, so a user can resume the approval request they just
-    //    answered.
-    if has_matching_one_shot_approval_grant(context, descriptor, &gate_effects) {
         return decision;
     }
     let expected_grantee = Principal::Extension(descriptor.provider.clone());

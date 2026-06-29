@@ -2,7 +2,7 @@
 name = "ironclaw_skills"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Skill selection, scoring, and management for IronClaw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
