@@ -366,6 +366,79 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
 }
 
 #[tokio::test]
+async fn host_runtime_services_extracts_google_drive_download_binary_into_text() {
+    // Producer -> consumer boundary for `google-drive.download_file`: the
+    // bundled WASM guest base64-encodes a binary download under `content_base64`
+    // (it cannot run the host's document extractor), and the host completion /
+    // obligation path must swap that base64 for extracted `content` before the
+    // result reaches the model. Drives the FULL path through
+    // `invoke_capability` (which routes through `complete_dispatch` ->
+    // `extract_documents_in_output`), not the helper in isolation.
+    let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    // `download_file` makes two HTTP calls: GET metadata (must parse as JSON)
+    // then GET the media body (`?alt=media`). A PDF is binary (invalid UTF-8),
+    // so the guest returns it base64-encoded for the host to extract.
+    let pdf = include_bytes!("../../../tests/fixtures/hello.pdf").to_vec();
+    let network = SequencedGoogleDriveDownloadEgress::new(
+        br#"{"id":"file-1","name":"hello.pdf","mimeType":"application/pdf"}"#.to_vec(),
+        pdf,
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_drive_download_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-drive",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"file_id": "file-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert!(
+                completed.output.get("content_base64").is_none(),
+                "host must strip `content_base64` so raw bytes never reach the model, got: {:?}",
+                completed.output
+            );
+            let content = completed.output["content"].as_str().unwrap_or("");
+            assert!(
+                content.contains("Hello"),
+                "extracted document text must be present, got: {content}"
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    // Two egress calls: metadata then media.
+    let requests = network.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].url.contains("alt=media"));
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
     let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -1499,6 +1572,60 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
             usage: NetworkUsage {
                 request_bytes,
                 response_bytes: self.response_body.len() as u64,
+                resolved_ip: None,
+            },
+        })
+    }
+}
+
+/// Network egress stub for the `download_file` two-call flow: the Drive guest
+/// first GETs file metadata (JSON) and then GETs the media body (`?alt=media`).
+/// A single fixed-body egress can't serve both, so this returns the metadata
+/// JSON for the metadata request and the binary file bytes for the media
+/// request (discriminated on `alt=media` in the URL).
+#[derive(Debug, Clone)]
+struct SequencedGoogleDriveDownloadEgress {
+    requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
+    metadata_body: Vec<u8>,
+    media_body: Vec<u8>,
+}
+
+impl SequencedGoogleDriveDownloadEgress {
+    fn new(metadata_body: Vec<u8>, media_body: Vec<u8>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            metadata_body,
+            media_body,
+        }
+    }
+
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpEgress for SequencedGoogleDriveDownloadEgress {
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        let is_media = request.url.contains("alt=media");
+        self.requests.lock().unwrap().push(request);
+        let body = if is_media {
+            self.media_body.clone()
+        } else {
+            self.metadata_body.clone()
+        };
+        let response_bytes = body.len() as u64;
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body,
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes,
                 resolved_ip: None,
             },
         })

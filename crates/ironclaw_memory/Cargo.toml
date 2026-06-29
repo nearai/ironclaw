@@ -3,7 +3,7 @@ name = "ironclaw_memory"
 version = "0.1.0"
 edition = "2024"
 # Keep in sync with the workspace-level package.rust-version.
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Provider-neutral memory contract types for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -17,10 +17,11 @@ async-trait = "0.1"
 # IANA timezone names; the constructor must stay an inherent method on the
 # contract type so the existing consumer call site is unchanged.
 chrono-tz = "0.10"
+hex = "0.4"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 # Required only by `DocumentMetadata::from_value`, which logs a diagnostic on
 # deserialize failure; preserved to keep behavior identical to the impl crate.
 tracing = "0.1"

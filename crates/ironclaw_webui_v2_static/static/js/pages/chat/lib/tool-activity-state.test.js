@@ -77,8 +77,9 @@ test("approval gate with invocation id merges into an existing runtime activity"
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "tool-invocation-1");
   assert.equal(harness.messages[0].gateRef, "gate:approval-1");
-  assert.equal(harness.messages[0].toolStatus, "error");
-  assert.equal(harness.messages[0].toolError, "authorization");
+  assert.equal(harness.messages[0].toolStatus, "declined");
+  assert.equal(harness.messages[0].toolError, "gate_declined");
+  assert.equal(harness.messages[0].toolErrorKind, "gate_declined");
   assert.equal(harness.messages[0].activityOrder, 42);
 });
 
@@ -89,13 +90,29 @@ test("runtime activity adopts an earlier gate card by invocation id", () => {
   failGateToolActivity(harness.setMessages, approvalGate(), harness.stateRef);
   upsertToolActivityMessage(
     harness.setMessages,
-    runtimeActivity({ toolStatus: "error" }),
+    runtimeActivity({
+      toolStatus: "declined",
+      toolError: "gate_declined",
+      toolErrorKind: "gate_declined",
+    }),
     harness.stateRef,
   );
 
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "tool-invocation-1");
-  assert.equal(harness.messages[0].toolStatus, "error");
+  assert.equal(harness.messages[0].toolStatus, "declined");
   assert.equal(harness.messages[0].activityOrder, 42);
   assert.equal(harness.messages[0].activityOrderSource, "projection");
+});
+
+test("approval gate without invocation id does not synthesize an activity card", () => {
+  const harness = messageHarness();
+
+  ensureGateToolActivity(
+    harness.setMessages,
+    approvalGate({ invocationId: null }),
+    harness.stateRef,
+  );
+
+  assert.equal(harness.messages.length, 0);
 });

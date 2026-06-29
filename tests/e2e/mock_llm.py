@@ -19,6 +19,11 @@ DENIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+REQUESTED_UNAVAILABLE_TOOL_TRIGGER = re.compile(
+    r"issue 5197 disabled echo workaround|\buse\s+builtin\.echo\s+to\s+print\b",
+    re.IGNORECASE,
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     # Reborn attachment e2e: the inbound pipeline extracts a document's text
@@ -33,13 +38,18 @@ CANNED_RESPONSES = [
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
     # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
-    # write_file dispatch lives in TOOL_CALL_PATTERNS), it replies referencing
-    # their /workspace paths so the WebUI renders downloadable file chips. Fires
-    # after the tool calls run (match_tool_call dedups the already-run writes).
+    # builtin__write_file dispatch lives in TOOL_CALL_PATTERNS), it replies
+    # referencing their /workspace paths so the WebUI renders downloadable file
+    # chips. Fires after the tool calls run (match_tool_call dedups the
+    # already-run writes).
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
         "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
         "Both are ready to download.",
+    ),
+    (
+        re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "Done - saved the approval test file.",
     ),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
@@ -110,6 +120,18 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
+    r"reborn external tool loop",
+    re.IGNORECASE,
+)
+REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+    r"reborn external tool failure",
+    re.IGNORECASE,
+)
+REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+    r"reborn mixed internal external tools",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -134,6 +156,17 @@ NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
 )
 
 TOOL_CALL_PATTERNS = [
+    # Reborn parallel tool-call port: the Reborn provider-visible builtin tool
+    # names are namespaced/sanitized, while the legacy engine keeps using the
+    # unqualified trigger below.
+    (
+        re.compile(r"reborn parallel echo and time", re.IGNORECASE),
+        "builtin__echo",
+        lambda _: [
+            {"tool_name": "builtin__echo", "arguments": {"message": "parallel-test"}},
+            {"tool_name": "builtin__time", "arguments": {"operation": "now"}},
+        ],
+    ),
     # Parallel tool calls: return both echo and time in one response
     (
         re.compile(r"parallel echo and time", re.IGNORECASE),
@@ -143,24 +176,36 @@ TOOL_CALL_PATTERNS = [
             {"tool_name": "time", "arguments": {"operation": "now"}},
         ],
     ),
+    (
+        re.compile(r"reborn builtin echo (.+)", re.IGNORECASE),
+        "builtin__echo",
+        lambda m: {"message": m.group(1)},
+    ),
+    (
+        re.compile(r"reborn builtin time", re.IGNORECASE),
+        "builtin__time",
+        lambda _: {"operation": "now"},
+    ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
-    # the project workspace. After both results land, match_tool_call dedups
-    # write_file and the conversation falls through to the CANNED_RESPONSES
-    # reply that references the two paths.
+    # the project workspace. Reborn exposes this first-party tool by capability
+    # id; the provider-facing tool name sanitizes dots as "__". After both
+    # results land, match_tool_call dedups builtin__write_file and the
+    # conversation falls through to the CANNED_RESPONSES reply that
+    # references the two paths.
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
-        "write_file",
+        "builtin__write_file",
         lambda _: [
             {
-                "tool_name": "write_file",
+                "tool_name": "builtin__write_file",
                 "arguments": {
                     "path": "/workspace/report.csv",
                     "content": "name,score\nalice,90\nbob,85\n",
                 },
             },
             {
-                "tool_name": "write_file",
+                "tool_name": "builtin__write_file",
                 "arguments": {
                     "path": "/workspace/report.pdf",
                     "content": (
@@ -170,6 +215,14 @@ TOOL_CALL_PATTERNS = [
                 },
             },
         ],
+    ),
+    (
+        re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "builtin__write_file",
+        lambda m: {
+            "path": f"/workspace/reborn-approval-{m.group('label')}.txt",
+            "content": f"approved {m.group('label')}\n",
+        },
     ),
     (
         re.compile(
@@ -829,6 +882,7 @@ TOOL_CALL_PATTERNS = [
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
 _last_chat_request: dict | None = None
+_chat_requests: list[dict] = []
 
 
 def _new_oauth_state() -> dict:
@@ -952,11 +1006,28 @@ def _active_skill_names(messages: list[dict]) -> set[str]:
     return names
 
 
+def _typed_user_content_for_skill_detection(messages: list[dict]) -> str:
+    """Return user-authored text without generated attachment context.
+
+    Reborn appends a model-visible ``<attachments>`` block to user messages so
+    tools can reason about uploaded files and their /workspace storage paths.
+    Those paths are not user-typed slash skills, so the mock's missing-skill
+    heuristic must ignore that generated block.
+    """
+    return re.sub(
+        r"\n+<attachments>.*?</attachments>\s*$",
+        "",
+        _last_user_content(messages),
+        flags=re.DOTALL,
+    )
+
+
 def _missing_explicit_skills(messages: list[dict]) -> list[str]:
     active = _active_skill_names(messages)
     missing = []
     seen = set()
-    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', _last_user_content(messages)):
+    content = _typed_user_content_for_skill_detection(messages)
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', content):
         name = match.group("name").lower()
         if name in active or name in seen:
             continue
@@ -990,11 +1061,18 @@ def _derive_skill_name_from_url(url: str) -> str:
     return slug or "remote-skill"
 
 
-def _conversation_wants_slow_response(messages: list[dict]) -> bool:
-    return _conversation_has_user_trigger(
+def _conversation_slow_response_delay(messages: list[dict]) -> float:
+    if _conversation_has_user_trigger(
+        messages,
+        re.compile(r"editable composer slow response", re.IGNORECASE),
+    ):
+        return 5.0
+    if _conversation_has_user_trigger(
         messages,
         re.compile(r"refresh-mid-response|slow response|slowly", re.IGNORECASE),
-    )
+    ):
+        return 2.0
+    return 0.0
 
 
 def _assistant_has_phrase(messages: list[dict], phrase: str) -> bool:
@@ -1289,7 +1367,25 @@ def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
     return [{"tool_name": tool_name, "arguments": value}]
 
 
-def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
+def _advertised_tool_names(tools: object) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+        elif isinstance(tool.get("name"), str):
+            names.add(tool["name"])
+    return names
+
+
+def match_tool_call(
+    messages: list[dict],
+    has_tools: bool,
+) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
     Returns ``None`` when no pattern matches or when the request did not
@@ -1305,6 +1401,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
+    if REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content):
+        if any(tr["name"] == "builtin_shell" for tr in recent_tool_results):
+            return None
+        return [{
+            "tool_name": "builtin_shell",
+            "arguments": {
+                "command": "echo \"disabled-test\"",
+                "workdir": "/workspace",
+            },
+        }]
     # #3533: gmail-install-then-retry sequence.
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
@@ -1447,9 +1553,9 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
                     tool_call_names[tool_call_id] = tool_name
             continue
         if message.get("role") == "tool":
-            name = _extract_tool_name(message)
+            name = tool_call_names.get(message.get("tool_call_id", ""), "unknown")
             if name == "unknown":
-                name = tool_call_names.get(message.get("tool_call_id", ""), name)
+                name = _extract_tool_name(message)
             results.append({
                 "name": name,
                 "content": message.get("content", ""),
@@ -1466,6 +1572,146 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
 def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     """Collect fresh tool results for one tool name."""
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
+
+
+def match_reborn_external_tool_response(messages: list[dict], has_tools: bool) -> dict | None:
+    """Script a repeated caller-supplied Responses API tool loop.
+
+    This path is intentionally sentinel-gated for Reborn OpenAI-compatible E2E
+    tests. It exercises model-emitted calls for tools supplied by the HTTP
+    client, then verifies submitted tool outputs are fed back as standard
+    OpenAI tool-result messages on later LLM calls.
+    """
+    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_LOOP_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn external tool loop missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "lookup_time" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_time",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "lookup_fact" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_fact",
+                "arguments": {"topic": "Boston"},
+            },
+        }
+
+    summary = "; ".join(
+        f"{name}={result_by_name[name]}"
+        for name in ("lookup_weather", "lookup_time", "lookup_fact")
+    )
+    return {
+        "type": "text",
+        "text": f"Reborn external tool loop complete: {summary}",
+    }
+
+
+def match_reborn_external_tool_failure_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Script an external tool call whose caller-supplied output is an error."""
+    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn external tool failure missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn external tool failure observed: "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
+
+
+def match_reborn_mixed_internal_external_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Emit an internal tool and a caller-supplied external tool in one response."""
+    if not _conversation_has_user_trigger(messages, REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "builtin__echo" not in result_by_name and "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn mixed tool run missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": [
+                {
+                    "tool_name": "builtin__echo",
+                    "arguments": {"message": "mixed-internal-echo"},
+                },
+                {
+                    "tool_name": "lookup_weather",
+                    "arguments": {"city": "Boston"},
+                },
+            ],
+        }
+
+    if "lookup_weather" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "builtin__echo" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "builtin__echo",
+                "arguments": {"message": "mixed-internal-echo"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn mixed tool run complete: "
+            f"builtin__echo={result_by_name['builtin__echo']}; "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
 
 
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
@@ -1682,16 +1928,33 @@ async def _send_sse(resp: web.StreamResponse, data: dict):
     await resp.write(f"data: {json.dumps(data)}\n\n".encode())
 
 
-def match_special_response(messages: list[dict], has_tools: bool) -> dict | None:
+def _preferred_tool_name(available_tool_names: set[str], legacy: str) -> str:
+    reborn_name = {
+        "echo": "builtin__echo",
+        "time": "builtin__time",
+    }.get(legacy)
+    if reborn_name and reborn_name in available_tool_names:
+        return reborn_name
+    return legacy
+
+
+def match_special_response(
+    messages: list[dict],
+    has_tools: bool,
+    available_tool_names: set[str] | None = None,
+) -> dict | None:
     """Deterministic issue-specific responses for agent-loop recovery tests."""
     last_user = _last_user_content(messages)
+    available_tool_names = available_tool_names or set()
+    echo_tool = _preferred_tool_name(available_tool_names, "echo")
+    time_tool = _preferred_tool_name(available_tool_names, "time")
 
     if _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
         if has_tools:
             return {
                 "type": "tool_call",
                 "tool_call": {
-                    "tool_name": "echo",
+                    "tool_name": echo_tool,
                     "arguments": {"message": "loop-iteration"},
                 },
             }
@@ -1705,7 +1968,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
             return {
                 "type": "truncated_tool_call",
                 "tool_call": {
-                    "tool_name": "time",
+                    "tool_name": time_tool,
                     "arguments": {},
                 },
                 "content": "Attempting a tool call but the response was truncated.",
@@ -1719,7 +1982,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
         return {
             "type": "tool_call",
             "tool_call": {
-                "tool_name": "time",
+                "tool_name": time_tool,
                 "arguments": {"operation": "broken-operation"},
             },
         }
@@ -1736,12 +1999,18 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
         if n == 0 and has_tools:
             return {
                 "type": "tool_call",
-                "tool_call": {"tool_name": "echo", "arguments": {"message": "step-one"}},
+                "tool_call": {
+                    "tool_name": echo_tool,
+                    "arguments": {"message": "step-one"},
+                },
             }
         if n == 1 and has_tools:
             return {
                 "type": "tool_call",
-                "tool_call": {"tool_name": "time", "arguments": {"operation": "now"}},
+                "tool_call": {
+                    "tool_name": time_tool,
+                    "arguments": {"operation": "now"},
+                },
             }
         return {
             "type": "text",
@@ -2005,13 +2274,17 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     global _last_chat_request
     body = await request.json()
     _last_chat_request = body
+    _chat_requests.append(body)
     messages = body.get("messages", [])
     stream = body.get("stream", False)
-    has_tools = bool(body.get("tools"))
+    tools = body.get("tools")
+    has_tools = bool(tools)
+    available_tool_names = _advertised_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
-    if _conversation_wants_slow_response(messages):
-        await asyncio.sleep(2.0)
+    slow_response_delay = _conversation_slow_response_delay(messages)
+    if slow_response_delay > 0:
+        await asyncio.sleep(slow_response_delay)
 
     # Job-mode conversations (background routine/job execution)
     job_resp = match_job_response(messages, has_tools)
@@ -2028,7 +2301,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
 
     # Special chat-loop recovery cases that intentionally override the normal
     # tool-result summary path (for example, the looping case).
-    special = match_special_response(messages, has_tools)
+    special = match_special_response(messages, has_tools, available_tool_names)
     if special and _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
     # Multi-step chain: must bypass tool-result-summary to issue second tool call
@@ -2057,6 +2330,20 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             if not stream:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
+    reborn_external_tool = match_reborn_external_tool_response(messages, has_tools)
+    if reborn_external_tool:
+        return await _dispatch_special_response(request, cid, stream, reborn_external_tool)
+    reborn_external_tool_failure = match_reborn_external_tool_failure_response(messages, has_tools)
+    if reborn_external_tool_failure:
+        return await _dispatch_special_response(
+            request,
+            cid,
+            stream,
+            reborn_external_tool_failure,
+        )
+    reborn_mixed_tool = match_reborn_mixed_internal_external_response(messages, has_tools)
+    if reborn_mixed_tool:
+        return await _dispatch_special_response(request, cid, stream, reborn_mixed_tool)
     if (
         not tool_results
         and _conversation_uses_codeact(messages)
@@ -2799,9 +3086,20 @@ def main():
     async def get_last_chat_request(request: web.Request) -> web.Response:
         return web.json_response(_last_chat_request or {})
 
+    async def get_chat_requests(request: web.Request) -> web.Response:
+        return web.json_response({"requests": _chat_requests})
+
+    async def reset_chat_requests(request: web.Request) -> web.Response:
+        global _last_chat_request
+        _last_chat_request = None
+        _chat_requests.clear()
+        return web.json_response({"ok": True})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
+    app.router.add_get("/__mock/chat_requests", get_chat_requests)
+    app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

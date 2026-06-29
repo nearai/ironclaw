@@ -267,29 +267,35 @@ fn stamp_resume_disposition(
         .pending_approval_resume
         .as_ref()
         .is_some_and(|p| p.gate_ref == last_gate);
-    // Explicit 4-way match — fail closed when both slots claim the same gate.
-    match (auth_matches, approval_matches) {
-        (true, false) => {
-            if let Some(pending) = state.pending_auth_resume.as_mut() {
-                pending.disposition = Some(disposition);
-            }
-        }
-        (false, true) => {
-            if let Some(pending) = state.pending_approval_resume.as_mut() {
-                pending.disposition = Some(disposition);
-            }
-        }
-        (false, false) => {
-            // Neither slot matches last_gate — stamp neither (defensive no-op).
-        }
-        (true, true) => {
-            // Should never happen: two pending slots share the same gate_ref.
-            // Refuse to stamp either rather than misattribute the denial.
+    let external_tool_matches = state
+        .pending_external_tool_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    // Exactly one pending slot may own a given gate_ref. Fail closed (stamp
+    // nothing) when zero or more than one slot claims it, rather than
+    // misattribute the disposition.
+    let match_count = usize::from(auth_matches)
+        + usize::from(approval_matches)
+        + usize::from(external_tool_matches);
+    if match_count != 1 {
+        if match_count > 1 {
             tracing::debug!(
                 ?last_gate,
                 "ambiguous gate resume disposition; refusing to stamp"
             );
         }
+        return;
+    }
+    if auth_matches {
+        if let Some(pending) = state.pending_auth_resume.as_mut() {
+            pending.disposition = Some(disposition);
+        }
+    } else if approval_matches {
+        if let Some(pending) = state.pending_approval_resume.as_mut() {
+            pending.disposition = Some(disposition);
+        }
+    } else if let Some(pending) = state.pending_external_tool_resume.as_mut() {
+        pending.disposition = Some(disposition);
     }
 }
 
@@ -1086,6 +1092,7 @@ mod tests {
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
         let gate_ref = LoopGateRef::new("gate:test-auth-deny").expect("valid gate ref");
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -1097,7 +1104,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1259,15 +1266,16 @@ mod tests {
         };
 
         let gate_ref = LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref");
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_approval_resume = Some(PendingApprovalResume {
             gate_ref,
             capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
+            resume_token: CapabilityResumeToken::new(activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1357,6 +1365,76 @@ mod tests {
         );
     }
 
+    // ---- external-tool disposition injection tests --------------------------------
+
+    fn state_with_pending_external_tool_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingExternalToolResume;
+        use ironclaw_host_api::CapabilityId;
+        use ironclaw_turns::CapabilityActivityId;
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+
+        let gate_ref = LoopGateRef::new("gate:test-external-tool-deny").expect("valid gate ref");
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.last_gate = Some(gate_ref.clone());
+        state.pending_external_tool_resume = Some(PendingExternalToolResume {
+            gate_ref,
+            capability_id: CapabilityId::new("test.external_tool").expect("valid capability id"),
+            activity_id: CapabilityActivityId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-external-tool-deny")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            disposition: None,
+        });
+        state
+    }
+
+    #[test]
+    fn external_tool_deny_disposition_is_stamped_onto_pending_external_tool_resume_before_execution()
+     {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_pending_external_tool_resume(&context);
+        assert!(
+            state
+                .pending_external_tool_resume
+                .as_ref()
+                .expect("pending_external_tool_resume must be set")
+                .disposition
+                .is_none(),
+            "staged pending_external_tool_resume must start with disposition: None"
+        );
+
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        let disposition = state
+            .pending_external_tool_resume
+            .expect("pending_external_tool_resume must survive round-trip")
+            .disposition
+            .expect("disposition must be Some after stamp_resume_disposition");
+        assert!(
+            matches!(disposition, GateResumeDisposition::Denied),
+            "disposition must be Denied after stamp_resume_disposition, got {disposition:?}"
+        );
+        assert!(
+            state.pending_auth_resume.is_none(),
+            "pending_auth_resume must remain absent when only external tool resume is present"
+        );
+        assert!(
+            state.pending_approval_resume.is_none(),
+            "pending_approval_resume must remain absent when only external tool resume is present"
+        );
+    }
+
     // ---- dual-slot regression test -----------------------------------------------
 
     /// Helper: build a `LoopExecutionState` carrying BOTH `pending_auth_resume`
@@ -1379,6 +1457,8 @@ mod tests {
 
         let auth_gate_ref = LoopGateRef::new("gate:dual-auth").expect("valid gate ref");
         let approval_gate_ref = LoopGateRef::new("gate:dual-approval").expect("valid gate ref");
+        let auth_activity_id = ironclaw_turns::CapabilityActivityId::new();
+        let approval_activity_id = ironclaw_turns::CapabilityActivityId::new();
 
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         // last_gate = approval — the run is currently blocked on this gate.
@@ -1392,7 +1472,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: auth_activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1402,9 +1482,9 @@ mod tests {
             capability_id: CapabilityId::new("test.capability.approval")
                 .expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
+            resume_token: CapabilityResumeToken::new(approval_activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id: approval_activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1566,6 +1646,8 @@ mod tests {
         };
 
         let gate_ref = LoopGateRef::new("gate:ambiguous-shared").expect("valid gate ref");
+        let auth_activity_id = ironclaw_turns::CapabilityActivityId::new();
+        let approval_activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -1577,7 +1659,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: auth_activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1587,9 +1669,9 @@ mod tests {
             capability_id: CapabilityId::new("test.capability.approval")
                 .expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000003")
+            resume_token: CapabilityResumeToken::new(approval_activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id: approval_activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),

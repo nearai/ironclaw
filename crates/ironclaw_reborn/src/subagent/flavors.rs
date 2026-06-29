@@ -492,7 +492,8 @@ mod tests {
                     .iter()
                     .map(|id| ProviderToolDefinition {
                         capability_id: cap(id),
-                        name: id.replace('.', "__"),
+                        name: ironclaw_host_api::ProviderToolName::new(id.replace('.', "__"))
+                            .expect("provider tool name"),
                         description: format!("{id} description"),
                         parameters: serde_json::json!({"type":"object"}),
                     })
@@ -607,6 +608,7 @@ mod tests {
 
         fn invocation(capability: &str) -> CapabilityInvocation {
             CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface-v1")
                     .expect("valid surface version"),
                 capability_id: cap(capability),

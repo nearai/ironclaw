@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ResourceEstimate,
-    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
+    ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -689,6 +689,9 @@ pub struct AgentLoopHostError {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -698,12 +701,18 @@ impl AgentLoopHostError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -1225,6 +1234,10 @@ pub struct AssistantReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityCallCandidate {
+    /// Stable activity identity assigned before capability dispatch. Hosts use
+    /// this as the runtime invocation identity, and tokenless gate checkpoints
+    /// persist it so terminal events can close the same activity.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
@@ -1264,7 +1277,7 @@ pub struct ProviderToolCallReplay {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name advertised to the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Provider-facing tool arguments captured from the model tool call.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1276,6 +1289,22 @@ pub struct ProviderToolCallReplay {
     /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl ProviderToolCallReplay {
+    pub fn from_tool_call(tool_call: ProviderToolCall, provider_turn_id: String) -> Self {
+        Self {
+            provider_id: tool_call.provider_id,
+            provider_model_id: tool_call.provider_model_id,
+            provider_turn_id,
+            provider_call_id: tool_call.id,
+            provider_tool_name: tool_call.name,
+            arguments: tool_call.arguments,
+            response_reasoning: tool_call.response_reasoning,
+            reasoning: tool_call.reasoning,
+            signature: tool_call.signature,
+        }
+    }
 }
 
 #[async_trait]
@@ -1344,11 +1373,49 @@ pub struct ProviderToolDefinition {
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-safe tool name sent to the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-safe tool description sent to the model.
     pub description: String,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
+}
+
+impl ProviderToolDefinition {
+    pub fn from_parts(
+        capability_id: CapabilityId,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        let name = ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?;
+        Ok(Self::from_typed_parts(
+            capability_id,
+            name,
+            description,
+            parameters,
+        ))
+    }
+
+    /// Builds a definition from a provider-safe name that has already passed
+    /// [`ProviderToolName`] validation. Use [`Self::from_parts`] for raw
+    /// provider names that still need validation.
+    pub fn from_typed_parts(
+        capability_id: CapabilityId,
+        name: ProviderToolName,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            capability_id,
+            name,
+            description: description.into(),
+            parameters,
+        }
+    }
+
+    pub fn validate_name(name: &str) -> Result<ProviderToolName, AgentLoopHostError> {
+        ProviderToolName::new(name).map_err(provider_tool_name_error)
+    }
 }
 
 /// Tool call emitted by a provider-backed model.
@@ -1364,7 +1431,7 @@ pub struct ProviderToolCall {
     /// Provider call id referenced by the matching tool result.
     pub id: String,
     /// Provider-facing tool name returned by the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-facing tool arguments returned by the model.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1376,6 +1443,40 @@ pub struct ProviderToolCall {
     /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl ProviderToolCall {
+    pub fn from_parts(
+        provider_id: impl Into<String>,
+        provider_model_id: impl Into<String>,
+        turn_id: Option<String>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            provider_model_id: provider_model_id.into(),
+            turn_id,
+            id: id.into(),
+            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        })
+    }
+}
+
+fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
+    let detail = match error {
+        HostApiError::InvalidId { reason, .. } => reason,
+        other => other.to_string(),
+    };
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("tool name cannot be represented as a provider tool name: {detail}"),
+    )
 }
 
 /// Durable reference to provider tool-call metadata for tool-result replay.
@@ -1390,7 +1491,7 @@ pub struct ProviderToolCallReference {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name returned by the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-facing tool arguments returned by the model.
@@ -1407,17 +1508,47 @@ pub struct ProviderToolCallReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterProviderToolCallRequest {
+    pub tool_call: ProviderToolCall,
+    /// Activity identity to bind to this provider call. When set, the host
+    /// must register the call with this id, rejecting if the same input_ref was
+    /// already registered with another id. When absent, the host creates an id
+    /// for the first registration and returns that same id for duplicate
+    /// registrations of the same input_ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
+}
+
+impl RegisterProviderToolCallRequest {
+    pub fn new(tool_call: ProviderToolCall) -> Self {
+        Self {
+            tool_call,
+            activity_id: None,
+        }
+    }
+
+    pub fn for_activity(tool_call: ProviderToolCall, activity_id: CapabilityActivityId) -> Self {
+        Self {
+            tool_call,
+            activity_id: Some(activity_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
+    /// Stable activity identity for this invocation. Runtime hosts derive
+    /// their execution identity from it rather than minting a second id.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
     /// Set when the invocation was previously auth-blocked and the auth
-    /// gate has now been resolved. Carries the original `invocation_id`
-    /// (as a resume token) so re-dispatch reuses it rather than minting a
-    /// new one, preserving any prior approval lease whose scope embeds
-    /// that id.
+    /// gate has now been resolved. Carries the original activity token so
+    /// re-dispatch reuses it rather than minting a new one, preserving any
+    /// prior approval lease whose scope embeds that id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume: Option<CapabilityAuthResume>,
 }
@@ -1489,16 +1620,16 @@ pub struct AuthResumeApprovalIdentity {
 
 /// Auth-gate resume identity.
 ///
-/// Carries the original invocation identifier (encoded as a resume token) so
-/// that re-dispatch after credential completion reuses the same invocation
+/// Carries the original activity identity (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same activity
 /// rather than minting a fresh one.  When the prior invocation also passed
 /// an approval gate, `prior_approval` carries the approval identity so the
 /// host can claim the matching fingerprinted lease without requiring a second
 /// human approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
-    /// Encodes the original invocation identifier; the host decodes it via
-    /// `invocation_id_from_resume_token` to set `context.invocation_id`.
+    /// Encodes the original activity identity so the host can reuse the
+    /// matching execution context after auth completes.
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
@@ -1554,6 +1685,14 @@ pub enum CapabilityOutcome {
         gate_ref: LoopGateRef,
         safe_summary: String,
     },
+    /// The model called a client-supplied ("external") tool. The host does not
+    /// execute it: the run parks and control returns to the API client, which
+    /// resumes by submitting the tool output. Carries only the opaque gate ref
+    /// and a bounded safe summary (never the raw caller tool args or output).
+    ExternalToolPending {
+        gate_ref: LoopGateRef,
+        safe_summary: String,
+    },
     SpawnedProcess(ProcessHandleSummary),
     AwaitDependentRun {
         gate_ref: LoopGateRef,
@@ -1587,6 +1726,7 @@ impl CapabilityOutcome {
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::ExternalToolPending { .. }
                 | Self::AwaitDependentRun { .. }
                 | Self::SpawnedProcess(_)
         )
@@ -1721,6 +1861,7 @@ pub enum CapabilityFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    GateDeclined,
     InvalidInput,
     InvalidOutput,
     MissingRuntime,
@@ -1761,6 +1902,7 @@ impl CapabilityFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::GateDeclined => "gate_declined",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
@@ -1805,6 +1947,7 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "backend" => Ok(Self::Backend),
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
+            "gate_declined" => Ok(Self::GateDeclined),
             "invalid_input" => Ok(Self::InvalidInput),
             "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
@@ -1857,7 +2000,7 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn register_provider_tool_call(
         &self,
-        _tool_call: ProviderToolCall,
+        _request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         Err(unsupported_host_method("register_provider_tool_call"))
     }
@@ -2167,6 +2310,7 @@ pub enum LoopGateKind {
     Auth,
     ResourceWait,
     AwaitDependentRun,
+    ExternalTool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2313,7 +2457,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn".to_string()),
             id: "call".to_string(),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments: serde_json::json!({}),
             response_reasoning: None,
             reasoning: None,
@@ -2326,7 +2470,7 @@ mod tests {
         let port = DefinitionPort {
             definitions: vec![ProviderToolDefinition {
                 capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
-                name: "demo__allowed".to_string(),
+                name: ProviderToolName::new("demo__allowed").expect("provider tool name"),
                 description: "allowed".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
             }],

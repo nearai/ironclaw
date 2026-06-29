@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
@@ -292,7 +293,24 @@ async fn build_qa_fire_runtime(
                 }),
         )
         .with_model_gateway_override(gateway);
-    build_reborn_runtime(input).await.expect("runtime builds")
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    seed_qa_fire_auto_approve(&runtime).await;
+    runtime
+}
+
+async fn seed_qa_fire_auto_approve(runtime: &RebornRuntime) {
+    let auto_approve = runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("QA fire runtime exposes local-dev auto-approve settings");
+    auto_approve
+        .set(AutoApproveSettingInput {
+            scope: trigger_management_execution_context().resource_scope,
+            enabled: true,
+            updated_by: Principal::User(UserId::new(QA_USER).expect("QA user id")),
+        })
+        .await
+        .expect("seed QA fire global auto-approve");
 }
 
 #[tokio::test]

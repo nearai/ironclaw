@@ -18,8 +18,8 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem,
+    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,
@@ -401,6 +401,7 @@ fn turn_run_state(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-required").unwrap()),
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,

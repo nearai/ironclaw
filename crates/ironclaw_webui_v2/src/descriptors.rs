@@ -50,6 +50,11 @@ pub const WEBUI_V2_ROUTE_UPDATE_SKILL: &str = "webui.v2.update_skill";
 pub const WEBUI_V2_ROUTE_REMOVE_SKILL: &str = "webui.v2.remove_skill";
 pub const WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE: &str = "webui.v2.set_skill_auto_activate";
 pub const WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED: &str = "webui.v2.set_auto_activate_learned";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS: &str = "webui.v2.settings.list_tools";
+pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE: &str =
+    "webui.v2.settings.set_tools_auto_approve";
+pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION: &str =
+    "webui.v2.settings.set_tool_permission";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -70,6 +75,7 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_LOGS: &str = "webui.v2.logs";
 pub const WEBUI_V2_ROUTE_LIST_PROJECT_FILES: &str = "webui.v2.list_project_files";
 pub const WEBUI_V2_ROUTE_STAT_PROJECT_FILE: &str = "webui.v2.stat_project_file";
 pub const WEBUI_V2_ROUTE_READ_PROJECT_FILE: &str = "webui.v2.read_project_file";
@@ -93,6 +99,7 @@ pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{threa
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
+pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
@@ -129,6 +136,9 @@ pub const WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE: &str =
     "/api/webchat/v2/skills/{name}/auto-activate";
 pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
     "/api/webchat/v2/skills/auto-activate-learned";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOLS: &str = "/api/webchat/v2/settings/tools";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION: &str =
+    "/api/webchat/v2/settings/tools/{capability_id}";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -178,6 +188,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
+        logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
         stream_events_ws_descriptor(),
@@ -208,6 +219,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_skill_descriptor(),
         set_skill_auto_activate_descriptor(),
         set_auto_activate_learned_descriptor(),
+        list_settings_tools_descriptor(),
+        set_settings_tools_auto_approve_descriptor(),
+        set_settings_tool_permission_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1022,6 +1036,48 @@ fn set_auto_activate_learned_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn list_settings_tools_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_settings_tools_auto_approve_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn get_llm_config_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_GET_LLM_CONFIG,
@@ -1265,6 +1321,20 @@ fn operator_logs_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_OPERATOR_LOGS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_OPERATOR_LOGS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn logs_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LOGS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LOGS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

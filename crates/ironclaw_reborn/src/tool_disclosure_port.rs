@@ -4,19 +4,22 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
+};
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
-    TurnId,
+    CapabilityActivityId, TurnId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureKind,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
         CapabilityResultMessage, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRunContext,
         ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use serde_json::{Value, json};
@@ -165,7 +168,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        if !is_bridge_name(&tool_call.name) {
+        if !is_bridge_name(tool_call.name.as_str()) {
             if let Some(target) = self.direct_deferred_target(tool_call)? {
                 debug!(
                     tool_name = tool_call.name.as_str(),
@@ -184,7 +187,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             }
             return self.inner.provider_tool_call_capability_ids(tool_call);
         }
-        if tool_call.name == TOOL_CALL_NAME
+        if tool_call.name.as_str() == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
             return Ok(ProviderToolCallCapabilityIds {
@@ -207,7 +210,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
-        if !is_bridge_name(&tool_call.name) {
+        if !is_bridge_name(tool_call.name.as_str()) {
             if let Some(target) = self.direct_deferred_target(tool_call)? {
                 debug!(
                     tool_name = tool_call.name.as_str(),
@@ -224,7 +227,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         ) {
             return Ok(());
         }
-        if tool_call.name == TOOL_CALL_NAME
+        if tool_call.name.as_str() == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
             // A resolved target that fails inner validation must NOT abort the
@@ -249,9 +252,13 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        if !is_bridge_name(&tool_call.name) {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
+        if !is_bridge_name(tool_call.name.as_str()) {
             if let Some(target) = self.direct_deferred_target(&tool_call)? {
                 // Preserve the model's emitted wire name in the replay when it is
                 // already valid (the common `__`-encoded case) so the replayed
@@ -282,7 +289,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 // round-trip on correct calls. Once disclosed, a still-invalid
                 // call dispatches and fails normally, so the no-progress detector
                 // still observes the repeated failure.
-                if !self.is_disclosed(&target.definition.name)?
+                if !self.is_disclosed(target.definition.name.as_str())?
                     && self
                         .inner
                         .validate_provider_tool_call(&target.target_call)
@@ -296,12 +303,12 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     return self.register_describe_first(
                         &tool_call,
                         replay_tool_name,
-                        &target.definition.name,
+                        target.definition.name.as_str(),
                     );
                 }
                 let mut candidate = self
                     .inner
-                    .register_provider_tool_call(target.target_call)
+                    .register_provider_tool_call(register_request(target.target_call, activity_id))
                     .await?;
                 candidate.provider_replay = Some(provider_replay_for(&tool_call, replay_tool_name));
                 self.record_promotable_input(
@@ -310,9 +317,12 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 )?;
                 return Ok(candidate);
             }
-            return self.inner.register_provider_tool_call(tool_call).await;
+            return self
+                .inner
+                .register_provider_tool_call(register_request(tool_call, activity_id))
+                .await;
         }
-        if tool_call.name == TOOL_CALL_NAME
+        if tool_call.name.as_str() == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(&tool_call)?
         {
             // The model invoked the `tool_call` bridge itself (a valid wire
@@ -322,7 +332,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             // an undisclosed tool called via the bridge with arguments that fail
             // pre-dispatch validation gets its schema instead of a blind dispatch,
             // one-shot per undisclosed tool.
-            if !self.is_disclosed(&target.definition.name)?
+            if !self.is_disclosed(target.definition.name.as_str())?
                 && self
                     .inner
                     .validate_provider_tool_call(&target.target_call)
@@ -336,12 +346,12 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 return self.register_describe_first(
                     &tool_call,
                     bridge_provider_tool_name,
-                    &target.definition.name,
+                    target.definition.name.as_str(),
                 );
             }
             match self
                 .inner
-                .register_provider_tool_call(target.target_call)
+                .register_provider_tool_call(register_request(target.target_call, activity_id))
                 .await
             {
                 Ok(mut candidate) => {
@@ -542,7 +552,7 @@ impl ToolDisclosureCapabilityPort {
             state
                 .catalog
                 .definition_by_name_for_capability(capability_id)
-                .map(|definition| definition.name.clone())
+                .map(|definition| definition.name.to_string())
         };
         let Some(name) = name else {
             return Ok(());
@@ -593,8 +603,11 @@ impl ToolDisclosureCapabilityPort {
         else {
             return Err(invalid_invocation("bridge tool definition is unavailable"));
         };
-        let digest_input =
-            provider_call_digest_input(&tool_call.id, &tool_call.name, &tool_call.arguments);
+        let digest_input = provider_call_digest_input(
+            &tool_call.id,
+            tool_call.name.as_str(),
+            &tool_call.arguments,
+        );
         let digest = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
         let input_ref = CapabilityInputRef::new(format!("{DISCLOSURE_INPUT_PREFIX}{digest}"))
             .map_err(|e| {
@@ -606,12 +619,13 @@ impl ToolDisclosureCapabilityPort {
             .insert(
                 input_ref.as_str().to_string(),
                 BridgeInvocation {
-                    name: tool_call.name.clone(),
+                    name: tool_call.name.to_string(),
                     arguments: tool_call.arguments.clone(),
                 },
             );
         let surface_version = self.current_surface_version()?;
         Ok(CapabilityCallCandidate {
+            activity_id: CapabilityActivityId::new(),
             surface_version,
             capability_id: definition.capability_id,
             input_ref,
@@ -634,12 +648,12 @@ impl ToolDisclosureCapabilityPort {
     fn register_describe_first(
         &self,
         tool_call: &ProviderToolCall,
-        replay_tool_name: String,
+        replay_tool_name: ProviderToolName,
         target_name: &str,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let Some(definition) = bridge_tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == TOOL_DESCRIBE_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_DESCRIBE_NAME)
         else {
             return Err(invalid_invocation(
                 "tool_describe bridge definition is unavailable",
@@ -671,6 +685,7 @@ impl ToolDisclosureCapabilityPort {
             );
         let surface_version = self.current_surface_version()?;
         Ok(CapabilityCallCandidate {
+            activity_id: CapabilityActivityId::new(),
             surface_version,
             capability_id: definition.capability_id,
             input_ref,
@@ -859,7 +874,8 @@ impl ToolDisclosureCapabilityPort {
         target: &ProviderToolDefinition,
         arguments: Value,
     ) -> ProviderToolCall {
-        let digest_input = provider_call_digest_input(&tool_call.id, &target.name, &arguments);
+        let digest_input =
+            provider_call_digest_input(&tool_call.id, target.name.as_str(), &arguments);
         let target_id = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
         ProviderToolCall {
             provider_id: tool_call.provider_id.clone(),
@@ -919,7 +935,7 @@ impl ToolDisclosureCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<Option<ResolvedToolTarget>, AgentLoopHostError> {
-        if is_bridge_name(&tool_call.name) {
+        if is_bridge_name(tool_call.name.as_str()) {
             return Ok(None);
         }
         let guard = self.turn_state()?;
@@ -930,13 +946,14 @@ impl ToolDisclosureCapabilityPort {
             );
             return Ok(None);
         };
-        let Some(definition) = self.catalog_target(state, &tool_call.name) else {
+        let Some(definition) = self.catalog_target(state, tool_call.name.as_str()) else {
             // DIAGNOSTIC (temporary): the model called a non-bridge tool that the
             // catalog could not resolve by name. Sample catalog names + capability
             // ids that share the called tool's provider prefix, so a name-form
             // mismatch (dotted vs `__`-encoded) is visible vs. genuinely absent.
             let prefix: String = tool_call
                 .name
+                .as_str()
                 .chars()
                 .take_while(|c| *c != '_' && *c != '.' && *c != '-')
                 .collect();
@@ -944,7 +961,7 @@ impl ToolDisclosureCapabilityPort {
                 .catalog
                 .definitions()
                 .filter(|definition| {
-                    definition.name.starts_with(&prefix)
+                    definition.name.as_str().starts_with(&prefix)
                         || definition.capability_id.as_str().starts_with(&prefix)
                 })
                 .map(|definition| {
@@ -1024,11 +1041,14 @@ impl CatalogLookupByCapability for CapabilityCatalog {
 /// resolved definition's canonical name, which is always wire-safe. Recording a
 /// dotted name fails `validate_provider_tool_name` and borks the run on the
 /// assistant transcript / provider-error result-ref write.
-fn replay_provider_tool_name(called_name: &str, definition_name: &str) -> String {
-    if ironclaw_safety::validate_provider_tool_name(called_name).is_ok() {
-        called_name.to_string()
+fn replay_provider_tool_name(
+    called_name: &ProviderToolName,
+    definition_name: &ProviderToolName,
+) -> ProviderToolName {
+    if ironclaw_safety::validate_provider_tool_name(called_name.as_str()).is_ok() {
+        called_name.clone()
     } else {
-        definition_name.to_string()
+        definition_name.clone()
     }
 }
 
@@ -1045,7 +1065,7 @@ fn replay_provider_tool_name(called_name: &str, definition_name: &str) -> String
 /// already-valid `tool_call.name`.
 fn provider_replay_for(
     tool_call: &ProviderToolCall,
-    provider_tool_name: String,
+    provider_tool_name: ProviderToolName,
 ) -> ProviderToolCallReplay {
     ProviderToolCallReplay {
         provider_id: tool_call.provider_id.clone(),
@@ -1057,6 +1077,19 @@ fn provider_replay_for(
         response_reasoning: tool_call.response_reasoning.clone(),
         reasoning: tool_call.reasoning.clone(),
         signature: tool_call.signature.clone(),
+    }
+}
+
+/// Build the inner-port registration request for a synthesized target call,
+/// preserving any activity identity the gateway bound to the bridge call so the
+/// inner port registers the dispatched target under the same id.
+fn register_request(
+    tool_call: ProviderToolCall,
+    activity_id: Option<CapabilityActivityId>,
+) -> RegisterProviderToolCallRequest {
+    match activity_id {
+        Some(activity_id) => RegisterProviderToolCallRequest::for_activity(tool_call, activity_id),
+        None => RegisterProviderToolCallRequest::new(tool_call),
     }
 }
 
@@ -1150,10 +1183,14 @@ mod tests {
 
         async fn register_provider_tool_call(
             &self,
-            tool_call: ProviderToolCall,
+            request: RegisterProviderToolCallRequest,
         ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+            let RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            } = request;
             // Sentinel: lets tests drive the gateway's "register failed" arm.
-            if tool_call.name == "register_explodes" {
+            if tool_call.name.as_str() == "register_explodes" {
                 return Err(invalid_invocation("spy register explodes"));
             }
             self.validate_provider_tool_call(&tool_call)?;
@@ -1168,6 +1205,7 @@ mod tests {
                 .expect("test target definition")
                 .clone();
             Ok(CapabilityCallCandidate {
+                activity_id: activity_id.unwrap_or_else(CapabilityActivityId::new),
                 surface_version: self.surface_version.clone(),
                 capability_id: definition.capability_id,
                 input_ref: input_ref(format!("input:{}", tool_call.name)),
@@ -1190,7 +1228,7 @@ mod tests {
                         capability_id: definition.capability_id.clone(),
                         provider: None,
                         runtime: ironclaw_host_api::RuntimeKind::FirstParty,
-                        safe_name: definition.name.clone(),
+                        safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
                         concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters.clone(),
@@ -1314,12 +1352,12 @@ mod tests {
         assert!(
             advertised
                 .iter()
-                .any(|definition| definition.name == TOOL_CALL_NAME)
+                .any(|definition| definition.name.as_str() == TOOL_CALL_NAME)
         );
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool")
+                .any(|definition| definition.name.as_str() == "hidden_tool")
         );
 
         // Forgiving `tool_call` resolution of an undisclosed catalog tool is
@@ -1327,14 +1365,15 @@ mod tests {
         // This test focuses on the search -> disclose -> dispatch -> promote flow.
 
         let search = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_SEARCH_NAME,
                 json!({"query": "hidden", "limit": 5}),
-            ))
+            )))
             .await
             .expect("search registers");
         let search_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: search.activity_id,
                 surface_version: search.surface_version,
                 capability_id: search.capability_id,
                 input_ref: search.input_ref,
@@ -1358,10 +1397,10 @@ mod tests {
         );
 
         let target = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            ))
+            )))
             .await
             .expect("disclosed tool_call registers as target");
         assert_eq!(target.capability_id.as_str(), "fixture.hidden");
@@ -1370,12 +1409,14 @@ mod tests {
                 .provider_replay
                 .as_ref()
                 .expect("provider replay")
-                .provider_tool_name,
+                .provider_tool_name
+                .as_str(),
             TOOL_CALL_NAME
         );
         let batch = port
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![CapabilityInvocation {
+                    activity_id: target.activity_id,
                     surface_version: target.surface_version,
                     capability_id: target.capability_id,
                     input_ref: target.input_ref,
@@ -1397,7 +1438,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target call")
-                .name,
+                .name
+                .as_str(),
             "hidden_tool"
         );
         assert_eq!(
@@ -1425,7 +1467,7 @@ mod tests {
         assert!(
             next_advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool"),
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
             "successful deferred tool_call should promote the target on the next turn"
         );
     }
@@ -1466,7 +1508,7 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool"),
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
             "hidden_tool starts deferred"
         );
 
@@ -1481,7 +1523,7 @@ mod tests {
         port.validate_provider_tool_call(&direct_call)
             .expect("direct deferred call validates through inner");
         let target = port
-            .register_provider_tool_call(direct_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
             .await
             .expect("direct deferred call registers as target");
         assert_eq!(target.capability_id.as_str(), "fixture.hidden");
@@ -1490,11 +1532,13 @@ mod tests {
                 .provider_replay
                 .as_ref()
                 .expect("provider replay")
-                .provider_tool_name,
+                .provider_tool_name
+                .as_str(),
             "hidden_tool"
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
                 input_ref: target.input_ref,
@@ -1511,7 +1555,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target call")
-                .name,
+                .name
+                .as_str(),
             "hidden_tool"
         );
         assert_eq!(
@@ -1539,7 +1584,7 @@ mod tests {
         assert!(
             next_advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool"),
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
             "successful direct deferred call should promote the target on the next turn"
         );
     }
@@ -1578,10 +1623,10 @@ mod tests {
             .expect("visible surface");
 
         let candidate = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            ))
+            )))
             .await
             .expect("describe-first registers");
         assert!(
@@ -1599,6 +1644,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1651,10 +1697,10 @@ mod tests {
             .expect("visible surface");
 
         let candidate = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            ))
+            )))
             .await
             .expect("valid blind call registers");
         assert_eq!(
@@ -1669,7 +1715,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target registered")
-                .name,
+                .name
+                .as_str(),
             "hidden_tool"
         );
     }
@@ -1708,10 +1755,10 @@ mod tests {
 
         // First invalid blind call -> describe-first (schema bridge), discloses.
         let first = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            ))
+            )))
             .await
             .expect("first registers");
         assert!(
@@ -1719,6 +1766,7 @@ mod tests {
             "first undisclosed invalid call is describe-first"
         );
         port.invoke_capability(CapabilityInvocation {
+            activity_id: first.activity_id,
             surface_version: first.surface_version,
             capability_id: first.capability_id,
             input_ref: first.input_ref,
@@ -1732,14 +1780,15 @@ mod tests {
         // it dispatches, the inner port rejects it, and a recoverable Failed
         // outcome (countable by the no-progress detector) surfaces — NOT a schema.
         let second = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
-            ))
+            )))
             .await
             .expect("second registers via recoverable fallback");
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: second.activity_id,
                 surface_version: second.surface_version,
                 capability_id: second.capability_id,
                 input_ref: second.input_ref,
@@ -1755,15 +1804,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_deferred_dotted_capability_id_records_canonical_wire_name_in_replay() {
-        // Regression: a weak model frequently calls a deferred provider tool by
-        // its dotted catalog capability_id (e.g. `google-calendar.list_events`,
-        // which `tool_search`/`tool_describe` surface) instead of the canonical
-        // `__`-encoded wire name. The forgiving direct-deferred path resolves
-        // that, but the recorded provider replay (consumed by the assistant
-        // transcript and any provider-error result ref) MUST carry the canonical
-        // wire name — recording the dotted name fails `validate_provider_tool_name`
-        // and borks the whole run on transcript write.
+    async fn direct_deferred_encoded_wire_name_records_canonical_wire_name_in_replay() {
+        // Regression: a weak model calls a deferred provider tool by its canonical
+        // `__`-encoded wire name (e.g. `google-calendar__list_events`, which
+        // `tool_search`/`tool_describe` surface) before it is advertised. The
+        // forgiving direct-deferred path resolves that, and the recorded provider
+        // replay (consumed by the assistant transcript and any provider-error
+        // result ref) MUST carry the canonical wire name so it serializes without
+        // tripping `validate_provider_tool_name`. (The dotted capability_id form a
+        // model might otherwise copy can no longer reach this port: `ProviderToolName`
+        // excludes dots, so the gateway rejects such a call before it lands here.)
         let definitions = vec![
             provider_definition("fixture.read_file", "read_file", "Read a file"),
             provider_definition(
@@ -1797,28 +1847,30 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "google-calendar__list_events"),
+                .any(|definition| definition.name.as_str() == "google-calendar__list_events"),
             "deferred Google Calendar tool starts hidden"
         );
 
-        // The model calls the tool by its DOTTED capability_id, not the wire name.
-        let dotted_call = provider_call("google-calendar.list_events", json!({"path": "demo"}));
-        port.provider_tool_call_capability_ids(&dotted_call)
-            .expect("dotted capability id resolves through forgiving path");
-        port.validate_provider_tool_call(&dotted_call)
-            .expect("dotted capability id validates through forgiving path");
+        // The model calls the deferred tool by its `__`-encoded wire name before
+        // it is advertised.
+        let deferred_call = provider_call("google-calendar__list_events", json!({"path": "demo"}));
+        port.provider_tool_call_capability_ids(&deferred_call)
+            .expect("deferred wire name resolves through forgiving path");
+        port.validate_provider_tool_call(&deferred_call)
+            .expect("deferred wire name validates through forgiving path");
         let candidate = port
-            .register_provider_tool_call(dotted_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(deferred_call))
             .await
-            .expect("dotted capability id registers as target");
+            .expect("deferred wire name registers as target");
 
         let replay = candidate.provider_replay.as_ref().expect("provider replay");
         assert_eq!(
-            replay.provider_tool_name, "google-calendar__list_events",
-            "replay records the canonical wire name, not the dotted capability_id"
+            replay.provider_tool_name.as_str(),
+            "google-calendar__list_events",
+            "replay records the canonical wire name"
         );
         // The recorded name must serialize into the transcript without error.
-        ironclaw_safety::validate_provider_tool_name(&replay.provider_tool_name)
+        ironclaw_safety::validate_provider_tool_name(replay.provider_tool_name.as_str())
             .expect("recorded provider tool name is wire-safe");
     }
 
@@ -1862,17 +1914,21 @@ mod tests {
                 .tool_definitions()
                 .expect("tool definitions")
                 .iter()
-                .any(|definition| definition.name == "suspends_tool"),
+                .any(|definition| definition.name.as_str() == "suspends_tool"),
             "suspends_tool starts deferred"
         );
 
         // Direct-deferred call -> resolves -> dispatch -> APPROVAL suspension.
         let target = port
-            .register_provider_tool_call(provider_call("suspends_tool", json!({"path": "demo"})))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "suspends_tool",
+                json!({"path": "demo"}),
+            )))
             .await
             .expect("direct deferred call registers as target");
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
                 input_ref: target.input_ref,
@@ -1903,7 +1959,7 @@ mod tests {
                 .tool_definitions()
                 .expect("next tool definitions")
                 .iter()
-                .any(|definition| definition.name == "suspends_tool"),
+                .any(|definition| definition.name.as_str() == "suspends_tool"),
             "a gate-suspended tool must be promoted so it survives the resume"
         );
     }
@@ -1945,7 +2001,9 @@ mod tests {
 
         let advertised = port.tool_definitions().expect("tool definitions");
         assert!(
-            advertised.iter().any(|d| d.name == TOOL_SEARCH_NAME),
+            advertised
+                .iter()
+                .any(|d| d.name.as_str() == TOOL_SEARCH_NAME),
             "fixture must be in deferred mode so the bridges are advertised"
         );
         let callable: std::collections::HashSet<_> =
@@ -1998,7 +2056,7 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "echo"),
+                .any(|definition| definition.name.as_str() == "echo"),
             "echo starts deferred"
         );
 
@@ -2021,7 +2079,7 @@ mod tests {
         port.validate_provider_tool_call(&direct_call)
             .expect("provider-encoded direct deferred call validates against resolved target");
         let target = port
-            .register_provider_tool_call(direct_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
             .await
             .expect("provider-encoded direct deferred call registers as target");
         assert_eq!(target.capability_id.as_str(), "builtin.echo");
@@ -2030,11 +2088,13 @@ mod tests {
                 .provider_replay
                 .as_ref()
                 .expect("provider replay")
-                .provider_tool_name,
+                .provider_tool_name
+                .as_str(),
             "builtin__echo"
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
                 input_ref: target.input_ref,
@@ -2051,7 +2111,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target call")
-                .name,
+                .name
+                .as_str(),
             "echo",
             "inner registration must receive the catalog target name"
         );
@@ -2080,7 +2141,7 @@ mod tests {
         assert!(
             next_advertised
                 .iter()
-                .any(|definition| definition.name == "echo"),
+                .any(|definition| definition.name.as_str() == "echo"),
             "successful provider-encoded direct deferred call should promote the target next turn"
         );
     }
@@ -2131,7 +2192,7 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "gmail__send_message"),
+                .any(|definition| definition.name.as_str() == "gmail__send_message"),
             "gmail__send_message starts deferred"
         );
 
@@ -2154,7 +2215,7 @@ mod tests {
         port.validate_provider_tool_call(&direct_call)
             .expect("provider-encoded non-builtin direct deferred call validates against target");
         let target = port
-            .register_provider_tool_call(direct_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(direct_call))
             .await
             .expect("provider-encoded non-builtin direct deferred call registers as target");
         assert_eq!(target.capability_id.as_str(), "gmail.send_message");
@@ -2163,11 +2224,13 @@ mod tests {
                 .provider_replay
                 .as_ref()
                 .expect("provider replay")
-                .provider_tool_name,
+                .provider_tool_name
+                .as_str(),
             "gmail__send_message"
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
                 input_ref: target.input_ref,
@@ -2184,7 +2247,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target call")
-                .name,
+                .name
+                .as_str(),
             "gmail__send_message",
             "inner registration must receive the catalog target name"
         );
@@ -2213,7 +2277,7 @@ mod tests {
         assert!(
             next_advertised
                 .iter()
-                .any(|definition| definition.name == "gmail__send_message"),
+                .any(|definition| definition.name.as_str() == "gmail__send_message"),
             "successful non-builtin direct deferred call should promote the target next turn"
         );
     }
@@ -2259,16 +2323,16 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool"),
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
             "hidden_tool starts deferred (never discovered this turn)"
         );
 
         // tool_call the deferred tool WITHOUT any prior tool_search/tool_describe.
         let candidate = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            ))
+            )))
             .await
             .expect("undisclosed tool_call resolves forgivingly");
         assert_eq!(
@@ -2279,6 +2343,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -2295,7 +2360,8 @@ mod tests {
                 .expect("registered calls lock")
                 .last()
                 .expect("target call")
-                .name,
+                .name
+                .as_str(),
             "hidden_tool",
             "the inner port must receive the unwrapped target call"
         );
@@ -2353,7 +2419,7 @@ mod tests {
             .expect("bridge validate downgrades a target failure to recoverable");
 
         let candidate = port
-            .register_provider_tool_call(bridge_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(bridge_call))
             .await
             .expect("bridge register falls back instead of erroring");
         assert!(
@@ -2363,6 +2429,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -2410,10 +2477,10 @@ mod tests {
             .expect("surface builds turn state");
 
         let candidate = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": TOOL_SEARCH_NAME, "arguments": {}}),
-            ))
+            )))
             .await
             .expect("recursive tool_call registers on the bridge path");
         assert!(
@@ -2422,6 +2489,7 @@ mod tests {
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -2485,10 +2553,10 @@ mod tests {
             .expect("surface builds turn state");
 
         let candidate = port
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "does_not_exist", "arguments": {}}),
-            ))
+            )))
             .await
             .expect("unknown-target tool_call registers on the bridge path");
         assert!(
@@ -2497,6 +2565,7 @@ mod tests {
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -2571,15 +2640,16 @@ mod tests {
             .await
             .expect("surface builds turn state");
         let search = tenant_a_first_turn
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_SEARCH_NAME,
                 json!({"query": "hidden", "limit": 5}),
-            ))
+            )))
             .await
             .expect("search registers");
         assert!(matches!(
             tenant_a_first_turn
                 .invoke_capability(CapabilityInvocation {
+                    activity_id: search.activity_id,
                     surface_version: search.surface_version,
                     capability_id: search.capability_id,
                     input_ref: search.input_ref,
@@ -2591,15 +2661,16 @@ mod tests {
             CapabilityOutcome::Completed(_)
         ));
         let target = tenant_a_first_turn
-            .register_provider_tool_call(provider_call(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
                 json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
-            ))
+            )))
             .await
             .expect("target registers");
         assert!(matches!(
             tenant_a_first_turn
                 .invoke_capability(CapabilityInvocation {
+                    activity_id: target.activity_id,
                     surface_version: target.surface_version,
                     capability_id: target.capability_id,
                     input_ref: target.input_ref,
@@ -2633,7 +2704,7 @@ mod tests {
         assert!(
             !tenant_b_advertised
                 .iter()
-                .any(|definition| definition.name == "hidden_tool"),
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
             "promotion from tenant A must not leak to tenant B with the same thread id"
         );
     }
@@ -2666,12 +2737,15 @@ mod tests {
             json!({"query": ""}),
             json!({"query": "   "}),
         ] {
-            let candidate = port
-                .register_provider_tool_call(provider_call(TOOL_SEARCH_NAME, arguments))
+            let candidate =
+                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    provider_call(TOOL_SEARCH_NAME, arguments),
+                ))
                 .await
                 .expect("tool_search registers");
             let outcome = port
                 .invoke_capability(CapabilityInvocation {
+                    activity_id: candidate.activity_id,
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -2748,7 +2822,7 @@ mod tests {
     ) -> ProviderToolDefinition {
         ProviderToolDefinition {
             capability_id: CapabilityId::new(capability_id).expect("valid capability id"),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("valid provider tool name"),
             description: description.to_string(),
             parameters: json!({
                 "type": "object",
@@ -2767,7 +2841,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("provider-turn".to_string()),
             id: format!("call-{name}"),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("valid provider tool name"),
             arguments,
             response_reasoning: None,
             reasoning: None,

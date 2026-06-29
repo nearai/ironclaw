@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
-use ironclaw_llm::{NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager};
+use ironclaw_llm::{
+    NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
+};
 use ironclaw_product_workflow::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -186,6 +188,7 @@ impl RebornLlmConfigService {
             let metadata = info.metadata;
             let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
             let api_key_set = stored_key_set || env_key_set;
+            let base_url = provider_snapshot_base_url(&info.id, metadata.as_ref(), api_key_set);
             if info.active && active.is_none() {
                 active = Some(LlmActiveSelection {
                     provider_id: info.id.clone(),
@@ -200,7 +203,7 @@ impl RebornLlmConfigService {
                     .map(|meta| meta.protocol.clone())
                     .unwrap_or_default(),
                 default_model: info.default_model,
-                base_url: metadata.as_ref().and_then(|meta| meta.base_url.clone()),
+                base_url,
                 builtin,
                 active: info.active,
                 active_model: info.active_model,
@@ -909,7 +912,30 @@ fn definition_env_key_set(definition: &ProviderDefinition) -> bool {
 }
 
 fn env_var_present(name: &str) -> bool {
-    std::env::var_os(name).is_some()
+    ironclaw_common::env_helpers::env_or_override(name).is_some()
+}
+
+fn provider_snapshot_base_url(
+    provider_id: &str,
+    metadata: Option<&crate::RebornProviderMetadata>,
+    api_key_set: bool,
+) -> Option<String> {
+    if let Some(base_url) = metadata
+        .and_then(|meta| meta.base_url.as_deref())
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty())
+    {
+        return Some(base_url.to_string());
+    }
+
+    if provider_id.eq_ignore_ascii_case("nearai") {
+        return Some(default_nearai_base_url(
+            api_key_set,
+            ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
+        ));
+    }
+
+    None
 }
 
 fn normalized_endpoint(value: Option<&str>) -> Option<String> {
@@ -1077,6 +1103,7 @@ mod tests {
 
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
+    use ironclaw_llm::{NEARAI_CLOUD_DEFAULT_BASE_URL, NEARAI_PRIVATE_DEFAULT_BASE_URL};
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
@@ -1272,6 +1299,67 @@ mod tests {
             Some(AgentId::new("agent-alpha").expect("agent")),
             Some(ProjectId::new("project-alpha").expect("project")),
         )
+    }
+
+    fn nearai_provider(snapshot: &LlmConfigSnapshot) -> &LlmProviderView {
+        snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "nearai")
+            .expect("nearai provider in snapshot")
+    }
+
+    fn clear_nearai_snapshot_env() {
+        for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
+            ironclaw_common::env_helpers::remove_runtime_env(key);
+            assert!(
+                ironclaw_common::env_helpers::env_or_override(key).is_none(),
+                "{key} must be unset for this branch-specific snapshot test"
+            );
+        }
+    }
+
+    #[test]
+    fn nearai_default_base_url_selects_private_without_api_key() {
+        assert_eq!(
+            default_nearai_base_url(false, None),
+            NEARAI_PRIVATE_DEFAULT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn nearai_default_base_url_selects_cloud_with_api_key() {
+        assert_eq!(
+            default_nearai_base_url(true, None),
+            NEARAI_CLOUD_DEFAULT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn nearai_default_base_url_prefers_explicit_base_url() {
+        assert_eq!(
+            default_nearai_base_url(false, Some("https://nearai.example.test/v1".to_string())),
+            "https://nearai.example.test/v1"
+        );
+    }
+
+    #[test]
+    fn env_var_present_honors_runtime_env_overlay() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let key = "IRONCLAW_TEST_LLM_CONFIG_SERVICE_ENV_PRESENT";
+        ironclaw_common::env_helpers::remove_runtime_env(key);
+
+        assert!(
+            !env_var_present(key),
+            "fresh test-specific env key should start absent"
+        );
+
+        ironclaw_common::env_helpers::set_runtime_env(key, "1");
+        assert!(
+            env_var_present(key),
+            "runtime env overlay should count as configured"
+        );
+        ironclaw_common::env_helpers::remove_runtime_env(key);
     }
 
     fn upsert_request(
@@ -1682,11 +1770,7 @@ mod tests {
         let service = RebornLlmConfigService::new(boot, key_store());
 
         let snapshot = service.snapshot(caller()).await.expect("snapshot");
-        let nearai = snapshot
-            .providers
-            .iter()
-            .find(|provider| provider.id == "nearai")
-            .expect("nearai provider in snapshot");
+        let nearai = nearai_provider(&snapshot);
 
         assert!(nearai.builtin);
         assert!(
@@ -1696,6 +1780,51 @@ mod tests {
         assert!(
             !nearai.api_key_required,
             "NEAR AI session-token login means API key is not the only setup path"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn nearai_snapshot_exposes_effective_default_base_url() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        clear_nearai_snapshot_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let snapshot = service.snapshot(caller()).await.expect("snapshot");
+        let nearai = nearai_provider(&snapshot);
+
+        assert_eq!(
+            nearai.base_url.as_deref(),
+            Some(NEARAI_PRIVATE_DEFAULT_BASE_URL),
+            "NEAR AI snapshot should show the same effective default base URL the runtime resolves"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn nearai_snapshot_uses_cloud_default_with_stored_api_key() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        clear_nearai_snapshot_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        keys.put("nearai", SecretMaterial::from("sk-nearai-test"))
+            .await
+            .expect("store nearai key");
+        let service = RebornLlmConfigService::new(boot, keys);
+
+        let snapshot = service.snapshot(caller()).await.expect("snapshot");
+        let nearai = nearai_provider(&snapshot);
+
+        assert!(nearai.api_key_set);
+        assert_eq!(
+            nearai.base_url.as_deref(),
+            Some(NEARAI_CLOUD_DEFAULT_BASE_URL),
+            "stored NEAR AI API-key auth should show the cloud-api default unless NEARAI_BASE_URL overrides it"
         );
     }
 

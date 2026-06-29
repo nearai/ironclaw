@@ -5,7 +5,7 @@ use std::{
     sync::LazyLock,
 };
 
-use ironclaw_host_api::{CapabilityId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
 use ironclaw_turns::run_profile::{
     CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,
 };
@@ -105,7 +105,7 @@ impl CapabilityCatalog {
         let mut entries: Vec<CatalogEntry> = definitions
             .iter()
             .filter(|definition| {
-                !is_bridge_name(&definition.name)
+                !is_bridge_name(definition.name.as_str())
                     && !is_bridge_capability_id(&definition.capability_id)
             })
             .map(|definition| {
@@ -180,7 +180,7 @@ impl CapabilityCatalog {
         self.entries
             .iter()
             .filter(|entry| entry.tier == ToolTier::Discoverable)
-            .map(|entry| entry.definition.name.clone())
+            .map(|entry| entry.definition.name.to_string())
             .collect()
     }
 
@@ -197,10 +197,10 @@ impl CapabilityCatalog {
         let mut included = BTreeSet::new();
         let mut descriptors = Vec::new();
         for definition in &active.definitions {
-            if is_bridge_name(&definition.name) {
+            if is_bridge_name(definition.name.as_str()) {
                 descriptors.push(bridge_descriptor(definition));
-            } else if let Some(entry) = self.entry_by_name(&definition.name)
-                && included.insert(definition.name.clone())
+            } else if let Some(entry) = self.entry_by_name(definition.name.as_str())
+                && included.insert(definition.name.to_string())
             {
                 descriptors.push(catalog_descriptor(entry));
             }
@@ -239,7 +239,7 @@ pub(crate) fn definition_matches_provider_name(
     provider_name: &str,
 ) -> bool {
     // 1. Exact canonical wire name (the advertised form).
-    if definition.name == provider_name {
+    if definition.name.as_str() == provider_name {
         return true;
     }
     let capability_id = definition.capability_id.as_str();
@@ -268,7 +268,7 @@ pub(crate) fn definition_matches_provider_name(
 }
 
 fn definition_matches_core_name(definition: &ProviderToolDefinition, core_name: &str) -> bool {
-    if definition.name == core_name {
+    if definition.name.as_str() == core_name {
         return true;
     }
     let capability_id = definition.capability_id.as_str();
@@ -413,12 +413,12 @@ fn advertised_bridge_tool_definitions(
     bridge_tool_definitions_with_tokens()
         .map(|(definition, est_schema_tokens)| {
             let mut advertised = definition.clone();
-            if advertised.name == TOOL_SEARCH_NAME {
+            if advertised.name.as_str() == TOOL_SEARCH_NAME {
                 advertised.description = catalog_index_tool_search_description(catalog);
                 let est_schema_tokens = estimate_definition_tokens(&advertised);
                 return (advertised, est_schema_tokens);
             }
-            if advertised.name == TOOL_CALL_NAME {
+            if advertised.name.as_str() == TOOL_CALL_NAME {
                 advertised.description = tool_call_safety_description();
                 let est_schema_tokens = estimate_definition_tokens(&advertised);
                 return (advertised, est_schema_tokens);
@@ -521,7 +521,7 @@ pub(crate) fn select_active_set(
         .iter()
         .filter(|entry| entry.tier == ToolTier::Core)
     {
-        if core_names.insert(entry.definition.name.clone()) {
+        if core_names.insert(entry.definition.name.to_string()) {
             core_definitions.push((entry.definition.clone(), entry.est_schema_tokens));
         }
     }
@@ -601,7 +601,7 @@ pub(crate) fn tool_search_rank(
         .filter_map(|entry| {
             let score = score_tool_entry(entry, &query_terms);
             if score > 0 {
-                Some((entry.definition.name.clone(), score))
+                Some((entry.definition.name.to_string(), score))
             } else {
                 None
             }
@@ -633,7 +633,7 @@ pub(crate) struct CatalogSearchResult {
 impl CatalogSearchResult {
     fn from_entry(entry: &CatalogEntry) -> Self {
         Self {
-            name: entry.definition.name.clone(),
+            name: entry.definition.name.to_string(),
             capability_id: entry.definition.capability_id.clone(),
             description: entry.definition.description.clone(),
             required_params: required_params(&entry.definition.parameters),
@@ -683,7 +683,7 @@ fn append_definition(
     definition: ProviderToolDefinition,
     est_schema_tokens: u32,
 ) {
-    if included_names.insert(definition.name.clone()) {
+    if included_names.insert(definition.name.to_string()) {
         definitions.push(definition);
         *advertised_tokens = advertised_tokens.saturating_add(est_schema_tokens);
     }
@@ -711,7 +711,7 @@ fn select_promoted_definitions(
             if advertised_tokens.saturating_add(entry.est_schema_tokens) > threshold_tokens {
                 break;
             }
-            included_names.insert(entry.definition.name.clone());
+            included_names.insert(entry.definition.name.to_string());
             selected.push((entry.definition.clone(), entry.est_schema_tokens));
             advertised_tokens = advertised_tokens.saturating_add(entry.est_schema_tokens);
             advertised_count = advertised_count.saturating_add(1);
@@ -731,7 +731,9 @@ fn sum_definition_tokens(definitions: &[(ProviderToolDefinition, u32)]) -> u32 {
 fn score_tool_entry(entry: &CatalogEntry, query_terms: &[&str]) -> u32 {
     let mut keyword_score = 0_u32;
     for term in query_terms {
-        if entry.definition.name.eq_ignore_ascii_case(term) || entry.search_terms.contains(*term) {
+        if entry.definition.name.as_str().eq_ignore_ascii_case(term)
+            || entry.search_terms.contains(*term)
+        {
             keyword_score = keyword_score.saturating_add(10);
         } else if entry.search_blob.contains(term) {
             keyword_score = keyword_score.saturating_add(5);
@@ -756,7 +758,7 @@ fn bridge_tool_definition(
 ) -> ProviderToolDefinition {
     ProviderToolDefinition {
         capability_id: bridge_capability_id(name),
-        name: name.to_string(),
+        name: ProviderToolName::new(name).expect("valid static bridge tool name"),
         description: description.to_string(),
         parameters,
     }
@@ -779,7 +781,7 @@ fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescripto
         capability_id: definition.capability_id.clone(),
         provider: None,
         runtime: RuntimeKind::FirstParty,
-        safe_name: definition.name.clone(),
+        safe_name: definition.name.to_string(),
         safe_description: definition.description.clone(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: definition.parameters.clone(),
@@ -791,7 +793,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         capability_id: entry.definition.capability_id.clone(),
         provider: None,
         runtime: RuntimeKind::FirstParty,
-        safe_name: entry.definition.name.clone(),
+        safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
@@ -812,7 +814,10 @@ fn canonical_tool_schema_value(definition: &ProviderToolDefinition) -> Value {
             "description".to_string(),
             Value::String(definition.description.clone()),
         ),
-        ("name".to_string(), Value::String(definition.name.clone())),
+        (
+            "name".to_string(),
+            Value::String(definition.name.to_string()),
+        ),
         (
             "parameters".to_string(),
             canonicalize_json(&definition.parameters),
@@ -937,7 +942,7 @@ mod tests {
         let definitions = vec![ProviderToolDefinition {
             capability_id: CapabilityId::new(ironclaw_host_runtime::READ_FILE_CAPABILITY_ID)
                 .expect("valid capability id"),
-            name: "builtin__read_file".to_string(),
+            name: ProviderToolName::new("builtin__read_file").expect("valid provider tool name"),
             description: "Read files from the workspace.".to_string(),
             parameters: medium_schema(0),
         }];
@@ -957,37 +962,35 @@ mod tests {
         // A weak model copies a deferred extension tool's name from tool_search
         // results / the visible surface in inconsistent forms — sometimes the
         // dotted capability id (`google-calendar.list_events`), sometimes the
-        // `__`-encoded wire name. Both must resolve to the same catalog entry,
-        // regardless of which form the catalog itself stores, for ANY provider.
-        for stored_name in [
-            "google-calendar__list_events",
-            "google-calendar.list_events",
-        ] {
-            let definition = ProviderToolDefinition {
-                capability_id: CapabilityId::new("google-calendar.list_events")
-                    .expect("valid capability id"),
-                name: stored_name.to_string(),
-                description: "List events on a Google Calendar.".to_string(),
-                parameters: medium_schema(0),
-            };
-            assert!(
-                definition_matches_provider_name(&definition, "google-calendar__list_events"),
-                "encoded call must resolve (stored as {stored_name})"
-            );
-            assert!(
-                definition_matches_provider_name(&definition, "google-calendar.list_events"),
-                "dotted call must resolve (stored as {stored_name})"
-            );
-            // A different tool / provider must NOT match.
-            assert!(!definition_matches_provider_name(
-                &definition,
-                "google-calendar__list_calendars"
-            ));
-            assert!(!definition_matches_provider_name(
-                &definition,
-                "gmail__send_message"
-            ));
-        }
+        // `__`-encoded wire name. Both call forms must resolve to the same catalog
+        // entry, for ANY provider. The catalog itself stores the `__`-encoded wire
+        // name (a `ProviderToolName` excludes dots), and the dotted call resolves
+        // through the entry's dotted `capability_id`.
+        let stored_name = "google-calendar__list_events";
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("google-calendar.list_events")
+                .expect("valid capability id"),
+            name: ProviderToolName::new(stored_name).expect("valid provider tool name"),
+            description: "List events on a Google Calendar.".to_string(),
+            parameters: medium_schema(0),
+        };
+        assert!(
+            definition_matches_provider_name(&definition, "google-calendar__list_events"),
+            "encoded call must resolve (stored as {stored_name})"
+        );
+        assert!(
+            definition_matches_provider_name(&definition, "google-calendar.list_events"),
+            "dotted call must resolve (stored as {stored_name})"
+        );
+        // A different tool / provider must NOT match.
+        assert!(!definition_matches_provider_name(
+            &definition,
+            "google-calendar__list_calendars"
+        ));
+        assert!(!definition_matches_provider_name(
+            &definition,
+            "gmail__send_message"
+        ));
     }
 
     #[test]
@@ -1055,12 +1058,12 @@ mod tests {
         );
         let bridge = bridge_tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_SEARCH_NAME)
             .expect("tool_search bridge definition");
         let advertised = active
             .definitions
             .iter()
-            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_SEARCH_NAME)
             .expect("tool_search advertised");
         assert_eq!(advertised.capability_id, bridge.capability_id);
     }
@@ -1069,12 +1072,13 @@ mod tests {
     fn catalog_reserves_bridge_capability_ids_for_synthetic_definitions() {
         let bridge = bridge_tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_SEARCH_NAME)
             .expect("tool_search bridge definition");
         let definitions = vec![
             ProviderToolDefinition {
                 capability_id: bridge.capability_id.clone(),
-                name: "ordinary_tool_name".to_string(),
+                name: ProviderToolName::new("ordinary_tool_name")
+                    .expect("valid provider tool name"),
                 description: "Conflicting real tool with a reserved bridge id".to_string(),
                 parameters: small_no_arg_schema(),
             },
@@ -1370,7 +1374,7 @@ mod tests {
         let tool_search = active
             .definitions
             .iter()
-            .find(|definition| definition.name == TOOL_SEARCH_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_SEARCH_NAME)
             .expect("tool_search advertised");
         assert_eq!(
             tool_search.description,
@@ -1379,7 +1383,7 @@ mod tests {
         let tool_call = active
             .definitions
             .iter()
-            .find(|definition| definition.name == TOOL_CALL_NAME)
+            .find(|definition| definition.name.as_str() == TOOL_CALL_NAME)
             .expect("tool_call advertised");
         assert_eq!(tool_call.description, tool_call_safety_description());
 
@@ -1401,7 +1405,7 @@ mod tests {
         let definitions = vec![
             fixture_tool("read_file", "Read a file from disk.", small_no_arg_schema()),
             fixture_tool(
-                "google-calendar.list_events",
+                "google-calendar__list_events",
                 "List events on a Google Calendar within a time window.",
                 small_no_arg_schema(),
             ),
@@ -1410,7 +1414,7 @@ mod tests {
         let description = catalog_index_tool_search_description(&catalog);
 
         assert!(
-            description.contains("google-calendar.list_events"),
+            description.contains("google-calendar__list_events"),
             "discoverable tool must be named in the index, got: {description}"
         );
         assert!(
@@ -1428,7 +1432,7 @@ mod tests {
         let definitions: Vec<_> = (0..300)
             .map(|i| {
                 fixture_tool(
-                    format!("integration-{i:03}.do_a_long_named_action"),
+                    format!("integration-{i:03}__do_a_long_named_action"),
                     "descriptions are not indexed",
                     small_no_arg_schema(),
                 )
@@ -1605,7 +1609,7 @@ mod tests {
         let name = name.into();
         ProviderToolDefinition {
             capability_id: CapabilityId::new(format!("fixture.{name}")).expect("fixture id"),
-            name,
+            name: ProviderToolName::new(name).expect("valid fixture tool name"),
             description: description.into(),
             parameters,
         }

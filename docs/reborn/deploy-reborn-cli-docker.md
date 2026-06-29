@@ -94,6 +94,24 @@ IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
 NEARAI_API_KEY=<nearai-api-key>
 ```
 
+Minimum Railway variables for the hosted single-tenant volume profile:
+
+```bash
+IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume
+IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
+IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
+NEARAI_API_KEY=<nearai-api-key>
+```
+
+Attach a Railway volume and mount it at `/data`, or set
+`IRONCLAW_REBORN_HOME` under `RAILWAY_VOLUME_MOUNT_PATH`. The image entrypoint
+will use `$RAILWAY_VOLUME_MOUNT_PATH/ironclaw-reborn` by default when Railway
+exposes a volume mount. Without a volume, Railway deployments using
+`local-dev`, `local-dev-yolo`, `hosted-single-tenant`, or
+`hosted-single-tenant-volume` fail closed unless
+`IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true` is explicitly set for a
+disposable test deployment.
+
 For managed Postgres providers with a small session-pool cap, set
 `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE=1` or `2` rather than relying on the
 provider to queue excess sessions.
@@ -113,9 +131,9 @@ selects a different provider.
 
 Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public Railway
 listener. That profile grants trusted host access and `serve` refuses to bind it
-to a non-loopback host. Use `hosted-single-tenant` for the preview deployment
-path that keeps the local-dev product surface while storing runtime state in
-Postgres.
+to a non-loopback host. Use `hosted-single-tenant-volume` for the mounted-volume
+single-tenant preview path that keeps the local-dev product surface with durable
+libSQL-backed state, or `hosted-single-tenant` for Postgres-backed hosted state.
 
 Set `IRONCLAW_REBORN_HOME` to a mounted volume path if local files should
 survive redeploys. The hosted single-tenant profile stores runtime/control-plane
@@ -123,8 +141,10 @@ state, including extension installation/activation state, in Postgres; project
 files, materialized system extension packages, and current skill file storage
 still live under the local filesystem root. The image default is
 `/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
-container workdir is `/workspace` so the workspace root stays separate from
-Reborn's state and skill roots.
+hosted single-tenant volume profile stores runtime/control-plane state under
+that Reborn home on the mounted volume and does not require
+`IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
+workspace root stays separate from Reborn's state and skill roots.
 
 To seed a custom config instead of the bundled default, mount it under
 `/opt/ironclaw/` and set `IRONCLAW_REBORN_DEFAULT_CONFIG` to that path. On first
@@ -132,7 +152,9 @@ start, the entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`;
 later starts preserve the existing home config.
 
 For public WebUI Google login, use the Reborn WebUI SSO variables and an HTTPS
-base URL that matches the deployed Railway domain:
+base URL that matches the deployed Railway domain users will open. If Railway
+exposes more than one domain for the same service, choose one canonical domain
+for `IRONCLAW_REBORN_WEBUI_BASE_URL` and register that same domain in Google:
 
 ```bash
 IRONCLAW_REBORN_WEBUI_BASE_URL=https://<railway-domain>

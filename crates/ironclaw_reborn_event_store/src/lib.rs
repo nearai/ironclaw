@@ -47,8 +47,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+mod coalescing_sink;
 mod filesystem_store;
 
+pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 #[cfg(feature = "postgres")]
@@ -667,6 +669,10 @@ mod postgres_backed {
 
         for host in hosts {
             match host {
+                // `Host::Unix` only exists on unix in tokio-postgres; on Windows
+                // the enum has just `Tcp`, so gating this arm keeps the match
+                // exhaustive on both platforms (a Unix socket host is local).
+                #[cfg(unix)]
                 Host::Unix(_) => continue,
                 Host::Tcp(name) => {
                     if !is_local_host_literal(name) {

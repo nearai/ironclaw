@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::Semaphore;
 
-use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
+use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use crate::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
@@ -460,15 +460,16 @@ impl SlackFinalReplyDeliveryObserver {
                     );
                     return Ok(None);
                 };
-                let view = auth_prompt_view_for_blocked_auth(
-                    &binding.actor_user_id,
+                let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                    fallback_owner_user_id: &binding.actor_user_id,
                     scope,
                     run_id,
-                    gate_ref.as_str(),
-                    "Authenticate to continue this run.".to_string(),
-                    &state.credential_requirements,
-                    self.services.auth_challenges.as_deref(),
-                )
+                    gate_ref: gate_ref.as_str(),
+                    invocation_id: None,
+                    body: "Authenticate to continue this run.".to_string(),
+                    credential_requirements: &state.credential_requirements,
+                    auth_challenges: self.services.auth_challenges.as_deref(),
+                })
                 .await?;
                 // Only link-based OAuth is allowed over Slack: the user
                 // authenticates on the provider's site via `authorization_url` and
@@ -1803,16 +1804,18 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 // using the same polling machinery as the observer path (above).
 
 /// Composition-owned hook invoked by the trigger poller after a successful fire
-/// submission. The composition root wires a real implementation (behind the
-/// `slack-v2-host-beta` feature) or a no-op.
+/// submission has been durably settled in trigger storage. The composition root
+/// wires a real implementation (behind the `slack-v2-host-beta` feature) or a
+/// no-op.
 #[async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. The trigger poller owns the
-    /// non-blocking handoff by invoking this hook from a detached task, so hook
-    /// latency cannot delay fire settlement. Implementations may still spawn
-    /// their own longer-lived delivery tasks when they need bounded admission or
-    /// shutdown tracking.
+    /// turn scope the run was submitted under. The trigger poller invokes this
+    /// hook from a detached task after the accepted fire appears as settled, so
+    /// hook latency cannot delay settlement and delivery cannot precede the
+    /// persisted run/thread mapping. Implementations may still spawn their own
+    /// longer-lived delivery tasks when they need bounded admission or shutdown
+    /// tracking.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 
@@ -2011,6 +2014,21 @@ impl TriggeredRunDeliveryDriver {
 }
 
 /// Inner delivery coroutine for a single triggered run.
+///
+/// ## Invariant: a parked-awaiting-user run is terminal-for-delivery
+///
+/// After the actionable gate/auth prompt for a `BlockedApproval` / `BlockedAuth`
+/// run has been delivered, the run typically *stays* blocked until the user acts
+/// (approve / re-auth) — which is the common case, not a failure. The wait loop
+/// re-enters `wait_for_actionable_triggered` to handle the eventual transition to
+/// `Completed` (deliver the final reply, delete the stale OAuth prompt). If that
+/// re-wait hits the `max_wait` backstop, the run is parked awaiting the user: that
+/// is a successful, terminal-for-delivery outcome (`Delivered`) — NEVER record
+/// `Failed` for it, and never poll it for `Completed`. The `max_wait` backstop is
+/// the failure signal ONLY for runs that never reached an actionable state at all
+/// (still running / stuck), distinguished here by `delivered_blocked_marker`. See
+/// `docs/plans/2026-06-25-slack-delivery-blocked-terminal.md` for the production
+/// incident (23× spurious `Failed` after 30-min polls) this guards against.
 #[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_run(
     services: &SlackFinalReplyDeliveryServices,
@@ -2079,6 +2097,31 @@ async fn deliver_triggered_run(
         .await
         {
             Ok(s) => s,
+            Err(SlackFinalReplyDeliveryError::RunWaitTimedOut { .. })
+                if delivered_blocked_marker.is_some() =>
+            {
+                // The run is parked in a Blocked* state (awaiting the user's
+                // approval or re-auth) AFTER we already delivered its actionable
+                // gate/auth prompt. This is the common, expected case — the user
+                // simply has not acted within the wait backstop. The prompt is
+                // out; the user's resolution arrives later as a separate inbound
+                // event and is bridged back via the delivered-gate route. Treat
+                // this as a successful, terminal-for-delivery outcome instead of
+                // polling to the backstop and recording a generic `Failed` (which
+                // also clobbers the `Delivered` we already earned). Mirrors the
+                // live-run path's `RunWaitTimedOutAfterNotification` "quiet
+                // success" semantics. The auth prompt must remain actionable, so
+                // we intentionally do NOT delete `messages_to_delete_after_final`
+                // here — they are cleaned up only on a real terminal final reply.
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "triggered run parked awaiting user after delivering blocked prompt; recording Delivered"
+                );
+                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                return outcome;
+            }
             Err(err) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::slack_delivery",
@@ -2490,15 +2533,16 @@ async fn triggered_notification_for_state(
                 );
                 return Ok(None);
             };
-            let mut view = auth_prompt_view_for_blocked_auth(
-                &actor.user_id,
+            let mut view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                fallback_owner_user_id: &actor.user_id,
                 scope,
                 run_id,
-                gate_ref.as_str(),
-                "Authentication required to continue this automation.".to_string(),
-                &state.credential_requirements,
-                services.auth_challenges.as_deref(),
-            )
+                gate_ref: gate_ref.as_str(),
+                invocation_id: None,
+                body: "Authentication required to continue this automation.".to_string(),
+                credential_requirements: &state.credential_requirements,
+                auth_challenges: services.auth_challenges.as_deref(),
+            })
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
             // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
@@ -2934,8 +2978,6 @@ mod tests {
     // the plan explicitly forbids exposing `host_state_filesystem` from
     // `RebornRuntime` for that purpose.
 
-    use std::sync::OnceLock;
-
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
         InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
@@ -2980,6 +3022,11 @@ mod tests {
         /// When set, `cancel_run` returns `Err(TurnError::Unavailable)` instead of
         /// the normal success response. Used to test the OAuth backstop cancel-failure path.
         cancel_should_fail: std::sync::atomic::AtomicBool,
+        /// When `true`, `get_run_state` clamps at the LAST scripted state once
+        /// exhausted (sticky) instead of cycling with wraparound. Models a run
+        /// that transitions through a prefix of states and then stays in its
+        /// final state forever (e.g. Running → BlockedApproval and never resolves).
+        clamp_at_last: bool,
     }
 
     impl ScriptedTurnCoordinator {
@@ -2991,6 +3038,17 @@ mod tests {
                 calls: Mutex::new(0),
                 cancel_calls: Mutex::new(Vec::new()),
                 cancel_should_fail: std::sync::atomic::AtomicBool::new(false),
+                clamp_at_last: false,
+            }
+        }
+
+        /// Like [`with_states`] but the final state is sticky: once the script is
+        /// exhausted, `get_run_state` keeps returning the last entry instead of
+        /// wrapping around. Use to model a run parked in its terminal-ish state.
+        fn with_states_clamped(states: Vec<ScriptedRunState>) -> Self {
+            Self {
+                clamp_at_last: true,
+                ..Self::with_states(states)
             }
         }
 
@@ -3069,7 +3127,11 @@ mod tests {
                 return Err(TurnError::ScopeNotFound);
             }
             let mut calls = self.calls.lock().expect("calls lock");
-            let idx = *calls % self.states.len();
+            let idx = if self.clamp_at_last {
+                (*calls).min(self.states.len() - 1)
+            } else {
+                *calls % self.states.len()
+            };
             *calls += 1;
             let scripted = self.states[idx].clone();
             // Build a minimal-but-valid TurnRunState from the scripted status + gate_ref.
@@ -3089,6 +3151,7 @@ mod tests {
                 received_at: Utc::now(),
                 checkpoint_id: None,
                 gate_ref: scripted.gate_ref,
+                blocked_activity_id: None,
                 credential_requirements: Vec::new(),
                 failure: None,
                 event_cursor: EventCursor(1),
@@ -5790,65 +5853,6 @@ mod tests {
         );
     }
 
-    // --- OnceLock slot behaviour tests ----------------------------------------
-
-    #[tokio::test]
-    async fn post_submit_hook_slot_empty_hook_does_not_fire() {
-        // Verify the contract that `PostSubmitHookWrappedSubmitter` relies on:
-        // when the OnceLock slot is empty, reading it returns None and no hook fires.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-
-        // Slot is empty — `get()` returns None, so no hook fires.
-        assert!(slot.get().is_none(), "empty slot must return None");
-
-        // When the slot IS occupied the hook IS reachable.
-        let fired = Arc::new(Mutex::new(false));
-        let fired_clone = Arc::clone(&fired);
-        struct FlagHook(Arc<Mutex<bool>>);
-        #[async_trait]
-        impl PostSubmitDeliveryHook for FlagHook {
-            async fn on_trigger_submitted(
-                &self,
-                _fire: TriggerFire,
-                _run_id: TurnRunId,
-                _scope: TurnScope,
-            ) {
-                *self.0.lock().expect("flag") = true;
-            }
-        }
-        slot.set(Arc::new(FlagHook(fired_clone)))
-            .unwrap_or_else(|_| panic!("first slot set should succeed"));
-        if let Some(hook) = slot.get() {
-            let fire = minimal_trigger_fire(None);
-            hook.on_trigger_submitted(fire, TurnRunId::new(), personal_turn_scope())
-                .await;
-        }
-        assert!(
-            *fired.lock().expect("flag"),
-            "hook must fire after slot is set"
-        );
-    }
-
-    #[test]
-    fn post_submit_hook_slot_second_set_is_noop() {
-        // OnceLock semantics: first set succeeds, second set returns the value.
-        // This is the contract behind `set_trigger_post_submit_hook` returning false
-        // on duplicate calls.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-        let hook_a: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-        let hook_b: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-
-        assert!(slot.set(hook_a).is_ok(), "first set should succeed");
-        assert!(
-            slot.set(hook_b).is_err(),
-            "second set should fail (slot already occupied)"
-        );
-        assert!(
-            slot.get().is_some(),
-            "slot still occupied after duplicate set"
-        );
-    }
-
     #[test]
     fn slack_approval_prompt_offers_always_for_typed_approval_gate() {
         let gate_ref = GateRef::new(format!(
@@ -8171,6 +8175,404 @@ mod tests {
         assert!(
             result.is_ok(),
             "personal DM binding + require=true must not be rejected"
+        );
+    }
+
+    // ── Bug reproduction: persistent BlockedApproval never resolves ────────────
+
+    /// Regression for the Slack triggered-run "blocked-forever → Failed" bug.
+    ///
+    /// A triggered run enters `BlockedApproval` and STAYS there (the user never
+    /// approves — the common case). The delivery loop posts the approval prompt
+    /// once, then re-waits for the run to leave the blocked state. Before the fix,
+    /// that re-wait polled to `max_wait` (30 min in production) and recorded
+    /// `Failed`, clobbering the `Delivered` it had already earned — see the 23×
+    /// "did not finish before Slack delivery timeout" → `outcome=Failed` in
+    /// production logs (logs.1782348290172).
+    ///
+    /// Desired (post-fix) behavior: the approval prompt is posted at least once
+    /// and the outcome is `Delivered` (the run is parked awaiting the user; its
+    /// resolution arrives via a separate inbound event). The wait timeout after a
+    /// blocked prompt was delivered must NOT record `Failed`.
+    ///
+    /// `max_wait` is set to 200ms so the test completes in milliseconds. With the
+    /// bug present this test fails (`final_outcome == Failed`); with the fix it
+    /// passes — verified red→green.
+    #[tokio::test]
+    async fn triggered_persistent_blocked_approval_records_delivered_not_failed() {
+        let install = "test-install";
+        let gate_ref_str = "gate:approval-stuck";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // Always returns BlockedApproval — the user never approves.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        // No finalized assistant message: the run never completes.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Program several OK responses so the approval prompt can be posted
+        // (and any re-posts if the bug causes repeated delivery).
+        for _ in 0..5 {
+            egress.program_response(
+                "slack.com",
+                Ok(EgressResponse::new(
+                    200,
+                    slack_post_ok_json("D456", "8001.1"),
+                )),
+            );
+        }
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Short max_wait so the test finishes in milliseconds instead of 30 min.
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::from_millis(1),
+            max_wait: std::time::Duration::from_millis(200),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // Count how many chat.postMessage calls were made.
+        let post_count = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .count();
+
+        // Read the final recorded outcome.
+        let record = delivery_store
+            .load_triggered_run_delivery(run_id)
+            .await
+            .expect("load record")
+            .expect("record must exist after wait_for_delivery_record");
+        let final_outcome = record.outcome;
+
+        // The approval prompt is posted at least once AND the delivery is recorded
+        // as Delivered (not Failed). With the bug present, post_count >= 1 but
+        // final_outcome == Failed — the assertion below catches that.
+        assert!(
+            post_count >= 1,
+            "approval prompt must be posted at least once; got post_count={post_count}"
+        );
+        assert_eq!(
+            final_outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "delivery must be recorded as Delivered when approval prompt was posted; \
+             got {final_outcome:?} (post_count={post_count})"
+        );
+    }
+
+    /// Production-faithful variant of the blocked-forever regression: the run is
+    /// `Running` for the first 2 polls, THEN enters `BlockedApproval` and stays
+    /// there forever — matching the production timeline (run executes briefly,
+    /// then blocks on approval, then the wait backstop fires). The first wait that
+    /// observes the block must post the approval prompt and the outcome must be
+    /// `Delivered`, never `Failed`. Fails on the old behavior, passes after the fix.
+    #[tokio::test]
+    async fn triggered_running_then_blocked_approval_records_delivered_not_failed() {
+        let install = "test-install";
+        let gate_ref_str = "gate:approval-stuck-after-running";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // Running for the first 2 polls, then sticky BlockedApproval forever
+        // (clamped script: the last entry is returned indefinitely).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states_clamped(vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedApproval, Some(gate_ref_str)),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        // No finalized assistant message: the run never completes.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        for _ in 0..5 {
+            egress.program_response(
+                "slack.com",
+                Ok(EgressResponse::new(
+                    200,
+                    slack_post_ok_json("D456", "8001.1"),
+                )),
+            );
+        }
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::from_millis(1),
+            max_wait: std::time::Duration::from_millis(200),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posts: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        let post_count = posts.len();
+        let approval_posted = posts.iter().any(|b| b.contains("needs your approval"));
+
+        let record = delivery_store
+            .load_triggered_run_delivery(run_id)
+            .await
+            .expect("load record")
+            .expect("record must exist after wait_for_delivery_record");
+        let final_outcome = record.outcome;
+
+        assert!(
+            post_count >= 1,
+            "approval prompt must be posted at least once even when run starts Running; \
+             got post_count={post_count}"
+        );
+        assert!(
+            approval_posted,
+            "the posted message must be the approval prompt; got posts: {posts:?}"
+        );
+        assert_eq!(
+            final_outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "delivery must be recorded as Delivered when approval prompt was posted; \
+             got {final_outcome:?} (post_count={post_count})"
+        );
+    }
+
+    /// Backstop-preserved guard: a triggered run that is `Running` and never
+    /// reaches an actionable (terminal or Blocked*) state must still time out and
+    /// record `Failed` with ZERO posts. This proves the fix only flips the
+    /// *post-actionable* wait timeout to `Delivered` — the genuine
+    /// never-actionable backstop (the real failure signal) is unchanged.
+    #[tokio::test]
+    async fn triggered_never_actionable_run_times_out_failed() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // Always Running, no gate ref: the run never becomes actionable.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::from_millis(1),
+            max_wait: std::time::Duration::from_millis(50),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let post_count = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .count();
+        let final_outcome = delivery_store
+            .load_triggered_run_delivery(run_id)
+            .await
+            .expect("load record")
+            .expect("record must exist")
+            .outcome;
+
+        assert_eq!(
+            post_count, 0,
+            "a never-actionable run must not post anything; got post_count={post_count}"
+        );
+        assert_eq!(
+            final_outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "a run that never reaches an actionable state must time out as Failed; \
+             got {final_outcome:?}"
+        );
+    }
+
+    /// Auth/OAuth variant of the blocked-forever regression. The new
+    /// `RunWaitTimedOut + delivered_blocked_marker.is_some()` arm fires for BOTH
+    /// `BlockedApproval` and `BlockedAuth` (line 2230 sets the marker for the
+    /// `AuthRequired` event kind too). A triggered run that posts its OAuth
+    /// auth prompt to a personal DM and then stays `BlockedAuth` forever (the user
+    /// never re-authenticates) must record `Delivered`, not `Failed` — same parked
+    /// invariant as the approval case. Guards against a future change that scopes
+    /// the guard to `ApprovalNeeded` only. Fails on the old behavior, passes after
+    /// the fix.
+    #[tokio::test]
+    async fn triggered_persistent_blocked_oauth_auth_records_delivered_not_failed() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-stuck";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        // Personal-DM binding so the OAuth DM-only send-time guard does NOT trip.
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // Always BlockedAuth with a gate ref: the user never re-authenticates.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Program OK responses so the OAuth auth prompt can be posted.
+        for _ in 0..5 {
+            egress.program_response(
+                "slack.com",
+                Ok(EgressResponse::new(
+                    200,
+                    slack_post_ok_json("D456", "8001.1"),
+                )),
+            );
+        }
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // OAuth challenge provider so the auth prompt carries an authorization_url
+        // (the OAuth branch that sets `delivered_blocked_marker`).
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-stuck".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::from_millis(1),
+            max_wait: std::time::Duration::from_millis(200),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posts: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        let final_outcome = delivery_store
+            .load_triggered_run_delivery(run_id)
+            .await
+            .expect("load record")
+            .expect("record must exist")
+            .outcome;
+
+        assert!(
+            posts
+                .iter()
+                .any(|b| b.contains("https://provider.example/oauth-stuck")),
+            "the OAuth authorization_url must be posted to the personal DM; got: {posts:?}"
+        );
+        assert_eq!(
+            final_outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "a run parked in BlockedAuth after its OAuth prompt was delivered must be \
+             recorded as Delivered, not Failed; got {final_outcome:?}"
         );
     }
 }

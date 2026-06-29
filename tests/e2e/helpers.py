@@ -229,9 +229,56 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "new_chat":       "[data-testid='new-chat']",  # "+ New" client-side new-chat button
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "chat_file_input": "input[type=file][multiple]",
+    "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    "msg_assistant_markdown": '[data-testid="msg-assistant"] .markdown-body',
+    "msg_system":     "[data-testid='msg-system']",     # system notice bubble
+    "message_copy_button": "button[title]",
+    "sidebar_button": "#gateway-sidebar button",
+    "message_list_scroll": "[data-testid='message-list-scroll']",
+    "message_list_content": "[data-testid='message-list-content']",
+    "message_list_load_older": "[data-testid='message-list-load-older']",
+    "auth_gate":      "[data-testid='auth-gate']",
+    "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
+    "auth_token_input": "[data-testid='auth-token-input']",
+    "auth_oauth_open": "[data-testid='auth-oauth-open']",
+    "channel_connect_card": "[data-testid='channel-connect-card']",
+    "channel_connect_card_for": (
+        "[data-testid='channel-connect-card'][data-channel='{channel}']"
+        "[data-strategy='{strategy}']"
+    ),
+    "channel_connect_dismiss": "[data-testid='channel-connect-dismiss']",
+    "slack_pairing_section": "[data-testid='slack-pairing-section']",
+    "slack_pairing_code_input": "[data-testid='slack-pairing-code-input']",
+    "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
+    "slack_pairing_success": "[data-testid='slack-pairing-success']",
+    "slack_pairing_error": "[data-testid='slack-pairing-error']",
+    "approval_card":  "[data-testid='approval-card']",  # approval gate card
+    "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
+    "activity_run":   "[data-testid='activity-run']",
+    "activity_run_toggle": "[data-testid='activity-run-toggle']",
+    "activity_run_items": "[data-testid='activity-run-items']",
+    "tool_activity_card": "[data-testid='tool-activity-card']",
+    "tool_activity_card_for": "[data-testid='tool-activity-card'][data-tool-name='{name}']",
+    "tool_activity_toggle": "[data-testid='tool-activity-toggle']",
+    "tool_activity_detail": "[data-testid='tool-activity-detail']",
+    "projects_grid": "[data-testid='projects-grid']",
+    "projects_search_input": "[data-testid='projects-search-input']",
+    "project_card": "[data-testid='project-card']",
+    "project_card_for": "[data-testid='project-card'][data-project-id='{id}']",
+    "project_open_workspace": "[data-testid='project-open-workspace']",
+    "project_workspace": "[data-testid='project-workspace']",
+    "project_workspace_for": "[data-testid='project-workspace'][data-project-id='{id}']",
+    "project_workspace_title": "[data-testid='project-workspace-title']",
+    "project_filesystem_entry_for": (
+        "[data-testid='project-filesystem-entry'][data-entry-path='{path}']"
+    ),
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.
@@ -321,9 +368,11 @@ async def sse_stream(
     base_url: str,
     path: str = "/api/chat/events",
     *,
+    method: str = "GET",
     token: str = AUTH_TOKEN,
     params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
+    json: object | None = None,
     timeout: float = 45,
 ):
     """Open an authenticated SSE stream and yield the aiohttp response."""
@@ -335,10 +384,12 @@ async def sse_stream(
         request_headers.update(headers)
     client_timeout = aiohttp.ClientTimeout(total=timeout, sock_read=timeout)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.get(
+        async with session.request(
+            method,
             f"{base_url}{path}",
             params=params,
             headers=request_headers,
+            json=json,
         ) as response:
             yield response
 

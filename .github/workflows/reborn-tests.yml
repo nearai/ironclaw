@@ -42,16 +42,10 @@ env:
   # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
   # the previous one-job Cargo build serialization as the one-line fallback.
   RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
-  CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # The 64-crate closure runs ~64 jobs that each resolve+download the dependency
-  # tree from crates.io in parallel, so a transient registry SSL/HTTP2 hiccup
-  # (e.g. "download of <crate> failed: curl [55] SSL_ERROR_SYSCALL") tends to hit
-  # many jobs at once and redden the whole run. Make Cargo retry network failures
-  # (default 3) far more aggressively, and use the git CLI for git deps.
-  CARGO_NET_RETRY: "10"
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Cargo network resilience (retries, HTTP/2 multiplexing off, git-CLI fetch)
+  # lives in the repo-wide .cargo/config.toml so it applies to every workflow.
 
 jobs:
   changes:
@@ -182,7 +176,7 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
     steps:
@@ -202,10 +196,30 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Resolve crate feature flags
+        id: crate-feature-flags
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+          echo "feature_flags=${feature_flags}" >> "$GITHUB_OUTPUT"
+          if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
+            echo "needs_webui_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_webui_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Node.js for WebUI bundle builds
+        if: ${{ steps.crate-feature-flags.outputs.needs_webui_node == 'true' }}
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
+
       - name: Install mold and clang
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold
+          scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Restore Rust cache
@@ -216,7 +230,7 @@ jobs:
           # ~0.4-0.7 GB), which blew far past GitHub's ~10 GB repo cache LRU and
           # evicted each other — so most jobs hit "No cache found", re-downloaded
           # the crates.io registry from cold, and were exposed to transient
-          # download flakes (mitigated separately by CARGO_NET_RETRY). A single
+          # download flakes (mitigated separately by .cargo/config.toml). A single
           # shared key keeps the registry + shared-dep build in one small,
           # always-resident entry, so the registry is downloaded once, not ~60x.
           shared-key: reborn-tests-crates
@@ -228,7 +242,7 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+          feature_flags="${{ steps.crate-feature-flags.outputs.feature_flags }}"
 
           if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
             echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
@@ -256,7 +270,7 @@ jobs:
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         partition: [0, 1, 2, 3]
     steps:
@@ -278,8 +292,7 @@ jobs:
 
       - name: Install mold and clang
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold
+          scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Verify mold linker is active
@@ -366,8 +379,7 @@ jobs:
 
       - name: Install mold
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
+          scripts/ci/install-ci-apt-packages.sh mold
           test -x /usr/bin/mold
 
       - name: Install Rust

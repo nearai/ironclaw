@@ -5,6 +5,7 @@ export function TypingIndicator() {
     <div className="flex flex-col items-start">
       <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
         <div
+          data-testid="typing-indicator"
           className="w-fit rounded-[18px] border border-white/10 bg-iron-800/60 px-4 py-3"
         >
           <div className="flex gap-1">

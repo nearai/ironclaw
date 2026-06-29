@@ -3,7 +3,8 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::{CapabilityId, ThreadId};
+use chrono::Utc;
+use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -17,7 +18,11 @@ use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    AcceptedMessageRef, EventCursor, ExternalToolCatalog, InMemoryExternalToolCatalog,
+    PendingExternalCall, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnRunState, TurnScope,
+};
 
 #[tokio::test]
 async fn openai_responses_retrieve_returns_failed_projection_status() {
@@ -30,6 +35,7 @@ async fn openai_responses_retrieve_returns_failed_projection_status() {
             run_id,
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -53,6 +59,7 @@ async fn openai_responses_retrieve_returns_cancelled_projection_status() {
             run_id,
             "cancelled",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -76,6 +83,7 @@ async fn openai_responses_retrieve_ignores_other_run_statuses() {
             TurnRunId::new(),
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -103,6 +111,7 @@ async fn openai_responses_retrieve_keeps_finalized_message_completion() {
             run_id,
             "running",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -126,6 +135,7 @@ async fn openai_responses_retrieve_keeps_completed_projection_in_progress_until_
             run_id,
             "completed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -149,6 +159,7 @@ async fn openai_responses_wait_returns_terminal_projection_status_without_messag
             run_id,
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let projection = reader
@@ -175,8 +186,11 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
             "failed",
         )],
     ]));
-    let mut reader =
-        OpenAiResponsesThreadProjectionReader::new(fixture.threads.clone(), stream.clone());
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        stream.clone(),
+        no_external_tools(),
+    );
     reader.poll_interval = Duration::from_millis(1);
 
     let projection = reader
@@ -186,6 +200,381 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
 
     assert_eq!(projection.response.status, OpenAiResponseStatus::Failed);
     assert_eq!(stream.after_cursors(), vec![None, Some(first_cursor)]);
+}
+
+#[tokio::test]
+async fn openai_responses_retrieve_surfaces_parked_external_tool_call() {
+    let fixture = ResponseReaderFixture::new("blocked-ext").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_abc", "get_weather", serde_json::json!({"city": "SF"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    // A run parked on a client tool reads as a completed turn whose output is
+    // the pending `function_call` the client must fulfil.
+    assert_eq!(response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(response.output.len(), 1);
+    match &response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
+            assert_eq!(call_id, "call_abc");
+            assert_eq!(name, "get_weather");
+            assert!(arguments.contains("SF"), "arguments: {arguments}");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_retrieve_prefers_coordinator_state_over_stale_blocked_event() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-stale-state").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_stale", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::Running,
+    ))));
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(response.status, OpenAiResponseStatus::InProgress);
+    assert!(
+        response.output.is_empty(),
+        "stale blocked events must not surface pending calls while coordinator says running"
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_wait_surfaces_parked_external_tool_call() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-wait").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_xyz", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    );
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 1);
+    match &projection.response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall { call_id, name, .. } => {
+            assert_eq!(call_id, "call_xyz");
+            assert_eq!(name, "lookup");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_wait_surfaces_parked_external_tool_call_from_run_state() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-state").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_state", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![])),
+        catalog,
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::BlockedExternalTool,
+    ))));
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 1);
+    match &projection.response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall { call_id, name, .. } => {
+            assert_eq!(call_id, "call_state");
+            assert_eq!(name, "lookup");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_wait_surfaces_pending_external_call_with_sibling_tool_output() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-sibling-output").await;
+    let run_id = TurnRunId::new();
+    append_run_output_tool_result_for_run(
+        &fixture.threads,
+        &fixture.thread_scope,
+        &fixture.thread_id,
+        &run_id.to_string(),
+    )
+    .await;
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_pending",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![])),
+        catalog,
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::BlockedExternalTool,
+    ))));
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 3);
+    assert!(
+        projection.response.output.iter().any(|item| matches!(
+            item,
+            OpenAiResponseOutputItem::FunctionCallOutput { call_id, .. }
+                if call_id == "call_abc"
+        )),
+        "sibling internal tool output must be preserved"
+    );
+    assert!(
+        projection.response.output.iter().any(|item| matches!(
+            item,
+            OpenAiResponseOutputItem::FunctionCall { call_id, name, .. }
+                if call_id == "call_pending" && name == "lookup_weather"
+        )),
+        "pending external tool call must be surfaced"
+    );
+}
+
+#[tokio::test]
+async fn external_tool_store_rejects_output_for_non_pending_call_id() {
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    let run_id = TurnRunId::new();
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_expected",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let store = OpenAiCompatRuntimeExternalToolStore {
+        catalog: catalog.clone(),
+    };
+
+    let error = store
+        .submit_tool_output(
+            OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            "call_wrong".to_string(),
+            serde_json::json!("weather:sunny"),
+        )
+        .await
+        .expect_err("wrong call id must be rejected");
+
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(
+        catalog.pending_calls(run_id).await.expect("pending").len(),
+        1
+    );
+    assert_eq!(
+        catalog
+            .take_output(run_id, "call_wrong")
+            .await
+            .expect("take wrong output"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn external_tool_store_accepts_output_for_pending_call_id() {
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    let run_id = TurnRunId::new();
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_expected",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let store = OpenAiCompatRuntimeExternalToolStore {
+        catalog: catalog.clone(),
+    };
+
+    store
+        .submit_tool_output(
+            OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            "call_expected".to_string(),
+            serde_json::json!("weather:sunny"),
+        )
+        .await
+        .expect("pending call id is accepted");
+
+    assert_eq!(
+        catalog.pending_calls(run_id).await.expect("pending").len(),
+        1,
+        "pending call is cleared only after the resumed capability result is written"
+    );
+    assert_eq!(
+        catalog
+            .take_output(run_id, "call_expected")
+            .await
+            .expect("take output"),
+        Some(serde_json::json!("weather:sunny"))
+    );
+}
+
+#[test]
+fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
+    let tenant_id = TenantId::new("tenant-resume").expect("tenant");
+    let user_id = UserId::new("user-resume").expect("user");
+    let agent_id = AgentId::new("agent-resume").expect("agent");
+    let project_id = ProjectId::new("project-resume").expect("project");
+    let thread_id = ThreadId::new("thread-resume").expect("thread");
+    let actor_scope = OpenAiCompatActorScope::new(
+        tenant_id.clone(),
+        user_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+    );
+
+    let scope = openai_compat_resume_turn_scope(&actor_scope, thread_id.clone());
+
+    assert_eq!(scope.tenant_id, tenant_id);
+    assert_eq!(scope.agent_id, Some(agent_id));
+    assert_eq!(scope.project_id, Some(project_id));
+    assert_eq!(scope.thread_id, thread_id);
+    assert_eq!(scope.explicit_owner_user_id(), Some(&user_id));
+}
+
+#[test]
+fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
+    let gate_ref = ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let same_gate_ref =
+        ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let other_gate_ref =
+        ironclaw_turns::GateRef::new("gate:external_tool-call-b").expect("gate ref");
+
+    let first =
+        openai_compat_external_tool_resume_idempotency_key(&gate_ref).expect("idempotency key");
+    let second = openai_compat_external_tool_resume_idempotency_key(&same_gate_ref)
+        .expect("idempotency key");
+    let other = openai_compat_external_tool_resume_idempotency_key(&other_gate_ref)
+        .expect("idempotency key");
+
+    assert_eq!(first.as_str(), second.as_str());
+    assert_ne!(first.as_str(), other.as_str());
+    assert!(first.as_str().starts_with("openai-compat-ext-resume-v1-"));
+    assert!(!first.as_str().contains(gate_ref.as_str()));
+}
+
+#[tokio::test]
+async fn external_tool_resume_rejects_non_blocked_running_run() {
+    let fixture = ResponseReaderFixture::new("resume-running").await;
+    let run_id = TurnRunId::new();
+    let resume = OpenAiCompatRuntimeExternalToolResume {
+        coordinator: Arc::new(StaticTurnCoordinator::new(turn_run_state(
+            &fixture.projection_read,
+            run_id,
+            TurnStatus::Running,
+        ))),
+    };
+
+    let error = resume
+        .resume_external_tool_run(OpenAiCompatExternalToolResumeRequest {
+            actor_scope: fixture.actor_scope.clone(),
+            run_ref: OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            thread_id: fixture.thread_id.as_str().to_string(),
+        })
+        .await
+        .expect_err("running run must not accept external tool resume");
+
+    assert_eq!(error.status_code(), 409);
 }
 
 struct ResponseReaderFixture {
@@ -262,11 +651,11 @@ impl ResponseReaderFixture {
         OpenAiResponseWaitRequest {
             public_id: OpenAiResponseId::new("resp_test").expect("response id"),
             actor_scope: self.actor_scope.clone(),
-            accepted_ack: ProductInboundAck::Accepted {
+            accepted_ack: Some(ProductInboundAck::Accepted {
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
                     .expect("accepted ref"),
                 submitted_run_id: run_id,
-            },
+            }),
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),
             mapping: self.mapping(run_id),
@@ -287,6 +676,7 @@ impl ResponseReaderFixture {
             created_at: 123,
             idempotency_key: None,
             accepted_ack: None,
+            external_tool_resume_completed: false,
             binding: OpenAiCompatResourceBinding::Bound {
                 internal_refs: OpenAiCompatInternalRefs::new(
                     OpenAiCompatProductActionRef::new("product-action:test").expect("action ref"),
@@ -344,6 +734,60 @@ impl ProjectionStream for StaticProjectionStream {
         _request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         Ok(self.envelopes.clone())
+    }
+}
+
+struct StaticTurnCoordinator {
+    state: TurnRunState,
+}
+
+impl StaticTurnCoordinator {
+    fn new(state: TurnRunState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for StaticTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: ironclaw_turns::SubmitTurnRequest,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if request.run_id == self.state.run_id && request.scope == self.state.scope {
+            Ok(self.state.clone())
+        } else {
+            Err(TurnError::ScopeNotFound)
+        }
     }
 }
 
@@ -414,6 +858,37 @@ fn run_status_envelope(
     )
 }
 
+fn turn_run_state(
+    projection_read: &ProjectionReadRequest,
+    run_id: TurnRunId,
+    status: TurnStatus,
+) -> TurnRunState {
+    TurnRunState {
+        scope: projection_read.scope.clone(),
+        actor: Some(projection_read.actor.clone()),
+        turn_id: TurnId::new(),
+        run_id,
+        status,
+        accepted_message_ref: AcceptedMessageRef::new("message:openai-compat-test")
+            .expect("accepted ref"),
+        source_binding_ref: SourceBindingRef::new("source:openai-compat-test").expect("source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-compat-test")
+            .expect("reply target"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor::default(),
+        product_context: None,
+        resume_disposition: None,
+    }
+}
+
 const RUN_ID: &str = "turn-run-1";
 
 fn run_output_scope() -> ThreadScope {
@@ -447,7 +922,7 @@ fn run_output_provider_call() -> ProviderToolCallReferenceEnvelope {
         provider_model_id: "gpt-test".to_string(),
         provider_turn_id: "turn-1".to_string(),
         provider_call_id: "call_abc".to_string(),
-        provider_tool_name: "web_search".to_string(),
+        provider_tool_name: ProviderToolName::new("web_search").expect("provider tool name"),
         capability_id: CapabilityId::new("web.search").expect("capability id"),
         arguments: serde_json::json!({ "query": "rust" }),
         response_reasoning: None,
@@ -493,11 +968,20 @@ async fn append_run_output_tool_result(
     scope: &ThreadScope,
     thread_id: &ThreadId,
 ) {
+    append_run_output_tool_result_for_run(service, scope, thread_id, RUN_ID).await;
+}
+
+async fn append_run_output_tool_result_for_run(
+    service: &InMemorySessionThreadService,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    run_id: &str,
+) {
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
             thread_id: thread_id.clone(),
-            turn_run_id: RUN_ID.to_string(),
+            turn_run_id: run_id.to_string(),
             result_ref: "result:tool-1".to_string(),
             safe_summary: ToolResultSafeSummary::new("search failed").expect("summary"),
             provider_call: Some(run_output_provider_call()),
@@ -513,7 +997,12 @@ fn run_output_reader(
     OpenAiResponsesThreadProjectionReader::new(
         service,
         Arc::new(StaticProjectionStream::new(vec![])),
+        no_external_tools(),
     )
+}
+
+fn no_external_tools() -> Arc<dyn ExternalToolCatalog> {
+    Arc::new(InMemoryExternalToolCatalog::new())
 }
 
 #[tokio::test]
@@ -658,4 +1147,67 @@ async fn read_run_output_in_progress_surfaces_tool_output_without_final_message(
         projection.items[1],
         OpenAiResponseOutputItem::FunctionCallOutput { .. }
     ));
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn provider_view(
+    id: &str,
+    default_model: &str,
+    active: bool,
+    active_model: Option<&str>,
+) -> ironclaw_product_workflow::LlmProviderView {
+    ironclaw_product_workflow::LlmProviderView {
+        id: id.to_string(),
+        description: String::new(),
+        adapter: "open_ai_completions".to_string(),
+        default_model: default_model.to_string(),
+        base_url: None,
+        builtin: true,
+        active,
+        active_model: active_model.map(str::to_string),
+        api_key_required: false,
+        accepts_api_key: true,
+        api_key_set: false,
+        can_list_models: true,
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn model_entries_list_active_first_then_providers_deduped() {
+    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+        providers: vec![
+            provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
+            provider_view("anthropic", "claude-opus-4", false, None),
+            // Duplicate model id (same default) must not be listed twice.
+            provider_view("openai-mirror", "gpt-4o", false, None),
+        ],
+        active: Some(ironclaw_product_workflow::LlmActiveSelection {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-4o".to_string()),
+        }),
+    };
+
+    let entries = model_entries_from_snapshot(&snapshot);
+
+    assert_eq!(entries.len(), 2, "duplicate model id must be de-duplicated");
+    assert_eq!(entries[0].id, "gpt-4o", "active selection listed first");
+    assert_eq!(entries[0].owned_by.as_deref(), Some("openai"));
+    assert_eq!(entries[1].id, "claude-opus-4");
+    assert_eq!(entries[1].owned_by.as_deref(), Some("anthropic"));
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn model_entries_fall_back_to_default_model_when_no_active_selection() {
+    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+        providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
+        active: None,
+    };
+
+    let entries = model_entries_from_snapshot(&snapshot);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "claude-opus-4");
+    assert_eq!(entries[0].owned_by.as_deref(), Some("anthropic"));
 }

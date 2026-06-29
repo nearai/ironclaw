@@ -710,6 +710,7 @@ impl LlmProvider for NearAiChatProvider {
             cache_read_input_tokens: cached_tokens.unwrap_or(0).min(input_tokens),
             cache_creation_input_tokens: 0,
             reasoning: provider_reasoning,
+            reasoning_details: None,
         })
     }
 

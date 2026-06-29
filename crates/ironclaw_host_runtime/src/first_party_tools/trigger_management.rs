@@ -432,7 +432,7 @@ async fn set_trigger_state(
     state: TriggerState,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerStateInput = serde_json::from_value(input).map_err(|error| {
-        tracing::debug!(?error, "failed to deserialize trigger state input");
+        tracing::debug!(%error, "failed to deserialize trigger state input");
         input_error()
     })?;
     let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
@@ -779,6 +779,7 @@ fn trigger_error_kind(error: &TriggerError) -> &'static str {
         TriggerError::InvalidPollerConfig { .. } => "invalid_poller_config",
         TriggerError::InvalidSchedule { .. } => "invalid_schedule",
         TriggerError::InvalidMaterialization { .. } => "invalid_materialization",
+        TriggerError::BlockedMaterialization { .. } => "blocked_materialization",
         TriggerError::Backend { .. } => "backend",
         TriggerError::NotFound => "not_found",
     }
