@@ -1039,6 +1039,7 @@ impl LlmProvider for CodexChatGptProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            reasoning_details: None,
         })
     }
 }

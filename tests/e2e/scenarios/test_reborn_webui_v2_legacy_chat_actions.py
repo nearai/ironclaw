@@ -39,7 +39,7 @@ async def test_reborn_legacy_message_copy_button_writes_raw_text(reborn_v2_page)
     await expect(user_message).to_contain_text("link test", timeout=15000)
     await expect(assistant_message).to_contain_text("the pull request", timeout=30000)
 
-    user_copy = user_message.locator("button[title]").first
+    user_copy = user_message.locator(SEL_V2["message_copy_button"]).first
     await user_copy.click(force=True)
     await page.wait_for_function(
         "() => window.__copiedText === 'link test'",
@@ -48,7 +48,7 @@ async def test_reborn_legacy_message_copy_button_writes_raw_text(reborn_v2_page)
     await expect(user_copy).to_have_attribute("aria-label", "Copied", timeout=5000)
     await expect(user_copy).to_have_attribute("aria-label", "Copy message", timeout=3000)
 
-    assistant_copy = assistant_message.locator("button[title]").first
+    assistant_copy = assistant_message.locator(SEL_V2["message_copy_button"]).first
     await assistant_copy.click(force=True)
     await page.wait_for_function(
         """() => window.__copiedText ===
@@ -69,10 +69,9 @@ async def test_reborn_legacy_selection_copy_forces_plain_text(reborn_v2_page):
 
     copied = await page.evaluate(
         """
-        () => {
-          const content = Array.from(document.querySelectorAll(
-            '[data-testid="msg-assistant"] .markdown-body'
-          )).find((el) => (el.textContent || '').includes('the pull request'));
+        (selector) => {
+          const content = Array.from(document.querySelectorAll(selector))
+            .find((el) => (el.textContent || '').includes('the pull request'));
           if (!content) return { ok: false, reason: 'no content' };
           const range = document.createRange();
           range.selectNodeContents(content);
@@ -96,7 +95,8 @@ async def test_reborn_legacy_selection_copy_forces_plain_text(reborn_v2_page):
             html: store['text/html'] || '',
           };
         }
-        """
+        """,
+        SEL_V2["msg_assistant_markdown"],
     )
 
     assert copied["ok"], copied.get("reason", "copy setup failed")

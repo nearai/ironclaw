@@ -82,11 +82,11 @@ pub use fs_browse::{
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingStore,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
-    ToolPermissionState, permission_mode_allows_persistent_approval,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
+    AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -963,7 +963,9 @@ async fn auto_approve_config_entry(
         .get(&key)
         .await
         .map_err(operator_config_store_error)?;
-    let enabled = record.as_ref().is_some_and(|record| record.enabled);
+    let enabled = record
+        .as_ref()
+        .map_or(AUTO_APPROVE_DEFAULT_ENABLED, |record| record.enabled);
     Ok(RebornOperatorConfigEntry {
         key: AUTO_APPROVE_CONFIG_KEY.to_string(),
         value: serde_json::json!(enabled),

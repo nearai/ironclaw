@@ -1823,6 +1823,24 @@ mod tests {
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
         );
+        // Global auto-approve now defaults ON, so disable it for the owner scope
+        // (the scope the set dispatch authorizes against) to exercise the
+        // gate -> approve -> resume path this test verifies.
+        {
+            let mut disable_scope = run_context.scope.to_resource_scope();
+            disable_scope.user_id = owner_user_id.clone();
+            ironclaw_approvals::AutoApproveSettingStore::set(
+                local_runtime.auto_approve_settings.as_ref(),
+                ironclaw_approvals::AutoApproveSettingInput {
+                    updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
+                    scope: disable_scope,
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("disable global auto-approve"); // safety: test-only gating precondition
+        }
+
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(

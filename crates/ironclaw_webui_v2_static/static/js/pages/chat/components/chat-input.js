@@ -4,6 +4,7 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { authScope } from "../../../lib/auth-scope.js";
 import { stageFiles } from "../lib/attachments.js";
+import { ATTACHMENTS_ONLY_CONTENT } from "../lib/attachment-sentinel.js";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig.js";
 import {
   NEW_DRAFT_KEY,
@@ -14,8 +15,6 @@ import {
   setDraft,
   setStagedAttachments,
 } from "../lib/draft-store.js";
-
-export const ATTACHMENTS_ONLY_CONTENT = "(files attached)";
 
 export function ChatInput({
   onSend,
@@ -46,6 +45,8 @@ export function ChatInput({
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
   const sendBlocked = disabled || sendDisabled || isSending;
+  const submitDisabledRef = React.useRef(disabled || sendDisabled);
+  submitDisabledRef.current = disabled || sendDisabled;
   sendBlockedRef.current = sendBlocked;
   // Mirror of `attachments` plus a serial promise, so overlapping addFiles()
   // calls validate against the latest staged set rather than a stale snapshot
@@ -53,6 +54,8 @@ export function ChatInput({
   // files past the per-message budget).
   const attachmentsRef = React.useRef([]);
   const stagingQueueRef = React.useRef(Promise.resolve());
+  const activeDraftContextRef = React.useRef({ draftKey, storageScope });
+  activeDraftContextRef.current = { draftKey, storageScope };
   React.useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
@@ -158,6 +161,8 @@ export function ChatInput({
     (files) => {
       // Paste/drop can call this while the composer is disabled; don't stage then.
       if (disabled || !files || files.length === 0) return;
+      const expectedDraftKey = draftKey;
+      const expectedStorageScope = storageScope;
       // Chain on the staging queue so calls run one-at-a-time and each sees the
       // attachments admitted by the previous one (via attachmentsRef). The
       // `.catch` guarantees the shared queue promise always resolves — an
@@ -170,10 +175,18 @@ export function ChatInput({
             existing: attachmentsRef.current,
             t,
           });
+          const current = activeDraftContextRef.current;
+          if (
+            current.draftKey !== expectedDraftKey ||
+            current.storageScope !== expectedStorageScope ||
+            authScope() !== expectedStorageScope
+          ) {
+            return;
+          }
           if (staged.length > 0) {
             const next = [...attachmentsRef.current, ...staged];
             attachmentsRef.current = next;
-            setStagedAttachments(draftKey, next);
+            setStagedAttachments(expectedDraftKey, next);
             setAttachments(next);
           }
           setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
@@ -182,7 +195,7 @@ export function ChatInput({
           setAttachmentError(t("chat.attachmentStagingFailed"));
         });
     },
-    [disabled, draftKey, limits, t]
+    [disabled, draftKey, limits, storageScope, t]
   );
 
   const removeAttachment = React.useCallback((id) => {
@@ -234,10 +247,18 @@ export function ChatInput({
     } catch {
       // The failed optimistic message renders retry details in the thread.
     } finally {
-      sendBlockedRef.current = disabled || sendDisabled;
+      sendBlockedRef.current = submitDisabledRef.current;
       setIsSending(false);
     }
-  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
+  }, [
+    text,
+    attachments,
+    onSend,
+    draftKey,
+    cancelPendingDraft,
+    disabled,
+    sendDisabled,
+  ]);
 
   const handleChange = React.useCallback(
     (e) => {

@@ -57,6 +57,7 @@ async def stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await proc.wait()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -412,7 +413,11 @@ async def wait_for_assistant_message(
     """Poll the timeline until a finalized assistant message appears."""
     last_timeline: dict = {}
     for _ in range(int(timeout * 2)):
-        last_timeline = await fetch_timeline(client, base_url, thread_id)
+        try:
+            last_timeline = await fetch_timeline(client, base_url, thread_id)
+        except httpx.HTTPError:
+            await asyncio.sleep(0.5)
+            continue
         finalized = [
             message
             for message in last_timeline.get("messages", [])
@@ -450,7 +455,11 @@ async def send_and_settle(
     """Send a text turn and wait until ``expected`` assistant replies finalize."""
     await send_message(client, base_url, thread_id, content)
     for _ in range(90):
-        timeline = await fetch_timeline(client, base_url, thread_id)
+        try:
+            timeline = await fetch_timeline(client, base_url, thread_id)
+        except httpx.HTTPError:
+            await asyncio.sleep(0.5)
+            continue
         if finalized_assistant_count(timeline) >= expected:
             return
         await asyncio.sleep(0.5)
