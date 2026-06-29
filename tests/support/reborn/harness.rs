@@ -3565,6 +3565,14 @@ impl LoopbackMcpRuntimeHttpEgress {
         // then fail network authorization — a latent trap.
         let parsed = url::Url::parse(mcp_url)
             .map_err(|e| format!("invalid mock MCP URL {mcp_url:?}: {e}"))?;
+        let scheme = parsed.scheme();
+        if scheme != "http" {
+            return Err(format!(
+                "mock MCP URL {mcp_url:?} must use http://127.0.0.1/...; scheme {scheme:?} not \
+                 accepted (mcp_loopback_network_policy only permits http)"
+            )
+            .into());
+        }
         let is_loopback_ipv4 = match parsed.host() {
             Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
             _ => false,
