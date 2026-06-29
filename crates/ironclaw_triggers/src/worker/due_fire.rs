@@ -6,9 +6,9 @@ use crate::{
 use ironclaw_host_api::Timestamp;
 
 use super::{
-    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
-    failure::{SubmitFailureKind, classify_failure},
+    TriggerAcceptedFireSettlement, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+    TriggerPollerWorker, TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
+    failure::{SubmitFailureKind, classify_failure, classify_submit_failure},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl TriggerPollerWorker {
         Ok(outcome)
     }
 
-    async fn process_claimed_fire(
+    pub(super) async fn process_claimed_fire(
         &self,
         record: TriggerRecord,
         fire_slot: Timestamp,
@@ -115,6 +115,7 @@ impl TriggerPollerWorker {
                     .await;
             }
         };
+        let submitted_fire = fire.clone();
         match self
             .deps
             .trusted_submitter
@@ -138,7 +139,7 @@ impl TriggerPollerWorker {
                         trigger_id: record.trigger_id,
                         fire_slot,
                         run_id,
-                        thread_id: turn_scope.thread_id,
+                        thread_id: turn_scope.thread_id.clone(),
                         submitted_at,
                     })
                     .await?;
@@ -148,6 +149,14 @@ impl TriggerPollerWorker {
                             .to_string(),
                     });
                 }
+                self.deps
+                    .fire_settlement_observer
+                    .on_accepted_fire_settled(TriggerAcceptedFireSettlement {
+                        fire: submitted_fire,
+                        run_id,
+                        turn_scope,
+                    })
+                    .await;
                 Ok(TriggerPollerFireOutcome::Submitted { run_id })
             }
             Ok(TrustedTriggerFireSubmitOutcome::Replayed {
@@ -176,7 +185,7 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::Replayed { original_run_id })
             }
             Err(error) => {
-                let classification = classify_failure(&error);
+                let classification = classify_submit_failure(&error);
                 let disposition = match classification.kind {
                     SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
                     SubmitFailureKind::Permanent => {

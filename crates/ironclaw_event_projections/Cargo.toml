@@ -18,6 +18,7 @@ thiserror = "2"
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_memory = { path = "../ironclaw_memory" }
+ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 serde_json = "1"
 tempfile = "3"

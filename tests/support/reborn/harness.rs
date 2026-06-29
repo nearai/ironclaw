@@ -25,7 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -42,8 +42,8 @@ use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
     MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    Obligations, PackageId, Principal, ProjectId, ResourceEstimate, ResourceScope,
-    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    Obligations, PackageId, Principal, ProjectId, ProviderToolName, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
 };
@@ -158,15 +158,15 @@ const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type HarnessCapabilityParts = (
+pub(crate) type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
     Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
-type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
-type HarnessTurnBackend = CompositeRootFilesystem;
+pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -240,19 +240,19 @@ pub struct RecordedCapabilityResult {
     pub output: serde_json::Value,
 }
 
-enum HarnessCapabilityMode {
+pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 #[derive(Clone)]
-enum HarnessCapabilityRecorder {
+pub(crate) enum HarnessCapabilityRecorder {
     Recording(Arc<RecordingTestCapabilityPort>),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 impl HarnessCapabilityRecorder {
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
         match self {
             Self::Recording(port) => port.invocations(),
             Self::HostRuntime(harness) => harness.invocations(),
@@ -273,7 +273,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+    pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.runtime_http_requests(),
@@ -1231,6 +1231,19 @@ impl RebornBinaryE2EHarness {
             if state.status == expected {
                 return Ok(state);
             }
+            // A terminal status (Completed/Failed/Cancelled/RecoveryRequired) is
+            // never left, so once we observe one that is not the target the run
+            // can never reach `expected`. Fail fast instead of polling to the
+            // deadline — otherwise a run that fails early (e.g. a spawn capability
+            // returning a terminal `driver_unavailable`) burns the whole timeout
+            // and buries the real failure category.
+            if state.status.is_terminal() {
+                return Err(format!(
+                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
+                    state.status, state.failure
+                )
+                .into());
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for {expected:?}; last status={:?} failure={:?}",
@@ -1446,7 +1459,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
 }
 
 impl HarnessCapabilityMode {
-    fn into_parts(
+    pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
     ) -> HarnessResult<HarnessCapabilityParts> {
@@ -1479,9 +1492,10 @@ impl HarnessCapabilityMode {
     }
 }
 
-struct HostRuntimeCapabilityHarness {
+pub(crate) struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
@@ -1528,14 +1542,24 @@ impl HostRuntimeHarnessOptions {
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(Some(
+        let harness = Self::file_tools_with_runtime_policy(Some(
             ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
         ))
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn file_tools_requiring_approval() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(None).await
+        let harness = Self::file_tools_with_runtime_policy(None).await?;
+        // Global auto-approve now defaults ON, so disable it explicitly to keep
+        // this constructor's per-tool approval gate behavior.
+        harness
+            .disable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn file_tools_with_runtime_policy(
@@ -1570,7 +1594,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn coding_read_tools() -> HarnessResult<Self> {
-        Self::new(
+        let harness = Self::new(
             "reborn-e2e-coding-read-tools",
             vec![
                 CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
@@ -1583,11 +1607,15 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-coding-read-user")?,
             None,
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn process_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-process-tools",
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
@@ -1607,7 +1635,11 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-process-user")?,
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn qa_smoke_tools() -> HarnessResult<Self> {
@@ -1631,6 +1663,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1712,6 +1745,9 @@ impl HostRuntimeCapabilityHarness {
         .await?;
         harness.network_policy = wildcard_test_policy();
         harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1742,11 +1778,14 @@ impl HostRuntimeCapabilityHarness {
         )
         .await?;
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
     async fn trigger_management_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
@@ -1766,7 +1805,66 @@ impl HostRuntimeCapabilityHarness {
                 )?),
             ),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.enable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.enable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    async fn enable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Global auto-approve now defaults ON. A test that needs to exercise the
+    /// per-tool approval gate must flip it OFF for the product and harness-user
+    /// scopes the run authorizes against, as an explicit precondition.
+    pub async fn disable_global_auto_approve_for_product_and_harness_users(
+        &self,
+    ) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.disable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.disable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    async fn disable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: false,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn trace_commons_tools() -> HarnessResult<Self> {
@@ -1795,8 +1893,8 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-trace-commons-user")?,
             // The Trace Commons write/network capabilities are
             // PermissionMode::Ask (onboard, profile_token, profile_set) — like
-            // the skill/trigger harnesses, the yolo runtime policy
-            // auto-approves them so the scripted run is not gated.
+            // the skill/trigger harnesses, the scripted run enables global
+            // auto-approve so it is not gated.
             HostRuntimeHarnessOptions::new(
                 MountView::default(),
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -1809,6 +1907,9 @@ impl HostRuntimeCapabilityHarness {
         // non-empty network policy or the obligation check rejects dispatch
         // before the consent gate runs.
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1879,6 +1980,7 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
         let approval_parts = services.local_dev_approval_test_parts();
+        let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -1890,6 +1992,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts,
+            auto_approve_settings,
             pending_approval_scopes,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1911,7 +2014,7 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
-    async fn core_builtin_tools() -> HarnessResult<Self> {
+    pub(crate) async fn core_builtin_tools() -> HarnessResult<Self> {
         Self::core_builtin_tools_with_network_policy(http_test_policy()).await
     }
 
@@ -1973,6 +2076,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2038,6 +2142,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2445,9 +2550,9 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -3319,7 +3424,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
-            name: self.primary_tool_name().to_string(),
+            name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
             parameters: json!({
                 "type": "object",
@@ -3333,10 +3438,12 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let call = request.tool_call;
         let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: capability_id.clone(),
@@ -3430,8 +3537,8 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     }
 }
 
-struct HarnessCapabilityPortFactory {
-    port: Arc<RecordingTestCapabilityPort>,
+pub(crate) struct HarnessCapabilityPortFactory {
+    pub(crate) port: Arc<RecordingTestCapabilityPort>,
 }
 
 #[async_trait]
@@ -3444,8 +3551,8 @@ impl LoopCapabilityPortFactory for HarnessCapabilityPortFactory {
     }
 }
 
-struct StaticCapabilitySurfaceProfileResolver {
-    allow_set: CapabilityAllowSet,
+pub(crate) struct StaticCapabilitySurfaceProfileResolver {
+    pub(crate) allow_set: CapabilityAllowSet,
 }
 
 #[async_trait]
@@ -3458,7 +3565,7 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver
     }
 }
 
-struct EmptyIdentityContextSource;
+pub(crate) struct EmptyIdentityContextSource;
 
 #[async_trait]
 impl HostIdentityContextSource for EmptyIdentityContextSource {
@@ -3570,7 +3677,7 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs(
+pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
@@ -3636,6 +3743,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
@@ -3648,7 +3756,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: "call-1".to_string(),
-                provider_tool_name: "test_echo".to_string(),
+                provider_tool_name: ProviderToolName::new("test_echo").expect("provider tool name"),
                 arguments: json!({"message": "hi"}),
                 response_reasoning: None,
                 reasoning: None,

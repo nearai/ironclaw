@@ -147,8 +147,9 @@ api_version = "{api_version}"
 
 [boot]
 # Composition profile. One of: local-dev, local-dev-yolo, hosted-single-tenant,
-# production, migration-dry-run.
-# Today local-dev, local-dev-yolo, and hosted-single-tenant are wired end-to-end.
+# hosted-single-tenant-volume, production, migration-dry-run.
+# Today local-dev, local-dev-yolo, hosted-single-tenant, and
+# hosted-single-tenant-volume are wired end-to-end.
 # local-dev-yolo also requires --confirm-host-access at runtime.
 profile = "local-dev"
 
@@ -220,6 +221,7 @@ api_key_env = "OPENAI_API_KEY"
 # [slack]
 # # Host-beta Slack Events API route for `ironclaw-reborn serve`.
 # # Requires a binary built with `--features slack-v2-host-beta`.
+# # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
 # enabled = false
 # # Configure Slack app ids, bot token, signing secret, and channel mappings
 # # from WebUI channel setup after the server starts.

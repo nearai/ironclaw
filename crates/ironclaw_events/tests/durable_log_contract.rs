@@ -5,11 +5,12 @@
 //! semantics, stream-key partitioning, redaction guarantees on event
 //! constructors, and best-effort sink delivery.
 
+use async_trait::async_trait;
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor,
-    EventError, EventSink, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
-    InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEvent, RuntimeEventKind,
-    parse_jsonl, replay_jsonl, sanitize_error_kind,
+    EventError, EventLogEntry, EventReplay, EventSink, EventStreamKey, InMemoryAuditSink,
+    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEvent,
+    RuntimeEventKind, parse_jsonl, replay_jsonl, sanitize_error_kind,
 };
 use ironclaw_host_api::{
     Action, ActionSummary, AgentId, ApprovalDecisionKind, ApprovalRequest, ApprovalRequestId,
@@ -1009,6 +1010,116 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
         project_b_replay.entries[0].record.scope.project_id.as_ref(),
         Some(&project_b)
     );
+}
+
+// ─── default append_batch partial-failure contract ───────────────────────────
+
+/// Minimal [`DurableEventLog`] whose `append` succeeds for the first
+/// `succeed_count` calls and fails for every subsequent call.  `append_batch`
+/// is deliberately NOT overridden so the test exercises the default
+/// implementation in [`DurableEventLog`].
+struct PartialFailLog {
+    call_count: std::sync::atomic::AtomicUsize,
+    succeed_count: usize,
+}
+
+impl PartialFailLog {
+    fn new(succeed_count: usize) -> Self {
+        Self {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            succeed_count,
+        }
+    }
+}
+
+#[async_trait]
+impl DurableEventLog for PartialFailLog {
+    async fn append(&self, event: RuntimeEvent) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        let n = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.succeed_count {
+            Ok(EventLogEntry {
+                cursor: EventCursor::new(n as u64 + 1),
+                record: event,
+            })
+        } else {
+            Err(EventError::DurableLog {
+                reason: "injected failure".to_string(),
+            })
+        }
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        _after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "not implemented in test mock".to_string(),
+        })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        Err(EventError::DurableLog {
+            reason: "not implemented in test mock".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn durable_event_log_append_batch_keeps_prefix_on_mid_batch_error() {
+    // The default `append_batch` loops `append` one-at-a-time and collects a
+    // per-event Result in input order.  A failure at position K must not
+    // silently discard results[0..K]; the successful prefix must survive and
+    // results must cover the entire input.
+    const K: usize = 3; // first K appends succeed
+    const N: usize = 5; // total events in the batch
+
+    let log = PartialFailLog::new(K);
+    let scope = local_scope("alice", Some("default"));
+
+    let events: Vec<RuntimeEvent> = (0..N)
+        .map(|_| RuntimeEvent::dispatch_requested(scope.clone(), capability_id()))
+        .collect();
+    let event_ids: Vec<_> = events.iter().map(|e| e.event_id).collect();
+
+    let results = log.append_batch(events).await;
+
+    // Result vec must have one entry per input event.
+    assert_eq!(
+        results.len(),
+        N,
+        "result vec length must equal input length"
+    );
+
+    // Successful prefix [0..K]: Ok, in input order, records preserved.
+    for (i, result) in results[..K].iter().enumerate() {
+        let entry = result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("results[{i}] expected Ok, got Err: {e}"));
+        assert_eq!(
+            entry.record.event_id, event_ids[i],
+            "results[{i}] must carry the event at position {i} in input order"
+        );
+    }
+
+    // Position K is the first failure.
+    assert!(
+        results[K].is_err(),
+        "results[K={K}] must be Err (first injected failure)"
+    );
+
+    // Positions beyond K are also failures (mock returns Err for all n >= K).
+    for (i, result) in results.iter().enumerate().skip(K + 1) {
+        assert!(result.is_err(), "results[{i}] must be Err");
+    }
 }
 
 #[tokio::test]

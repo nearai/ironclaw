@@ -906,7 +906,8 @@ async fn authenticate_request(
         auth.user_id,
         state.default_agent_id.clone(),
         state.default_project_id.clone(),
-    );
+    )
+    .with_operator_webui_config(auth.capabilities.operator_webui_config);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     #[cfg(feature = "openai-compat-beta")]

@@ -209,7 +209,7 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
     steps:
@@ -254,6 +254,12 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
+      - name: Install Node.js for WebUI bundle builds
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
@@ -286,6 +292,12 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install Node.js for WebUI bundle builds
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench

@@ -66,28 +66,39 @@ Be sure to create a fine-grained personal access token with only the necessary p
 
 Here are some of the actions your agent can perform with the GitHub extension:
 
-- `get_repo`: Retrieve repository information  
-- `list_issues`: List all issues in a repository  
-- `create_issue`: Create a new issue  
-- `get_issue`: Get details of a specific issue  
-- `list_issue_comments`: List comments on an issue  
-- `create_issue_comment`: Add a comment to an issue  
-- `list_pull_requests`: List pull requests  
-- `create_pull_request`: Create a new pull request  
-- `get_pull_request`: Get details of a specific pull request  
-- `get_pull_request_files`: Get the list of files in a pull request  
-- `create_pr_review`: Submit a pull request review  
-- `list_pull_request_comments`: List review comments on a pull request  
-- `reply_pull_request_comment`: Reply to a pull request review comment  
-- `get_pull_request_reviews`: Get reviews for a pull request  
-- `get_combined_status`: Get the combined status for a ref  
+- `get_repo`: Retrieve repository information
+- `list_issues`: List all issues in a repository
+- `create_issue`: Create a new issue
+- `get_issue`: Get details of a specific issue
+- `update_issue`: Update issue fields, labels, and assignees
+- `list_issue_comments`: List comments on an issue
+- `create_issue_comment`: Add a comment to an issue
+- `add_issue_labels` / `remove_issue_label`: Add or remove issue labels
+- `add_issue_assignees` / `remove_issue_assignees`: Add or remove issue assignees
+- `list_pull_requests`: List pull requests
+- `create_pull_request`: Create a new pull request
+- `get_pull_request`: Get details of a specific pull request
+- `get_pull_request_files`: Get the list of files in a pull request
+- `create_pr_review`: Submit a pull request review
+- `list_pull_request_comments`: List review comments on a pull request
+- `list_pull_request_review_threads`: List inline review threads on a pull request
+- `reply_pull_request_comment`: Reply to a pull request review comment
+- `get_pull_request_reviews`: Get reviews for a pull request
+- `update_pull_request`: Update pull request metadata
+- `resolve_review_thread` / `unresolve_review_thread`: Change inline review thread state
+- `get_combined_status`: Get the combined status for a ref
 - `merge_pull_request`: Merge a pull request  
 - `get_authenticated_user`: Get the authenticated GitHub user
-- `list_repos`: List repositories (user/org)  
-- `get_file_content`: Retrieve the content of a file in the repo  
-- `trigger_workflow`: Manually trigger a GitHub Actions workflow  
-- `get_workflow_runs`: List recent workflow runs  
-- `handle_webhook`: Handle a GitHub webhook payload  
+- `list_repos`: List authenticated repositories
+- `get_file_content`: Retrieve the content of a file in the repo
+- `trigger_workflow`: Manually trigger a GitHub Actions workflow
+- `get_workflow_runs`: List recent workflow runs
+- `get_workflow_run_jobs`: List jobs for a workflow run
+- `get_workflow_run_artifacts`: List artifacts for a workflow run
+- `rerun_failed_workflow_run_jobs` / `rerun_workflow_job`: Rerun GitHub Actions jobs
+- `handle_webhook`: Handle a GitHub webhook payload
+
+Several list actions accept richer filters, including pull request branch/sort filters, issue search filters, review-thread pagination, and workflow run filters.
 
 ---
 

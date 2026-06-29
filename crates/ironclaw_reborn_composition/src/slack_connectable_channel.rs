@@ -113,6 +113,7 @@ impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade 
         let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
         if self.visibility
             == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
+            && caller.operator_webui_config
             && caller.tenant_id == self.tenant_id
             && caller.user_id == self.operator_user_id
         {
@@ -247,7 +248,8 @@ mod tests {
             UserId::new(SLACK_OPERATOR_USER).expect("user"),
             Some(AgentId::new("slack-webui-agent").expect("agent")),
             None,
-        );
+        )
+        .with_operator_webui_config(true);
 
         let response = bundle
             .api
@@ -267,6 +269,53 @@ mod tests {
         assert_eq!(
             channel_admin.strategy,
             RebornChannelConnectStrategy::AdminManagedChannels
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn slack_mounts_hide_channel_admin_action_from_operator_user_without_operator_capability()
+    {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: "slack-webui-tenant".to_string(),
+                agent_id: "slack-webui-agent".to_string(),
+                source_binding_id: "slack-webui-source".to_string(),
+                reply_target_binding_id: "slack-webui-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+        let bundle = build_webui_services_with_slack_connectable_channel(
+            &runtime,
+            None,
+            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+        )
+        .expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new(SLACK_OPERATOR_TENANT).expect("tenant"),
+            UserId::new(SLACK_OPERATOR_USER).expect("user"),
+            Some(AgentId::new("slack-webui-agent").expect("agent")),
+            None,
+        );
+
+        let response = bundle
+            .api
+            .list_connectable_channels(caller)
+            .await
+            .expect("connectable channels");
+
+        assert_eq!(response.channels.len(), 1);
+        assert_eq!(
+            response.channels[0].strategy,
+            RebornChannelConnectStrategy::InboundProofCode
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -301,7 +350,8 @@ mod tests {
             UserId::new("user:not-operator").expect("user"),
             Some(AgentId::new("slack-webui-agent").expect("agent")),
             None,
-        );
+        )
+        .with_operator_webui_config(true);
 
         let response = bundle
             .api
@@ -347,7 +397,8 @@ mod tests {
             UserId::new(SLACK_OPERATOR_USER).expect("user"),
             Some(AgentId::new("slack-webui-agent").expect("agent")),
             None,
-        );
+        )
+        .with_operator_webui_config(true);
 
         let response = bundle
             .api
@@ -393,7 +444,8 @@ mod tests {
             UserId::new(SLACK_OPERATOR_USER).expect("user"),
             Some(AgentId::new("slack-webui-agent").expect("agent")),
             None,
-        );
+        )
+        .with_operator_webui_config(true);
 
         let response = bundle
             .api

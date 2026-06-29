@@ -154,15 +154,15 @@ async fn reborn_trace_process_first_party_tools_parity() {
             .any(|message| message.content.contains(shell.as_str())),
         "shell must be advertised on the Reborn model-facing first-party surface"
     );
-    // Subagent spawning is a special loop path covered by
-    // tests/reborn_subagent_spawn_e2e.rs; this first-party tool trace only
-    // verifies it remains advertised on the model-facing surface.
+    // TEMP(disable-spawn-subagents): spawn_subagent is temporarily disabled via
+    // the outermost capability deny filter in the default planned runtime, so it
+    // must NOT appear on the model-facing surface.
     assert!(
-        requests[0]
+        !requests[0]
             .messages
             .iter()
             .any(|message| message.content.contains(spawn_subagent.as_str())),
-        "spawn_subagent must be advertised on the Reborn model-facing first-party surface"
+        "spawn_subagent must NOT be advertised while temporarily disabled"
     );
     assert_eq!(tool_result_count(&requests[1]), 1);
     assert_milestone_order(
@@ -176,6 +176,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
     let spawn_subagent =
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");

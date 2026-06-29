@@ -3,7 +3,7 @@
 mod reborn_support;
 mod support;
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{
@@ -305,6 +305,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
@@ -448,8 +449,15 @@ async fn qa_skill_discovery_and_invocation_smokes_are_read_only_until_invoked() 
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn qa_error_process_repo_patch_and_cleanup_smokes() {
+#[test]
+fn qa_error_process_repo_patch_and_cleanup_smokes() {
+    run_async_test_with_stack(
+        "qa_error_process_repo_patch_and_cleanup_smokes",
+        qa_error_process_repo_patch_and_cleanup_smokes_impl,
+    );
+}
+
+async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
     let json = cap(JSON_CAPABILITY_ID);
     let shell = cap(SHELL_CAPABILITY_ID);
     let write_file = cap(WRITE_FILE_CAPABILITY_ID);
@@ -971,6 +979,27 @@ fn qa_wait() -> WaitConfig {
     WaitConfig {
         timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(20),
+    }
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
     }
 }
 

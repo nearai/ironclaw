@@ -5,7 +5,7 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
+    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
     LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
 };
 
 use crate::{
-    app_loop_family::build_loop_family_registry,
+    app_loop_family::build_loop_family_registry_with_default_iteration_limit,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
@@ -96,9 +96,13 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
     pub poll_interval: std::time::Duration,
-    pub worker_count: std::num::NonZeroUsize,
+    /// Number of concurrent turn-runner slots (the scheduler semaphore permit
+    /// count). `None` = unlimited — the semaphore is sized to
+    /// [`tokio::sync::Semaphore::MAX_PERMITS`]. See [`scheduler_permit_count`].
+    pub worker_count: Option<std::num::NonZeroUsize>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+    pub planned_default_iteration_limit: Option<u32>,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {
@@ -106,11 +110,35 @@ impl Default for DefaultPlannedRuntimeConfig {
         Self {
             heartbeat_interval: std::time::Duration::from_secs(10),
             poll_interval: std::time::Duration::from_secs(5),
-            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
+            planned_default_iteration_limit: None,
         }
     }
+}
+
+/// Map the configured worker count into a scheduler-semaphore permit count.
+///
+/// `None` (the operator-selected "unlimited" sentinel, e.g.
+/// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT=0`) yields
+/// [`tokio::sync::Semaphore::MAX_PERMITS`] so the global scheduler never
+/// throttles claimed runs — the per-user / per-origin caps remain the only
+/// concurrency bound. A bounded count is saturated at
+/// [`tokio::sync::Semaphore::MAX_PERMITS`] — values above that ceiling are
+/// clamped down rather than passed through, so this function never produces a
+/// count that would panic `Semaphore::new` regardless of caller.
+fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize {
+    worker_count
+        .map(std::num::NonZeroUsize::get)
+        // Saturate at tokio's ceiling: `Semaphore::new` panics ABOVE
+        // `MAX_PERMITS`, and a request for more permits than that is already in
+        // "no effective bound" territory (the `None` = unlimited path sizes the
+        // semaphore to exactly `MAX_PERMITS`). This is a defense-in-depth
+        // backstop for direct composition callers; the CLI layer still rejects
+        // oversized operator config loudly before it ever reaches here.
+        .unwrap_or(tokio::sync::Semaphore::MAX_PERMITS)
+        .min(tokio::sync::Semaphore::MAX_PERMITS)
 }
 
 pub trait RuntimeTurnStateStore:
@@ -463,7 +491,10 @@ where
 {
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
-    let family_registry = build_loop_family_registry().map_err(|error| {
+    let family_registry = build_loop_family_registry_with_default_iteration_limit(
+        parts.config.planned_default_iteration_limit,
+    )
+    .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
             DefaultPlannedDriverRegistrationError::DriverBuild(
                 AgentLoopDriverError::InvalidRequest {
@@ -568,10 +599,28 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
+    // TEMP(disable-spawn-subagents): explicit composition decision to remove the
+    // spawn_subagent capability from the model-facing surface across all
+    // profiles. Applied as the OUTERMOST decorator so it strips the capability
+    // whether it was surfaced by `spawn_decorator` (the rich flavor-aware tool)
+    // or by the host-runtime first-party manifest (the bare authorization stub).
+    // This is a deny list — it takes effect regardless of the resolved profile
+    // allow-set (which is `All` for top-level runs, making a profile allow-set
+    // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
+    let disabled = DISABLED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    let mut capability_factory_builder =
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator),
-    );
+            .with_decorator(spawn_decorator);
+    if !disabled.is_empty() {
+        capability_factory_builder = capability_factory_builder
+            .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(disabled)));
+    }
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
+        Arc::new(capability_factory_builder);
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,
@@ -639,7 +688,7 @@ where
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
     ));
     let scheduler_config = TurnRunSchedulerConfig::default()
-        .with_max_concurrent_runs(parts.config.worker_count.get())
+        .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
         .with_poll_interval(parts.config.poll_interval);
     let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
@@ -654,6 +703,40 @@ where
             scheduler_handle,
         },
     )
+}
+
+/// Outermost decorator that strips a caller-supplied deny list from every loop
+/// capability surface (tool definitions, visible descriptors, and invocation),
+/// regardless of the resolved profile allow-set.
+/// Capabilities temporarily removed from the model-facing surface as an
+/// explicit composition decision. Applied via an outermost
+/// [`CapabilitySurfaceDenyFilter`]. Empty this slice to re-enable everything.
+const DISABLED_CAPABILITY_IDS: &[&str] =
+    &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
+
+struct DisabledCapabilitiesDecorator {
+    denied_capability_ids: Vec<CapabilityId>,
+}
+
+impl DisabledCapabilitiesDecorator {
+    fn new(denied_capability_ids: Vec<CapabilityId>) -> Self {
+        Self {
+            denied_capability_ids,
+        }
+    }
+}
+
+impl LoopCapabilityPortDecorator for DisabledCapabilitiesDecorator {
+    fn decorate(
+        &self,
+        _run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        Arc::new(CapabilitySurfaceDenyFilter::new(
+            inner,
+            self.denied_capability_ids.iter().cloned(),
+        ))
+    }
 }
 
 struct SubagentSpawnCapabilityDecorator {
@@ -714,6 +797,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use super::scheduler_permit_count;
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
@@ -729,6 +813,36 @@ mod tests {
     use ironclaw_loop_support::{
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn scheduler_permit_count_unlimited_uses_max_permits() {
+        // `None` is the "no global throttle" sentinel — the scheduler semaphore
+        // must be sized to the largest value tokio accepts, and `Semaphore::new`
+        // must not panic on it.
+        let permits = scheduler_permit_count(None);
+        assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
+        // Constructing the semaphore with this count must not panic.
+        let _ = tokio::sync::Semaphore::new(permits);
+    }
+
+    #[test]
+    fn scheduler_permit_count_bounded_passes_through() {
+        let permits =
+            scheduler_permit_count(Some(std::num::NonZeroUsize::new(7).expect("non-zero")));
+        assert_eq!(permits, 7);
+    }
+
+    #[test]
+    fn scheduler_permit_count_saturates_above_max_permits() {
+        // A direct composition caller passing more permits than tokio accepts must
+        // not panic the scheduler; it saturates to the ceiling instead.
+        let over =
+            std::num::NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1).expect("non-zero");
+        let permits = scheduler_permit_count(Some(over));
+        assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
+        // Must not panic.
+        let _ = tokio::sync::Semaphore::new(permits);
+    }
 
     async fn test_run_context() -> LoopRunContext {
         let tenant_id = TenantId::new("tenant-runtime-test").unwrap();

@@ -369,6 +369,34 @@ async fn builtin_write_file_new_file_returns_additions_only_diff_preview() {
 }
 
 #[tokio::test]
+async fn builtin_write_file_maps_filesystem_provider_write_failure_to_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(WriteFailureFilesystem {
+        inner: filesystem,
+        fail_suffix: "/main.rs",
+    });
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs", "content": "new\n"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
+        "old\n"
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_returns_unified_diff_display_preview() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
@@ -408,6 +436,34 @@ async fn builtin_apply_patch_returns_unified_diff_display_preview() {
     );
     assert!(preview.output_preview.contains("-    old();"));
     assert!(preview.output_preview.contains("+    new();"));
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_maps_filesystem_provider_write_failure_to_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(WriteFailureFilesystem {
+        inner: filesystem,
+        fail_suffix: "/main.rs",
+    });
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs", "old_string": "old", "new_string": "new"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
+        "old\n"
+    );
 }
 
 #[tokio::test]
@@ -1059,6 +1115,41 @@ impl RootFilesystem for ReadFailureFilesystem {
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         self.inner.write_file(path, bytes).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
+}
+
+struct WriteFailureFilesystem {
+    inner: LocalFilesystem,
+    fail_suffix: &'static str,
+}
+
+#[async_trait]
+impl RootFilesystem for WriteFailureFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        if path.as_str().ends_with(self.fail_suffix) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "disk full".to_string(),
+            });
+        }
+        self.inner.write_file(path, _bytes).await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {

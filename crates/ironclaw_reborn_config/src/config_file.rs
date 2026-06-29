@@ -103,7 +103,8 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"local-dev-yolo"`, `"hosted-single-tenant"`, `"production"`,
+    /// `"local-dev-yolo"`, `"hosted-single-tenant"`,
+    /// `"hosted-single-tenant-volume"`, `"production"`,
     /// `"migration-dry-run"`.
     pub profile: Option<String>,
 }
@@ -155,7 +156,13 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
-    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
+    /// Number of concurrent turn-runner slots (scheduler semaphore permits).
+    /// `None` (absent) → compiled default (16). `0` → unlimited (no global
+    /// throttle). Positive values are used verbatim as the scheduler-semaphore
+    /// permit count; values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected as a config error (they would otherwise panic semaphore
+    /// construction). Overridable at runtime by
+    /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT`.
     pub worker_count: Option<usize>,
     /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
     pub max_concurrent_runs_per_user: Option<u32>,
@@ -294,15 +301,18 @@ pub struct WebuiSection {
 
 /// Slack Events API host-beta enablement.
 ///
-/// `enabled = true` mounts the Slack route. Installation identifiers, channel
-/// routing, and Slack secrets are configured through the WebUI channel setup
-/// surface. The deprecated fields below are accepted as a startup migration
-/// bridge for existing `config.toml` files; secret values still stay env-only.
+/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
+/// route. The env var overrides only this enablement gate. Installation
+/// identifiers, channel routing, and Slack secrets are configured through the
+/// WebUI channel setup surface. The deprecated fields below are accepted as a
+/// startup migration bridge for existing `config.toml` files; secret values
+/// still stay env-only.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve`.
+    /// is not mounted by `ironclaw-reborn serve` unless
+    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
     /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
@@ -913,8 +923,6 @@ pub fn begin_default_llm_slot_update(
 }
 
 fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
-    use fs4::FileExt as _;
-
     let lock_path = config_update_lock_path(path);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
@@ -932,7 +940,7 @@ fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateEr
             path: lock_path.clone(),
             source,
         })?;
-    file.lock_exclusive()
+    file.lock()
         .map_err(|source| RebornConfigFileUpdateError::Lock {
             path: lock_path,
             source,

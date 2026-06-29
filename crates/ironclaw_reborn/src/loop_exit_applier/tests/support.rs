@@ -85,6 +85,7 @@ pub(super) fn running_run_state(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
@@ -227,6 +228,7 @@ pub(super) fn blocked_exit_with_checkpoint(
     LoopExit::Blocked(LoopBlocked {
         kind,
         gate_ref: LoopGateRef::new("gate:test").expect("valid"),
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref,
@@ -315,6 +317,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(0),
@@ -515,6 +518,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
                     checkpoint_id: _,
                     state_ref: _,
                     reason,
+                    blocked_activity_id: _,
                 } => {
                     let status = reason.status();
                     Ok(state_for_mapping(
@@ -573,6 +577,7 @@ fn state_for_mapping(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure,
         event_cursor: EventCursor(0),

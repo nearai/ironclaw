@@ -48,8 +48,7 @@ impl OpenAiCodexProvider {
     ) -> Result<Self, LlmError> {
         let account_id = extract_account_id(token)?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(request_timeout_secs))
+            client: crate::config::hardened_client_builder(request_timeout_secs)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
@@ -342,6 +341,7 @@ impl LlmProvider for OpenAiCodexProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: parsed.reasoning,
+            reasoning_details: None,
         })
     }
 

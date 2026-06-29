@@ -10,11 +10,12 @@ mod admission;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
+mod external_tool_catalog;
 mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-mod memory;
+pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;
@@ -48,7 +49,12 @@ pub use events::{
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
-    TurnEventSink, TurnLifecycleEvent,
+    TurnEventReducerService, TurnEventReducerSnapshot, TurnEventSink, TurnLifecycleEvent,
+    TurnLifecycleProjectionEntry,
+};
+pub use external_tool_catalog::{
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
+    InMemoryExternalToolCatalog, PendingExternalCall,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{

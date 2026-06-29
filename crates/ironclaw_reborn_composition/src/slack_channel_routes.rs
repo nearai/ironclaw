@@ -925,6 +925,9 @@ fn ensure_authorized_operator(
     if &caller.tenant_id != config.tenant_id() {
         return Err(SlackRouteError::NotFound);
     }
+    if !caller.operator_webui_config {
+        return Err(SlackRouteError::Forbidden);
+    }
     if &caller.user_id != config.operator_user_id() {
         return Err(SlackRouteError::Forbidden);
     }
@@ -1187,6 +1190,26 @@ mod tests {
                 r#"{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}"#,
                 TENANT,
                 "user:member",
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn route_admin_rejects_operator_user_without_operator_capability() {
+        let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
+            InMemorySlackChannelRouteStore::new(),
+        )));
+
+        let response = mount
+            .protected
+            .oneshot(request_without_operator_capability(
+                "PUT",
+                r#"{"channel_id":"C0ENG","subject_user_id":"user:eng-team-agent"}"#,
+                TENANT,
+                "user:admin",
             ))
             .await
             .expect("response");
@@ -1882,6 +1905,17 @@ mod tests {
         )
     }
 
+    fn request_without_operator_capability(
+        method: &str,
+        body: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Request<Body> {
+        let mut caller = caller(tenant_id, user_id);
+        caller.operator_webui_config = false;
+        request_to_path_with_caller(method, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, body, caller)
+    }
+
     fn request_to_path(
         method: &str,
         path: &str,
@@ -1902,12 +1936,32 @@ mod tests {
             .expect("request builds")
     }
 
+    fn request_to_path_with_caller(
+        method: &str,
+        path: &str,
+        body: &str,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .extension(caller);
+        if method == "GET" {
+            builder = builder.header("content-length", "0");
+        }
+        builder
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
     fn caller(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller {
             tenant_id: TenantId::new(tenant_id).expect("tenant"),
             user_id: UserId::new(user_id).expect("user"),
             agent_id: None,
             project_id: None,
+            operator_webui_config: true,
         }
     }
 }

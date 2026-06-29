@@ -289,15 +289,15 @@ struct PKCEParams {
 }
 
 fn generate_pkce_params() -> PKCEParams {
-    use rand::Rng;
+    use rand::RngExt as _;
 
     let code_verifier = ironclaw_common::pkce::generate_code_verifier();
     let code_challenge = ironclaw_common::pkce::s256_challenge(code_verifier.as_bytes());
 
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     let state: String = (0..32)
         .map(|_| {
-            let idx = rng.gen_range(0..STATE_CHARSET.len());
+            let idx = rng.random_range(0..STATE_CHARSET.len());
             STATE_CHARSET[idx] as char
         })
         .collect();
@@ -317,13 +317,13 @@ pub(crate) struct CredentialManager {
 
 impl CredentialManager {
     pub(crate) fn new(profiles_path: impl AsRef<Path>) -> Result<Self, LlmError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "gemini_oauth".to_string(),
-                reason: format!("Failed to create HTTP client for CredentialManager: {e}"),
-            })?;
+        let client =
+            crate::config::hardened_client_builder(crate::config::AUXILIARY_REQUEST_TIMEOUT_SECS)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "gemini_oauth".to_string(),
+                    reason: format!("Failed to create HTTP client for CredentialManager: {e}"),
+                })?;
 
         Ok(Self {
             profiles_path: profiles_path.as_ref().to_path_buf(),
@@ -931,13 +931,13 @@ type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, 
 impl GeminiOauthProvider {
     pub(crate) fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
         let cred_manager = CredentialManager::new(&config.credentials_path)?;
-        let http_client = Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "gemini_oauth".to_string(),
-                reason: format!("Failed to create HTTP client for GeminiOauthProvider: {e}"),
-            })?;
+        let http_client =
+            crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "gemini_oauth".to_string(),
+                    reason: format!("Failed to create HTTP client for GeminiOauthProvider: {e}"),
+                })?;
 
         Ok(Self {
             config,
@@ -2179,6 +2179,7 @@ impl LlmProvider for GeminiOauthProvider {
             cache_read_input_tokens: response.cache_read_input_tokens,
             cache_creation_input_tokens: response.cache_creation_input_tokens,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }

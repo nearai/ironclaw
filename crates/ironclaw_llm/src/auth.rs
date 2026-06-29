@@ -284,8 +284,9 @@ pub fn load_persisted_credentials(
 // ── Per-backend dispatchers ──────────────────────────────────────────────
 
 fn http_client() -> Result<reqwest::Client, AuthError> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+    // Auth dispatch is a single fast token-exchange round-trip, so it uses a
+    // tighter budget than even the shared auxiliary timeout.
+    crate::config::hardened_client_builder(15)
         .build()
         .map_err(|e| AuthError::Other(format!("http client build failed: {e}")))
 }

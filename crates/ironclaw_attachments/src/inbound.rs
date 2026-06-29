@@ -136,25 +136,22 @@ const MAX_EXTRACTED_TEXT_CHARS: usize = 100_000;
 /// Returns `None` when extraction yields nothing or fails — the attachment is
 /// still landed and referenced, the model just won't have its text.
 fn extract_document_text(bytes: &[u8], mime: &str, filename: Option<&str>) -> Option<String> {
-    let text = match ironclaw_extractors::extract_text(bytes, mime, filename) {
-        Ok(text) => text,
-        Err(error) => {
+    match ironclaw_extractors::extract_document(bytes, mime, filename) {
+        ironclaw_extractors::DocumentExtraction::Text(text) => Some(
+            ironclaw_extractors::truncate_to_chars(&text, MAX_EXTRACTED_TEXT_CHARS),
+        ),
+        // Extraction yielded nothing usable — the attachment is still landed and
+        // referenced, the model just won't have its text.
+        ironclaw_extractors::DocumentExtraction::Empty => None,
+        ironclaw_extractors::DocumentExtraction::Failed(error) => {
             // Extraction failure is non-fatal — the attachment is still landed
             // and referenced, the model just won't have its text. Log it so an
             // unsupported-format/corrupt-file case is observable (debug, not
             // warn: this runs in library context that may back the REPL/TUI).
             tracing::debug!(mime, filename, %error, "document text extraction failed");
-            return None;
+            None
         }
-    };
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
     }
-    Some(ironclaw_extractors::truncate_to_chars(
-        trimmed,
-        MAX_EXTRACTED_TEXT_CHARS,
-    ))
 }
 
 #[cfg(test)]

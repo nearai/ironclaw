@@ -4,11 +4,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use aes::Aes128;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use base64::Engine as _;
 use futures::StreamExt;
 use md5::{Digest, Md5};
-use rand::RngCore;
+use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -265,7 +265,9 @@ fn decrypt_aes_ecb_pkcs7(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, Strin
     let cipher = Aes128::new_from_slice(key).map_err(|e| format!("Invalid AES key: {e}"))?;
     let mut plaintext = ciphertext.to_vec();
     for chunk in plaintext.chunks_exact_mut(AES_BLOCK_SIZE) {
-        cipher.decrypt_block(GenericArray::from_mut_slice(chunk));
+        let block = <&mut Array<u8, aes::cipher::consts::U16>>::try_from(chunk)
+            .map_err(|_| "Invalid AES block length".to_string())?;
+        cipher.decrypt_block(block);
     }
 
     let pad_len = *plaintext
@@ -538,7 +540,9 @@ fn encrypt_aes_ecb_pkcs7(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String
     padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
 
     for chunk in padded.chunks_exact_mut(AES_BLOCK_SIZE) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
+        let block = <&mut Array<u8, aes::cipher::consts::U16>>::try_from(chunk)
+            .map_err(|_| "Invalid AES block length".to_string())?;
+        cipher.encrypt_block(block);
     }
 
     Ok(padded)
@@ -567,7 +571,7 @@ fn padded_size(raw_size: u64) -> u64 {
 
 fn random_bytes(len: usize) -> Result<Vec<u8>, String> {
     let mut bytes = vec![0u8; len];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     if bytes.iter().all(|byte| *byte == 0) {
         return Err("OS RNG returned all-zero bytes unexpectedly".to_string());
     }

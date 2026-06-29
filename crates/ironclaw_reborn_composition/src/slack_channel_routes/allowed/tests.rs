@@ -815,6 +815,7 @@ fn request_for_caller(method: &str, body: &str, tenant_id: &str, user_id: &str) 
             user_id: UserId::new(user_id).expect("user"),
             agent_id: None,
             project_id: None,
+            operator_webui_config: true,
         });
     if method == "GET" {
         builder = builder.header("content-length", "0");

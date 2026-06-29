@@ -198,6 +198,52 @@ async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workfl
 }
 
 #[tokio::test]
+async fn chat_completion_rejects_invalid_model_before_product_workflow() {
+    // Each value violates a distinct `model` bound: over the 256-byte cap,
+    // a control character, and surrounding whitespace. All must reject with a
+    // sanitized 400 naming the `model` param before the product workflow runs.
+    let oversized_model = "m".repeat(257);
+    let cases = [
+        oversized_model.as_str(),
+        "gpt\u{0000}4",
+        " gpt-reborn",
+        "gpt-reborn ",
+    ];
+    for model in cases {
+        let workflow = Arc::new(FakeProductWorkflow::new());
+        let router = test_router(
+            workflow.clone(),
+            Arc::new(StaticChatProjectionReader::text("unused")),
+        );
+
+        let response = router
+            .oneshot(chat_request(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                None,
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            http::StatusCode::BAD_REQUEST,
+            "model {model:?} must reject"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["param"], "model", "model {model:?}");
+        assert_eq!(body["error"]["code"], "invalid_request", "model {model:?}");
+        assert_eq!(
+            workflow.accepted_count(),
+            0,
+            "invalid model {model:?} must not reach the product workflow"
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_completion_rejects_invalid_idempotency_key_header() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(

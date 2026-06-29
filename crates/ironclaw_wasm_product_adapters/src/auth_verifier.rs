@@ -19,7 +19,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_product_adapters::ProtocolAuthFailure;
 use ironclaw_product_adapters::redaction::RedactedString;
 use sha2::Sha256;

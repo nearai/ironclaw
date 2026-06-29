@@ -20,8 +20,9 @@ use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, R
 use thiserror::Error;
 
 pub use auto_approve::{
-    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, FilesystemAutoApproveSettingStore, InMemoryAutoApproveSettingStore,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
+    AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,
+    InMemoryAutoApproveSettingStore,
 };
 pub use capability_permission::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,

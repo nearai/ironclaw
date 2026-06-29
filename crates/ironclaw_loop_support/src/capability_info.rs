@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::{CapabilityId, EffectKind, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, EffectKind, ProviderToolName, RuntimeKind};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition,
 };
@@ -10,7 +10,7 @@ pub(crate) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";
 
 pub(super) struct CapabilityInfoEntry<'a> {
     pub(super) capability_id: &'a CapabilityId,
-    pub(super) provider_tool_name: &'a str,
+    pub(super) provider_tool_name: &'a ProviderToolName,
     pub(super) safe_description: &'a str,
     pub(super) parameters_schema: &'a serde_json::Value,
     pub(super) runtime: RuntimeKind,
@@ -90,10 +90,19 @@ pub(crate) fn is_capability_id(capability_id: &CapabilityId) -> bool {
 pub(super) fn tool_definition() -> Result<ProviderToolDefinition, AgentLoopHostError> {
     Ok(ProviderToolDefinition {
         capability_id: capability_id()?,
-        name: TOOL_NAME.to_string(),
+        name: provider_tool_name()?,
         description: "Get names, summary, or schema details for a currently visible capability."
             .to_string(),
         parameters: schema(),
+    })
+}
+
+pub(super) fn provider_tool_name() -> Result<ProviderToolName, AgentLoopHostError> {
+    ProviderToolName::new(TOOL_NAME).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "capability info provider tool name could not be represented",
+        )
     })
 }
 

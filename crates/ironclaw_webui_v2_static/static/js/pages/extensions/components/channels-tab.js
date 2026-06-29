@@ -75,7 +75,7 @@ export function ChannelsTab({
   const enabledChannels = status.enabled_channels || [];
   const slackConnectActions = findSlackConnectActions(connectableChannels);
   const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
-  const showLegacySlackConnectActions =
+  const showBuiltinSlackConnectActions =
     slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return html`
@@ -113,13 +113,13 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
-        ${showLegacySlackConnectActions &&
+        ${showBuiltinSlackConnectActions &&
         html`
           <${BuiltinRow}
             name=${t("channels.slack") || "Slack"}
             description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
             enabled=${false}
-            statusLabel="legacy"
+            statusLabel="setup"
             statusTone="muted"
             detail=${t("channels.slackDetail") || "Tenant Slack app install"}
           >
