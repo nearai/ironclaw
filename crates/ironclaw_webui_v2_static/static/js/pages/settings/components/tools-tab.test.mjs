@@ -92,7 +92,7 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderToolsModule({ tools = [] } = {}) {
+function renderToolsModule({ tools = [], translations = {} } = {}) {
   const saved = [];
   const context = {
     Badge: "Badge",
@@ -102,7 +102,7 @@ function renderToolsModule({ tools = [] } = {}) {
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
-    useT: () => (key) => key,
+    useT: () => (key) => translations[key] || key,
     useTools: () => ({
       tools,
       query: { isLoading: false, error: null },
@@ -183,4 +183,60 @@ test("Tool permission select follows global unless a per-tool override exists", 
   });
   const overrideSelect = findTemplateNode(overrideTool, "<select");
   assert.equal(overrideSelect.values[0], "ask_each_time");
+});
+
+test("Tool rows localize built-in descriptions by capability id", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  const scalars = collectScalars(rendered);
+  assert.ok(scalars.includes("回显一条消息"));
+  assert.ok(!scalars.includes("Echo a message"));
+});
+
+test("Tools tab search matches localized and raw tool descriptions", () => {
+  const tools = [
+    {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+  ];
+  const { exports } = renderToolsModule({
+    tools,
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const zhRendered = exports.ToolsTab({ searchQuery: "回显" });
+  assert.ok(
+    findComponentNode(zhRendered, exports.ToolRow),
+    "localized description should keep the tool visible"
+  );
+
+  const enRendered = exports.ToolsTab({ searchQuery: "Echo" });
+  assert.ok(
+    findComponentNode(enRendered, exports.ToolRow),
+    "raw backend description should still keep the tool visible"
+  );
 });

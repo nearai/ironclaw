@@ -464,7 +464,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const setupAction = actions.find((a) => a.id === "setup");
       assert.notEqual(setupAction, undefined, "Setup action must exist");
-      assert.equal(setupAction.label, "Setup");
+      assert.equal(setupAction.label, "setup");
       setupAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
@@ -499,7 +499,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const reconfigureAction = actions.find((a) => a.id === "reconfigure");
       assert.notEqual(reconfigureAction, undefined, "Reconfigure action must exist");
-      assert.equal(reconfigureAction.label, "Reconfigure");
+      assert.equal(reconfigureAction.label, "reconfigure");
       reconfigureAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
