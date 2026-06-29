@@ -104,9 +104,8 @@ use ironclaw_reborn::subagent::{
 };
 use ironclaw_reborn::{
     loop_exit_applier::{
-        ApprovalGateEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
-        FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
-        ThreadCheckpointLoopExitEvidencePort,
+        BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+        FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
     },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
@@ -329,7 +328,7 @@ impl HarnessCapabilityRecorder {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev auto-approve settings".into())
             }
-            Self::HostRuntime(harness) => harness.disable_auto_approve_for(scope).await,
+            Self::HostRuntime(harness) => harness.disable_global_auto_approve(scope).await,
         }
     }
 
@@ -338,7 +337,7 @@ impl HarnessCapabilityRecorder {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev auto-approve settings".into())
             }
-            Self::HostRuntime(harness) => harness.enable_auto_approve_for(scope).await,
+            Self::HostRuntime(harness) => harness.enable_global_auto_approve(scope).await,
         }
     }
 
@@ -349,51 +348,6 @@ impl HarnessCapabilityRecorder {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.approval_requests_store(),
         }
-    }
-}
-
-/// Test-tree [`ApprovalGateEvidenceStore`] over the real approval-request store —
-/// mirrors the private production `LocalDevApprovalGateEvidence`
-/// (`ironclaw_reborn_composition::runtime`). The integration runtime wires this
-/// so a `BlockedApproval` run is verified against the persisted `Pending`
-/// approval request at loop exit and pauses, instead of being rejected as
-/// unverified and going terminal `Failed` (`driver_protocol_violation`).
-pub(crate) struct HarnessApprovalGateEvidence {
-    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-}
-
-impl HarnessApprovalGateEvidence {
-    pub(crate) fn new(
-        approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-    ) -> Self {
-        Self { approval_requests }
-    }
-}
-
-#[async_trait]
-impl ApprovalGateEvidenceStore for HarnessApprovalGateEvidence {
-    async fn pending_approval_gate(
-        &self,
-        scope: &TurnScope,
-        gate_ref: &LoopGateRef,
-    ) -> Result<bool, TurnError> {
-        let Some(request_id) = gate_ref
-            .as_str()
-            .strip_prefix("gate:approval-")
-            .and_then(|value| ApprovalRequestId::parse(value).ok())
-        else {
-            return Ok(false);
-        };
-        let record = self
-            .approval_requests
-            .get(&scope.to_resource_scope(), request_id)
-            .await
-            .map_err(|error| TurnError::Unavailable {
-                reason: format!("approval request evidence lookup failed: {error}"),
-            })?;
-        Ok(record
-            .map(|record| record.status == ironclaw_run_state::ApprovalStatus::Pending)
-            .unwrap_or(false))
     }
 }
 
@@ -1930,7 +1884,10 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    async fn enable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn enable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
         let store = self
             .auto_approve_settings
             .as_ref()
@@ -1960,7 +1917,10 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    async fn disable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn disable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
         let store = self
             .auto_approve_settings
             .as_ref()
@@ -2463,7 +2423,7 @@ impl HostRuntimeCapabilityHarness {
         let scope = self
             .pending_approval_scopes
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&request_id)
             .cloned()
             .ok_or("approval gate was not recorded by the host runtime harness")?;
@@ -2511,7 +2471,7 @@ impl HostRuntimeCapabilityHarness {
         let scope = self
             .pending_approval_scopes
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&request_id)
             .cloned()
             .ok_or("approval gate was not recorded by the host runtime harness")?;
@@ -2529,22 +2489,6 @@ impl HostRuntimeCapabilityHarness {
             )
             .await?;
         Ok(())
-    }
-
-    /// Disable the `(tenant, user)` auto-approve toggle for `scope` via the real
-    /// CAS-persisted `AutoApproveSettingStore`. Used by the
-    /// `RebornIntegrationGroup::live_approvals` path to gate the *run's own* scope
-    /// (the auto-approve key is `(tenant_id, user_id)` only, so the constructor's
-    /// product-scope disable does not cover an integration run under a different
-    /// tenant).
-    pub(crate) async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
-        self.disable_global_auto_approve(scope).await
-    }
-
-    /// Enable the `(tenant, user)` auto-approve toggle for `scope` (the no-gate
-    /// setting-flip arm of the C1 approval-settings test).
-    pub(crate) async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
-        self.enable_global_auto_approve(scope).await
     }
 
     /// The persisted approval-request store, when this harness wires the real
@@ -2735,7 +2679,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)
@@ -2750,7 +2694,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)

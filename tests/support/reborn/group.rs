@@ -73,20 +73,55 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::ResourceScope;
+use ironclaw_llm::testing::provider_chain_over;
+use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
+use ironclaw_loop_support::{
+    EmptyUserProfileSource, HostManagedModelGateway, JsonSpawnSubagentInputCodec,
+    SubagentSpawnLimits,
+};
+use ironclaw_product_adapters::ProductTriggerReason;
+use ironclaw_product_workflow::{
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    IdempotencyLedger, InboundTurnService,
+};
+use ironclaw_reborn::loop_exit_applier::{
+    LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
+};
+use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_reborn::runtime::{
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
+    build_default_planned_runtime,
+};
+use ironclaw_reborn::subagent::{
+    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    goal_store::InMemoryBoundedSubagentGoalStore,
+};
+use ironclaw_threads::SessionThreadService;
+use ironclaw_turns::run_profile::{InMemoryLoopHostMilestoneSink, ModelProfileId};
+use ironclaw_turns::{
+    FilesystemTurnStateStore, InMemoryCheckpointStateStore, LoopCheckpointStore, TurnScope,
+    TurnStateStore,
+};
 
 use super::builder::{
-    RebornIntegrationHarness, StorageMode, apply_hermetic_env, assemble_thread_runtime,
-    build_storage_composite, resolve_canonical_subject_user,
+    HARNESS_ACTOR_ID, INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness, StorageMode,
+    apply_hermetic_env, binding_request, build_storage_composite, resolve_canonical_subject_user,
+    scoped_turns_fs_composite, thread_scope_from_binding,
 };
 use super::harness::{
-    HarnessCapabilityMode, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
-    test_product_scope,
+    EmptyIdentityContextSource, HarnessCapabilityMode, HarnessTurnBackend,
+    HostRuntimeCapabilityHarness, RecordingTestCapabilityPort, test_product_scope,
 };
 use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
+use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
+use super::session_thread::RebornThreadHarness;
+use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -100,8 +135,6 @@ pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// Owned by `Arc<GroupSharedStorage>` so harnesses can outlive the group's
 /// stack frame (R6: `RebornIntegrationHarness` is `'static`).
 pub(crate) struct GroupSharedStorage {
-    /// Storage backend selector (passed to `build_storage_composite`).
-    pub(crate) storage: StorageMode,
     /// Thread history + turn state composite, shared across all threads.
     pub(crate) composite: Arc<CompositeRootFilesystem>,
     /// Path to the on-disk SQLite file for `StorageMode::LibSql`; `None` for
@@ -263,6 +296,18 @@ impl RebornIntegrationGroup {
 // RebornIntegrationGroupBuilder
 // ---------------------------------------------------------------------------
 
+/// Shared base data produced by [`RebornIntegrationGroupBuilder::build_base`].
+///
+/// Replaces the 4-tuple `(RebornProductWorkflowHarness, Arc<CompositeRootFilesystem>,
+/// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
+/// position-destructure a tuple.
+struct GroupBaseData {
+    product_harness: RebornProductWorkflowHarness,
+    composite: Arc<CompositeRootFilesystem>,
+    libsql_db_path: Option<PathBuf>,
+    turn_root: Arc<tempfile::TempDir>,
+}
+
 /// Builder for `RebornIntegrationGroup` with optional storage mode selection.
 /// Obtain via [`RebornIntegrationGroup::builder`]; defaults to
 /// `StorageMode::InMemory`.
@@ -281,16 +326,9 @@ impl RebornIntegrationGroupBuilder {
 
     /// Shared setup for every group constructor: hermetic env, the product
     /// workflow harness over the fixed itest scope, the per-group `TempDir`, and
-    /// the thread/turn composite. Returns the pieces each constructor combines
-    /// with its capability backend — the fixed test-scope strings live HERE only.
-    async fn build_base(
-        &self,
-    ) -> HarnessResult<(
-        RebornProductWorkflowHarness,
-        Arc<CompositeRootFilesystem>,
-        Option<PathBuf>,
-        Arc<tempfile::TempDir>,
-    )> {
+    /// the thread/turn composite. Returns [`GroupBaseData`] so each constructor
+    /// names the fields it needs — the fixed test-scope strings live HERE only.
+    async fn build_base(&self) -> HarnessResult<GroupBaseData> {
         apply_hermetic_env();
         let scope = test_product_scope(
             "tenant-itest",
@@ -302,24 +340,25 @@ impl RebornIntegrationGroupBuilder {
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, libsql_db_path) =
             build_storage_composite(self.storage, turn_root.path()).await?;
-        Ok((product_harness, composite, libsql_db_path, turn_root))
+        Ok(GroupBaseData {
+            product_harness,
+            composite,
+            libsql_db_path,
+            turn_root,
+        })
     }
 
     fn into_group(
         self,
-        product_harness: RebornProductWorkflowHarness,
-        composite: Arc<CompositeRootFilesystem>,
-        libsql_db_path: Option<PathBuf>,
-        turn_root: Arc<tempfile::TempDir>,
+        base: GroupBaseData,
         capability: GroupCapability,
     ) -> RebornIntegrationGroup {
         RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
-                storage: self.storage,
-                composite,
-                libsql_db_path,
-                turn_root,
-                product_harness,
+                composite: base.composite,
+                libsql_db_path: base.libsql_db_path,
+                turn_root: base.turn_root,
+                product_harness: base.product_harness,
                 capability,
             }),
         }
@@ -327,62 +366,50 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
     pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
-        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
+        let base = self.build_base().await?;
         // Execute first-party tools under the run's CANONICAL binding subject
         // user (the hashed `UserId` the actor `host-user` resolves to), not the
         // constructor's fixed test user, so capability dispatch, approval
         // persistence, auto-approve keying, and gate-evidence lookup all share the
         // run's `(tenant, user)` — matching production.
-        let subject_user = resolve_canonical_subject_user(&product_harness).await?;
+        let subject_user = resolve_canonical_subject_user(&base.product_harness).await?;
         let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
             .await?
             .with_user_id(subject_user);
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        let group = self.into_group(
-            product_harness,
-            composite,
-            libsql_db_path,
-            turn_root,
-            capability,
-        );
+        let group = self.into_group(base, capability);
         // Disable auto-approve once at build time so every thread in this group
         // faces real approval gates. The dispatch-time check is keyed on the
         // capability harness's executor user (NOT the binding owner), so target
         // `auto_approve_scope()` — `(run tenant, capability user)`.
-        if let (Some(scope), GroupCapability::HostRuntime(arc)) =
-            (group.shared.auto_approve_scope(), &group.shared.capability)
-        {
-            arc.disable_auto_approve_for(scope).await?;
-        }
+        // `live_approvals` always constructs `GroupCapability::HostRuntime`, so
+        // both `auto_approve_scope()` and `capability_harness()` are guaranteed
+        // `Some` — use `expect` rather than a redundant `if let`.
+        let scope = group
+            .shared
+            .auto_approve_scope()
+            .expect("live_approvals always uses HostRuntime; scope is always Some");
+        let arc = group
+            .capability_harness()
+            .expect("live_approvals always uses HostRuntime");
+        arc.disable_global_auto_approve(scope).await?;
         Ok(group)
     }
 
     /// Build a core built-in tools group. See [`RebornIntegrationGroup::builtin_tools`].
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
-        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
+        let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(self.into_group(
-            product_harness,
-            composite,
-            libsql_db_path,
-            turn_root,
-            capability,
-        ))
+        Ok(self.into_group(base, capability))
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
-        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
+        let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(self.into_group(
-            product_harness,
-            composite,
-            libsql_db_path,
-            turn_root,
-            capability,
-        ))
+        Ok(self.into_group(base, capability))
     }
 }
 
@@ -416,9 +443,8 @@ impl<'g> RebornThreadBuilder<'g> {
     /// storage.
     ///
     /// Arc-clones every shared field from `GroupSharedStorage` so the returned
-    /// harness is `'static` (does not borrow `'g`). Calls
-    /// `assemble_thread_runtime` in `builder.rs`, which owns the private
-    /// `RebornIntegrationHarness` fields.
+    /// harness is `'static` (does not borrow `'g`). Delegates to
+    /// `assemble_thread_runtime` (defined below in this module).
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         let capability_mode = self.group.shared.capability.mode();
         assemble_thread_runtime(
@@ -476,4 +502,214 @@ impl ScenarioReport {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-thread runtime assembly (shared by `build()` and `RebornThreadBuilder`)
+// ---------------------------------------------------------------------------
+
+/// Assemble one `RebornIntegrationHarness` thread over an existing
+/// `GroupSharedStorage`.
+///
+/// Lives in `group.rs` (not `builder.rs`) because `GroupSharedStorage` and the
+/// capability-mode types (`GroupCapability`, `HarnessCapabilityMode`) are owned
+/// by this module. `RebornIntegrationHarness` fields are `pub(crate)` so the
+/// function can set them from here. Both the single-shot
+/// `RebornIntegrationHarnessBuilder::build()` and `RebornThreadBuilder::build()`
+/// delegate here — the only difference is whether `shared` is the sole owner or
+/// is shared with a `RebornIntegrationGroup` and sibling threads.
+///
+/// Sequential-use assumption. Callers are responsible for capability construction
+/// and auto-approve disable/enable **before** calling this function (those
+/// operations require the `Arc<HostRuntimeCapabilityHarness>` inside
+/// `shared.capability`, which is accessible to callers but consumed by
+/// `capability_mode.into_parts` once this function begins).
+pub(crate) async fn assemble_thread_runtime(
+    shared: Arc<GroupSharedStorage>,
+    conversation_id: &str,
+    replies: Vec<RebornScriptedReply>,
+    capability_mode: HarnessCapabilityMode,
+) -> HarnessResult<RebornIntegrationHarness> {
+    // --- product workflow + binding ----------------------------------------
+    // A fresh adapter + ingress each time (cheap, stateless).  The binding
+    // service is backed by `shared.product_harness` which is shared; the
+    // idempotency ledger is also shared (per-binding idempotency).
+    let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
+    let ingress = RebornTestIngress::new(adapter);
+
+    // Probe: synthesise a minimal inbound envelope to trigger binding
+    // resolution (same conversation_id = same thread). The probe event id is
+    // hardcoded — per-thread uniqueness comes from the per-thread
+    // `conversation_id`, which routes each probe to a distinct binding.
+    let probe = ingress.verified_text_envelope_with_trigger(
+        "binding-probe",
+        HARNESS_ACTOR_ID,
+        conversation_id,
+        "hi",
+        ProductTriggerReason::DirectChat,
+    )?;
+    let binding = shared
+        .product_harness
+        .binding_service()?
+        .resolve_binding(binding_request(&probe))
+        .await?;
+    let thread_scope = thread_scope_from_binding(&binding)?;
+    let turn_scope = TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    );
+
+    // --- one composite for threads + turns (slice 3) -----------------------
+    // `shared.composite` and `shared.turn_root` live for the group lifetime;
+    // this thread borrows them via Arc-clone.
+    let thread_harness = RebornThreadHarness::filesystem_shared_composite(
+        thread_scope.clone(),
+        Arc::clone(&shared.composite),
+        Arc::clone(&shared.turn_root),
+    )?;
+    let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
+        Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+            Arc::clone(&shared.composite),
+            &binding,
+        )?));
+    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+
+    // --- real model gateway over the scripted raw provider -----------------
+    // Session path is per-conversation so group threads do not clobber each
+    // other's LLM session cache under the same `turn_root`.
+    let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(replies));
+    let session = create_session_manager(SessionConfig {
+        session_path: shared
+            .turn_root
+            .path()
+            .join(format!("{conversation_id}.session.json")),
+        ..SessionConfig::default()
+    })
+    .await;
+    let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+    let provider = provider_chain_over(raw, &llm_config, session).await?;
+    let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
+        .map_err(|reason| format!("invalid model profile id: {reason}"))?;
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+    let model_gateway: Arc<dyn HostManagedModelGateway> =
+        Arc::new(LlmProviderModelGateway::new(provider, policy));
+
+    // --- capability surface ------------------------------------------------
+    let (
+        capability_factory,
+        capability_surface_resolver,
+        capability_input_resolver,
+        capability_result_writer,
+        capability_recorder,
+    ) = capability_mode.into_parts(milestone_sink.clone())?;
+
+    // Baselines: the recorder may already contain entries from prior threads in
+    // the same group. Record the counts now so assertions only see the delta
+    // produced by *this* thread's turns (R2).
+    let baseline_invocation_count = capability_recorder.invocations().len();
+    let baseline_egress_count = capability_recorder.runtime_http_requests().len();
+    let baseline_result_count = capability_recorder.capability_results().len();
+    let baseline_process_count = capability_recorder.recorded_process_commands().len();
+
+    // --- loop-exit evidence ------------------------------------------------
+    // When the capability backend wires the real local-dev approval stores
+    // (`RebornIntegrationGroup::live_approvals`), attach the approval-gate evidence store so a
+    // `BlockedApproval` run is verified against the persisted `Pending` request
+    // at loop exit and genuinely pauses — mirrors production
+    // `ironclaw_reborn_composition::runtime` (`with_approval_gate_evidence`,
+    // runtime.rs:2799). Without it the blocked run is rejected as unverified and
+    // goes terminal `Failed` (driver_protocol_violation), so the real gate flow
+    // (`submit_turn_until_blocked` → `approve_gate`/`deny_gate`) cannot fire.
+    let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
+    let mut evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_harness.service.clone(),
+        turn_state_for_evidence,
+        Arc::clone(&loop_checkpoint_store),
+        thread_scope.clone(),
+    );
+    if let Some(approval_requests) = capability_recorder.approval_requests_store() {
+        evidence = evidence.with_approval_gate_evidence(
+            ironclaw_reborn_composition::test_support::build_local_dev_approval_gate_evidence_for_test(
+                approval_requests,
+            ),
+        );
+    }
+    let loop_exit_evidence: Arc<dyn LoopExitEvidencePort> = Arc::new(evidence);
+
+    // --- planned runtime composition ---------------------------------------
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        turn_state: turn_state_for_runtime,
+        thread_service: thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: thread_scope.clone(),
+        model_gateway,
+        checkpoint_state_store,
+        loop_checkpoint_store,
+        milestone_sink,
+        capability_factory,
+        capability_surface_resolver,
+        capability_result_writer,
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
+            capability_input_resolver,
+        )),
+        subagent_spawn_limits: SubagentSpawnLimits::default(),
+        loop_exit_evidence,
+        config: DefaultPlannedRuntimeConfig {
+            poll_interval: Duration::from_millis(10),
+            ..DefaultPlannedRuntimeConfig::default()
+        },
+        model_route_resolver: None,
+        cancellation_factory: None,
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        attachment_read_port: None,
+        scheduler_wake_wiring: None,
+    })?;
+
+    // --- product workflow over the coordinator -----------------------------
+    let binding_service: Arc<dyn ConversationBindingService> =
+        Arc::new(shared.product_harness.binding_service()?);
+    let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
+        Arc::clone(&binding_service),
+        thread_harness.service_instance()?,
+        composition.coordinator.clone(),
+    ));
+    let ledger: Arc<dyn IdempotencyLedger> = Arc::new(shared.product_harness.idempotency_ledger());
+    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+
+    Ok(RebornIntegrationHarness {
+        ingress,
+        workflow,
+        conversation_id: conversation_id.to_owned(),
+        binding,
+        turn_scope,
+        turn_store,
+        thread_harness,
+        coordinator: composition.coordinator.clone(),
+        scheduler_handle: Some(composition.scheduler_handle),
+        event_seq: AtomicU64::new(1),
+        capability_recorder,
+        _shared: shared,
+        baseline_invocation_count,
+        baseline_egress_count,
+        baseline_result_count,
+        baseline_process_count,
+    })
 }

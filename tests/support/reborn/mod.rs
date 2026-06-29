@@ -11,6 +11,7 @@ pub mod harness;
 pub mod http_matcher;
 pub mod model_replay;
 pub mod network;
+pub mod oauth_flow;
 pub mod process;
 pub mod product_workflow;
 #[allow(dead_code)]

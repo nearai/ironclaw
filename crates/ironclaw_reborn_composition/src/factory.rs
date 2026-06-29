@@ -517,10 +517,9 @@ impl RebornServices {
     /// composition. Returns `None` for production-profile compositions that did
     /// not wire up local-dev extension management.
     ///
-    /// Mirrors the `installation_store` wired into
-    /// `RebornLocalExtensionManagementPort` by the production local-dev
-    /// extension lifecycle factory. For tests only — zero bytes shipped in
-    /// production builds.
+    /// Mirrors the `installation_store` that `build_local_runtime` wires into
+    /// `RebornLocalExtensionManagementPort`. For tests only — zero bytes
+    /// shipped in production builds.
     #[cfg(feature = "test-support")]
     pub fn extension_installation_store_for_test(
         &self,

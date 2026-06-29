@@ -30,33 +30,30 @@
 //! `credential_refresh_worker` that powers arm b) so the file compiles and
 //! produces zero tests when neither database feature is active.
 
+// The support tree is large and shared; a single-test file exercises only a
+// slice of it, so suppress dead-code warnings on the includes.
+#[allow(dead_code)]
+#[path = "support/reborn/mod.rs"]
+mod reborn_support;
+#[allow(dead_code)]
+mod support;
+
 // Imports and helpers are gated alongside the test functions so that building
 // without a database feature produces zero unused-import warnings.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::{Duration, Utc};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest,
-    CredentialAccountStatus, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope,
+    AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::{OAuthProductAuthTestBundle, build_google_oauth_product_auth_for_test},
+    CredentialRefreshSettings, test_support::build_google_oauth_product_auth_for_test,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use secrecy::SecretString;
-
-/// Build a 64-character hex string from a repeated byte value.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn hex64(fill: u8) -> String {
-    format!("{fill:02x}").repeat(32)
-}
+use reborn_support::oauth_flow::connect_google_account;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_scope() -> AuthProductScope {
@@ -66,91 +63,6 @@ fn test_scope() -> AuthProductScope {
     )
     .expect("local_default scope must build");
     AuthProductScope::new(resource, AuthSurface::Callback)
-}
-
-/// Run the standard Google OAuth connect flow on `bundle` and return the
-/// persisted `CredentialAccount`.
-///
-/// Mirrors the same helper in `reborn_integration_oauth_refresh.rs`.  Test
-/// code duplication is intentional: the function lives in a test binary, which
-/// cannot be re-exported to another test binary.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn connect_google_account(
-    bundle: &OAuthProductAuthTestBundle,
-    scope: &AuthProductScope,
-    fill: u8,
-) -> ironclaw_auth::CredentialAccount {
-    let provider = AuthProviderId::new("google").unwrap();
-    let state_hash = OpaqueStateHash::new(hex64(fill)).unwrap();
-    let pkce_hash = PkceVerifierHash::new(hex64(fill.wrapping_add(1))).unwrap();
-    let code_hash = AuthorizationCodeHash::new(hex64(fill.wrapping_add(2))).unwrap();
-    let expires_at = Utc::now() + Duration::minutes(5);
-
-    let flow = bundle
-        .services
-        .flow_manager()
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider.clone(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: OAuthAuthorizationUrl::new(
-                    "https://accounts.google.com/o/oauth2/auth",
-                )
-                .unwrap(),
-                expires_at,
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: Some(state_hash.clone()),
-            pkce_verifier_hash: Some(pkce_hash.clone()),
-            expires_at,
-        })
-        .await
-        .expect("create_flow must succeed");
-
-    let response = bundle
-        .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope: scope.clone(),
-            flow_id: flow.id,
-            opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
-                provider_request: OAuthProviderCallbackRequest {
-                    provider: provider.clone(),
-                    account_label: CredentialAccountLabel::new("Google Account").unwrap(),
-                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                        "google-auth-code".to_string(),
-                    ))
-                    .unwrap(),
-                    authorization_code_hash: code_hash,
-                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                        "google-pkce-verifier".to_string(),
-                    ))
-                    .unwrap(),
-                    pkce_verifier_hash: pkce_hash,
-                    scopes: vec![ProviderScope::new("email").unwrap()],
-                },
-            },
-        })
-        .await
-        .expect("handle_oauth_callback must succeed");
-
-    let account_id = response
-        .credential_account_id
-        .expect("completed callback must carry a credential_account_id");
-
-    bundle
-        .services
-        .credential_account_service()
-        .get_account(CredentialAccountLookupRequest::new(
-            scope.clone(),
-            account_id,
-        ))
-        .await
-        .expect("get_account must not error")
-        .expect("credential account must be persisted after a successful OAuth callback")
 }
 
 // ─── arm a: pure-store revoke ─────────────────────────────────────────────────

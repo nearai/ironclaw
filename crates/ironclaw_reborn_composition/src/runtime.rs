@@ -781,8 +781,8 @@ impl LocalDevApprovalTurnRunLocator {
     }
 }
 
-struct LocalDevApprovalGateEvidence {
-    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+pub(crate) struct LocalDevApprovalGateEvidence {
+    pub(crate) approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 }
 
 #[async_trait::async_trait]

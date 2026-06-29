@@ -34,11 +34,35 @@ mod scenario_approve_always_persists_cross_thread;
 mod scenario_gate_then_approve;
 mod scenario_gate_then_deny;
 
+use reborn_support::builder::StorageMode;
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
 async fn approvals_group_e2e() {
     let g = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("group builds");
+
+    let mut report = ScenarioReport::new();
+    // Independent gate scenarios (run while auto-approve is still OFF — they are
+    // the control proving the gate is real before scenario 3 flips it ON).
+    report.record(
+        "gate_then_approve",
+        scenario_gate_then_approve::run(&g).await,
+    );
+    report.record("gate_then_deny", scenario_gate_then_deny::run(&g).await);
+    // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
+    scenario_approve_always_persists_cross_thread::run(&g)
+        .await
+        .expect("approve-always persists cross-thread");
+    report.assert_all_passed();
+}
+
+#[tokio::test]
+async fn approvals_group_libsql_e2e() {
+    let g = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .live_approvals()
         .await
         .expect("group builds");
 

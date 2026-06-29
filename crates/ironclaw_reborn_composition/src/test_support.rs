@@ -1,14 +1,20 @@
-//! Test-only helpers for driving budget E2E tests against
-//! [`build_reborn_runtime`].
+//! Test-only helpers for the Reborn integration-test framework and budget E2E tests.
 //!
-//! Gated behind the `test-support` feature so production builds never pay
-//! the cost of the mock gateway / introspection accessors. The shapes here
-//! are deliberately small: a mock [`HostManagedModelGateway`] with
-//! per-turn scripted responses (including token usage), plus its companion
-//! cost-table helper. Tests inject these via
-//! [`RebornRuntimeInput::with_model_gateway_override`] and
-//! [`RebornRuntimeInput::with_model_cost_table_override`], which are
-//! exposed under the same `test-support` feature.
+//! Gated behind the `test-support` feature so production builds never pay the cost
+//! of the mock gateway / introspection accessors. The module covers three areas:
+//!
+//! 1. **Budget / mock-gateway helpers** — [`BudgetTestGateway`], [`FailingTestGateway`],
+//!    [`ScriptedReply`] — scripted model responses with configurable token counts for
+//!    `RebornRuntimeInput::with_model_gateway_override` tests.
+//! 2. **OAuth / product-auth test bundles** — [`ScriptedOAuthTokenEgress`],
+//!    [`OAuthProductAuthTestBundle`], `build_oauth_product_auth_for_test`,
+//!    `build_google_oauth_product_auth_for_test` — real store / real client / scripted
+//!    HTTP egress for OAuth connect, refresh, and error-path tests.
+//! 3. **Reborn integration-test framework accessors** — `build_local_dev_approval_gate_evidence_for_test`,
+//!    `build_default_local_dev_database_roots_for_test`, `mount_local_dev_database_roots_for_test`,
+//!    `build_local_dev_secret_store_for_test` — mirror the production local-dev boot
+//!    sequence so the integration-test harness (`tests/support/reborn/`) drives the
+//!    real local-dev composition paths without duplicating the wiring logic.
 
 use std::sync::{Arc, Mutex};
 
@@ -216,6 +222,12 @@ impl HostManagedModelGateway for FailingTestGateway {
 ///
 /// The default `(status, body)` is used for every call unless a per-call
 /// override has been queued with [`push_response`].
+///
+/// **Sequential-use assumption.** Callers drive this egress from a single test
+/// thread. The internal `Mutex` guards against accidental concurrent access but
+/// is not intended to support concurrent callers — FIFO ordering of
+/// `push_response` / `captured_count` / `captured_grant_types` is meaningful
+/// only under sequential use.
 ///
 /// [`push_response`]: ScriptedOAuthTokenEgress::push_response
 pub struct ScriptedOAuthTokenEgress {
@@ -591,6 +603,13 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 ///
 /// Gated on `any(feature = "libsql", feature = "postgres")` because
 /// `credential_refresh_worker` is only compiled under those features.
+// TODO(follow-up): add a LibSql-backed sweep test that drives the real
+// `FilesystemCredentialRefreshCandidateSource` enumeration. `FixedCandidateSource`
+// bypasses the tenant-path filesystem walk because this bundle's fixed view
+// mounts only `/secrets` (no tenant tree to enumerate). The refresh path itself
+// (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
+// write-back) is already covered here at full fidelity; only candidate
+// enumeration is stubbed.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FixedCandidateSource {
     candidates: Vec<ironclaw_auth::CredentialAccount>,
@@ -803,4 +822,21 @@ where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
     crate::factory::build_local_dev_secret_store(root, scoped, None)
+}
+
+/// Mirrors the production approval-gate evidence wiring done by
+/// `build_local_runtime` (runtime.rs ~line 2799) — returns the REAL
+/// `LocalDevApprovalGateEvidence` so the gate-evidence lookup logic
+/// (the `gate:approval-` prefix parse + `ApprovalStatus::Pending` check)
+/// never drifts from production. Tests only.
+///
+/// Wired by the Reborn integration-test framework's `assemble_thread_runtime`
+/// so a `BlockedApproval` run is verified against the persisted `Pending`
+/// approval request at loop exit and genuinely pauses — mirrors the production
+/// `runtime.rs` path with the real type, never a hand-mirrored copy.
+#[cfg(feature = "test-support")]
+pub fn build_local_dev_approval_gate_evidence_for_test(
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+    std::sync::Arc::new(crate::runtime::LocalDevApprovalGateEvidence { approval_requests })
 }

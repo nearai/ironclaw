@@ -18,6 +18,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_install_then_visible_cross_thread;
+mod scenario_remove_then_absent_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -34,6 +35,15 @@ async fn extensions_group_e2e() {
     report.record(
         "install_then_visible_cross_thread",
         scenario_install_then_visible_cross_thread::run(&g).await,
+    );
+
+    // Scenario 2: install + remove in thread A → search in thread B confirms
+    // the extension is no longer installed over the shared store. Independent
+    // of Scenario 1 (different conversation IDs; the group's extension store
+    // is shared but both scenarios install their own copy of "github").
+    report.record(
+        "remove_then_absent_cross_thread",
+        scenario_remove_then_absent_cross_thread::run(&g).await,
     );
 
     report.assert_all_passed();

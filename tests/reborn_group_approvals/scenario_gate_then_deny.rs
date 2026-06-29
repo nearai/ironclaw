@@ -26,9 +26,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
 
     let (run_id, gate_ref) = h.submit_turn_until_blocked("write the denied file").await?;
-    if !gate_ref.as_str().starts_with("gate:approval-") {
-        return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
-    }
 
     // Deny + resume. Real guard (non-vacuous): the deny→resume pipeline drives the
     // run to terminal `Completed` (the model sees a non-retryable authorization

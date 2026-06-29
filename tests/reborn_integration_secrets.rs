@@ -5,11 +5,10 @@
 //! same on-disk database file and reads the secret back. Proves real on-disk
 //! secret durability without exercising the turn/model layer.
 //!
-//! Gated on the `libsql` feature because `wrap_scoped` and
-//! `build_local_dev_secret_store_for_test` are compiled only under
-//! `any(feature = "libsql", feature = "postgres")`.  Running without the
-//! feature produces 0 tests (compile-safe); running with `--features libsql`
-//! produces 2 tests.
+//! Gated on the `libsql` feature because the test directly instantiates
+//! `LibSqlRootFilesystem`, a type that compiles only under
+//! `feature = "libsql"`.  Running without the feature produces 0 tests
+//! (compile-safe); running with `--features libsql` produces 2 tests.
 
 #![cfg(feature = "libsql")]
 
