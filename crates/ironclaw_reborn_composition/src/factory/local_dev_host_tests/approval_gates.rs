@@ -369,6 +369,135 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
 }
 
 #[tokio::test]
+async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-echo-ask-resume", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let estimate = ResourceEstimate::default();
+    let input = serde_json::json!({"message": "hello ask-each-time"});
+    let context = echo_spawn_execution_context("local-dev-echo-ask-resume", "thread-echo-resume");
+
+    local_runtime
+        .tool_permission_overrides
+        .set(ToolPermissionOverrideInput {
+            scope: operator_tool_permission_scope_for_test(&context.resource_scope),
+            capability_id: capability_id.clone(),
+            state: ToolPermissionOverride::AskEachTime,
+            updated_by: Principal::User(context.user_id.clone()),
+        })
+        .await
+        .expect("tool permission override update");
+
+    let blocked = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("echo invocation resolves");
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = blocked else {
+        panic!("explicit ask_each_time should gate builtin.echo, got {blocked:?}");
+    };
+    assert_eq!(gate.capability_id, capability_id);
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "explicit ask_each_time must create a pending approval"
+    );
+
+    let premature_resume = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("pending echo approval resume resolves to non-completion");
+    assert!(
+        !matches!(premature_resume, RuntimeCapabilityOutcome::Completed(_)),
+        "pending ask_each_time approval must not allow echo resume, got {premature_resume:?}"
+    );
+    assert!(
+        local_runtime
+            .capability_leases
+            .leases_for_scope(&context.resource_scope)
+            .await
+            .is_empty(),
+        "pending approval must not issue an approval lease"
+    );
+
+    let lease = ApprovalResolver::new(
+        local_runtime.approval_requests.as_ref(),
+        local_runtime.capability_leases.as_ref(),
+    )
+    .approve_dispatch(
+        &context.resource_scope,
+        gate.approval_request_id,
+        echo_dispatch_lease_approval(),
+    )
+    .await
+    .expect("approval issues echo lease");
+    let approved_record = local_runtime
+        .approval_requests
+        .get(&context.resource_scope, gate.approval_request_id)
+        .await
+        .expect("approval record lookup")
+        .expect("approval record exists");
+    assert_eq!(approved_record.status, ApprovalStatus::Approved);
+    assert!(
+        lease.invocation_fingerprint.is_some(),
+        "approval lease must be tied to the approved invocation fingerprint"
+    );
+    assert_eq!(
+        lease.invocation_fingerprint.as_ref(),
+        approved_record.request.invocation_fingerprint.as_ref(),
+        "approval lease fingerprint must match the approved request"
+    );
+
+    let resumed = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("approved echo invocation resumes");
+    assert!(
+        matches!(resumed, RuntimeCapabilityOutcome::Completed(_)),
+        "approved ask_each_time one-shot lease should allow echo resume, got {resumed:?}"
+    );
+    let leases = local_runtime
+        .capability_leases
+        .leases_for_scope(&context.resource_scope)
+        .await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].status, CapabilityLeaseStatus::Consumed);
+}
+
+#[tokio::test]
 async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
@@ -856,6 +985,18 @@ fn shell_lease_approval() -> LeaseApproval {
     })
 }
 
+fn echo_dispatch_lease_approval() -> LeaseApproval {
+    local_dev_one_shot_lease_approval(GrantConstraints {
+        allowed_effects: echo_dispatch_allowed_effects(),
+        mounts: MountView::default(),
+        network: NetworkPolicy::default(),
+        secrets: Vec::new(),
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: None,
+    })
+}
+
 fn trust_decision(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
@@ -1146,6 +1287,10 @@ fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionCont
 // and the request reaches the local-dev approval gate instead of being denied.
 fn echo_spawn_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess]
+}
+
+fn echo_dispatch_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability]
 }
 
 /// A capability invoked without a matching grant must be denied, not upgraded to
