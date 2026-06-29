@@ -3557,26 +3557,33 @@ struct LoopbackMcpRuntimeHttpEgress {
 
 impl LoopbackMcpRuntimeHttpEgress {
     fn new(mcp_url: &str) -> HarnessResult<Self> {
-        // Hermetic hardening: refuse any non-loopback host so a typo in the mock
-        // URL cannot silently turn this test egress into real external network
-        // I/O. Only 127.0.0.1 / ::1 / localhost are permitted.
+        // Hermetic hardening: refuse any host other than 127.0.0.1 so a typo in
+        // the mock URL cannot silently turn this test egress into real external
+        // network I/O. Narrowed to 127.0.0.1 only (not ::1 / localhost) so the
+        // guard matches `mcp_loopback_network_policy()`, which also only permits
+        // 127.0.0.1; a caller using "localhost" would otherwise pass this guard
+        // then fail network authorization — a latent trap.
         let parsed = url::Url::parse(mcp_url)
             .map_err(|e| format!("invalid mock MCP URL {mcp_url:?}: {e}"))?;
-        let is_loopback = match parsed.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-            None => false,
+        let is_loopback_ipv4 = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+            _ => false,
         };
-        if !is_loopback {
+        if !is_loopback_ipv4 {
             return Err(format!(
-                "mock MCP URL {mcp_url:?} host is not loopback (expected 127.0.0.1, ::1, or \
-                 localhost); refusing non-hermetic egress"
+                "mock MCP URL {mcp_url:?} host is not 127.0.0.1; only the IPv4 loopback \
+                 address is accepted (matches mcp_loopback_network_policy); refusing \
+                 non-hermetic egress"
             )
             .into());
         }
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
+            // Disable automatic redirect-following so a mock 3xx cannot redirect
+            // the client off loopback. The start_with(mcp_url) hermetic guard only
+            // checks the first request URL; a followed redirect to an external host
+            // would bypass it entirely.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("failed to build reqwest client for mock MCP egress: {e}"))?;
         Ok(Self {
