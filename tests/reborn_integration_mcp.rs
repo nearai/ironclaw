@@ -53,13 +53,27 @@ async fn mcp_tool_call_reaches_mock_server() {
         !recorded.is_empty(),
         "mock MCP server received no HTTP request; MCP egress did not reach the server"
     );
-    assert!(
-        recorded.iter().any(|r| r.method == "tools/call"),
-        "mock MCP server received requests but none was tools/call; saw: {:?}",
-        recorded
-            .iter()
-            .map(|r| r.method.as_str())
-            .collect::<Vec<_>>()
+    let tools_call = recorded
+        .iter()
+        .find(|r| r.method == "tools/call")
+        .unwrap_or_else(|| {
+            panic!(
+                "mock MCP server received requests but none was tools/call; saw: {:?}",
+                recorded
+                    .iter()
+                    .map(|r| r.method.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        tools_call
+            .params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str()),
+        Some("search"),
+        "tools/call params did not name the expected tool 'search'; params: {:?}",
+        tools_call.params
     );
 }
 

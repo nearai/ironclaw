@@ -63,6 +63,11 @@ pub struct RecordedMcpRequest {
     pub authorization: Option<String>,
     /// The inbound `Mcp-Session-Id` header, if the client echoed one back.
     pub session_id: Option<String>,
+    /// The JSON-RPC `params` field, if present. For `tools/call` requests this
+    /// carries `{"name": "<tool>", "arguments": {...}}` so tests can assert
+    /// which tool was called with which arguments — not just that *some*
+    /// `tools/call` arrived.
+    pub params: Option<serde_json::Value>,
 }
 
 impl MockMcpServer {
@@ -384,6 +389,7 @@ async fn handle_mcp(
                 Some(auth.to_string())
             },
             session_id: inbound_session_id,
+            params: req.params.clone(),
         });
 
     if !auth.starts_with("Bearer ")
