@@ -1609,10 +1609,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Unknown Reborn WebUI v2 live QA case",
             match.group("body"),
         )
-        self.assertIn(
-            "target_ref is disabled for reborn-webui-v2-live-qa",
-            match.group("body"),
+        self.assertIn("target_pr is required when target_ref is supplied", match.group("body"))
+        self.assertIn("Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR", match.group("body"))
+        self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", match.group("body"))
+        self.assertIn("ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref", match.group("body"))
+
+        command_workflow_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/live-canary-command.yml"
         )
+        command_workflow = command_workflow_path.read_text(encoding="utf-8")
+        self.assertIn('-f target_ref="$HEAD_SHA"', command_workflow)
+        self.assertIn('-f target_pr="$PR"', command_workflow)
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
