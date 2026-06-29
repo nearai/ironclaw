@@ -6,7 +6,7 @@ pub mod delivery;
 pub mod extension_surface;
 pub mod filesystem;
 pub mod github;
-pub(crate) mod group;
+pub mod group;
 pub mod harness;
 pub mod http_matcher;
 pub mod model_replay;

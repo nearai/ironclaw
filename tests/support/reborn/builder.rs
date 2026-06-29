@@ -128,12 +128,6 @@ enum RebornCapabilityBackend {
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
     MockMcp { mcp_url: String },
-    /// Real first-party file tools wired to the local-dev approval stores
-    /// (`ApprovalRequestStore` + `CapabilityLeaseStore` + `AutoApproveSettingStore`)
-    /// so a gated tool call raises a real `TurnStatus::BlockedApproval` gate that
-    /// the test resolves through `approve_gate` / `deny_gate`. Selected by
-    /// `.with_live_approvals()`.
-    LiveApprovals,
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -221,23 +215,6 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Wire the real local-dev approval stores so a gated tool call raises a real
-    /// `TurnStatus::BlockedApproval` gate (`with_live_*` = swap a no-op stub for
-    /// the real subsystem, sibling of [`with_live_shell`](Self::with_live_shell)).
-    ///
-    /// Surfaces the first-party `builtin.write_file` / `builtin.read_file` tools
-    /// (PermissionMode::Ask) and disables the per-`(tenant, user)` auto-approve
-    /// toggle for the harness run scope at `build()` time, so a scripted
-    /// `builtin.write_file` call blocks on approval instead of auto-approving.
-    /// Resolve with [`approve_gate`](RebornIntegrationHarness::approve_gate) or
-    /// [`deny_gate`](RebornIntegrationHarness::deny_gate); flip the toggle back on
-    /// with [`enable_auto_approve`](RebornIntegrationHarness::enable_auto_approve)
-    /// for the no-gate settings arm.
-    pub fn with_live_approvals(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::LiveApprovals;
-        self
-    }
-
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///
@@ -250,8 +227,8 @@ impl RebornIntegrationHarnessBuilder {
 
         // --- capability backend → GroupCapability --------------------------
         // Echo by default (records, executes nothing — a text reply invokes no
-        // tool). Builtin/MCP/LiveApprovals swap in the real first-party runtime.
-        let live_approvals = matches!(self.capability, RebornCapabilityBackend::LiveApprovals);
+        // tool). Builtin/MCP swap in the real first-party runtime. (Live approval
+        // stores are a group-only backend; see `RebornIntegrationGroup::live_approvals`.)
         let group_capability = match self.capability {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
@@ -275,14 +252,6 @@ impl RebornIntegrationHarnessBuilder {
                 .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::LiveApprovals => {
-                // Real local-dev approval stores: `builtin.write_file` is
-                // PermissionMode::Ask, so with auto-approve disabled below a
-                // scripted write blocks on a real `BlockedApproval` gate.
-                let host_runtime =
-                    HostRuntimeCapabilityHarness::file_tools_requiring_approval().await?;
-                GroupCapability::HostRuntime(Arc::new(host_runtime))
-            }
         };
 
         // --- product workflow + storage ------------------------------------
@@ -297,14 +266,6 @@ impl RebornIntegrationHarnessBuilder {
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, libsql_db_path) =
             build_storage_composite(self.storage, turn_root.path()).await?;
-
-        // `.with_live_approvals()`: disable per-`(tenant, user)` auto-approve for
-        // the run scope. Uses `product_harness.scope` as the single-source
-        // ResourceScope (R5) instead of the old duplicate `run_resource_scope`.
-        if live_approvals && let GroupCapability::HostRuntime(ref arc) = group_capability {
-            arc.disable_auto_approve_for(product_harness.scope.clone())
-                .await?;
-        }
 
         let shared = Arc::new(GroupSharedStorage {
             storage: self.storage,
@@ -401,8 +362,9 @@ impl RebornIntegrationHarness {
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
     /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
-    /// destructive tool call against `.with_live_approvals()` blocks here; the test
-    /// then calls `approve_gate`/`deny_gate` and `wait_for_status(Completed)`.
+    /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
+    /// blocks here; the test then calls `approve_gate`/`deny_gate` and
+    /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
         &self,
         text: &str,
@@ -979,7 +941,7 @@ pub(crate) async fn assemble_thread_runtime(
 
     // --- loop-exit evidence ------------------------------------------------
     // When the capability backend wires the real local-dev approval stores
-    // (`.with_live_approvals()`), attach the approval-gate evidence store so a
+    // (`RebornIntegrationGroup::live_approvals`), attach the approval-gate evidence store so a
     // `BlockedApproval` run is verified against the persisted `Pending` request
     // at loop exit and genuinely pauses — mirrors production
     // `ironclaw_reborn_composition::runtime` (`with_approval_gate_evidence`,

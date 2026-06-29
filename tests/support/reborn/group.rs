@@ -279,8 +279,18 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
-    pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Shared setup for every group constructor: hermetic env, the product
+    /// workflow harness over the fixed itest scope, the per-group `TempDir`, and
+    /// the thread/turn composite. Returns the pieces each constructor combines
+    /// with its capability backend — the fixed test-scope strings live HERE only.
+    async fn build_base(
+        &self,
+    ) -> HarnessResult<(
+        RebornProductWorkflowHarness,
+        Arc<CompositeRootFilesystem>,
+        Option<PathBuf>,
+        Arc<tempfile::TempDir>,
+    )> {
         apply_hermetic_env();
         let scope = test_product_scope(
             "tenant-itest",
@@ -292,6 +302,32 @@ impl RebornIntegrationGroupBuilder {
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, libsql_db_path) =
             build_storage_composite(self.storage, turn_root.path()).await?;
+        Ok((product_harness, composite, libsql_db_path, turn_root))
+    }
+
+    fn into_group(
+        self,
+        product_harness: RebornProductWorkflowHarness,
+        composite: Arc<CompositeRootFilesystem>,
+        libsql_db_path: Option<PathBuf>,
+        turn_root: Arc<tempfile::TempDir>,
+        capability: GroupCapability,
+    ) -> RebornIntegrationGroup {
+        RebornIntegrationGroup {
+            shared: Arc::new(GroupSharedStorage {
+                storage: self.storage,
+                composite,
+                libsql_db_path,
+                turn_root,
+                product_harness,
+                capability,
+            }),
+        }
+    }
+
+    /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
+    pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
         // Execute first-party tools under the run's CANONICAL binding subject
         // user (the hashed `UserId` the actor `host-user` resolves to), not the
         // constructor's fixed test user, so capability dispatch, approval
@@ -301,82 +337,52 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
             .await?
             .with_user_id(subject_user);
-        let arc = Arc::new(host_runtime);
-        let capability = GroupCapability::HostRuntime(arc);
-        let shared = GroupSharedStorage {
-            storage: self.storage,
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        let group = self.into_group(
+            product_harness,
             composite,
             libsql_db_path,
             turn_root,
-            product_harness,
             capability,
-        };
+        );
         // Disable auto-approve once at build time so every thread in this group
         // faces real approval gates. The dispatch-time check is keyed on the
         // capability harness's executor user (NOT the binding owner), so target
         // `auto_approve_scope()` — `(run tenant, capability user)`.
         if let (Some(scope), GroupCapability::HostRuntime(arc)) =
-            (shared.auto_approve_scope(), &shared.capability)
+            (group.shared.auto_approve_scope(), &group.shared.capability)
         {
             arc.disable_auto_approve_for(scope).await?;
         }
-        Ok(RebornIntegrationGroup {
-            shared: Arc::new(shared),
-        })
+        Ok(group)
     }
 
     /// Build a core built-in tools group. See [`RebornIntegrationGroup::builtin_tools`].
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
-        apply_hermetic_env();
-        let scope = test_product_scope(
-            "tenant-itest",
-            "host-user",
-            "agent-itest",
-            Some("project-itest"),
-        );
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
-        let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
-            build_storage_composite(self.storage, turn_root.path()).await?;
+        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(RebornIntegrationGroup {
-            shared: Arc::new(GroupSharedStorage {
-                storage: self.storage,
-                composite,
-                libsql_db_path,
-                turn_root,
-                product_harness,
-                capability,
-            }),
-        })
+        Ok(self.into_group(
+            product_harness,
+            composite,
+            libsql_db_path,
+            turn_root,
+            capability,
+        ))
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
-        apply_hermetic_env();
-        let scope = test_product_scope(
-            "tenant-itest",
-            "host-user",
-            "agent-itest",
-            Some("project-itest"),
-        );
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
-        let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
-            build_storage_composite(self.storage, turn_root.path()).await?;
+        let (product_harness, composite, libsql_db_path, turn_root) = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(RebornIntegrationGroup {
-            shared: Arc::new(GroupSharedStorage {
-                storage: self.storage,
-                composite,
-                libsql_db_path,
-                turn_root,
-                product_harness,
-                capability,
-            }),
-        })
+        Ok(self.into_group(
+            product_harness,
+            composite,
+            libsql_db_path,
+            turn_root,
+            capability,
+        ))
     }
 }
 
@@ -470,42 +476,4 @@ impl ScenarioReport {
             );
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// run_reborn_group! macro
-// ---------------------------------------------------------------------------
-
-/// Eliminates the `#[tokio::test]` + group-construction + `ScenarioReport`
-/// boilerplate from a group driver. Scenario ordering remains explicit at the
-/// call site — use `?` for dependent scenarios and `$report.record(...)` for
-/// independent ones.
-///
-/// The test binary's `main.rs` must declare:
-/// ```rust,no_run
-/// #[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
-/// #[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
-/// ```
-/// so that `$crate::reborn_support::group::ScenarioReport` resolves.
-///
-/// # Example
-/// ```rust,no_run
-/// run_reborn_group!(approvals_group_e2e, RebornIntegrationGroup::live_approvals(), |g, report| {
-///     // dependent: must pass before subsequent scenarios read its side-effect
-///     scenario_approve_always_persists::run(&g).await.expect("approve-always persists");
-///     // independent: failure recorded, driver continues
-///     report.record("gate_then_resolve", scenario_gate_then_resolve::run(&g).await);
-/// });
-/// ```
-#[macro_export]
-macro_rules! run_reborn_group {
-    ($test_name:ident, $group_build:expr, |$g:ident, $report:ident| { $($body:tt)* }) => {
-        #[tokio::test]
-        async fn $test_name() {
-            let $g = ($group_build).await.expect("group builds");
-            let mut $report = $crate::reborn_support::group::ScenarioReport::new();
-            $($body)*
-            $report.assert_all_passed();
-        }
-    };
 }

@@ -54,12 +54,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     viewer
         .assert_tool_invoked("builtin.extension_search")
         .await?;
-    // The search result includes `installation_phase: "installed"` for the
-    // github package only when it is already installed. Seeing this field
-    // proves thread B observes thread A's installation over the shared store
-    // (before installation the field is absent from the result entirely).
+    // The search result carries `installation_phase: "installed"` for the github
+    // package only when it is already installed (before installation the field is
+    // absent entirely). Assert the VALUE, not just the key — a `pending`/`failed`
+    // phase must not satisfy this — so the check proves thread B observes thread
+    // A's *successful* installation over the shared store.
     viewer
-        .assert_tool_result_contains("installation_phase")
+        .assert_tool_result_contains(r#""installation_phase":"installed""#)
         .await?;
 
     // Committed negative guard (non-vacuity): a marker for a never-installed,

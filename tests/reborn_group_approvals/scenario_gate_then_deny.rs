@@ -30,9 +30,25 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
     }
 
-    // Deny + resume: the model must see the denial and finalize a reply (no hang).
+    // Deny + resume. Real guard (non-vacuous): the deny→resume pipeline drives the
+    // run to terminal `Completed` (the model sees a non-retryable authorization
+    // failure and finalizes a reply) — it would hang/Fail if deny or resume were
+    // broken. (The scripted final reply text is NOT asserted: the scripted model
+    // emits it unconditionally, so it would not discriminate.)
     h.deny_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
-    h.assert_reply_contains("not authorized").await?;
+
+    // The denied write must NOT have executed: unlike the approve path, the gated
+    // capability is never re-dispatched, so no capability result carries the write
+    // content. This proves deny actually blocked the side effect, not merely that
+    // the run terminated.
+    if h.assert_tool_result_contains("should not persist")
+        .await
+        .is_ok()
+    {
+        return Err(
+            "deny did not block the write: its content appears in a recorded tool result".into(),
+        );
+    }
     Ok(())
 }

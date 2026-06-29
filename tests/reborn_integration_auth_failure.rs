@@ -72,9 +72,8 @@ fn test_scope() -> AuthProductScope {
 /// persisted `CredentialAccount`.
 ///
 /// Mirrors the same helper in `reborn_integration_oauth_refresh.rs`.  Test
-/// code duplication is intentional: the function lives in a test binary and
-/// cannot be re-exported from there, and adding a shared module under
-/// `tests/` would touch `tests/support/reborn/` which is out of scope.
+/// code duplication is intentional: the function lives in a test binary, which
+/// cannot be re-exported to another test binary.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn connect_google_account(
     bundle: &OAuthProductAuthTestBundle,

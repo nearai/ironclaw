@@ -350,13 +350,6 @@ impl HarnessCapabilityRecorder {
             Self::HostRuntime(harness) => harness.approval_requests_store(),
         }
     }
-
-    pub(crate) fn capability_user_id(&self) -> Option<UserId> {
-        match self {
-            Self::Recording(_) => None,
-            Self::HostRuntime(harness) => Some(harness.user_id().clone()),
-        }
-    }
 }
 
 /// Test-tree [`ApprovalGateEvidenceStore`] over the real approval-request store —
@@ -2539,10 +2532,11 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Disable the `(tenant, user)` auto-approve toggle for `scope` via the real
-    /// CAS-persisted `AutoApproveSettingStore`. Used by the integration harness's
-    /// `.with_live_approvals()` path to gate the *run's own* scope (the auto-approve
-    /// key is `(tenant_id, user_id)` only, so the constructor's product-scope disable
-    /// does not cover an integration run under a different tenant).
+    /// CAS-persisted `AutoApproveSettingStore`. Used by the
+    /// `RebornIntegrationGroup::live_approvals` path to gate the *run's own* scope
+    /// (the auto-approve key is `(tenant_id, user_id)` only, so the constructor's
+    /// product-scope disable does not cover an integration run under a different
+    /// tenant).
     pub(crate) async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
         self.disable_global_auto_approve(scope).await
     }
