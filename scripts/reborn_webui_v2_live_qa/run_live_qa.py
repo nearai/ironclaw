@@ -1026,11 +1026,12 @@ async def _wait_for_assistant_reply(
     )
 
 
-def _required_text_matches(normalized_text: str, required_text: list[str]) -> bool:
+def _required_text_matches(text: str, required_text: list[str]) -> bool:
+    normalized_text = text.lower()
     return all(
-        any(option.strip().lower() in normalized_text for option in piece.split("|"))
+        any(option.strip().lower() in normalized_text for option in piece.split('|') if option.strip())
         for piece in required_text
-    )
+)
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
