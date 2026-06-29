@@ -176,6 +176,7 @@ DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "reborn-webui-v2-live-qa"
 DEFAULT_REBORN_HOME = Path("/tmp/ironclaw-reborn-real-slack")
 AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
+ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
 HN_KEYWORD_SEARCH_URL = (
@@ -1152,7 +1153,7 @@ async def _wait_for_google_sheet_marker_after_slack_event(
 
 
 async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    url = "https://cloud-api.near.ai"
+    url = ENDPOINT_STATUS_URL
     live_status = await _live_http_status(url)
     return await _live_chat_case(
         ctx,
@@ -2556,13 +2557,17 @@ async def _routine_creation_case(
 
 async def case_qa_3c_endpoint_status_slack_routine(ctx: LiveQaContext) -> ProbeResult:
     routine_name = "reborn-qa-3c-endpoint-status-slack"
+    prompt = _qa_sheet_prompt("qa_3c_endpoint_status_slack_routine").replace(
+        "[endpoint URL]",
+        ENDPOINT_STATUS_URL,
+    )
     return await _routine_creation_case(
         ctx,
         case_name="qa_3c_endpoint_status_slack_routine",
         routine_name=routine_name,
         marker=None,
         required_text=["routine"],
-        prompt=_qa_sheet_prompt("qa_3c_endpoint_status_slack_routine"),
+        prompt=prompt,
     )
 
 
@@ -2657,7 +2662,7 @@ async def case_qa_3d_endpoint_status_slack_delivery(ctx: LiveQaContext) -> Probe
         routine_prefix="reborn-qa-3d-endpoint-status-slack-delivery",
         marker_prefix="REBORN_QA_3D_ENDPOINT_STATUS",
         routine_instruction=(
-            "check https://cloud-api.near.ai with live HTTP or web access, report "
+            f"check {ENDPOINT_STATUS_URL} with live HTTP or web access, report "
             "the observed HTTP status, and send the result to Slack"
         ),
         required_delivery_text=["status"],

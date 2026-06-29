@@ -253,6 +253,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             str(result.details["error"]),
         )
 
+    def test_endpoint_status_routine_prompt_uses_real_endpoint(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": "Routine created"},
+            )
+
+        with (
+            patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_3c_endpoint_status_slack_routine(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        prompt = str(captured["prompt"])
+        self.assertNotIn("[endpoint URL]", prompt)
+        self.assertIn(run_live_qa.ENDPOINT_STATUS_URL, prompt)
+
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
