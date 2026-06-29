@@ -60,11 +60,12 @@ pub enum RuntimeEventKind {
 /// Redacted runtime event payload.
 ///
 /// All optional fields are absent unless meaningful for the event kind.
-/// `error_kind` is constrained by [`sanitize_error_kind`] on every wire
+/// `error_kind` and `error_summary` are constrained by
+/// [`sanitize_error_kind`] and [`sanitize_error_summary`] on every wire
 /// crossing:
 ///
-/// - the typed `dispatch_failed` / `model_failed` / `loop_failed` /
-///   `process_failed` constructors apply sanitization at construction time;
+/// - the typed failure constructors and [`RuntimeEvent::with_error_summary`]
+///   apply sanitization at construction time;
 /// - the custom [`Deserialize`] impl re-runs the sanitizer on any inbound
 ///   JSONL/wire payload;
 /// - the custom [`Serialize`] impl re-runs the sanitizer before emitting the
@@ -90,6 +91,8 @@ pub struct RuntimeEvent {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized, host-authored failure summary for display-only projections.
+    pub error_summary: Option<String>,
     /// Hex-encoded blake3 hook identity. Present only on hook events.
     pub hook_id: Option<String>,
     /// Closed-vocabulary hook point label (e.g. `before_capability`). Present
@@ -130,6 +133,8 @@ struct RuntimeEventWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_point: Option<String>,
@@ -164,6 +169,7 @@ impl Serialize for RuntimeEvent {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.clone().map(sanitize_error_kind),
+            error_summary: self.error_summary.clone().and_then(sanitize_error_summary),
             hook_id: self.hook_id.clone().map(sanitize_hook_id),
             hook_point: self.hook_point.clone().map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.clone().map(sanitize_hook_label),
@@ -207,6 +213,8 @@ struct TrustedRuntimeEventWire {
     output_bytes: Option<u64>,
     #[serde(default)]
     error_kind: Option<String>,
+    #[serde(default)]
+    error_summary: Option<String>,
     #[serde(default)]
     hook_id: Option<String>,
     #[serde(default)]
@@ -257,6 +265,7 @@ impl RuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary: self.error_summary.and_then(sanitize_error_summary),
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -281,6 +290,7 @@ impl TrustedRuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary: self.error_summary.and_then(sanitize_error_summary),
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -610,6 +620,7 @@ impl RuntimeEvent {
             process_id: payload.process_id,
             output_bytes: payload.output_bytes,
             error_kind: payload.error_kind,
+            error_summary: None,
             hook_id: payload.hook_id,
             hook_point: payload.hook_point,
             hook_trust_class: payload.hook_trust_class,
@@ -653,6 +664,11 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::CapabilityActivityFailed,
             ..Self::dispatch_failed(scope, capability_id, provider, runtime, error_kind)
         }
+    }
+
+    pub fn with_error_summary(mut self, summary: impl Into<String>) -> Self {
+        self.error_summary = sanitize_error_summary(summary);
+        self
     }
 
     /// Construct a [`RuntimeEventKind::HookDispatched`] event.
@@ -768,6 +784,7 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
+const MAX_ERROR_SUMMARY_BYTES: usize = 512;
 
 /// Collapse any error_kind value that does not match the stable classification
 /// shape into the single `Unclassified` token. This is the redaction guard
@@ -792,6 +809,67 @@ pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
     } else {
         UNCLASSIFIED_ERROR_KIND.to_string()
     }
+}
+
+pub fn sanitize_error_summary(summary: impl Into<String>) -> Option<String> {
+    let value = summary.into();
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !is_safe_error_summary(trimmed) {
+        return None;
+    }
+    Some(truncate_error_summary(trimmed))
+}
+
+fn is_safe_error_summary(value: &str) -> bool {
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return false;
+    }
+    if value.chars().any(|character| {
+        matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )
+    }) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in [
+        "access token",
+        "api key",
+        "api_key",
+        "apikey",
+        "authorization:",
+        "bearer ",
+        "password",
+        "passwd",
+        "provider error",
+        "raw runtime",
+        "secret",
+        "stack trace",
+        "traceback",
+    ] {
+        if lower.contains(forbidden) {
+            return false;
+        }
+    }
+    !lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+}
+
+fn truncate_error_summary(value: &str) -> String {
+    const ELLIPSIS: &str = "...";
+    if value.len() <= MAX_ERROR_SUMMARY_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_ERROR_SUMMARY_BYTES - ELLIPSIS.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], ELLIPSIS)
 }
 
 fn is_safe_error_kind(value: &str) -> bool {
@@ -907,6 +985,38 @@ mod tests {
         // 64-char lowercase hex matching the blake3 hook id shape produced by
         // `ironclaw_hooks::HookId::to_hex`.
         "0123456789abcdef".repeat(4)
+    }
+
+    #[test]
+    fn runtime_event_error_summary_round_trips_only_when_safe() {
+        let event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary(
+            "read_file failed for path workspace ironclaw_issues.json: file not found",
+        );
+        let wire = serde_json::to_string(&event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("read_file failed for path workspace ironclaw_issues.json: file not found")
+        );
+
+        let unsafe_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("read_file failed for /tmp/api_key.txt: secret leaked");
+        let wire = serde_json::to_string(&unsafe_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(decoded.error_summary, None);
     }
 
     #[test]

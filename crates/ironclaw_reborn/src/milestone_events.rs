@@ -240,10 +240,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
-                // The durable runtime event records the failure kind only; the
-                // sanitized summary stays on the live projection path and is not
-                // persisted as a backend error detail in the event log.
-                safe_summary: _,
+                safe_summary,
             } => {
                 let mut scope = scope;
                 scope.invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -254,6 +251,9 @@ impl DurableLoopHostMilestoneSink {
                     *runtime,
                     reason_kind.as_str(),
                 );
+                if let Some(summary) = safe_summary {
+                    event = event.with_error_summary(summary.as_str());
+                }
                 event.parent_invocation_id =
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
                 event
@@ -537,7 +537,10 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
-                safe_summary: None,
+                safe_summary: Some(
+                    "read_file failed for path workspace ironclaw_issues.json: file not found"
+                        .to_string(),
+                ),
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -559,6 +562,10 @@ mod tests {
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Script));
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
+        assert_eq!(
+            event.error_summary.as_deref(),
+            Some("read_file failed for path workspace ironclaw_issues.json: file not found")
+        );
     }
 
     #[tokio::test]

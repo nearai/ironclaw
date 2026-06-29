@@ -1,6 +1,8 @@
 use std::{cmp::Ordering, collections::HashMap};
 
-use ironclaw_events::{EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind};
+use ironclaw_events::{
+    EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind, sanitize_error_summary,
+};
 use ironclaw_host_api::InvocationId;
 
 use crate::{
@@ -270,6 +272,7 @@ fn apply_capability_activity_event(
         return;
     };
     let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
+    let sanitized_error_summary = event.error_summary.clone().and_then(sanitize_error_summary);
     let activity = activities
         .entry(event.scope.invocation_id)
         .or_insert_with(|| capability_activity_projection_for_entry(entry, status));
@@ -299,8 +302,10 @@ fn apply_capability_activity_event(
             | CapabilityActivityStatus::Completed
     ) {
         activity.error_kind = None;
+        activity.error_detail = None;
     } else if sanitized_error_kind.is_some() {
         activity.error_kind = sanitized_error_kind;
+        activity.error_detail = sanitized_error_summary;
     }
     activity.last_cursor = entry.cursor;
     activity.updated_at = event.timestamp;
@@ -322,6 +327,7 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        error_detail: event.error_summary.clone().and_then(sanitize_error_summary),
         first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,
