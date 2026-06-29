@@ -63,6 +63,11 @@ pub struct RecordedMcpRequest {
     pub authorization: Option<String>,
     /// The inbound `Mcp-Session-Id` header, if the client echoed one back.
     pub session_id: Option<String>,
+    /// The JSON-RPC `params` field, if present. For `tools/call` requests this
+    /// carries `{"name": "<tool>", "arguments": {...}}` so tests can assert
+    /// which tool was called with which arguments — not just that *some*
+    /// `tools/call` arrived.
+    pub params: Option<serde_json::Value>,
 }
 
 impl MockMcpServer {
@@ -384,6 +389,7 @@ async fn handle_mcp(
                 Some(auth.to_string())
             },
             session_id: inbound_session_id,
+            params: req.params.clone(),
         });
 
     if !auth.starts_with("Bearer ")
@@ -410,9 +416,14 @@ async fn handle_mcp(
             .into_response();
     }
 
-    // Handle notifications (no id) silently.
+    // Handle notifications (no id) silently. Per the MCP Streamable HTTP spec,
+    // a request body consisting solely of JSON-RPC notifications MUST be answered
+    // with `202 Accepted` and no body — the real client (`send_planned_json_rpc`)
+    // only treats 202 as a valid empty-body ack and otherwise tries to parse the
+    // body as a JSON-RPC response, which fails on an empty 200 and aborts the
+    // handshake before `tools/call` is ever sent.
     if req.id.is_none() {
-        return StatusCode::OK.into_response();
+        return StatusCode::ACCEPTED.into_response();
     }
 
     let mut response_session_id: Option<String> = None;

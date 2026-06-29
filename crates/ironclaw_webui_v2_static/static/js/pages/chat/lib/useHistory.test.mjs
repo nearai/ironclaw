@@ -46,6 +46,41 @@ function createReactStub({ setCalls = [] } = {}) {
   };
 }
 
+function createPersistentReactStub({ setCalls = [] } = {}) {
+  let stateIndex = 0;
+  let refIndex = 0;
+  const stateSlots = [];
+  const refSlots = [];
+  return {
+    __beginRender: () => {
+      stateIndex = 0;
+      refIndex = 0;
+    },
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+    useRef: (value) => {
+      const index = refIndex++;
+      const ref = refSlots[index] || { current: value };
+      refSlots[index] = ref;
+      return ref;
+    },
+    useState: (initial) => {
+      const index = stateIndex++;
+      const slot = stateSlots[index] || {
+        value: typeof initial === "function" ? initial() : initial,
+      };
+      stateSlots[index] = slot;
+      return [
+        slot.value,
+        (next) => {
+          slot.value = typeof next === "function" ? next(slot.value) : next;
+          setCalls.push(slot.value);
+        },
+      ];
+    },
+  };
+}
+
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
@@ -187,6 +222,45 @@ test("useHistory can seed a newly-created thread before navigation", async () =>
       isOptimistic: true,
     },
   ]);
+});
+
+test("useHistory clears visible messages immediately when switching to an uncached thread", () => {
+  const ReactStub = createPersistentReactStub();
+  const context = {
+    console,
+    fetchTimeline: async () => {
+      throw new Error("render reset should not need timeline fetch");
+    },
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: ReactStub,
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const renderHistory = (threadId) => {
+    ReactStub.__beginRender();
+    return context.globalThis.__testExports.useHistory(threadId, {});
+  };
+
+  let history = renderHistory("thread-old");
+  history.setMessages([
+    {
+      id: "pending-old",
+      role: "user",
+      content: "old thread message",
+    },
+  ]);
+  history = renderHistory("thread-old");
+  assert.equal(history.messages.length, 1);
+
+  renderHistory("thread-new");
+  history = renderHistory("thread-new");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(history.messages)), []);
+  assert.equal(history.isLoading, true);
 });
 
 test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {

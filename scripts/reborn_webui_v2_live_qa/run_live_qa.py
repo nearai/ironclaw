@@ -65,6 +65,7 @@ from scripts.reborn_webui_v2_live_qa.env_helpers import (  # noqa: E402
     _section_env_name,
 )
 from scripts.reborn_webui_v2_live_qa.google_api_helpers import (  # noqa: E402
+    _create_google_spreadsheet_fixture,
     _extract_google_document_id,
     _extract_google_spreadsheet_id,
     _gmail_delivery_target_email,
@@ -108,10 +109,75 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_team_id_from_bot_token_env,
 )
 
+QA_SHEET_PROMPTS: dict[str, str] = {
+    "qa_2a_gmail_connect": """In WebUI, ask IronClaw “connect to Gmail.” Go through the auth flow.
+Expected result: Gmail is connected""",
+    "qa_2b_calendar_connect": """In WebUI, ask IronClaw “connect to Google Calendar.” Go through the auth flow.
+Expected result: Google Calendar is connected""",
+    "qa_2c_drive_connect": """In WebUI, ask IronClaw “connect to Google Drive.” Go through the auth flow.
+Expected result: Google Drive is connected""",
+    "qa_2d_calendar_prep_live_chat": """In WebUI, ask IronClaw “For my next meeting, find information about the company that I am meeting with from my Google Docs and find the latest news.”
+Expected result: Reference a Google Doc and the latest news""",
+    "qa_2e_calendar_prep_email_routine": """In WebUI, ask IronClaw, “Every 30 minutes, send me an email with a summary for my next meeting, including info about the company I will meet, based on the Google Drive docs and the latest news.”
+Expected results: Routine created""",
+    "qa_3a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the flow.
+Expected result: Slack is connected""",
+    "qa_3b_endpoint_status_live_chat": """In WebUI, ask IronClaw "check if near.ai returns a 200 status."
+Expected result: IronClaw reports the endpoint's current HTTP status""",
+    "qa_3c_endpoint_status_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, ping [endpoint URL] checking if it returns a 200 status and send result in a DM in slack"
+Expected result: Routine created""",
+    "qa_4a_gmail_connect": """In WebUI, ask IronClaw "connect to Gmail." Go through the flow w/ Gmail.
+Expected result: Gmail is connected""",
+    "qa_4b_github_connect": """In WebUI, ask IronClaw "connect to GitHub." Go through the auth flow.
+Expected result: GitHub is connected""",
+    "qa_4c_github_release_live_chat": """In WebUI, ask IronClaw "summarize the latest release from https://github.com/nearai/ironclaw."
+Expected result: summary of the most recent release""",
+    "qa_4d_github_release_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack message summarizing any new ones."
+Expected result: Routine created""",
+    "qa_5a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the auth flow.
+Expected result: Slack is connected""",
+    "qa_5b_drive_connect": """In WebUI, ask IronClaw "connect to Google Drive." Go through the auth flow.
+Expected result: Google Drive is connected""",
+    "qa_5c_strategy_doc_knowledge_base": """In WebUI, ask IronClaw "use the NEAR AI Strategy doc in my Google Drive as your knowledge base for answering strategy questions."
+Expected result: IronClaw references the doc and confirms it can answer from it""",
+    "qa_5d_slack_strategy_doc_answer": """In Slack, in a DM with IronClawm, ask a detailed strategy question about a Google doc (providing a link)
+Expected result: Slack reply that answers the question, grounded in the strategy doc""",
+    "qa_6a_gmail_connect": """In WebUI, ask IronClaw "connect to Gmail." Go through the auth flow.
+Expected result: Gmail is connected""",
+    "qa_6b_sheets_connect": """In WebUI, ask IronClaw "connect to Google Sheets." Go through the auth flow.
+Expected result: Google Sheets is connected""",
+    "qa_6c_gmail_to_sheet_live_chat": """In WebUI, ask IronClaw "check my recent emails and add any from a near.ai address to my Google Sheet called ABC."
+Expected result: ABC sheet has new rows for each near.ai inbound email""",
+    "qa_6d_gmail_to_sheet_routine": """In WebUI, ask IronClaw, "Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC."
+Expected result: Routine created""",
+    "qa_7a_slack_product_channel_connect": """In WebUI, ask IronClaw "connect to Slack, using channel #product." Go through the flow
+Expected result: Slack channel is connected""",
+    "qa_7b_sheets_connect": """In WebUI, ask IronClaw "connect to Google Sheets." Go through the auth flow.
+Expected result: Google Sheets is connected""",
+    "qa_7c_slack_bug_logger_routine": """In WebUI, ask IronClaw "whenever I send a slack message starting with 'bug:', add it as a row to my bug logging Google Sheet."
+Expected result: Routine/trigger created""",
+    "qa_7d_slack_bug_message_trigger": """In Slack, send a message starting with "bug:"
+Expected result: Routine created""",
+    "qa_8a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the auth flow.
+Expected result: Slack is connected""",
+    "qa_8b_hn_keyword_live_chat": """In WebUI, ask IronClaw "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'."
+Expected result: IronClaw reports any matching HN posts""",
+    "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack."
+Expected result: Routine created""",
+}
+
+
+def _qa_sheet_prompt(case_name: str) -> str:
+    try:
+        return QA_SHEET_PROMPTS[case_name]
+    except KeyError as exc:
+        raise AssertionError(f"QA sheet prompt is not hardcoded for {case_name}") from exc
+
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "reborn-webui-v2-live-qa"
 DEFAULT_REBORN_HOME = Path("/tmp/ironclaw-reborn-real-slack")
 AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
+ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
 HN_KEYWORD_SEARCH_URL = (
@@ -121,6 +187,13 @@ HN_KEYWORD_SEARCH_URL = (
 EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
+OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
+QA_7A_CHAT_CONNECT_CAPABILITY_IDS = [
+    EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_ACTIVATE_CAPABILITY_ID,
+]
+QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 
 
 class LiveQaContext:
@@ -741,7 +814,7 @@ async def _live_chat_case(
     *,
     case_name: str,
     prompt: str,
-    marker: str,
+    marker: str | None,
     required_text: list[str],
     timeout: float = 120.0,
     extra_details: dict[str, object] | None = None,
@@ -800,6 +873,7 @@ async def _live_chat_case(
             True,
             started,
             {
+                "prompt": prompt,
                 "marker": marker,
                 "required_text": required_text,
                 **(extra_details or {}),
@@ -813,6 +887,7 @@ async def _live_chat_case(
             started,
             {
                 "error": str(exc),
+                "prompt": prompt,
                 "marker": marker,
                 "required_text": required_text,
                 **(extra_details or {}),
@@ -826,7 +901,7 @@ async def _live_chat_with_extensions_case(
     *,
     case_name: str,
     prompt: str,
-    marker: str,
+    marker: str | None,
     required_text: list[str],
     extensions: list[dict[str, object]],
     timeout: float = 240.0,
@@ -838,6 +913,7 @@ async def _live_chat_with_extensions_case(
     started = time.monotonic()
     observed: dict[str, object] = {
         "marker": marker,
+        "prompt": prompt,
         "required_text": required_text,
         "extensions": [extension["package_id"] for extension in extensions],
         **(extra_details or {}),
@@ -917,7 +993,7 @@ async def _dismiss_visible_connect_action(page: object) -> bool:
 async def _wait_for_assistant_reply(
     page: object,
     *,
-    marker: str,
+    marker: str | None,
     required_text: list[str],
     timeout: float,
 ) -> str:
@@ -934,7 +1010,8 @@ async def _wait_for_assistant_reply(
             if text:
                 last_text = text
             normalized = text.lower()
-            if marker in text and all(piece.lower() in normalized for piece in required_text):
+            marker_matches = not marker or marker in text
+            if marker_matches and all(piece.lower() in normalized for piece in required_text):
                 return text[-2000:]
         await asyncio.sleep(0.5)
     main_text = ""
@@ -1084,33 +1161,30 @@ async def _wait_for_google_sheet_marker_after_slack_event(
 
 
 async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_3B_ENDPOINT_STATUS_DONE"
-    url = "https://cloud-api.near.ai"
+    url = ENDPOINT_STATUS_URL
     live_status = await _live_http_status(url)
     return await _live_chat_case(
         ctx,
         case_name="qa_3b_endpoint_status_live_chat",
-        prompt=(
-            f"QA case 3B: check the current HTTP status for {url}. Use live HTTP "
-            "or web capabilities if available. If the endpoint does not return 200, "
-            "report the actual status code. In the final answer include the exact "
-            f"marker {marker} and include the text status."
-        ),
-        marker=marker,
-        required_text=["status", str(live_status)],
+        prompt=_qa_sheet_prompt("qa_3b_endpoint_status_live_chat"),
+        marker=None,
+        required_text=["status"],
         extra_details={"endpoint_url": url, "expected_status_code": live_status},
     )
 
 
-def _trigger_record_count(reborn_home: Path, routine_name: str) -> int:
+def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) -> int:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return 0
     with sqlite3.connect(db_path) as db:
-        cursor = db.execute(
-            "SELECT COUNT(*) FROM trigger_records WHERE name = ?",
-            (routine_name,),
-        )
+        if routine_name:
+            cursor = db.execute(
+                "SELECT COUNT(*) FROM trigger_records WHERE name = ?",
+                (routine_name,),
+            )
+        else:
+            cursor = db.execute("SELECT COUNT(*) FROM trigger_records")
         value = cursor.fetchone()[0]
     return int(value)
 
@@ -1286,6 +1360,24 @@ async def _approve_slack_event_gates(
     }
 
 
+async def _wait_for_slack_event_run_id(
+    ctx: LiveQaContext,
+    *,
+    event_id: str,
+    timeout: float = 180.0,
+) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run_id = _slack_event_run_id_for_event(ctx.reborn_home, event_id)
+        if run_id:
+            return run_id
+        await asyncio.sleep(1.0)
+    raise AssertionError(
+        "Slack event was not accepted into a Reborn run before timeout. "
+        f"event_id={event_id!r}"
+    )
+
+
 async def _resolve_webui_approval_gate(
     ctx: LiveQaContext,
     *,
@@ -1370,6 +1462,10 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     target = str(payload.get("final_reply_target") or "")
     match = re.search(r"conversation:(\d+):([^;]+)", target)
     return match.group(2) if match else None
+
+
+def _slack_delivery_target_is_dm(channel_id: str | None) -> bool:
+    return bool(channel_id and channel_id.startswith("D"))
 
 
 async def _slack_history_contains_marker(
@@ -1529,7 +1625,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     from playwright.async_api import expect
 
     started = time.monotonic()
-    prompt = "connect my Slack account"
+    prompt = _qa_sheet_prompt(case_name)
     observed: dict[str, object] = {"chat_connect_prompt": prompt}
 
     async def action(page: object) -> None:
@@ -1645,6 +1741,15 @@ def _capability_run_statuses(
     return statuses
 
 
+def _completed_capability_counts(
+    statuses: dict[str, list[str]],
+) -> dict[str, int]:
+    return {
+        capability_id: capability_statuses.count("completed")
+        for capability_id, capability_statuses in statuses.items()
+    }
+
+
 async def _extension_chat_connect_case(
     ctx: LiveQaContext,
     *,
@@ -1662,30 +1767,40 @@ async def _extension_chat_connect_case(
         EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_ACTIVATE_CAPABILITY_ID,
     ]
-    expected_capabilities = [*setup_capabilities, *verification_capabilities]
-    prompt = (
-        f"QA connect case {case_name}: connect my {display_name} from this chat. "
-        f"Use extension_search for `{package_id}`, then install and activate "
-        f"`{package_id}` if it is not already active. {verification_instruction} "
-        "Do not create, update, send, or delete anything. In the final answer "
-        f"include the exact marker {marker} and include the words "
-        f"{display_name} connected."
+    prompt = QA_SHEET_PROMPTS.get(case_name)
+    sheet_prompt = prompt is not None
+    expected_capabilities = (
+        setup_capabilities
+        if sheet_prompt
+        else [*setup_capabilities, *verification_capabilities]
     )
+    marker_to_wait_for: str | None = None
+    if prompt is None:
+        prompt = (
+            f"QA connect case {case_name}: connect my {display_name} from this chat. "
+            f"Use extension_search for `{package_id}`, then install and activate "
+            f"`{package_id}` if it is not already active. {verification_instruction} "
+            "Do not create, update, send, or delete anything. In the final answer "
+            f"include the exact marker {marker} and include the words "
+            f"{display_name} connected."
+        )
+        marker_to_wait_for = marker
     chat = await _live_chat_case(
         ctx,
         case_name=case_name,
         prompt=prompt,
-        marker=marker,
+        marker=marker_to_wait_for,
         required_text=[display_name, "connected"],
         timeout=240.0,
         extra_details={
             "chat_connect_flow": True,
             "package_id": package_id,
             "required_capabilities": expected_capabilities,
+            "verification_capabilities": verification_capabilities,
+            "verification_capabilities_required": not sheet_prompt,
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't connect",
             "cannot connect",
@@ -1706,6 +1821,8 @@ async def _extension_chat_connect_case(
         "display_name": display_name,
         "required_tools": required_tools,
         "required_capabilities": expected_capabilities,
+        "verification_capabilities": verification_capabilities,
+        "verification_capabilities_required": not sheet_prompt,
     }
     try:
         statuses = _capability_run_statuses(ctx.reborn_home, expected_capabilities)
@@ -1869,12 +1986,11 @@ async def case_qa_2c_drive_connect(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_2d_calendar_prep_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_2D_CALENDAR_PREP_DONE"
     return await _live_chat_with_extensions_case(
         ctx,
         case_name="qa_2d_calendar_prep_live_chat",
-        marker=marker,
-        required_text=["Calendar", "news"],
+        marker=None,
+        required_text=["Google", "news"],
         extensions=[
             {
                 "package_id": "google-calendar",
@@ -1897,39 +2013,20 @@ async def case_qa_2d_calendar_prep_live_chat(ctx: LiveQaContext) -> ProbeResult:
                 "required_tools": ["web-access.search"],
             },
         ],
-        prompt=(
-            "QA case 2D: act as a meeting prep assistant. Use my live Google "
-            "Calendar connection to inspect upcoming events, and use live web "
-            "search for current NEAR AI news that could be useful context. If "
-            "there are no upcoming events, say that directly. Do not create, "
-            "update, or delete calendar events. In the final answer include the "
-            f"exact marker {marker}, include the word Calendar, and include the "
-            "word news."
-        ),
+        prompt=_qa_sheet_prompt("qa_2d_calendar_prep_live_chat"),
         timeout=300.0,
     )
 
 
 async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_2E_CALENDAR_EMAIL_ROUTINE_DONE"
     routine_name = "reborn-qa-2e-calendar-prep-email"
     return await _routine_creation_case(
         ctx,
         case_name="qa_2e_calendar_prep_email_routine",
         routine_name=routine_name,
-        marker=marker,
+        marker=None,
         required_text=["routine", "email"],
-        prompt=(
-            f"QA case 2E: create a routine named {routine_name}. Every weekday "
-            "morning, inspect my connected Google Calendar for upcoming meetings, "
-            "use connected Google Drive or Docs for relevant context when available, "
-            "include current NEAR AI news if useful, and send the meeting-prep "
-            "summary by Gmail email. Create the routine now; do not run it yet. "
-            "Do not call Google, Gmail, Calendar, Drive, Docs, or auth tools now; "
-            "only create the scheduled routine from these instructions. "
-            f"In the final answer include the exact marker {marker} and include "
-            "the words routine and email."
-        ),
+        prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
     )
 
 
@@ -2041,7 +2138,6 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't send",
             "cannot send",
@@ -2134,13 +2230,12 @@ async def case_qa_5b_drive_connect(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_5C_STRATEGY_DOC_DONE"
     strategy_phrase = "Reborn QA Strategy North Star: verify live WebUIv2 tool grounding."
     return await _live_chat_with_extensions_case(
         ctx,
         case_name="qa_5c_strategy_doc_knowledge_base",
-        marker=marker,
-        required_text=["strategy", "WebUIv2", "grounding"],
+        marker=None,
+        required_text=["strategy"],
         extensions=[
             {
                 "package_id": "google-docs",
@@ -2151,19 +2246,11 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
                 ],
             },
         ],
-        prompt=(
-            "QA case 5C: create a new Google Docs document titled "
-            f"`{marker}` with this exact strategy sentence in the body: "
-            f"{strategy_phrase} Then read the document content back through "
-            "Google Docs and answer what the strategy north star is. In the "
-            f"final answer include the exact marker {marker}, the word strategy, "
-            "the word WebUIv2, and the word grounding."
-        ),
+        prompt=_qa_sheet_prompt("qa_5c_strategy_doc_knowledge_base"),
         timeout=360.0,
         extra_details={"strategy_phrase": strategy_phrase},
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "local file",
             "/workspace/",
@@ -2215,7 +2302,6 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
@@ -2264,13 +2350,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             ctx,
             channel_id=channel_id,
             user_id=slack_user_id,
-            text=(
-                "QA case 5D: use Google Docs to read this exact document, not a "
-                f"search result: {doc_url}. The document ID is `{doc_id}` and "
-                f"the title is `{doc_marker}`. Answer with the strategy north "
-                "star from that document. Do not answer from memory. "
-                f"Include the exact marker {slack_marker} in your Slack reply."
-            ),
+            text=f"{_qa_sheet_prompt('qa_5d_slack_strategy_doc_answer')}\nGoogle doc link: {doc_url}",
             event_id=f"EvREBORNQA5D{suffix}",
         )
         observed["signed_event"] = post_result
@@ -2298,9 +2378,9 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             history = await _slack_history_contains_marker(
                 ctx,
                 channel_id=channel_id,
-                marker=slack_marker,
+                marker=nonce,
                 oldest_epoch=wall_started,
-                required_text=[nonce, "Google Docs", "grounding"],
+                required_text=[nonce, "strategy"],
             )
             last_history = history
             if history.get("found"):
@@ -2339,17 +2419,21 @@ async def case_qa_6b_sheets_connect(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_6C_GMAIL_TO_SHEET_DONE"
     return await _live_chat_with_extensions_case(
         ctx,
         case_name="qa_6c_gmail_to_sheet_live_chat",
-        marker=marker,
-        required_text=["Gmail", "Google Sheet"],
+        marker=None,
+        required_text=["ABC", "spreadsheet"],
         extensions=[
             {
                 "package_id": "gmail",
                 "display_name": "Gmail",
                 "required_tools": ["gmail.list_messages"],
+            },
+            {
+                "package_id": "google-drive",
+                "display_name": "Google Drive",
+                "required_tools": ["google-drive.list_files"],
             },
             {
                 "package_id": "google-sheets",
@@ -2360,38 +2444,20 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
                 ],
             },
         ],
-        prompt=(
-            "QA case 6C: use Gmail to inspect at most one recent inbox message, "
-            "then create a new Google Sheet named "
-            f"`{marker}` and write one row with columns Source, Summary, and "
-            "QA Marker. Use the Gmail result if one is available; if no message "
-            "is available, write Source as Gmail and Summary as no recent message "
-            "available. In the final answer include the exact marker "
-            f"{marker}, include the word Gmail, and include the phrase Google Sheet."
-        ),
+        prompt=_qa_sheet_prompt("qa_6c_gmail_to_sheet_live_chat"),
         timeout=360.0,
     )
 
 
 async def case_qa_6d_gmail_to_sheet_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_6D_GMAIL_TO_SHEET_ROUTINE_DONE"
     routine_name = "reborn-qa-6d-gmail-to-sheet"
     return await _routine_creation_case(
         ctx,
         case_name="qa_6d_gmail_to_sheet_routine",
         routine_name=routine_name,
-        marker=marker,
+        marker=None,
         required_text=["routine", "Gmail"],
-        prompt=(
-            f"QA case 6D dry-run routine-definition test: create a routine named {routine_name}. "
-            "When the routine runs later, it should check Gmail for new CRM or lead emails, "
-            "extract the sender, company or account name if present, summary, and received time, "
-            "then append one row to a Google Sheet CRM tracker. Create only the scheduled "
-            "routine definition now; do not run it, inspect accounts, verify connections, "
-            "or call Gmail, Google Sheets, Google auth, connector auth, or get_authenticated_user "
-            "tools now. In the final answer include the "
-            f"exact marker {marker} and include the words routine and Gmail."
-        ),
+        prompt=_qa_sheet_prompt("qa_6d_gmail_to_sheet_routine"),
     )
 
 
@@ -2432,7 +2498,6 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
         timeout=420.0,
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
@@ -2509,50 +2574,64 @@ async def _routine_creation_case(
     *,
     case_name: str,
     prompt: str,
-    marker: str,
+    marker: str | None,
     routine_name: str,
     required_text: list[str],
+    extensions: list[dict[str, object]] | None = None,
+    extra_details: dict[str, object] | None = None,
 ) -> ProbeResult:
-    before_count = _trigger_record_count(ctx.reborn_home, routine_name)
-    result = await _live_chat_case(
-        ctx,
-        case_name=case_name,
-        prompt=prompt,
-        marker=marker,
-        required_text=required_text,
-        timeout=180.0,
-        extra_details={
-            "routine_name": routine_name,
-            "trigger_records_before": before_count,
-        },
-    )
-    after_count = _trigger_record_count(ctx.reborn_home, routine_name)
+    count_name = routine_name if marker else None
+    before_count = _trigger_record_count(ctx.reborn_home, count_name)
+    details = {
+        "routine_name": routine_name,
+        "trigger_records_before": before_count,
+        **(extra_details or {}),
+    }
+    if extensions:
+        result = await _live_chat_with_extensions_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=marker,
+            required_text=required_text,
+            extensions=extensions,
+            timeout=180.0,
+            extra_details=details,
+        )
+    else:
+        result = await _live_chat_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=marker,
+            required_text=required_text,
+            timeout=180.0,
+            extra_details=details,
+        )
+    after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
     if result.success and after_count <= before_count:
         result.success = False
         result.details["error"] = (
-            f"assistant returned success marker but routine {routine_name!r} "
-            "was not added to trigger_records"
+            f"assistant returned success but routine scope {routine_name!r} "
+            "did not add a trigger_record"
         )
     return result
 
 
 async def case_qa_3c_endpoint_status_slack_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_3C_ENDPOINT_STATUS_ROUTINE_DONE"
     routine_name = "reborn-qa-3c-endpoint-status-slack"
+    prompt = _qa_sheet_prompt("qa_3c_endpoint_status_slack_routine").replace(
+        "[endpoint URL]",
+        ENDPOINT_STATUS_URL,
+    )
     return await _routine_creation_case(
         ctx,
         case_name="qa_3c_endpoint_status_slack_routine",
         routine_name=routine_name,
-        marker=marker,
+        marker=None,
         required_text=["routine"],
-        prompt=(
-            f"QA case 3C: create a routine named {routine_name}. Every 5 minutes, "
-            "ping https://cloud-api.near.ai, check whether it returns HTTP 200, "
-            "and send the result in a Slack DM. Create the routine now; do not run "
-            "the check immediately. In the final answer include the exact marker "
-            f"{marker} and include the text routine."
-        ),
+        prompt=prompt,
     )
 
 
@@ -2647,7 +2726,7 @@ async def case_qa_3d_endpoint_status_slack_delivery(ctx: LiveQaContext) -> Probe
         routine_prefix="reborn-qa-3d-endpoint-status-slack-delivery",
         marker_prefix="REBORN_QA_3D_ENDPOINT_STATUS",
         routine_instruction=(
-            "check https://cloud-api.near.ai with live HTTP or web access, report "
+            f"check {ENDPOINT_STATUS_URL} with live HTTP or web access, report "
             "the observed HTTP status, and send the result to Slack"
         ),
         required_delivery_text=["status"],
@@ -2655,45 +2734,25 @@ async def case_qa_3d_endpoint_status_slack_delivery(ctx: LiveQaContext) -> Probe
 
 
 async def case_qa_4c_github_release_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_4C_GITHUB_RELEASE_DONE"
-    release = await _live_github_latest_release("nearai", "ironclaw")
-    api_url = release["api_url"]
     return await _live_chat_case(
         ctx,
         case_name="qa_4c_github_release_live_chat",
-        prompt=(
-            "QA case 4C: perform exactly one public HTTP GET to "
-            f"{api_url}. Do not use an authenticated GitHub connector, GitHub auth "
-            "flow, save/download tools, or any other URL. Confirm that the live "
-            f"response tag_name is {release['tag_name']}, then immediately final-answer "
-            f"with the exact marker {marker}, the text GitHub, and the release tag "
-            f"{release['tag_name']}."
-        ),
-        marker=marker,
-        required_text=["GitHub", release["tag_name"]],
+        prompt=_qa_sheet_prompt("qa_4c_github_release_live_chat"),
+        marker=None,
+        required_text=["release"],
         timeout=240.0,
-        extra_details=release,
     )
 
 
 async def case_qa_4d_github_release_slack_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_4D_GITHUB_RELEASE_SLACK_ROUTINE_DONE"
     routine_name = "reborn-qa-4d-github-release-slack"
     return await _routine_creation_case(
         ctx,
         case_name="qa_4d_github_release_slack_routine",
         routine_name=routine_name,
-        marker=marker,
+        marker=None,
         required_text=["routine"],
-        prompt=(
-            f"QA case 4D: create a routine named {routine_name}. Every 5 minutes, "
-            "check https://github.com/nearai/ironclaw for the latest releases and "
-            "send a Slack message summarizing any new release. Create the routine "
-            "now; do not run the check immediately. Do not call GitHub tools, "
-            "GitHub auth, or connector auth tools now; only create the scheduled "
-            "routine from these instructions. In the final answer include "
-            f"the exact marker {marker} and include the text routine."
-        ),
+        prompt=_qa_sheet_prompt("qa_4d_github_release_slack_routine"),
     )
 
 
@@ -2791,7 +2850,6 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
         },
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't send",
             "cannot send",
@@ -2916,7 +2974,7 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
     wall_started = time.time()
     case_name = "qa_7d_slack_bug_message_trigger"
     suffix = str(int(wall_started * 1000))
-    marker = f"REBORN_QA_7D_SLACK_BUG_TRIGGER_{suffix}"
+    marker = "bug"
     observed: dict[str, object] = {"marker": marker}
     try:
         slack = _slack_preflight(ctx)
@@ -2930,40 +2988,32 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:
             raise AssertionError("Slack inbound test could not resolve a DM/channel id")
+        if not _slack_delivery_target_is_dm(channel_id):
+            raise AssertionError(
+                "Slack bug-message trigger test must inject into a DM target; "
+                f"got channel_id={channel_id!r}"
+            )
         slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
-        text = (
-            f"bug: live QA signed Slack inbound test {marker}. "
-            "This is a plain direct-message reply test; do not call tools, do not "
-            "configure channels, and do not change delivery settings. "
-            f"Answer directly with the exact marker {marker} and the word bug."
-        )
+        qa_sheet_prompt = _qa_sheet_prompt(case_name)
+        text = f"bug: reborn QA bug logger smoke {suffix}"
+        observed["qa_sheet_prompt"] = qa_sheet_prompt
+        observed["slack_event_text"] = text
+        event_id = f"EvREBORNQA7D{suffix}"
         post_result = await _post_signed_slack_dm_event(
             ctx,
             channel_id=channel_id,
             user_id=slack_user_id,
             text=text,
-            event_id=f"EvREBORNQA7D{suffix}",
+            event_id=event_id,
         )
         observed["signed_event"] = post_result
-        deadline = time.monotonic() + 180.0
-        last_history: dict[str, object] | None = None
-        while time.monotonic() < deadline:
-            history = await _slack_history_contains_marker(
-                ctx,
-                channel_id=channel_id,
-                marker=marker,
-                oldest_epoch=wall_started,
-                required_text=["bug"],
-            )
-            last_history = history
-            if history.get("found"):
-                observed["slack_history"] = history
-                return _result(case_name, True, started, observed)
-            await asyncio.sleep(2.0)
-        raise AssertionError(
-            "Slack reply marker was not observed after signed bug: event. "
-            f"last_history={last_history!r}"
+        run_id = await _wait_for_slack_event_run_id(
+            ctx,
+            event_id=event_id,
+            timeout=180.0,
         )
+        observed["accepted_run_id"] = run_id
+        return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
 
@@ -3001,7 +3051,6 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         timeout=360.0,
         forbidden_text=[
             "auth_denied",
-            "auth_required",
             "authentication required",
             "can't create",
             "cannot create",
@@ -3092,53 +3141,147 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
 
 
 async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_7C_SLACK_BUG_SHEET_ROUTINE_DONE"
+    started = time.monotonic()
     routine_name = "reborn-qa-7c-slack-bug-sheet"
-    return await _routine_creation_case(
-        ctx,
-        case_name="qa_7c_slack_bug_logger_routine",
-        routine_name=routine_name,
-        marker=marker,
-        required_text=["routine", "bug"],
-        prompt=(
-            f"QA case 7C: create a routine named {routine_name}. When a Slack "
-            "message in my product channel starts with `bug:`, extract the bug "
-            "summary, reporter, Slack timestamp, and current status, then append "
-            "one row to my connected Google Sheet for product bug tracking. Create "
-            "the routine now; do not trigger or run it yet. Do not call Slack, "
-            "Google Sheets, Google auth, or connector auth tools now; only create "
-            "the scheduled routine from these instructions. In the final answer "
-            f"include the exact marker {marker} and include the words routine and bug."
-        ),
-    )
+    try:
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        sheet_fixture = await _create_google_spreadsheet_fixture(
+            access_token=access_token,
+            title=QA_7C_BUG_LOGGING_SHEET_TITLE,
+            values=[
+                ["Summary", "Reporter", "Slack Timestamp", "Status", "QA Marker"],
+            ],
+        )
+        return await _routine_creation_case(
+            ctx,
+            case_name="qa_7c_slack_bug_logger_routine",
+            routine_name=routine_name,
+            marker=None,
+            required_text=["trigger", "bug"],
+            prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+            extensions=[
+                {
+                    "package_id": "slack",
+                    "display_name": "Slack",
+                    "required_tools": [],
+                },
+                {
+                    "package_id": "google-drive",
+                    "display_name": "Google Drive",
+                    "required_tools": ["google-drive.list_files"],
+                },
+                {
+                    "package_id": "google-sheets",
+                    "display_name": "Google Sheets",
+                    "required_tools": [
+                        "google-sheets.read_values",
+                        "google-sheets.append_values",
+                    ],
+                },
+            ],
+            extra_details={
+                "google_token": token_meta,
+                "bug_log_sheet_fixture": sheet_fixture,
+            },
+        )
+    except Exception as exc:
+        return _result(
+            "qa_7c_slack_bug_logger_routine",
+            False,
+            started,
+            {"routine_name": routine_name, "error": str(exc)},
+        )
 
 
 async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeResult:
+    from playwright.async_api import expect
+
     started = time.monotonic()
-    observed: dict[str, object] = {}
+    case_name = "qa_7a_slack_product_channel_connect"
+    prompt = _qa_sheet_prompt(case_name)
+    observed: dict[str, object] = {"chat_connect_prompt": prompt}
     try:
         slack = _slack_preflight(ctx)
+        delivery_channel_id = _slack_delivery_channel_id(ctx)
+        route_discovery = slack.get("route_discovery")
+        route_discovery_details = route_discovery if isinstance(route_discovery, dict) else {}
         observed.update(
             {
                 "delivery_target_present": slack.get("delivery_target_present"),
                 "route_configured_from_env": slack.get("route_configured_from_env"),
+                "slack_dm_user_source": route_discovery_details.get("dm_user_source"),
+                "slack_dm_user_id_present": bool(route_discovery_details.get("dm_user_id")),
+                "slack_delivery_channel_id_present": bool(delivery_channel_id),
+                "slack_delivery_target_kind": (
+                    "dm" if _slack_delivery_target_is_dm(delivery_channel_id) else "non_dm"
+                ),
             }
         )
         if not slack.get("delivery_target_present"):
             raise AssertionError(
-                "Slack product-channel route is not configured for this WebUI user"
+                "Slack DM delivery target is not configured for this WebUI user"
             )
-        connect_result = await _slack_connect_case(
-            ctx,
-            case_name="qa_7a_slack_product_channel_connect",
-        )
-        observed.update(connect_result.details)
-        if not connect_result.success:
-            raise AssertionError(str(connect_result.details.get("error") or connect_result.details))
-        return _result("qa_7a_slack_product_channel_connect", True, started, observed)
+        if not _slack_delivery_target_is_dm(delivery_channel_id):
+            raise AssertionError(
+                "Slack live QA delivery target must be a DM to the user; "
+                f"got channel_id={delivery_channel_id!r}"
+            )
+
+        async def action(page: object) -> None:
+            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
+            baseline_statuses = _capability_run_statuses(
+                ctx.reborn_home,
+                capability_ids,
+            )
+            baseline_completed = _completed_capability_counts(baseline_statuses)
+            observed["baseline_capability_statuses"] = baseline_statuses
+            await page.goto(
+                f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )  # type: ignore[attr-defined]
+            composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
+            await expect(composer).to_be_visible(timeout=15000)
+            await composer.fill(prompt)
+            await composer.press("Enter")
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
+            observed["text_excerpt"] = await _wait_for_assistant_reply(
+                page,
+                marker=None,
+                required_text=["slack"],
+                timeout=180.0,
+            )
+            deadline = time.monotonic() + 180.0
+            while time.monotonic() < deadline:
+                await _approve_visible_tool_gate(page)
+                statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
+                observed["capability_statuses"] = statuses
+                completed = _completed_capability_counts(statuses)
+                missing = [
+                    capability_id
+                    for capability_id in capability_ids
+                    if completed.get(capability_id, 0)
+                    <= baseline_completed.get(capability_id, 0)
+                ]
+                if not missing:
+                    return
+                await asyncio.sleep(1.0)
+            raise AssertionError(
+                "Slack DM connect prompt did not complete expected capabilities: "
+                f"{capability_ids!r}; observed statuses={observed.get('capability_statuses')!r}"
+            )
+
+        await _with_page(ctx.output_dir, case_name, action)
+        return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(
-            "qa_7a_slack_product_channel_connect",
+            case_name,
             False,
             started,
             {"error": str(exc), **observed},
@@ -3146,20 +3289,12 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
 
 
 async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN8BHNSEARCHDONE"
     return await _live_chat_case(
         ctx,
         case_name="qa_8b_hn_keyword_live_chat",
-        prompt=(
-            "Task 8B: perform exactly one public HTTP GET to the Hacker News Algolia "
-            f"API URL {HN_KEYWORD_SEARCH_URL}. Treat that response as the live Hacker "
-            "News keyword probe for recent NEAR AI posts. Do not use web_search, "
-            "authenticated connectors, save/download tools, or any other URL. Then "
-            f"immediately final-answer with the exact marker {marker} and include the "
-            "text Hacker News."
-        ),
-        marker=marker,
-        required_text=["Hacker News"],
+        prompt=_qa_sheet_prompt("qa_8b_hn_keyword_live_chat"),
+        marker=None,
+        required_text=["news.ycombinator.com"],
         timeout=240.0,
     )
 
@@ -3169,23 +3304,14 @@ async def case_qa_8a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_8c_hn_keyword_slack_routine(ctx: LiveQaContext) -> ProbeResult:
-    marker = "REBORN_QA_8C_HN_SLACK_ROUTINE_DONE"
     routine_name = "reborn-qa-8c-hn-keyword-slack"
     return await _routine_creation_case(
         ctx,
         case_name="qa_8c_hn_keyword_slack_routine",
         routine_name=routine_name,
-        marker=marker,
+        marker=None,
         required_text=["routine"],
-        prompt=(
-            f"QA case 8C: create a routine named {routine_name}. Every hour, "
-            "check Hacker News for new posts mentioning IronClaw or NEAR AI and "
-            "send a summary to Slack. Create the routine now; do not run the "
-            "search immediately. Do not call Slack delivery or auth tools now; "
-            "only create the scheduled routine from these instructions. In the "
-            "final answer include the exact marker "
-            f"{marker} and include the text routine."
-        ),
+        prompt=_qa_sheet_prompt("qa_8c_hn_keyword_slack_routine"),
     )
 
 

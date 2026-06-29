@@ -495,12 +495,37 @@ jobs:
           retention-days: 14
 
   reborn-webui-v2-live-qa:
-    name: Reborn WebUI v2 Live QA
+    name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_id: qa-2
+            shard_name: QA 2
+            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
+          - shard_id: qa-3
+            shard_name: QA 3
+            cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery
+          - shard_id: qa-4
+            shard_name: QA 4
+            cases: qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat,qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery
+          - shard_id: qa-5
+            shard_name: QA 5
+            cases: qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer
+          - shard_id: qa-6
+            shard_name: QA 6
+            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
+          - shard_id: qa-7
+            shard_name: QA 7
+            cases: qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery
+          - shard_id: qa-8
+            shard_name: QA 8
+            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
     env:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
@@ -512,28 +537,102 @@ jobs:
       REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
       LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
       LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL || 'Qwen/Qwen3.5-122B-A10B' }}
     steps:
+      - name: Resolve Reborn WebUI v2 live QA cases
+        id: resolve_reborn_webui_v2_cases
+        shell: bash
+        env:
+          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          SHARD_CASES: ${{ matrix.cases }}
+          ALL_SHARD_CASES: >-
+            qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
+            qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery,
+            qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat,qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery,
+            qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
+            qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
+            qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery,
+            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+        run: |
+          set -euo pipefail
+          cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
+          if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
+            echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=matrix-shard" >> "${GITHUB_ENV}"
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            echo "CASES=${cases:-<default>} requested; running shard cases: ${SHARD_CASES}"
+          else
+            selected=()
+            IFS=',' read -ra requested_cases <<< "${cases}"
+            IFS=',' read -ra shard_cases <<< "${SHARD_CASES}"
+            IFS=',' read -ra all_cases <<< "${ALL_SHARD_CASES}"
+            for requested in "${requested_cases[@]}"; do
+              requested="$(echo "${requested}" | xargs)"
+              [[ -n "${requested}" ]] || continue
+              known=0
+              for known_case in "${all_cases[@]}"; do
+                known_case="$(echo "${known_case}" | xargs)"
+                if [[ "${requested}" == "${known_case}" ]]; then
+                  known=1
+                  break
+                fi
+              done
+              if [[ ${known} -ne 1 ]]; then
+                echo "::error::Unknown Reborn WebUI v2 live QA case: ${requested}"
+                exit 1
+              fi
+              for shard_case in "${shard_cases[@]}"; do
+                if [[ "${requested}" == "${shard_case}" ]]; then
+                  selected+=("${requested}")
+                  break
+                fi
+              done
+            done
+            if [[ ${#selected[@]} -eq 0 ]]; then
+              echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested-not-in-shard" >> "${GITHUB_ENV}"
+              echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+              echo "Requested cases do not belong to this shard; skipping."
+            else
+              joined="$(IFS=,; echo "${selected[*]}")"
+              echo "CASES=${joined}" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested-filtered" >> "${GITHUB_ENV}"
+              echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+              echo "Running requested cases in this shard: ${joined}"
+            fi
+          fi
+      - name: Reject unsafe Reborn WebUI v2 live QA target refs
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' && github.event_name == 'workflow_dispatch' && inputs.target_ref != ''
+        run: |
+          echo "::error::target_ref is disabled for reborn-webui-v2-live-qa because this lane runs with live secrets."
+          exit 1
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
-          ref: ${{ inputs.target_ref || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           targets: wasm32-wasip2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           key: live-canary-reborn-webui-v2-live-qa
       - name: Install cargo-component
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         run: cargo install cargo-component --locked || true
       - name: Build WASM channels
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         shell: bash
         env:
           NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY || secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
@@ -573,37 +672,24 @@ jobs:
           write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
           write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
           write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
-      - name: Resolve Reborn WebUI v2 live QA cases
-        shell: bash
-        env:
-          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
-        run: |
-          set -euo pipefail
-          cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
-          if [[ "${cases}" == "all" ]]; then
-            echo "CASES=all" >> "${GITHUB_ENV}"
-            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=promoted-non-telegram" >> "${GITHUB_ENV}"
-            echo "CASES=all requested; running the promoted non-Telegram Reborn QA suite."
-          else
-            echo "CASES=${cases}" >> "${GITHUB_ENV}"
-            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested" >> "${GITHUB_ENV}"
-          fi
       - name: Run Reborn WebUI v2 live QA lane
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         env:
           LANE: reborn-webui-v2-live-qa
-          PROVIDER: reborn-webui-v2
+          PROVIDER: reborn-webui-v2-${{ matrix.shard_id }}
           COMMAND_TIMEOUT: 90m
           PLAYWRIGHT_INSTALL: with-deps
         run: scripts/live-canary/run.sh
       - name: Scrub artifacts
-        if: always()
+        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
-        if: always()
+        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: live-canary-reborn-webui-v2-live-qa
+          name: live-canary-reborn-webui-v2-live-qa-${{ matrix.shard_id }}
           path: artifacts/live-canary/
+          if-no-files-found: ignore
           retention-days: 14
 
   persona-rotating:

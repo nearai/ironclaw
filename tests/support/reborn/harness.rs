@@ -31,7 +31,10 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
@@ -39,11 +42,12 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    Obligations, PackageId, Principal, ProjectId, ProviderToolName, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    CapabilityId, CapabilityProfileSchemaRef, CapabilitySet, CredentialStageError, Decision,
+    EffectKind, ExecutionContext, ExtensionId, GrantConstraints, HostPath, InvocationId,
+    MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, PermissionMode,
+    Principal, ProjectId, ProviderToolName, RequestedTrustClass, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
 };
@@ -57,13 +61,14 @@ use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeProcessPort,
+    RuntimeStatusRequest, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -75,6 +80,10 @@ use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory,
     JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+};
+use ironclaw_mcp::{
+    McpHostHttpClient, McpHostHttpEgressPlan, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
+    StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -266,7 +275,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+    pub(crate) fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.capability_results(),
@@ -277,6 +286,15 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.runtime_http_requests(),
+        }
+    }
+
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty on the echo recording backend or the live-shell path.
+    pub(crate) fn recorded_process_commands(&self) -> Vec<String> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.process_commands(),
         }
     }
 
@@ -1514,6 +1532,10 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// Inert recording process port (slice 5). `Some` when the harness injected
+    /// a `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// used (`.with_live_shell()` path) or the harness predates slice 5.
+    process_port: Option<Arc<super::process::RecordingProcessPort>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1651,6 +1673,9 @@ impl HostRuntimeCapabilityHarness {
             Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
             )),
+            // qa_smoke_tools exercises real process execution (SpawnProcess effect);
+            // leave the default LocalHostProcessPort in place.
+            None,
         )?;
         let mounts = qa_smoke_mounts()?;
         let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
@@ -1721,6 +1746,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2011,6 +2037,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2021,13 +2048,41 @@ impl HostRuntimeCapabilityHarness {
     async fn core_builtin_tools_with_network_policy(
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(network_policy, true).await
+    }
+
+    /// Variant used by `.with_live_shell()`: same as `core_builtin_tools_with_network_policy`
+    /// but opts out of the recording process port so the real `LocalHostProcessPort`
+    /// executes shell commands on the host.
+    pub(crate) async fn core_builtin_tools_with_live_shell() -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(http_test_policy(), false)
+            .await
+    }
+
+    async fn core_builtin_tools_with_network_policy_and_process_port(
+        network_policy: NetworkPolicy,
+        recording_process: bool,
+    ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
             br#"{"accepted":true}"#.to_vec(),
         ));
+        // Slice 5: inject the inert recording port by default so `builtin.shell`
+        // invocations in tests never spawn a real OS process. The `.with_live_shell()`
+        // opt-in passes `recording_process = false`, which skips injection and lets
+        // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+        let recording_process_port = if recording_process {
+            Some(Arc::new(super::process::RecordingProcessPort::new()))
+        } else {
+            None
+        };
+        let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
+            .as_ref()
+            .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
             Arc::clone(&runtime_http_egress),
+            process_port_dyn,
         )?;
         let mut harness = Self::core_builtin_tools_from_runtime(
             root,
@@ -2037,6 +2092,7 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-core-builtins-user")?,
         )?;
         harness.http_egress = Some(runtime_http_egress);
+        harness.process_port = recording_process_port;
         Ok(harness)
     }
 
@@ -2099,6 +2155,10 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                // slice 5: `builtin.shell` on the surface so scripted shell calls
+                // route through the process port (recording by default, live via
+                // `.with_live_shell()`).
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
             effect_kinds: vec![
@@ -2106,6 +2166,11 @@ impl HostRuntimeCapabilityHarness {
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                // slice 5: `builtin.shell` declares ExecuteCode; the grant's
+                // allowed_effects must include it or the authorizer denies the
+                // capability before it reaches the process port.
+                EffectKind::ExecuteCode,
             ],
             network_policy,
             secrets: Vec::new(),
@@ -2116,6 +2181,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2161,6 +2227,81 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: Some(runtime_http_egress),
             network_egress: Some(network_egress),
+            process_port: None,
+        })
+    }
+
+    /// Slice 6: wire a single MCP capability backed by the loopback mock server.
+    ///
+    /// `mcp_url`  — the mock server's MCP endpoint (e.g. `"http://127.0.0.1:PORT/mcp"`).
+    /// `provider_id`   — extension id used in the registry (e.g. `"mock-mcp"`).
+    /// `capability_id` — capability id surfaced to the model (e.g. `"mock-mcp.search"`).
+    ///
+    /// The harness builds a `LoopbackMcpRuntimeHttpEgress` that makes REAL HTTP
+    /// connections to the mock server, injecting a fake Bearer token to satisfy
+    /// the mock's auth gate. Production egress policy, network policy, and
+    /// credential stores are bypassed — this path is test-only.
+    pub(crate) async fn mock_mcp_tools(
+        mcp_url: &str,
+        provider_id: &str,
+        capability_id: &str,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        // Recording egress for any first-party tool paths (unused in MCP tests,
+        // but HostRuntimeServices requires it when first_party_capabilities are wired).
+        let first_party_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        // Real loopback egress for the mock MCP server.
+        let mcp_egress = Arc::new(LoopbackMcpRuntimeHttpEgress::new(mcp_url)?);
+        let adapter = McpRuntimeHttpAdapter::new(Arc::clone(&mcp_egress));
+        let planner = StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan::default());
+        let client = McpHostHttpClient::new(adapter, planner);
+        let mcp_runtime: Arc<LoopbackMcpRuntime> =
+            Arc::new(McpRuntime::new(McpRuntimeConfig::default(), client));
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(mock_mcp_extension_package(
+            provider_id,
+            mcp_url,
+            capability_id,
+        )?)?;
+        let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
+            storage_root,
+            registry,
+            Arc::clone(&first_party_egress),
+            mcp_runtime,
+            provider_id,
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![CapabilityId::new(capability_id)?],
+            runtime_kind: RuntimeKind::Mcp,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            // The MCP capability declares `EffectKind::Network`, so authorization
+            // attaches an `ApplyNetworkPolicy` obligation that the host runtime
+            // rejects when `allowed_targets` is empty (a default `NetworkPolicy`).
+            // The mock server lives at `http://127.0.0.1:<port>/mcp`, so permit the
+            // loopback host (and disable the private-IP denial that would otherwise
+            // block 127.0.0.1) so the MCP egress reaches the loopback server.
+            network_policy: mcp_loopback_network_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(provider_id)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-mcp-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2194,6 +2335,30 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty when the harness uses the live `LocalHostProcessPort`
+    /// (`.with_live_shell()` path) or predates slice 5.
+    fn process_commands(&self) -> Vec<String> {
+        self.process_port
+            .as_ref()
+            .map(|port| port.commands())
+            .unwrap_or_default()
+    }
+
+    /// Install URL/method/capability-keyed scripted responses into the recording
+    /// HTTP egress (§3.6 P1 ergonomics). Errors if this harness wired no
+    /// recording egress (e.g. the live-HTTP variant).
+    pub(crate) fn install_http_responses(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) -> HarnessResult<()> {
+        self.http_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording http egress to script")?
+            .install_scripted(responses);
+        Ok(())
     }
 
     fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
@@ -2585,10 +2750,16 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
-    local_dev_host_runtime_with_registry_and_runtime_http_egress(storage_root, registry, egress)
+    local_dev_host_runtime_with_registry_and_runtime_http_egress(
+        storage_root,
+        registry,
+        egress,
+        process_port,
+    )
 }
 
 fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
@@ -2603,8 +2774,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(registry),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
@@ -2624,8 +2796,131 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     ))?))
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    // Inject the recording process port when provided (slice 5). When `None`,
+    // `HostRuntimeServices` defaults to `LocalHostProcessPort` (real execution).
+    if let Some(port) = process_port {
+        services = services.with_runtime_process_port_dyn(port);
+    }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+// arch-exempt: large_file, reborn itest process-port/MCP harness wiring; harness_mcp.rs split tracked as follow-up, plan docs/superpowers/plans/2026-06-27-reborn-itest-slice3-impl-plan.md
+/// Slice 6: variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// that also wires a loopback MCP runtime for the mock-MCP integration test.
+///
+/// The `first_party_egress` covers any first-party tool calls (recording, no
+/// network). The `mcp_runtime` is a concrete loopback runtime that makes real
+/// HTTP requests to the test-local mock MCP server.
+type LoopbackMcpRuntime = McpRuntime<
+    McpHostHttpClient<
+        McpRuntimeHttpAdapter<Arc<LoopbackMcpRuntimeHttpEgress>>,
+        StaticMcpHostHttpEgressPlanner,
+    >,
+>;
+
+fn local_dev_host_runtime_with_registry_egress_and_mcp(
+    storage_root: PathBuf,
+    registry: ExtensionRegistry,
+    first_party_egress: Arc<RecordingRuntimeHttpEgress>,
+    mcp_runtime: Arc<LoopbackMcpRuntime>,
+    mcp_provider_id: &str,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
+    .with_first_party_http_egress(first_party_egress)
+    .with_mcp_runtime(mcp_runtime)
+    .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Build an `ExtensionPackage` describing a hosted MCP extension backed by the
+/// loopback mock server. `provider_id` is both the extension id and the prefix
+/// stripped from capability ids to derive the MCP tool name
+/// (`"mock-mcp"` + `"mock-mcp.search"` → MCP tool `"search"`).
+/// No `runtime_credentials` are declared because `LoopbackMcpRuntimeHttpEgress`
+/// injects the Bearer token directly for test purposes.
+///
+/// Uses `from_host_bundled_manifest_with_inline_dynamic_schemas` with an inline
+/// `{"type":"object"}` parameters_schema so `surface_descriptor` in the host
+/// runtime skips the `$ref` filesystem read (no schema file exists for the mock
+/// extension). All descriptor fields except `parameters_schema` still match the
+/// manifest projection exactly.
+fn mock_mcp_extension_package(
+    provider_id: &str,
+    mcp_url: &str,
+    capability_id: &str,
+) -> HarnessResult<ExtensionPackage> {
+    let manifest = ExtensionManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+        id: ExtensionId::new(provider_id)?,
+        name: provider_id.to_string(),
+        version: "0.1.0".to_string(),
+        description: "Mock MCP extension (test only)".to_string(),
+        source: ManifestSource::HostBundled,
+        requested_trust: RequestedTrustClass::ThirdParty,
+        descriptor_trust_default: TrustClass::Sandbox,
+        runtime: ExtensionRuntime::Mcp {
+            transport: "http".to_string(),
+            command: None,
+            args: Vec::new(),
+            url: Some(mcp_url.to_string()),
+        },
+        host_apis: Vec::new(),
+        hooks: Vec::new(),
+        capabilities: vec![CapabilityManifest {
+            id: CapabilityId::new(capability_id)?,
+            implements: Vec::new(),
+            description: "Mock MCP capability".to_string(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            visibility: CapabilityVisibility::Model,
+            input_schema_ref: CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.input.v1.json",
+            )?,
+            output_schema_ref: CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.output.v1.json",
+            )?,
+            prompt_doc_ref: None,
+            required_host_ports: Vec::new(),
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        }],
+    };
+    // Inline schema so surface_descriptor returns Ok(descriptor) without
+    // trying to read "schemas/mock-mcp/mock.input.v1.json" from the test
+    // filesystem (that file doesn't exist for a test-only mock extension).
+    let capabilities = vec![CapabilityDescriptor {
+        id: CapabilityId::new(capability_id)?,
+        provider: ExtensionId::new(provider_id)?,
+        runtime: RuntimeKind::Mcp,
+        trust_ceiling: TrustClass::Sandbox,
+        description: "Mock MCP capability".to_string(),
+        parameters_schema: json!({"type": "object"}),
+        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
+        resource_profile: None,
+    }];
+    let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
+    Ok(
+        ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+            manifest,
+            root,
+            None,
+            capabilities,
+        )?,
+    )
 }
 
 fn local_dev_host_runtime_with_registry_and_egress(
@@ -2819,6 +3114,42 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     )])?)
 }
 
+/// Trust policy for MCP integration tests: first-party builtins + user-trusted
+/// mock MCP provider.  The mock MCP provider is registered with root
+/// `/system/extensions/<provider_id>`, so its manifest path must match the
+/// `PackageSource::LocalManifest` key the host runtime derives at dispatch time.
+fn first_party_and_mcp_trust_policy(mcp_provider_id: &str) -> HarnessResult<HostTrustPolicy> {
+    Ok(HostTrustPolicy::new(vec![Box::new(
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::DeleteFilesystem,
+                    EffectKind::Network,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ExternalWrite,
+                ],
+                None,
+            ),
+            AdminEntry::for_local_manifest(
+                PackageId::new(mcp_provider_id)?,
+                format!("/system/extensions/{mcp_provider_id}/manifest.toml"),
+                None,
+                HostTrustAssignment::user_trusted(),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+                None,
+            ),
+        ]),
+    )])?)
+}
+
 fn github_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
         AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
@@ -2846,6 +3177,23 @@ fn http_test_policy() -> NetworkPolicy {
         }],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
+    }
+}
+
+/// Network policy for the slice-6 loopback mock MCP server. The mock binds to
+/// `http://127.0.0.1:<port>/mcp`, so the policy must permit the loopback host and
+/// must NOT deny private/loopback IP ranges (127.0.0.1 is loopback). An empty
+/// `allowed_targets` (the `NetworkPolicy::default()`) is rejected by the host
+/// runtime's network obligation, which is what previously blocked the MCP egress.
+fn mcp_loopback_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1_000_000),
     }
 }
 
@@ -3069,6 +3417,9 @@ impl TrustAwareCapabilityDispatchAuthorizer for GithubHarnessAuthorizer {
 #[derive(Debug, Clone)]
 struct RecordingRuntimeHttpEgress {
     default_body: Vec<u8>,
+    /// URL/method/capability-keyed scripted responses (§3.6 P1 ergonomics).
+    /// Consulted before the FIFO queue; first match wins.
+    scripted: Arc<Mutex<Vec<super::http_matcher::ScriptedHttpResponse>>>,
     response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
     requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
 }
@@ -3077,6 +3428,7 @@ impl RecordingRuntimeHttpEgress {
     fn with_body(body: Vec<u8>) -> Self {
         Self {
             default_body: body,
+            scripted: Arc::new(Mutex::new(Vec::new())),
             response_bodies: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -3084,6 +3436,14 @@ impl RecordingRuntimeHttpEgress {
 
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Append keyed scripted responses (the canonical keyed-matcher install).
+    fn install_scripted(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) {
+        self.scripted.lock().unwrap().extend(responses);
     }
 }
 
@@ -3094,12 +3454,18 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let request_bytes = request.body.len() as u64;
+        // Resolve the keyed body BEFORE recording the request: pushing moves the
+        // request into the log and (via its `Drop`) zeroizes its URL/headers.
+        let keyed_body = {
+            let scripted = self.scripted.lock().unwrap();
+            scripted
+                .iter()
+                .find(|response| response.matches(&request))
+                .map(|response| response.body_bytes())
+        };
         self.requests.lock().unwrap().push(request);
-        let body = self
-            .response_bodies
-            .lock()
-            .unwrap()
-            .pop_front()
+        let body = keyed_body
+            .or_else(|| self.response_bodies.lock().unwrap().pop_front())
             .unwrap_or_else(|| self.default_body.clone());
         Ok(RuntimeHttpEgressResponse {
             status: 200,
@@ -3167,6 +3533,142 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
                 response_bytes: body.len() as u64,
                 resolved_ip: None,
             },
+        })
+    }
+}
+
+/// Test-only `RuntimeHttpEgress` that routes MCP traffic to the loopback mock
+/// MCP server using a real HTTP client (slice 6 design).
+///
+/// Unlike `RecordingRuntimeHttpEgress`, this makes REAL HTTP connections so the
+/// `MockMcpServer` actually receives the JSON-RPC handshake. It:
+///   - rejects any URL that does not start with the configured mock endpoint
+///     (hermetic guard — prevents accidental real-network egress)
+///   - injects `Authorization: Bearer mock-mcp-test-token` on every request,
+///     satisfying the mock server's OAuth gate without a credential-staging
+///     pipeline (acceptable because this egress is test-only and never ships)
+///   - passes all other request headers through unchanged
+struct LoopbackMcpRuntimeHttpEgress {
+    /// Full MCP endpoint URL (e.g. `"http://127.0.0.1:PORT/mcp"`).
+    /// All outbound URLs must start with this value — hermetic guard.
+    mcp_url: String,
+    client: reqwest::Client,
+}
+
+impl LoopbackMcpRuntimeHttpEgress {
+    fn new(mcp_url: &str) -> HarnessResult<Self> {
+        // Hermetic hardening: refuse any host other than 127.0.0.1 so a typo in
+        // the mock URL cannot silently turn this test egress into real external
+        // network I/O. Narrowed to 127.0.0.1 only (not ::1 / localhost) so the
+        // guard matches `mcp_loopback_network_policy()`, which also only permits
+        // 127.0.0.1; a caller using "localhost" would otherwise pass this guard
+        // then fail network authorization — a latent trap.
+        let parsed = url::Url::parse(mcp_url)
+            .map_err(|e| format!("invalid mock MCP URL {mcp_url:?}: {e}"))?;
+        let scheme = parsed.scheme();
+        if scheme != "http" {
+            return Err(format!(
+                "mock MCP URL {mcp_url:?} must use http://127.0.0.1/...; scheme {scheme:?} not \
+                 accepted (mcp_loopback_network_policy only permits http)"
+            )
+            .into());
+        }
+        let is_loopback_ipv4 = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+            _ => false,
+        };
+        if !is_loopback_ipv4 {
+            return Err(format!(
+                "mock MCP URL {mcp_url:?} host is not 127.0.0.1; only the IPv4 loopback \
+                 address is accepted (matches mcp_loopback_network_policy); refusing \
+                 non-hermetic egress"
+            )
+            .into());
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            // Disable automatic redirect-following so a mock 3xx cannot redirect
+            // the client off loopback. The start_with(mcp_url) hermetic guard only
+            // checks the first request URL; a followed redirect to an external host
+            // would bypass it entirely.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| format!("failed to build reqwest client for mock MCP egress: {e}"))?;
+        Ok(Self {
+            mcp_url: mcp_url.to_string(),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for LoopbackMcpRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        // Hermetic guard: only route to the configured loopback mock endpoint.
+        if !request.url.starts_with(&self.mcp_url) {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: format!(
+                    "loopback MCP egress: URL {:?} is outside allowed mock endpoint {:?}",
+                    request.url, self.mcp_url,
+                ),
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+        }
+        let request_bytes = request.body.len() as u64;
+        let method = match request.method {
+            NetworkMethod::Get => reqwest::Method::GET,
+            NetworkMethod::Post => reqwest::Method::POST,
+            NetworkMethod::Put => reqwest::Method::PUT,
+            NetworkMethod::Patch => reqwest::Method::PATCH,
+            NetworkMethod::Delete => reqwest::Method::DELETE,
+            NetworkMethod::Head => reqwest::Method::HEAD,
+        };
+        let mut builder = self.client.request(method, &request.url);
+        for (name, value) in &request.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        // The mock server requires a non-empty Bearer token on every request.
+        // Inject a fixed test token since there is no credential-staging
+        // pipeline in this test-only egress path.
+        builder = builder.header("authorization", "Bearer mock-mcp-test-token");
+        if !request.body.is_empty() {
+            builder = builder.body(request.body.clone());
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| RuntimeHttpEgressError::Network {
+                reason: e.to_string(),
+                request_bytes,
+                response_bytes: 0,
+            })?;
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| RuntimeHttpEgressError::Network {
+                reason: e.to_string(),
+                request_bytes,
+                response_bytes: 0,
+            })?;
+        let response_bytes = body.len() as u64;
+        Ok(RuntimeHttpEgressResponse {
+            status,
+            headers,
+            body: body.to_vec(),
+            saved_body: None,
+            request_bytes,
+            response_bytes,
+            redaction_applied: false,
         })
     }
 }
@@ -3681,32 +4183,14 @@ pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
-    let owner_user_id = binding
-        .subject_user_id
-        .as_ref()
-        .unwrap_or(&binding.actor_user_id);
     // Include agent_id and project_id in the path when present so that
     // distinct agents or projects stored under the same tenant/user
     // (e.g. shared-storage multi-harness tests) get isolated turn state
     // files and cannot cross-claim each other's queued runs.
-    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
-        (Some(agent_id), Some(project_id)) => format!(
-            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, agent_id, project_id, owner_user_id
-        ),
-        (Some(agent_id), None) => format!(
-            "/engine/tenants/{}/agents/{}/users/{}/turns",
-            binding.tenant_id, agent_id, owner_user_id
-        ),
-        (None, Some(project_id)) => format!(
-            "/engine/tenants/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, project_id, owner_user_id
-        ),
-        (None, None) => format!(
-            "/engine/tenants/{}/users/{}/turns",
-            binding.tenant_id, owner_user_id
-        ),
-    };
+    // The 4-arm match lives in `super::filesystem::turns_scope_path`; the
+    // integration tier reuses it with a different prefix via
+    // `scoped_turns_fs_composite` in builder.rs.
+    let target = super::filesystem::turns_scope_path("/engine", binding);
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),

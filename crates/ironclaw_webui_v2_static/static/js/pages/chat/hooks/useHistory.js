@@ -57,6 +57,17 @@ export function useHistory(threadId, options = {}) {
     // silently swallowed.
     loadError: null,
   });
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
+  if (stateThreadId !== threadId) {
+    const entry = threadId ? historyCache.get(cacheKey(threadId)) : null;
+    setStateThreadId(threadId);
+    setState({
+      messages: entry?.messages || [],
+      nextCursor: entry?.nextCursor || null,
+      isLoading: Boolean(threadId) && !entry,
+      loadError: null,
+    });
+  }
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
   // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
   // refetch can fire in the same tick). It must be per-thread, not a single

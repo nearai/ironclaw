@@ -22,6 +22,9 @@ exclude = [
     "crates/ironclaw_safety/fuzz",
 ]
 
+[workspace.package]
+rust-version = "1.96"
+
 # Maintainability guardrails against dead/speculative public API
 # (the "Theme 1" anti-pattern from the maintainability audit: accessors,
 # `_dyn` variants, and getters with zero callers that needlessly expand the
@@ -42,7 +45,7 @@ dead_code = "warn"
 name = "ironclaw"
 version = "0.29.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -180,13 +183,10 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution.
-# Floor 44.0.3: minimum patch containing the fix for RUSTSEC-2026-0182
-# (leak in the WASIp1 `fd_renumber` implementation). Also retains the
-# fix for RUSTSEC-2026-0149 (path_open(TRUNCATE) bypassing
-# FilePerms::WRITE), first available in 44.0.2; 43.x is end-of-life for
-# these advisories.
-wasmtime = { version = "44.0.3", features = ["component-model"] }
-wasmtime-wasi = "44.0.3"  # WASI support for component model
+# Floor 46.0.1: minimum current major patch containing the fixes for the
+# Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
+wasmtime = { version = "46.0.1", features = ["component-model"] }
+wasmtime-wasi = "46.0.1"  # WASI support for component model
 wasmparser = "0.250.0"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -271,6 +271,7 @@ ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
@@ -280,7 +281,7 @@ ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
@@ -289,6 +290,8 @@ ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
+# Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
+rstest = "0.23"
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
@@ -339,6 +342,10 @@ pr3180-ready = []
 # legacy host-workspace path which doesn't consult the substrate.
 # PR 7 must enable this feature in its merge commit.
 pr7-ready = []
+
+[[test]]
+name = "reborn_integration_oauth_refresh"
+required-features = ["libsql"]
 
 [[test]]
 name = "e2e_thread_scheduling"
