@@ -1,6 +1,6 @@
 use super::turn_events::{
     FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
-    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation, failure_explanation_user_prompt,
 };
 use super::*;
 
