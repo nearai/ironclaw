@@ -197,6 +197,22 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 4)]
     pub(crate) context_growth_turns_per_operation: usize,
 
+    /// Synthetic tool calls written per tool-session turn.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) tool_calls_per_turn: usize,
+
+    /// Synthetic latency per tool call in tool-session.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) tool_latency_ms: u64,
+
+    /// Bytes written into each synthetic capability preview output.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) tool_output_bytes: usize,
+
+    /// Every Nth synthetic tool result is recorded as failed. Set to 0 to disable.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) tool_failure_every: usize,
+
     /// Emit structured stderr spans for failed user-turn operations.
     #[arg(long, default_value_t = false)]
     pub(crate) span_log_failures: bool,
@@ -342,6 +358,7 @@ pub(crate) enum Scenario {
     ChatTurn,
     MixedUserSession,
     ContextGrowth,
+    ToolSession,
     CpuBurn,
     MemoryChurn,
 }
@@ -354,6 +371,7 @@ impl Scenario {
             Self::ChatTurn => "chat-turn",
             Self::MixedUserSession => "mixed-user-session",
             Self::ContextGrowth => "context-growth",
+            Self::ToolSession => "tool-session",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
         }
@@ -366,7 +384,7 @@ impl Scenario {
     pub(crate) fn is_user_turn(self) -> bool {
         matches!(
             self,
-            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth
+            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth | Self::ToolSession
         )
     }
 
@@ -411,6 +429,10 @@ struct RunSummary {
     assistant_message_bytes: usize,
     context_max_messages: usize,
     context_growth_turns_per_operation: usize,
+    tool_calls_per_turn: usize,
+    tool_latency_ms: u64,
+    tool_output_bytes: usize,
+    tool_failure_every: usize,
     attempted: u64,
     succeeded: u64,
     failed: u64,
@@ -551,6 +573,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.context_growth_turns_per_operation == 0 {
         return Err("--context-growth-turns-per-operation must be greater than 0".to_string());
     }
+    if args.tool_calls_per_turn == 0 {
+        return Err("--tool-calls-per-turn must be greater than 0".to_string());
+    }
+    if args.tool_output_bytes > 16 * 1024 {
+        return Err("--tool-output-bytes must be at most 16384".to_string());
+    }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
             "--scenario {} requires --processes 1",
@@ -644,6 +672,14 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.context_max_messages.to_string())
             .arg("--context-growth-turns-per-operation")
             .arg(args.context_growth_turns_per_operation.to_string())
+            .arg("--tool-calls-per-turn")
+            .arg(args.tool_calls_per_turn.to_string())
+            .arg("--tool-latency-ms")
+            .arg(args.tool_latency_ms.to_string())
+            .arg("--tool-output-bytes")
+            .arg(args.tool_output_bytes.to_string())
+            .arg("--tool-failure-every")
+            .arg(args.tool_failure_every.to_string())
             .arg("--slow-span-threshold-ms")
             .arg(args.slow_span_threshold_ms.to_string())
             .arg("--span-sample-limit")
@@ -1067,7 +1103,7 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
-        Scenario::ChatTurn | Scenario::ContextGrowth => {
+        Scenario::ChatTurn | Scenario::ContextGrowth | Scenario::ToolSession => {
             unreachable!("user-turn scenarios use the async user-turn workload")
         }
         Scenario::MixedUserSession => {
@@ -1138,6 +1174,10 @@ fn summarize(
         assistant_message_bytes: args.assistant_message_bytes,
         context_max_messages: args.context_max_messages,
         context_growth_turns_per_operation: args.context_growth_turns_per_operation,
+        tool_calls_per_turn: args.tool_calls_per_turn,
+        tool_latency_ms: args.tool_latency_ms,
+        tool_output_bytes: args.tool_output_bytes,
+        tool_failure_every: args.tool_failure_every,
         attempted,
         succeeded,
         failed,

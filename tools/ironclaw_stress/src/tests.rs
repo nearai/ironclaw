@@ -82,6 +82,17 @@ fn context_growth_rejects_multi_process_runs() {
 }
 
 #[test]
+fn tool_session_rejects_multi_process_runs() {
+    let mut args = test_args();
+    args.scenario = Scenario::ToolSession;
+    args.processes = 2;
+
+    let error = validate_args(&args).expect_err("tool-session is single-process only");
+
+    assert!(error.contains("--scenario tool-session requires --processes 1"));
+}
+
+#[test]
 fn context_growth_rejects_zero_turns_per_operation() {
     let mut args = test_args();
     args.context_growth_turns_per_operation = 0;
@@ -89,6 +100,26 @@ fn context_growth_rejects_zero_turns_per_operation() {
     let error = validate_args(&args).expect_err("zero context growth turns is invalid");
 
     assert!(error.contains("--context-growth-turns-per-operation"));
+}
+
+#[test]
+fn tool_session_rejects_zero_tool_calls() {
+    let mut args = test_args();
+    args.tool_calls_per_turn = 0;
+
+    let error = validate_args(&args).expect_err("zero tool calls are invalid");
+
+    assert!(error.contains("--tool-calls-per-turn"));
+}
+
+#[test]
+fn tool_session_rejects_oversized_preview_output() {
+    let mut args = test_args();
+    args.tool_output_bytes = 16 * 1024 + 1;
+
+    let error = validate_args(&args).expect_err("oversized tool preview is invalid");
+
+    assert!(error.contains("--tool-output-bytes"));
 }
 
 #[test]
@@ -203,6 +234,17 @@ fn tail_spike_model_latency_spikes_every_nth_operation() {
 }
 
 #[test]
+fn synthetic_tool_failure_cadence_is_deterministic() {
+    let mut args = test_args();
+    args.operations = 10;
+    args.tool_calls_per_turn = 3;
+    args.tool_failure_every = 4;
+
+    assert!(!user_turn::synthetic_tool_failed(&args, 0, 0, 0));
+    assert!(user_turn::synthetic_tool_failed(&args, 0, 1, 0));
+}
+
+#[test]
 fn failure_causes_are_grouped_by_bucket_and_stage() {
     let samples = vec![
         Sample {
@@ -275,6 +317,10 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         assistant_message_bytes: 0,
         context_max_messages: 20,
         context_growth_turns_per_operation: 4,
+        tool_calls_per_turn: 2,
+        tool_latency_ms: 0,
+        tool_output_bytes: 1024,
+        tool_failure_every: 0,
         attempted: 1,
         succeeded: 0,
         failed: 1,
@@ -296,6 +342,10 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
             load_context: empty_stage(),
             resource_reserve: stage(1, 3_000),
             model_wait: stage(1, 1_000_000),
+            tool_wait: stage(1, 4_000),
+            append_tool_result: stage(1, 5_000),
+            append_tool_preview: stage(1, 6_000),
+            update_assistant_draft: stage(1, 7_000),
             resource_reconcile: empty_stage(),
             resource_release: empty_stage(),
         }),
@@ -309,6 +359,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
     assert!(rendered.contains("submit_turn"));
     assert!(rendered.contains("resource_reserve"));
     assert!(rendered.contains("model_wait"));
+    assert!(rendered.contains("append_tool_result"));
     assert!(rendered.contains("DB probe"));
     assert!(rendered.contains("libsql_file"));
     assert!(rendered.contains("Failure causes"));
@@ -351,6 +402,10 @@ fn test_args() -> Args {
         assistant_message_bytes: 0,
         context_max_messages: 20,
         context_growth_turns_per_operation: 4,
+        tool_calls_per_turn: 2,
+        tool_latency_ms: 0,
+        tool_output_bytes: 1024,
+        tool_failure_every: 0,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,

@@ -84,6 +84,10 @@ pub(crate) fn summarize_user_turn_stages(
         load_context: summarize_stage(&stages, |stage| stage.load_context),
         resource_reserve: summarize_stage(&stages, |stage| stage.resource_reserve),
         model_wait: summarize_stage(&stages, |stage| stage.model_wait),
+        tool_wait: summarize_stage(&stages, |stage| stage.tool_wait),
+        append_tool_result: summarize_stage(&stages, |stage| stage.append_tool_result),
+        append_tool_preview: summarize_stage(&stages, |stage| stage.append_tool_preview),
+        update_assistant_draft: summarize_stage(&stages, |stage| stage.update_assistant_draft),
         resource_reconcile: summarize_stage(&stages, |stage| stage.resource_reconcile),
         resource_release: summarize_stage(&stages, |stage| stage.resource_release),
     })

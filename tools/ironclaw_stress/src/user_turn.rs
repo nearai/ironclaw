@@ -10,14 +10,17 @@ use std::{
 use chrono::Utc;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceReservation,
-    ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
+    CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+    ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent, SessionThreadError,
-    SessionThreadService,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, EnsureThreadRequest, FilesystemSessionThreadService,
+    LoadContextWindowRequest, MessageContent, SessionThreadError, SessionThreadService,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
@@ -74,6 +77,10 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) load_context: StageLatencySummary,
     pub(crate) resource_reserve: StageLatencySummary,
     pub(crate) model_wait: StageLatencySummary,
+    pub(crate) tool_wait: StageLatencySummary,
+    pub(crate) append_tool_result: StageLatencySummary,
+    pub(crate) append_tool_preview: StageLatencySummary,
+    pub(crate) update_assistant_draft: StageLatencySummary,
     pub(crate) resource_reconcile: StageLatencySummary,
     pub(crate) resource_release: StageLatencySummary,
 }
@@ -92,6 +99,10 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) load_context: Option<Duration>,
     pub(crate) resource_reserve: Option<Duration>,
     pub(crate) model_wait: Option<Duration>,
+    pub(crate) tool_wait: Option<Duration>,
+    pub(crate) append_tool_result: Option<Duration>,
+    pub(crate) append_tool_preview: Option<Duration>,
+    pub(crate) update_assistant_draft: Option<Duration>,
     pub(crate) resource_reconcile: Option<Duration>,
     pub(crate) resource_release: Option<Duration>,
 }
@@ -522,6 +533,57 @@ where
                     reconcile_resources(Arc::clone(&self.governor), reservation.id),
                 )
                 .await?;
+            } else if matches!(args.scenario, Scenario::ToolSession) {
+                time_stage(
+                    &mut stages.load_context,
+                    self.thread_service
+                        .load_context_window(LoadContextWindowRequest {
+                            scope: context.thread_scope.clone(),
+                            thread_id: thread.thread_id.clone(),
+                            max_messages: args.context_max_messages,
+                        }),
+                )
+                .await
+                .map_err(|error| thread_failure("load_context", error))?;
+
+                let reservation = time_stage(
+                    &mut stages.resource_reserve,
+                    reserve_resources(
+                        Arc::clone(&self.governor),
+                        context.turn_scope.to_resource_scope(),
+                    ),
+                )
+                .await?;
+
+                let execution = self
+                    .write_tool_session_turn(
+                        args,
+                        &context,
+                        &thread.thread_id,
+                        &turn_store,
+                        &claimed,
+                        &assistant_message,
+                        &operation_ref,
+                        worker_index,
+                        operation_index,
+                        stages,
+                    )
+                    .await;
+
+                if let Err(error) = execution {
+                    let _ = time_stage(
+                        &mut stages.resource_release,
+                        release_resources(Arc::clone(&self.governor), reservation.id),
+                    )
+                    .await;
+                    return Err(error);
+                }
+
+                time_stage(
+                    &mut stages.resource_reconcile,
+                    reconcile_resources(Arc::clone(&self.governor), reservation.id),
+                )
+                .await?;
             } else {
                 self.write_assistant_turn(
                     &context,
@@ -546,6 +608,136 @@ where
                 .map_err(|error| thread_failure("load_context", error))?;
             }
         }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn write_tool_session_turn(
+        &self,
+        args: &Args,
+        context: &crate::synthetic::UserTurnContext,
+        thread_id: &ThreadId,
+        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        claimed: &ClaimedTurnRun,
+        assistant_message: &str,
+        operation_ref: &str,
+        worker_index: usize,
+        operation_index: usize,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let mut draft_text = stress_payload(
+            format!(
+                "stress tool session {operation_ref} starting {} tool calls",
+                args.tool_calls_per_turn
+            ),
+            args.assistant_message_bytes,
+        );
+        let draft = time_stage(
+            &mut stages.append_assistant,
+            self.thread_service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: context.thread_scope.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_run_id: claimed.state.run_id.to_string(),
+                    content: MessageContent::text(draft_text.clone()),
+                }),
+        )
+        .await
+        .map_err(|error| thread_failure("append_assistant", error))?;
+
+        for tool_index in 0..args.tool_calls_per_turn {
+            time_stage(
+                &mut stages.tool_wait,
+                synthetic_tool_wait(args.tool_latency_ms),
+            )
+            .await;
+
+            let failed = synthetic_tool_failed(args, worker_index, operation_index, tool_index);
+            let result_ref = tool_result_ref(args, worker_index, operation_index, tool_index);
+            let safe_summary = if failed {
+                ToolResultSafeSummary::new("tool failed")
+            } else {
+                ToolResultSafeSummary::new("tool completed")
+            }
+            .map_err(|error| OperationFailure::invalid_request("append_tool_result", error))?;
+
+            time_stage(
+                &mut stages.append_tool_result,
+                self.thread_service.append_tool_result_reference(
+                    AppendToolResultReferenceRequest {
+                        scope: context.thread_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: claimed.state.run_id.to_string(),
+                        result_ref: result_ref.clone(),
+                        safe_summary,
+                        provider_call: None,
+                        model_observation: None,
+                    },
+                ),
+            )
+            .await
+            .map_err(|error| thread_failure("append_tool_result", error))?;
+
+            time_stage(
+                &mut stages.append_tool_preview,
+                self.thread_service.append_capability_display_preview(
+                    AppendCapabilityDisplayPreviewRequest {
+                        scope: context.thread_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: claimed.state.run_id.to_string(),
+                        preview: tool_preview(args, &result_ref, failed, tool_index)?,
+                    },
+                ),
+            )
+            .await
+            .map_err(|error| thread_failure("append_tool_preview", error))?;
+
+            let status = if failed { "failed" } else { "completed" };
+            draft_text.push_str(&format!("\ntool {tool_index} {status}: {result_ref}"));
+            draft_text = stress_payload(draft_text, args.assistant_message_bytes);
+            time_stage(
+                &mut stages.update_assistant_draft,
+                self.thread_service
+                    .update_assistant_draft(UpdateAssistantDraftRequest {
+                        scope: context.thread_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        message_id: draft.message_id,
+                        content: MessageContent::text(draft_text.clone()),
+                    }),
+            )
+            .await
+            .map_err(|error| thread_failure("update_assistant_draft", error))?;
+        }
+
+        time_stage(
+            &mut stages.finalize_assistant,
+            self.thread_service.finalize_assistant_message(
+                &context.thread_scope,
+                thread_id,
+                draft.message_id,
+                MessageContent::text(stress_payload(
+                    format!(
+                        "{assistant_message}\ncompleted {} synthetic tool calls",
+                        args.tool_calls_per_turn
+                    ),
+                    args.assistant_message_bytes,
+                )),
+            ),
+        )
+        .await
+        .map_err(|error| thread_failure("finalize_assistant", error))?;
+
+        time_stage(
+            &mut stages.complete_run,
+            turn_store.complete_run(CompleteRunRequest {
+                run_id: claimed.state.run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("complete_run", error))?;
 
         Ok(())
     }
@@ -717,6 +909,12 @@ async fn synthetic_model_wait(args: &Args, worker_index: usize, operation_index:
     }
 }
 
+async fn synthetic_tool_wait(wait_ms: u64) {
+    if wait_ms > 0 {
+        sleep(Duration::from_millis(wait_ms)).await;
+    }
+}
+
 pub(crate) fn synthetic_model_wait_ms(
     args: &Args,
     worker_index: usize,
@@ -755,6 +953,31 @@ pub(crate) fn synthetic_model_wait_ms(
     }
 }
 
+pub(crate) fn synthetic_tool_failed(
+    args: &Args,
+    worker_index: usize,
+    operation_index: usize,
+    tool_index: usize,
+) -> bool {
+    if args.tool_failure_every == 0 {
+        return false;
+    }
+    let operation_sequence = if args.uses_duration_mode() {
+        operation_index
+            .saturating_mul(args.concurrency)
+            .saturating_add(worker_index)
+    } else {
+        worker_index
+            .saturating_mul(args.operations)
+            .saturating_add(operation_index)
+    };
+    let tool_sequence = operation_sequence
+        .saturating_mul(args.tool_calls_per_turn)
+        .saturating_add(tool_index)
+        .saturating_add(1);
+    tool_sequence.is_multiple_of(args.tool_failure_every)
+}
+
 fn deterministic_jitter_ms(args: &Args, worker_index: usize, operation_index: usize) -> u64 {
     if args.model_latency_jitter_ms == 0 {
         return 0;
@@ -773,6 +996,63 @@ fn deterministic_jitter_ms(args: &Args, worker_index: usize, operation_index: us
     value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
     value ^= value >> 33;
     value % (args.model_latency_jitter_ms + 1)
+}
+
+fn tool_result_ref(
+    args: &Args,
+    worker_index: usize,
+    operation_index: usize,
+    tool_index: usize,
+) -> String {
+    let phase = if args.warmup_phase { "-warmup" } else { "" };
+    format!(
+        "result:stress-child-{}{}-worker-{worker_index}-op-{operation_index}-tool-{tool_index}",
+        args.child_index.unwrap_or(0),
+        phase
+    )
+}
+
+fn tool_preview(
+    args: &Args,
+    result_ref: &str,
+    failed: bool,
+    tool_index: usize,
+) -> Result<CapabilityDisplayPreviewEnvelope, OperationFailure> {
+    let status = if failed {
+        CapabilityDisplayPreviewStatus::Failed
+    } else {
+        CapabilityDisplayPreviewStatus::Completed
+    };
+    let output_preview = stress_payload(
+        format!("synthetic tool output {result_ref}"),
+        args.tool_output_bytes,
+    );
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id: InvocationId::new(),
+        capability_id: CapabilityId::new("ironclaw_stress.synthetic_tool")
+            .map_err(|error| OperationFailure::invalid_request("append_tool_preview", error))?,
+        status,
+        title: format!("synthetic tool {tool_index}"),
+        subtitle: Some(if failed {
+            "failed synthetic tool result".to_string()
+        } else {
+            "completed synthetic tool result".to_string()
+        }),
+        input_summary: Some("synthetic bounded tool input".to_string()),
+        output_summary: Some(if failed {
+            "synthetic tool failed".to_string()
+        } else {
+            "synthetic tool completed".to_string()
+        }),
+        output_preview: Some(output_preview),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(args.tool_output_bytes as u64),
+        result_ref: Some(result_ref.to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+        activity_order: Some(tool_index as u64),
+    })
+    .map_err(|error| OperationFailure::invalid_request("append_tool_preview", error))
 }
 
 fn stress_payload(mut base: String, minimum_bytes: usize) -> String {
@@ -866,6 +1146,18 @@ fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
     insert_stage_latency(&mut output, "load_context", stages.load_context);
     insert_stage_latency(&mut output, "resource_reserve", stages.resource_reserve);
     insert_stage_latency(&mut output, "model_wait", stages.model_wait);
+    insert_stage_latency(&mut output, "tool_wait", stages.tool_wait);
+    insert_stage_latency(&mut output, "append_tool_result", stages.append_tool_result);
+    insert_stage_latency(
+        &mut output,
+        "append_tool_preview",
+        stages.append_tool_preview,
+    );
+    insert_stage_latency(
+        &mut output,
+        "update_assistant_draft",
+        stages.update_assistant_draft,
+    );
     insert_stage_latency(&mut output, "resource_reconcile", stages.resource_reconcile);
     insert_stage_latency(&mut output, "resource_release", stages.resource_release);
     serde_json::Value::Object(output)

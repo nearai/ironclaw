@@ -60,6 +60,7 @@ fn scenario_stage(scenario: Scenario) -> &'static str {
         Scenario::ChatTurn => "chat_turn",
         Scenario::MixedUserSession => "mixed_user_session",
         Scenario::ContextGrowth => "context_growth",
+        Scenario::ToolSession => "tool_session",
         Scenario::CpuBurn => "cpu_burn",
         Scenario::MemoryChurn => "memory_churn",
     }
