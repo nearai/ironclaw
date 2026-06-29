@@ -23,13 +23,14 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
-        LoopSafeSummary, ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
+        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde_json::Value;
@@ -1852,9 +1853,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
                         && is_provider_tool_call_input_ref(effective_input_ref) =>
                 {
+                    let host_error = *error.error;
                     let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
                         error_kind: CapabilityFailureKind::InvalidInput,
-                        safe_summary: error.error.safe_summary,
+                        safe_summary: host_error.safe_summary,
                         detail: error.detail,
                     }));
                     guard.commit();
@@ -1865,7 +1867,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     )?;
                     return result;
                 }
-                Err(error) => return Err(error.error),
+                Err(error) => return Err(*error.error),
             };
             let runtime_input = match host_runtime_input_for_capability(
                 &request.capability_id,
@@ -2756,10 +2758,28 @@ fn runtime_failure_to_loop(
                     &failure,
                     "capability invocation failed",
                 ),
-                detail: None,
+                detail: runtime_failure_diagnostic_detail(&failure),
             }))
         }
     }
+}
+
+/// Build a model-visible, secret-scrubbed diagnostic from a runtime failure's
+/// raw message when the failure has no structured detail. This preserves the
+/// real cause (paths, schema refs, codes) that the strict safe-summary
+/// validator drops — only secret VALUES are redacted.
+fn runtime_failure_diagnostic_detail(
+    failure: &RuntimeCapabilityFailure,
+) -> Option<CapabilityFailureDetail> {
+    if failure.detail.is_some() {
+        return None;
+    }
+    let raw = failure.safe_summary()?;
+    let scrubbed = sanitize_model_visible_text(raw);
+    if scrubbed.trim().is_empty() {
+        return None;
+    }
+    Some(CapabilityFailureDetail::Diagnostic { text: scrubbed })
 }
 
 fn runtime_model_visible_failure_to_loop(
@@ -2775,10 +2795,16 @@ fn runtime_model_visible_failure_to_loop(
         }));
     }
 
+    let error_kind = model_visible_runtime_failure_kind_to_loop(failure.kind)?;
+    let safe_summary = runtime_failure_safe_summary(&failure, "capability invocation failed");
+    let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
+        Some(structured) => Some(structured),
+        None => runtime_failure_diagnostic_detail(&failure),
+    };
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
-        safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
-        detail: runtime_failure_detail_to_loop(failure.detail),
+        error_kind,
+        safe_summary,
+        detail,
     }))
 }
 
@@ -3413,6 +3439,60 @@ mod tests {
                 if failure.error_kind == CapabilityFailureKind::MissingRuntime
                     && failure.safe_summary == "tool runtime is missing"
         ));
+    }
+
+    #[test]
+    fn runtime_failure_carries_path_bearing_cause_into_model_visible_diagnostic() {
+        // Anchor: a host-runtime capability failure whose reason contains a path
+        // (rejected by the strict safe-summary validator) must NOT be collapsed
+        // to the generic fallback — the real cause reaches the model via detail.
+        let capability_id =
+            CapabilityId::new("google-calendar.list_calendars").expect("valid capability id");
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let outcome = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id,
+            RuntimeFailureKind::MissingRuntime,
+            Some(path.to_string()),
+        ))
+        .expect("convert host runtime failure");
+
+        let CapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected a model-visible Failed outcome");
+        };
+        // The summary stays generic (the path tripped the strict validator) ...
+        assert_eq!(failure.safe_summary, "capability invocation failed");
+        // ... but the raw path-bearing cause now rides the diagnostic detail.
+        let Some(CapabilityFailureDetail::Diagnostic { text }) = failure.detail else {
+            panic!("expected a diagnostic detail carrying the raw cause");
+        };
+        assert_eq!(text, path, "the path string must reach the model intact");
+    }
+
+    #[test]
+    fn runtime_failure_diagnostic_redacts_secret_values() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let reason = "auth failed using sk-LIVEsecretvalue while reaching provider";
+        let outcome = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id,
+            RuntimeFailureKind::MissingRuntime,
+            Some(reason.to_string()),
+        ))
+        .expect("convert host runtime failure");
+
+        let CapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected a model-visible Failed outcome");
+        };
+        let Some(CapabilityFailureDetail::Diagnostic { text }) = failure.detail else {
+            panic!("expected a diagnostic detail");
+        };
+        assert!(
+            !text.contains("sk-LIVEsecretvalue"),
+            "secret value must be redacted from the model-visible detail: {text}"
+        );
+        assert!(
+            text.contains("[redacted]"),
+            "redaction marker should be present: {text}"
+        );
     }
 
     #[test]

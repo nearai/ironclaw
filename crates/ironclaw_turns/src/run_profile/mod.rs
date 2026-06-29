@@ -93,10 +93,11 @@ pub use model::{
     NoOpPolicyGuard,
 };
 pub use model_observation::{
-    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRepair,
+    CapabilityRecoveryHint, MODEL_OBSERVATION_DETAIL_MAX_BYTES,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
     ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
-    ToolObservationStatus, ToolRecoveryObservation,
+    ToolObservationStatus, ToolRecoveryObservation, validate_model_observation_detail,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{
