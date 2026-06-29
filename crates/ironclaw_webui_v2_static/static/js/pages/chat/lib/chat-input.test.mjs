@@ -269,10 +269,47 @@ test("ChatInput preserves draft when caller refuses send", async () => {
   await flushAsyncHandlers();
 
   assert.equal(sendCalls, 2);
-  assert.equal(
-    setCalls.some((call) => call.index === 0 && call.value === ""),
-    false,
+  assert.deepEqual(
+    setCalls
+      .filter((call) => call.index === 0)
+      .map((call) => call.value),
+    ["", "draft while busy", "", "draft while busy"],
   );
+});
+
+test("ChatInput clears the textarea as soon as send starts", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "ship it now",
+    onSend: async () =>
+      new Promise(() => {
+        sendCalls += 1;
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  assert.equal(sendCalls, 1);
+  assert.equal(setCalls[0].index, 3);
+  assert.equal(setCalls[0].value, true);
+  assert.equal(setCalls[1].index, 0);
+  assert.equal(setCalls[1].value, "");
+  assert.equal(setCalls[2].index, 1);
+  assert.equal(setCalls[2].value.length, 0);
 });
 
 test("ChatInput keeps Enter blocked when submit becomes disabled during send", async () => {
@@ -305,7 +342,7 @@ test("ChatInput keeps Enter blocked when submit becomes disabled during send", a
 
   // Re-render in production would update submitDisabledRef before the original
   // async send closure reaches finally.
-  const submitDisabledRef = refs[3];
+  const submitDisabledRef = refs[4];
   submitDisabledRef.current = true;
   resolveSend();
   await flushAsyncHandlers();

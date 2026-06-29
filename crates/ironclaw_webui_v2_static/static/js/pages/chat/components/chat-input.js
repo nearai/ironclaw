@@ -39,6 +39,7 @@ export function ChatInput({
   const [isSending, setIsSending] = React.useState(false);
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
+  const textRef = React.useRef(text);
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
@@ -103,7 +104,9 @@ export function ChatInput({
   // and overrides when a location.state draft was passed in, so an
   // explicit hand-off draft still wins over the stored one.
   React.useEffect(() => {
-    setText(getDraft(draftKey));
+    const restored = getDraft(draftKey);
+    textRef.current = restored;
+    setText(restored);
     // Flush any queued write (for the previous key) before this key changes
     // or the composer unmounts, so a debounced draft is never lost.
     return () => flushDraft();
@@ -130,6 +133,7 @@ export function ChatInput({
 
   React.useEffect(() => {
     if (!initialText) return;
+    textRef.current = initialText;
     setText(initialText);
     window.requestAnimationFrame(() => {
       if (textareaRef.current) {
@@ -207,22 +211,40 @@ export function ChatInput({
   const handleSend = React.useCallback(async () => {
     // The v2 send contract requires non-empty content, so attachments
     // ride along with text rather than sending on their own.
-    if (!text.trim() || sendBlockedRef.current) return;
+    const submittedText = text.trim();
+    const submittedAttachments = attachments;
+    if (!submittedText || sendBlockedRef.current) return;
     sendBlockedRef.current = true;
     setIsSending(true);
+    textRef.current = "";
+    setText("");
+    setAttachments([]);
+    attachmentsRef.current = [];
+    setAttachmentError("");
+    cancelPendingDraft();
+    clearDraft(draftKey);
+    clearStagedAttachments(draftKey);
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+    const restoreSubmittedDraft = () => {
+      if (textRef.current === "") {
+        textRef.current = submittedText;
+        setText(submittedText);
+        setDraft(draftKey, submittedText);
+      }
+      if (attachmentsRef.current.length === 0 && submittedAttachments.length > 0) {
+        setAttachments(submittedAttachments);
+        attachmentsRef.current = submittedAttachments;
+        setStagedAttachments(draftKey, submittedAttachments);
+      }
+    };
     try {
-      const response = await onSend(text.trim(), { attachments });
-      if (response === null) return;
-      setText("");
-      setAttachments([]);
-      attachmentsRef.current = [];
-      setAttachmentError("");
-      cancelPendingDraft();
-      clearDraft(draftKey);
-      clearStagedAttachments(draftKey);
-      if (textareaRef.current) textareaRef.current.style.height = "auto";
+      const response = await onSend(submittedText, {
+        attachments: submittedAttachments,
+      });
+      if (response === null) restoreSubmittedDraft();
     } catch {
       // The failed optimistic message renders retry details in the thread.
+      restoreSubmittedDraft();
     } finally {
       sendBlockedRef.current = submitDisabledRef.current;
       setIsSending(false);
@@ -240,6 +262,7 @@ export function ChatInput({
   const handleChange = React.useCallback(
     (e) => {
       const next = e.target.value;
+      textRef.current = next;
       setText(next);
       // Queue a debounced persist instead of writing on every keystroke.
       // Capture the scope so a flush after an identity change is dropped.
