@@ -35,6 +35,10 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
                 summary.trace_interval_seconds.to_string(),
             ),
             ("users", summary.users.to_string()),
+            (
+                "active_thread_count",
+                format_active_thread_count(summary.active_thread_count, summary.users),
+            ),
             ("tenants", summary.tenants.to_string()),
             ("prefill_threads", summary.prefill_threads.to_string()),
             (
@@ -154,6 +158,10 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             (
                 "trace_interval_seconds",
                 args.trace_interval_seconds.to_string(),
+            ),
+            (
+                "active_thread_count",
+                format_active_thread_count(args.active_thread_count, args.users),
             ),
             ("prefill_threads", args.prefill_threads.to_string()),
             (
@@ -551,6 +559,14 @@ fn format_duration_ms(ms: u128) -> String {
         format!("{:.2}s", ms as f64 / 1_000.0)
     } else {
         format!("{ms}ms")
+    }
+}
+
+fn format_active_thread_count(active_thread_count: usize, users: usize) -> String {
+    if active_thread_count == 0 {
+        format!("per-user ({users})")
+    } else {
+        active_thread_count.to_string()
     }
 }
 

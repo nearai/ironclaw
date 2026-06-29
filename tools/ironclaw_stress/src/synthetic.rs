@@ -15,6 +15,7 @@ pub(crate) struct SyntheticIds {
 
 pub(crate) struct UserTurnContext {
     pub(crate) user_id: UserId,
+    pub(crate) thread_owner_user_id: UserId,
     pub(crate) thread_id: ThreadId,
     pub(crate) thread_scope: ThreadScope,
     pub(crate) turn_scope: TurnScope,
@@ -81,30 +82,47 @@ impl SyntheticIds {
         worker_index: usize,
         operation_index: usize,
     ) -> Result<UserTurnContext, String> {
-        let (_, user_index, _) = self.synthetic_indexes(args, worker_index, operation_index);
-        self.user_turn_context_for_user_index(user_index)
+        let (_, user_index, global_index) =
+            self.synthetic_indexes(args, worker_index, operation_index);
+        let thread_user_index = self.thread_user_index(args, user_index, global_index);
+        self.user_turn_context_for_indexes(user_index, thread_user_index)
     }
 
     pub(crate) fn user_turn_context_for_user_index(
         &self,
         user_index: usize,
     ) -> Result<UserTurnContext, String> {
-        if user_index >= self.users.len() {
+        self.user_turn_context_for_indexes(user_index, user_index)
+    }
+
+    fn user_turn_context_for_indexes(
+        &self,
+        actor_user_index: usize,
+        thread_user_index: usize,
+    ) -> Result<UserTurnContext, String> {
+        if actor_user_index >= self.users.len() {
             return Err(format!(
-                "synthetic user index {user_index} out of range for {} users",
+                "synthetic actor user index {actor_user_index} out of range for {} users",
                 self.users.len()
             ));
         }
-        let tenant_index = user_index % self.tenants.len();
+        if thread_user_index >= self.users.len() {
+            return Err(format!(
+                "synthetic thread user index {thread_user_index} out of range for {} users",
+                self.users.len()
+            ));
+        }
+        let tenant_index = thread_user_index % self.tenants.len();
         let tenant_id = self.tenants[tenant_index].clone();
-        let user_id = self.users[user_index].clone();
-        let thread_id = ThreadId::new(format!("thread-{tenant_index:04}-{user_index:06}"))
+        let user_id = self.users[actor_user_index].clone();
+        let thread_owner_user_id = self.users[thread_user_index].clone();
+        let thread_id = ThreadId::new(format!("thread-{tenant_index:04}-{thread_user_index:06}"))
             .map_err(|error| error.to_string())?;
         let thread_scope = ThreadScope {
             tenant_id: tenant_id.clone(),
             agent_id: self.agent_id.clone(),
             project_id: Some(self.project_id.clone()),
-            owner_user_id: Some(user_id.clone()),
+            owner_user_id: Some(thread_owner_user_id.clone()),
             mission_id: None,
         };
         let turn_scope = TurnScope::new_with_owner(
@@ -112,14 +130,23 @@ impl SyntheticIds {
             Some(self.agent_id.clone()),
             Some(self.project_id.clone()),
             thread_id.clone(),
-            Some(user_id.clone()),
+            Some(thread_owner_user_id.clone()),
         );
         Ok(UserTurnContext {
             user_id,
+            thread_owner_user_id,
             thread_id,
             thread_scope,
             turn_scope,
         })
+    }
+
+    fn thread_user_index(&self, args: &Args, user_index: usize, global_index: usize) -> usize {
+        if args.active_thread_count == 0 {
+            user_index
+        } else {
+            global_index % args.active_thread_count
+        }
     }
 
     fn synthetic_indexes(

@@ -37,6 +37,7 @@ struct SweepCase {
     repetition: usize,
     concurrency: usize,
     users: usize,
+    active_thread_count: usize,
     model_latency_ms: u64,
     user_message_bytes: usize,
     assistant_message_bytes: usize,
@@ -57,6 +58,7 @@ struct SweepResult {
 pub(crate) fn is_enabled(args: &Args) -> bool {
     !args.sweep_concurrency.is_empty()
         || !args.sweep_users.is_empty()
+        || !args.sweep_active_thread_count.is_empty()
         || !args.sweep_model_latency_ms.is_empty()
         || !args.sweep_user_message_bytes.is_empty()
         || !args.sweep_assistant_message_bytes.is_empty()
@@ -91,10 +93,11 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
 
     for case in cases {
         let run_id = format!(
-            "{suite_run_id}-r{}-c{}-u{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
+            "{suite_run_id}-r{}-c{}-u{}-at{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
             case.repetition,
             case.concurrency,
             case.users,
+            case.active_thread_count,
             case.model_latency_ms,
             case.user_message_bytes,
             case.assistant_message_bytes,
@@ -104,10 +107,11 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             case.tool_output_bytes
         );
         let label = format!(
-            "r{} c{} u{} m{} ub{} ab{} ctx{} cg{} tc{} tb{}",
+            "r{} c{} u{} at{} m{} ub{} ab{} ctx{} cg{} tc{} tb{}",
             case.repetition,
             case.concurrency,
             case.users,
+            case.active_thread_count,
             case.model_latency_ms,
             case.user_message_bytes,
             case.assistant_message_bytes,
@@ -119,6 +123,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         let mut case_args = args.clone();
         case_args.concurrency = case.concurrency;
         case_args.users = case.users;
+        case_args.active_thread_count = case.active_thread_count;
         case_args.model_latency_ms = case.model_latency_ms;
         case_args.user_message_bytes = case.user_message_bytes;
         case_args.assistant_message_bytes = case.assistant_message_bytes;
@@ -130,6 +135,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         case_args.repetitions = 1;
         case_args.sweep_concurrency.clear();
         case_args.sweep_users.clear();
+        case_args.sweep_active_thread_count.clear();
         case_args.sweep_model_latency_ms.clear();
         case_args.sweep_user_message_bytes.clear();
         case_args.sweep_assistant_message_bytes.clear();
@@ -140,10 +146,11 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         case_args.output_jsonl = None;
         if let Some(trace_jsonl) = &args.trace_jsonl {
             let trace_label = format!(
-                "sweep-r{}-c{}-u{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
+                "sweep-r{}-c{}-u{}-at{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
                 case.repetition,
                 case.concurrency,
                 case.users,
+                case.active_thread_count,
                 case.model_latency_ms,
                 case.user_message_bytes,
                 case.assistant_message_bytes,
@@ -178,6 +185,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "processes": case_args.processes,
             "concurrency": case.concurrency,
             "users": case.users,
+            "active_thread_count": case.active_thread_count,
             "tenants": case_args.tenants,
             "operations_per_thread": case_args.operations,
             "duration_seconds": case_args.duration_seconds,
@@ -313,6 +321,11 @@ fn build_cases(args: &Args) -> Vec<SweepCase> {
     } else {
         args.sweep_users.clone()
     };
+    let active_thread_count_values = if args.sweep_active_thread_count.is_empty() {
+        vec![args.active_thread_count]
+    } else {
+        args.sweep_active_thread_count.clone()
+    };
     let model_latency_values = if args.sweep_model_latency_ms.is_empty() {
         vec![args.model_latency_ms]
     } else {
@@ -353,28 +366,32 @@ fn build_cases(args: &Args) -> Vec<SweepCase> {
     for repetition in 1..=args.repetitions {
         for concurrency in &concurrency_values {
             for users in &user_values {
-                for model_latency_ms in &model_latency_values {
-                    for user_message_bytes in &user_message_byte_values {
-                        for assistant_message_bytes in &assistant_message_byte_values {
-                            for context_max_messages in &context_max_message_values {
-                                for context_growth_turns_per_operation in
-                                    &context_growth_turn_values
-                                {
-                                    for tool_calls_per_turn in &tool_calls_per_turn_values {
-                                        for tool_output_bytes in &tool_output_byte_values {
-                                            cases.push(SweepCase {
-                                                repetition,
-                                                concurrency: *concurrency,
-                                                users: *users,
-                                                model_latency_ms: *model_latency_ms,
-                                                user_message_bytes: *user_message_bytes,
-                                                assistant_message_bytes: *assistant_message_bytes,
-                                                context_max_messages: *context_max_messages,
-                                                context_growth_turns_per_operation:
-                                                    *context_growth_turns_per_operation,
-                                                tool_calls_per_turn: *tool_calls_per_turn,
-                                                tool_output_bytes: *tool_output_bytes,
-                                            });
+                for active_thread_count in &active_thread_count_values {
+                    for model_latency_ms in &model_latency_values {
+                        for user_message_bytes in &user_message_byte_values {
+                            for assistant_message_bytes in &assistant_message_byte_values {
+                                for context_max_messages in &context_max_message_values {
+                                    for context_growth_turns_per_operation in
+                                        &context_growth_turn_values
+                                    {
+                                        for tool_calls_per_turn in &tool_calls_per_turn_values {
+                                            for tool_output_bytes in &tool_output_byte_values {
+                                                cases.push(SweepCase {
+                                                    repetition,
+                                                    concurrency: *concurrency,
+                                                    users: *users,
+                                                    active_thread_count: *active_thread_count,
+                                                    model_latency_ms: *model_latency_ms,
+                                                    user_message_bytes: *user_message_bytes,
+                                                    assistant_message_bytes:
+                                                        *assistant_message_bytes,
+                                                    context_max_messages: *context_max_messages,
+                                                    context_growth_turns_per_operation:
+                                                        *context_growth_turns_per_operation,
+                                                    tool_calls_per_turn: *tool_calls_per_turn,
+                                                    tool_output_bytes: *tool_output_bytes,
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -393,11 +410,12 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
     let _ = writeln!(output, "\nSweep summary");
     let _ = writeln!(
         output,
-        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "{:<18} {:<8} {:>5} {:>6} {:>5} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "label",
         "run",
         "conc",
         "users",
+        "thr",
         "model",
         "uB",
         "aB",
@@ -416,18 +434,19 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
     );
     let _ = writeln!(
         output,
-        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->6} {:->6} {:->5} {:->5} {:->5} {:->6} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:->10}",
-        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""
+        "{:-<18} {:-<8} {:->5} {:->6} {:->5} {:->8} {:->6} {:->6} {:->5} {:->5} {:->5} {:->6} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:->10}",
+        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""
     );
     for result in results {
         let short_run_id = result.run_id.chars().take(8).collect::<String>();
         let _ = writeln!(
             output,
-            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "{:<18} {:<8} {:>5} {:>6} {:>5} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:>10}",
             truncate(&result.label, 18),
             short_run_id,
             result.case.concurrency,
             result.case.users,
+            format_active_thread_count(result.case.active_thread_count, result.case.users),
             result.case.model_latency_ms,
             result.case.user_message_bytes,
             result.case.assistant_message_bytes,
@@ -578,6 +597,14 @@ fn format_optional_ms(value: Option<u128>) -> String {
 
 fn format_optional_kb(value: Option<u64>) -> String {
     value.map(format_kb).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_active_thread_count(active_thread_count: usize, _users: usize) -> String {
+    if active_thread_count == 0 {
+        "all".to_string()
+    } else {
+        active_thread_count.to_string()
+    }
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

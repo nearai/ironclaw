@@ -100,6 +100,7 @@ pub(crate) fn parent_summary_value(
         "warmup_seconds": args.warmup_seconds,
         "trace_jsonl_enabled": args.trace_jsonl.is_some(),
         "trace_interval_seconds": args.trace_interval_seconds,
+        "active_thread_count": args.active_thread_count,
         "prefill_threads": args.prefill_threads,
         "prefill_turns_per_thread": args.prefill_turns_per_thread,
         "prefill_concurrency": args.prefill_concurrency,

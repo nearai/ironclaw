@@ -49,6 +49,24 @@ fn synthetic_ids_are_generated_once_for_requested_cardinality() {
 }
 
 #[test]
+fn active_thread_count_reuses_hot_thread_but_keeps_actor_fanout() {
+    let mut args = test_args();
+    args.users = 4;
+    args.active_thread_count = 1;
+    let ids = SyntheticIds::new(&args).expect("synthetic ids build");
+
+    let first = ids.user_turn_context(&args, 0, 0).expect("first context");
+    let second = ids.user_turn_context(&args, 0, 1).expect("second context");
+
+    assert_ne!(first.user_id.as_str(), second.user_id.as_str());
+    assert_eq!(first.thread_id.as_str(), second.thread_id.as_str());
+    assert_eq!(
+        first.thread_owner_user_id.as_str(),
+        second.thread_owner_user_id.as_str()
+    );
+}
+
+#[test]
 fn chat_turn_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ChatTurn;
@@ -203,6 +221,27 @@ fn sweep_concurrency_rejects_zero_values() {
     let error = validate_args(&args).expect_err("zero sweep concurrency is invalid");
 
     assert!(error.contains("--sweep-concurrency values must be greater than 0"));
+}
+
+#[test]
+fn active_thread_count_rejects_values_above_users() {
+    let mut args = test_args();
+    args.active_thread_count = args.users + 1;
+
+    let error = validate_args(&args).expect_err("active thread count exceeds users");
+
+    assert!(error.contains("--active-thread-count"));
+}
+
+#[test]
+fn sweep_active_thread_count_rejects_values_above_sweep_users() {
+    let mut args = test_args();
+    args.sweep_users = vec![2, 4];
+    args.sweep_active_thread_count = vec![0, 3];
+
+    let error = validate_args(&args).expect_err("active thread sweep exceeds users");
+
+    assert!(error.contains("--sweep-active-thread-count"));
 }
 
 #[test]
@@ -665,6 +704,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         trace_jsonl_enabled: false,
         trace_interval_seconds: 1,
         users: 1,
+        active_thread_count: 1,
         tenants: 1,
         prefill_threads: 1,
         prefill_turns_per_thread: 2,
@@ -725,6 +765,7 @@ fn test_args() -> Args {
         duration_seconds: 0,
         warmup_seconds: 0,
         users: 4,
+        active_thread_count: 0,
         tenants: 2,
         prefill_threads: 0,
         prefill_turns_per_thread: 0,
@@ -743,6 +784,7 @@ fn test_args() -> Args {
         ramp_factor: 2,
         sweep_concurrency: Vec::new(),
         sweep_users: Vec::new(),
+        sweep_active_thread_count: Vec::new(),
         sweep_model_latency_ms: Vec::new(),
         sweep_user_message_bytes: Vec::new(),
         sweep_assistant_message_bytes: Vec::new(),

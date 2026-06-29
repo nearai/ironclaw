@@ -526,7 +526,10 @@ where
                 scope: context.thread_scope.clone(),
                 thread_id: Some(context.thread_id.clone()),
                 created_by_actor_id: context.user_id.as_str().to_string(),
-                title: Some(format!("Storage stress {}", context.user_id.as_str())),
+                title: Some(format!(
+                    "Storage stress {}",
+                    context.thread_owner_user_id.as_str()
+                )),
                 metadata_json: None,
             }),
         )
@@ -677,7 +680,10 @@ where
                 scope: context.thread_scope.clone(),
                 thread_id: Some(context.thread_id.clone()),
                 created_by_actor_id: context.user_id.as_str().to_string(),
-                title: Some(format!("Storage stress {}", context.user_id.as_str())),
+                title: Some(format!(
+                    "Storage stress {}",
+                    context.thread_owner_user_id.as_str()
+                )),
                 metadata_json: None,
             }),
         )

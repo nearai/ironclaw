@@ -94,6 +94,10 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 50)]
     pub(crate) users: usize,
 
+    /// Distinct user threads targeted by user-turn scenarios. Set to 0 to use one thread per user.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) active_thread_count: usize,
+
     /// Synthetic tenants distributed across users.
     #[arg(long, default_value_t = 1)]
     pub(crate) tenants: usize,
@@ -164,6 +168,10 @@ pub(crate) struct Args {
     /// Comma-separated synthetic user counts to sweep.
     #[arg(long, value_delimiter = ',')]
     pub(crate) sweep_users: Vec<usize>,
+
+    /// Comma-separated active thread counts to sweep. Use 0 for one thread per user.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_active_thread_count: Vec<usize>,
 
     /// Comma-separated model latency values to sweep for mixed-user-session.
     #[arg(long, value_delimiter = ',')]
@@ -493,6 +501,7 @@ struct RunSummary {
     trace_jsonl_enabled: bool,
     trace_interval_seconds: u64,
     users: usize,
+    active_thread_count: usize,
     tenants: usize,
     prefill_threads: usize,
     prefill_turns_per_thread: usize,
@@ -658,6 +667,7 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if ramp::is_enabled(args)
         && (!args.sweep_concurrency.is_empty()
             || !args.sweep_users.is_empty()
+            || !args.sweep_active_thread_count.is_empty()
             || !args.sweep_model_latency_ms.is_empty()
             || !args.sweep_user_message_bytes.is_empty()
             || !args.sweep_assistant_message_bytes.is_empty()
@@ -676,6 +686,22 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.sweep_users.contains(&0) {
         return Err("--sweep-users values must be greater than 0".to_string());
+    }
+    let min_user_count = args.sweep_users.iter().copied().min().unwrap_or(args.users);
+    let max_active_thread_count = args
+        .sweep_active_thread_count
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(args.active_thread_count);
+    if args.active_thread_count > args.users {
+        return Err("--active-thread-count must be less than or equal to --users".to_string());
+    }
+    if max_active_thread_count > min_user_count {
+        return Err(
+            "--active-thread-count and --sweep-active-thread-count values must be less than or equal to every --sweep-users value"
+                .to_string(),
+        );
     }
     if args.sweep_context_max_messages.contains(&0) {
         return Err("--sweep-context-max-messages values must be greater than 0".to_string());
@@ -824,6 +850,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.warmup_seconds.to_string())
             .arg("--users")
             .arg(args.users.to_string())
+            .arg("--active-thread-count")
+            .arg(args.active_thread_count.to_string())
             .arg("--tenants")
             .arg(args.tenants.to_string())
             .arg("--prefill-threads")
@@ -1370,6 +1398,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         trace_jsonl_enabled: args.trace_jsonl.is_some(),
         trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
+        active_thread_count: args.active_thread_count,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
         prefill_turns_per_thread: args.prefill_turns_per_thread,
