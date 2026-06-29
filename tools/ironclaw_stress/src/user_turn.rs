@@ -37,6 +37,7 @@ use crate::{
     resource_ops,
     summary::FailureCause,
     synthetic::SyntheticIds,
+    trace::{spawn_trace_reporter, stop_trace_reporter},
 };
 
 pub(crate) struct UserTurnServices<F>
@@ -161,7 +162,7 @@ pub(crate) async fn run_user_turn_tasks(
     identities: Arc<SyntheticIds>,
 ) -> Result<Vec<Sample>, String> {
     let operation_target = args.operation_target();
-    let progress = Arc::new(ProgressCounters::default());
+    let progress = Arc::new(ProgressCounters::new(args.trace_jsonl.is_some()));
     let span_budget = Arc::new(AtomicUsize::new(span_sample_limit(args.span_sample_limit)));
     let progress_reporter = spawn_progress_reporter(
         crate::log_prefix(args),
@@ -171,6 +172,7 @@ pub(crate) async fn run_user_turn_tasks(
         operation_target.progress_total(),
         Arc::clone(&progress),
     );
+    let trace_reporter = spawn_trace_reporter(args, workload.target(), Arc::clone(&progress));
 
     let mut handles = Vec::with_capacity(args.concurrency);
     for worker_index in 0..args.concurrency {
@@ -195,7 +197,7 @@ pub(crate) async fn run_user_turn_tasks(
                             &span_budget,
                         )
                         .await;
-                    progress.record(sample.error.is_some());
+                    progress.record(sample.error.is_some(), sample.latency);
                     samples.push(sample);
                     operation_index += 1;
                 }
@@ -225,6 +227,7 @@ pub(crate) async fn run_user_turn_tasks(
             }
         }
     }
+    stop_trace_reporter(trace_reporter);
     stop_progress_reporter(progress_reporter);
 
     if let Some(error) = first_error {

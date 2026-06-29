@@ -7,11 +7,12 @@ use std::{
 use crate::{
     Args, Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
+    trace::{spawn_trace_reporter, stop_trace_reporter},
 };
 
 pub(crate) fn run(args: &Args) -> Result<Vec<Sample>, String> {
     let operation_target = args.operation_target();
-    let progress = Arc::new(ProgressCounters::default());
+    let progress = Arc::new(ProgressCounters::new(args.trace_jsonl.is_some()));
     let progress_reporter = spawn_progress_reporter(
         crate::log_prefix(args),
         args.backend.as_str(),
@@ -20,7 +21,9 @@ pub(crate) fn run(args: &Args) -> Result<Vec<Sample>, String> {
         operation_target.progress_total(),
         Arc::clone(&progress),
     );
+    let trace_reporter = spawn_trace_reporter(args, "process://local", Arc::clone(&progress));
     let samples = run_threads_inner(args, &progress);
+    stop_trace_reporter(trace_reporter);
     stop_progress_reporter(progress_reporter);
     samples
 }
@@ -41,7 +44,7 @@ fn run_threads_inner(args: &Args, progress: &Arc<ProgressCounters>) -> Result<Ve
                 let mut operation_index = 0;
                 while should_run_operation(args.operation_target(), started, operation_index) {
                     let sample = run_one_operation(&args, worker_index, operation_index);
-                    progress.record(sample.error.is_some());
+                    progress.record(sample.error.is_some(), sample.latency);
                     samples.push(sample);
                     operation_index += 1;
                 }

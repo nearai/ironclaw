@@ -178,6 +178,29 @@ fn thresholds_report_violating_run_label() {
 }
 
 #[test]
+fn trace_child_path_keeps_parent_trace_name() {
+    let child_path = trace::child_trace_path(Path::new("/tmp/ironclaw-trace.jsonl"), 3);
+
+    assert_eq!(
+        child_path,
+        Path::new("/tmp/ironclaw-trace.jsonl.child-3.jsonl")
+    );
+}
+
+#[test]
+fn progress_counters_drain_interval_latencies() {
+    let counters = progress::ProgressCounters::new(true);
+
+    counters.record(false, Duration::from_micros(10));
+    counters.record(true, Duration::from_micros(20));
+
+    assert_eq!(counters.snapshot().attempted, 2);
+    assert_eq!(counters.snapshot().failed, 1);
+    assert_eq!(counters.drain_interval_latencies_us(), vec![10, 20]);
+    assert!(counters.drain_interval_latencies_us().is_empty());
+}
+
+#[test]
 fn process_pressure_cpu_burn_generates_successful_samples() {
     let mut args = test_args();
     args.scenario = Scenario::CpuBurn;
@@ -306,6 +329,8 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         operations_per_thread: 1,
         duration_seconds: 0,
         warmup_seconds: 0,
+        trace_jsonl_enabled: false,
+        trace_interval_seconds: 1,
         users: 1,
         tenants: 1,
         model_latency_ms: 0,
@@ -388,6 +413,8 @@ fn test_args() -> Args {
         sweep_model_latency_ms: Vec::new(),
         repetitions: 1,
         output_jsonl: None,
+        trace_jsonl: None,
+        trace_interval_seconds: 1,
         max_failure_rate: None,
         max_p95_ms: None,
         min_throughput: None,

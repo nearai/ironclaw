@@ -13,6 +13,7 @@ mod sweep;
 mod synthetic;
 #[cfg(test)]
 mod tests;
+mod trace;
 mod user_turn;
 
 use std::{
@@ -140,6 +141,14 @@ pub(crate) struct Args {
     /// Write one JSON object per sweep run to this file.
     #[arg(long)]
     pub(crate) output_jsonl: Option<PathBuf>,
+
+    /// Write interval trace samples as JSONL. Multi-process runs write child-specific files.
+    #[arg(long)]
+    pub(crate) trace_jsonl: Option<PathBuf>,
+
+    /// Seconds between trace JSONL samples.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) trace_interval_seconds: u64,
 
     /// Fail when any run's failure rate is above this value, e.g. 0.01.
     #[arg(long)]
@@ -418,6 +427,8 @@ struct RunSummary {
     operations_per_thread: usize,
     duration_seconds: u64,
     warmup_seconds: u64,
+    trace_jsonl_enabled: bool,
+    trace_interval_seconds: u64,
     users: usize,
     tenants: usize,
     model_latency_ms: u64,
@@ -478,8 +489,10 @@ async fn run() -> Result<(), String> {
     };
 
     let result = if args.child_index.is_none() && sweep::is_enabled(&args) {
+        trace::prepare_trace_outputs(&args).await?;
         sweep::run(&args, &run_id).await
     } else {
+        trace::prepare_trace_outputs(&args).await?;
         run_once(&args, &run_id)
             .await
             .and_then(|captured| {
@@ -654,6 +667,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
             .arg(args.progress_interval_seconds.to_string())
+            .arg("--trace-interval-seconds")
+            .arg(args.trace_interval_seconds.to_string())
             .arg("--model-latency-ms")
             .arg(args.model_latency_ms.to_string())
             .arg("--model-latency-profile")
@@ -692,6 +707,11 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .stderr(Stdio::piped());
         if args.span_log_failures {
             command.arg("--span-log-failures");
+        }
+        if let Some(path) = &args.trace_jsonl {
+            command
+                .arg("--trace-jsonl")
+                .arg(trace::child_trace_path(path, child_index));
         }
         if matches!(args.backend, Backend::Libsql) {
             command.arg("--libsql-path").arg(&libsql_path);
@@ -875,36 +895,40 @@ async fn run_resource_governor_in_process(
         );
         let governor = Arc::clone(&backend.governor);
         let identities = Arc::clone(&identities);
-        let _ =
-            tokio::task::spawn_blocking(move || run_threads(&governor, &warmup_args, &identities))
-                .await
-                .map_err(|error| {
-                    if error.is_panic() {
-                        eprintln!("run_threads warmup task panicked: {error:?}");
-                        "run_threads warmup task panicked".to_string()
-                    } else {
-                        eprintln!("run_threads warmup task cancelled: {error:?}");
-                        "run_threads warmup task cancelled".to_string()
-                    }
-                })??;
+        let target = backend.target.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            run_threads(&governor, &warmup_args, &identities, &target)
+        })
+        .await
+        .map_err(|error| {
+            if error.is_panic() {
+                eprintln!("run_threads warmup task panicked: {error:?}");
+                "run_threads warmup task panicked".to_string()
+            } else {
+                eprintln!("run_threads warmup task cancelled: {error:?}");
+                "run_threads warmup task cancelled".to_string()
+            }
+        })??;
     }
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let db_probe_before = db_probe::capture(args).await;
     let started = Instant::now();
     let governor = Arc::clone(&backend.governor);
     let args_clone = args.clone();
-    let samples =
-        tokio::task::spawn_blocking(move || run_threads(&governor, &args_clone, &identities))
-            .await
-            .map_err(|error| {
-                if error.is_panic() {
-                    eprintln!("run_threads task panicked: {error:?}");
-                    "run_threads task panicked".to_string()
-                } else {
-                    eprintln!("run_threads task cancelled: {error:?}");
-                    "run_threads task cancelled".to_string()
-                }
-            })??;
+    let target_clone = backend.target.clone();
+    let samples = tokio::task::spawn_blocking(move || {
+        run_threads(&governor, &args_clone, &identities, &target_clone)
+    })
+    .await
+    .map_err(|error| {
+        if error.is_panic() {
+            eprintln!("run_threads task panicked: {error:?}");
+            "run_threads task panicked".to_string()
+        } else {
+            eprintln!("run_threads task cancelled: {error:?}");
+            "run_threads task cancelled".to_string()
+        }
+    })??;
     let elapsed = started.elapsed();
     let process = metrics.finish();
     let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
@@ -991,9 +1015,10 @@ fn run_threads(
     governor: &Arc<dyn ResourceGovernor>,
     args: &Args,
     identities: &Arc<SyntheticIds>,
+    target: &str,
 ) -> Result<Vec<Sample>, String> {
     let operation_target = args.operation_target();
-    let progress = Arc::new(ProgressCounters::default());
+    let progress = Arc::new(ProgressCounters::new(args.trace_jsonl.is_some()));
     let progress_reporter = spawn_progress_reporter(
         log_prefix(args),
         args.backend.as_str(),
@@ -1002,7 +1027,9 @@ fn run_threads(
         operation_target.progress_total(),
         Arc::clone(&progress),
     );
+    let trace_reporter = trace::spawn_trace_reporter(args, target, Arc::clone(&progress));
     let result = run_threads_inner(governor, args, identities, &progress);
+    trace::stop_trace_reporter(trace_reporter);
     stop_progress_reporter(progress_reporter);
     result
 }
@@ -1036,7 +1063,7 @@ fn run_threads_inner(
                         worker_index,
                         operation_index,
                     );
-                    progress.record(sample.error.is_some());
+                    progress.record(sample.error.is_some(), sample.latency);
                     samples.push(sample);
                     operation_index += 1;
                 }
@@ -1163,6 +1190,8 @@ fn summarize(
         operations_per_thread: args.operations,
         duration_seconds: args.duration_seconds,
         warmup_seconds: args.warmup_seconds,
+        trace_jsonl_enabled: args.trace_jsonl.is_some(),
+        trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
         tenants: args.tenants,
         model_latency_ms: args.model_latency_ms,

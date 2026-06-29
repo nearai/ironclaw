@@ -140,7 +140,7 @@ impl Peaks {
     }
 }
 
-fn capture_snapshot() -> ProcessSnapshot {
+pub(crate) fn capture_snapshot() -> ProcessSnapshot {
     let proc_status = proc_status_snapshot();
     let rusage = rusage_snapshot();
     ProcessSnapshot {

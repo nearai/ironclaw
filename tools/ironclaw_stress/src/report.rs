@@ -82,6 +82,8 @@ pub(crate) fn parent_summary_value(
         "concurrency_per_process": args.concurrency,
         "duration_seconds": args.duration_seconds,
         "warmup_seconds": args.warmup_seconds,
+        "trace_jsonl_enabled": args.trace_jsonl.is_some(),
+        "trace_interval_seconds": args.trace_interval_seconds,
         "tool_calls_per_turn": args.tool_calls_per_turn,
         "tool_latency_ms": args.tool_latency_ms,
         "tool_output_bytes": args.tool_output_bytes,

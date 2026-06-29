@@ -26,6 +26,14 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             ),
             ("duration_seconds", summary.duration_seconds.to_string()),
             ("warmup_seconds", summary.warmup_seconds.to_string()),
+            (
+                "trace_jsonl_enabled",
+                summary.trace_jsonl_enabled.to_string(),
+            ),
+            (
+                "trace_interval_seconds",
+                summary.trace_interval_seconds.to_string(),
+            ),
             ("users", summary.users.to_string()),
             ("tenants", summary.tenants.to_string()),
             ("model_latency_ms", summary.model_latency_ms.to_string()),
@@ -127,6 +135,14 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             ("concurrency_per_process", args.concurrency.to_string()),
             ("duration_seconds", args.duration_seconds.to_string()),
             ("warmup_seconds", args.warmup_seconds.to_string()),
+            (
+                "trace_jsonl_enabled",
+                args.trace_jsonl.is_some().to_string(),
+            ),
+            (
+                "trace_interval_seconds",
+                args.trace_interval_seconds.to_string(),
+            ),
             ("model_latency_ms", args.model_latency_ms.to_string()),
             (
                 "model_latency_profile",

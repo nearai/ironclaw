@@ -1,7 +1,7 @@
 use std::{
     any::Any,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -9,18 +9,60 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Default)]
 pub(crate) struct ProgressCounters {
     attempted: AtomicU64,
     failed: AtomicU64,
+    interval_latencies_us: Option<Mutex<Vec<u128>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProgressSnapshot {
+    pub(crate) attempted: u64,
+    pub(crate) failed: u64,
 }
 
 impl ProgressCounters {
-    pub(crate) fn record(&self, failed: bool) {
+    pub(crate) fn new(capture_interval_latencies: bool) -> Self {
+        Self {
+            attempted: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            interval_latencies_us: capture_interval_latencies.then(|| Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn record(&self, failed: bool, latency: Duration) {
         if failed {
             self.failed.fetch_add(1, Ordering::Relaxed);
         }
         self.attempted.fetch_add(1, Ordering::Relaxed);
+        if let Some(latencies) = &self.interval_latencies_us
+            && let Ok(mut latencies) = latencies.lock()
+        {
+            latencies.push(latency.as_micros());
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> ProgressSnapshot {
+        ProgressSnapshot {
+            attempted: self.attempted.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn drain_interval_latencies_us(&self) -> Vec<u128> {
+        let Some(latencies) = &self.interval_latencies_us else {
+            return Vec::new();
+        };
+        match latencies.lock() {
+            Ok(mut latencies) => std::mem::take(&mut *latencies),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl Default for ProgressCounters {
+    fn default() -> Self {
+        Self::new(false)
     }
 }
 
@@ -54,8 +96,9 @@ pub(crate) fn spawn_progress_reporter(
                 match stop_receiver.recv_timeout(interval) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let attempted = progress.attempted.load(Ordering::Relaxed);
-                        let failed = progress.failed.load(Ordering::Relaxed);
+                        let snapshot = progress.snapshot();
+                        let attempted = snapshot.attempted;
+                        let failed = snapshot.failed;
                         let succeeded = attempted.saturating_sub(failed);
                         let recent_attempted = attempted.saturating_sub(last_attempted);
                         let recent_elapsed = last_report.elapsed().as_secs_f64();
