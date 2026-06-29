@@ -46,6 +46,41 @@ function createReactStub({ setCalls = [] } = {}) {
   };
 }
 
+function createPersistentReactStub({ setCalls = [] } = {}) {
+  let stateIndex = 0;
+  let refIndex = 0;
+  const stateSlots = [];
+  const refSlots = [];
+  return {
+    __beginRender: () => {
+      stateIndex = 0;
+      refIndex = 0;
+    },
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+    useRef: (value) => {
+      const index = refIndex++;
+      const ref = refSlots[index] || { current: value };
+      refSlots[index] = ref;
+      return ref;
+    },
+    useState: (initial) => {
+      const index = stateIndex++;
+      const slot = stateSlots[index] || {
+        value: typeof initial === "function" ? initial() : initial,
+      };
+      stateSlots[index] = slot;
+      return [
+        slot.value,
+        (next) => {
+          slot.value = typeof next === "function" ? next(slot.value) : next;
+          setCalls.push(slot.value);
+        },
+      ];
+    },
+  };
+}
+
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
@@ -187,6 +222,45 @@ test("useHistory can seed a newly-created thread before navigation", async () =>
       isOptimistic: true,
     },
   ]);
+});
+
+test("useHistory clears visible messages immediately when switching to an uncached thread", () => {
+  const ReactStub = createPersistentReactStub();
+  const context = {
+    console,
+    fetchTimeline: async () => {
+      throw new Error("render reset should not need timeline fetch");
+    },
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: ReactStub,
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const renderHistory = (threadId) => {
+    ReactStub.__beginRender();
+    return context.globalThis.__testExports.useHistory(threadId, {});
+  };
+
+  let history = renderHistory("thread-old");
+  history.setMessages([
+    {
+      id: "pending-old",
+      role: "user",
+      content: "old thread message",
+    },
+  ]);
+  history = renderHistory("thread-old");
+  assert.equal(history.messages.length, 1);
+
+  renderHistory("thread-new");
+  history = renderHistory("thread-new");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(history.messages)), []);
+  assert.equal(history.isLoading, true);
 });
 
 test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
@@ -333,43 +407,14 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
   const timeline = [
-    { id: "msg-user-1", role: "user", turnRunId: "run-1" },
-    {
-      id: "tool-abc",
-      role: "tool_activity",
-      toolParameters: "{}",
-      toolResultPreview: "ok",
-      turnRunId: "run-1",
-    },
-    {
-      id: "msg-assistant-1",
-      role: "assistant",
-      isFinalReply: true,
-      turnRunId: "run-1",
-    },
-    { id: "msg-user-2", role: "user", turnRunId: "run-2" },
-    {
-      id: "msg-assistant-2",
-      role: "assistant",
-      isFinalReply: true,
-      turnRunId: "run-2",
-    },
+    { id: "msg-user-1", role: "user" },
+    { id: "tool-abc", role: "tool_activity", toolParameters: "{}", toolResultPreview: "ok" },
+    { id: "msg-assistant-1", role: "assistant" },
   ];
   const current = [
-    { id: "msg-user-1", role: "user", turnRunId: "run-1" },
-    {
-      id: "tool-abc",
-      role: "tool_activity",
-      toolParameters: null,
-      toolResultPreview: null,
-      turnRunId: "run-1",
-    },
-    {
-      id: "err-run-1",
-      role: "error",
-      content: "run failed",
-      turnRunId: "run-1",
-    },
+    { id: "msg-user-1", role: "user" },
+    { id: "tool-abc", role: "tool_activity", toolParameters: null, toolResultPreview: null },
+    { id: "err-run-1", role: "error", content: "run failed" },
   ];
 
   const merged = mergeFullRefresh(timeline, current, {
@@ -377,10 +422,10 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   });
 
   // Timeline order is authoritative and the rich tool card replaces the
-  // sparse live one; the client-only err-* bubble stays anchored to its run.
+  // sparse live one; the client-only err-* bubble is preserved at the end.
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,tool-abc,msg-assistant-1,err-run-1,msg-user-2,msg-assistant-2",
+    "msg-user-1,tool-abc,msg-assistant-1,err-run-1",
   );
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");

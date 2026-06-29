@@ -57,7 +57,8 @@ secrets, never speaks to Google, never reads a `SessionStore` row.
 Routes mounted by `webui_v2_auth_router`:
 
 - `GET  /auth/providers` — list configured provider names.
-- `GET  /auth/login/{provider}` — mint a pending flow (CSRF state +
+- `GET  /auth/login/{provider}` — redirect non-canonical hosts to
+  the configured `base_url`, then mint a pending flow (CSRF state +
   PKCE verifier + sanitized `redirect_after`) and redirect the
   browser to the provider's authorization URL.
 - `GET  /auth/callback/{provider}` — single-use state lookup,
@@ -115,6 +116,11 @@ pub trait OAuthProvider: Send + Sync + 'static {
   5-min TTL), and single-use on `take`. A replayed callback cannot
   re-use a state token; cross-provider replay (state minted for
   Google arriving on the GitHub callback) fails closed.
+- **Canonical login host** is the configured `base_url`. Login
+  requests received on any other `Host` redirect to that base URL
+  before a pending-flow entry is created, so preview/custom domains
+  cannot mint state that the registered provider callback host will
+  never see.
 - **Session exchange tickets** are process-local, bounded (1024
   entries + 60-sec TTL), and single-use on `take`. The OAuth
   callback puts only the ticket in the redirect `Location`; the SPA

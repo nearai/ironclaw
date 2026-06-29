@@ -40,9 +40,15 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
   const [always, setAlways] = React.useState(false);
   const [expandedPayload, setExpandedPayload] = React.useState(false);
+  const [isResolving, setIsResolving] = React.useState(false);
+  const isResolvingRef = React.useRef(false);
+  const currentGateRef = React.useRef(gate);
+  currentGateRef.current = gate;
 
   React.useEffect(() => {
     setExpandedPayload(false);
+    isResolvingRef.current = false;
+    setIsResolving(false);
   }, [gate]);
 
   const risk = React.useMemo(
@@ -53,13 +59,24 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
   const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
 
-  const onPrimary = React.useCallback(() => {
-    if (always && allowAlways) {
-      onAlways?.();
-    } else {
-      onApprove?.();
+  const resolve = React.useCallback(async (handler) => {
+    if (isResolvingRef.current) return;
+    const gateAtStart = currentGateRef.current;
+    isResolvingRef.current = true;
+    setIsResolving(true);
+    try {
+      await handler?.();
+    } finally {
+      if (currentGateRef.current === gateAtStart) {
+        isResolvingRef.current = false;
+        setIsResolving(false);
+      }
     }
-  }, [always, allowAlways, onAlways, onApprove]);
+  }, []);
+
+  const onPrimary = React.useCallback(() => {
+    resolve(always && allowAlways ? onAlways : onApprove);
+  }, [always, allowAlways, onAlways, onApprove, resolve]);
 
   return html`
     <div
@@ -119,6 +136,7 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
             type="checkbox"
             checked=${always}
             onChange=${(event) => setAlways(event.currentTarget.checked)}
+            disabled=${isResolving}
             className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
           />
           ${t("approval.alwaysAllowToolLabel", { tool: toolLabel })}
@@ -126,10 +144,14 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
       `}
 
       <div className="flex flex-wrap gap-2">
-        <${Button} variant="primary" onClick=${onPrimary}>
+        <${Button} variant="primary" onClick=${onPrimary} disabled=${isResolving}>
           ${always && allowAlways ? t("approval.approveAndAlways") : t("approval.approve")}
         <//>
-        <${Button} variant="secondary" onClick=${() => onDeny?.()}>
+        <${Button}
+          variant="secondary"
+          onClick=${() => resolve(onDeny)}
+          disabled=${isResolving}
+        >
           ${t("approval.deny")}
         <//>
       </div>

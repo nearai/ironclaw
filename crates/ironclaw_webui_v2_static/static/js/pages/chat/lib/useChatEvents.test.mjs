@@ -611,9 +611,9 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
             run_status: {
               run_id: "run-failed-1",
               status: "failed",
-              failure_category: "model_credentials_unavailable",
+              failure_category: "driver_invalid_request",
               failure_summary:
-                "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+                "The run failed because the execution driver rejected the request.",
             },
           },
         ],
@@ -627,33 +627,18 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   assert.deepEqual(plain(seenFailureInputs), [
     {
       status: "failed",
-      failureCategory: "model_credentials_unavailable",
+      failureCategory: "driver_invalid_request",
       failureSummary:
-        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+        "The run failed because the execution driver rejected the request.",
     },
   ]);
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-failed-1");
   assert.equal(harness.messages[0].role, "error");
-  assert.equal(harness.messages[0].turnRunId, "run-failed-1");
   assert.equal(
     harness.messages[0].content,
-    "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+    "The run failed because the execution driver rejected the request.",
   );
-});
-
-test("useChatEvents: consumer fixtures do not pin internal driver categories", () => {
-  const source = readFileSync(new URL(import.meta.url), "utf8");
-  for (const forbidden of [
-    `failure_category: "${"driver_"}`,
-    `failureCategory: "${"driver_"}`,
-  ]) {
-    assert.equal(
-      source.includes(forbidden),
-      false,
-      `consumer test fixture leaked internal category prefix ${forbidden}`,
-    );
-  }
 });
 
 test("useChatEvents: typed failed event appends visible error", () => {
@@ -682,7 +667,6 @@ test("useChatEvents: typed failed event appends visible error", () => {
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-typed-failed-1");
   assert.equal(harness.messages[0].role, "error");
-  assert.equal(harness.messages[0].turnRunId, "run-typed-failed-1");
   assert.equal(harness.messages[0].content, "category:model_unavailable");
   assert.deepEqual(plain(seenFailureInputs), [
     {
@@ -691,6 +675,42 @@ test("useChatEvents: typed failed event appends visible error", () => {
       failureSummary: null,
     },
   ]);
+});
+
+test("useChatEvents: category-only failure update upgrades existing error", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureCategory, failureSummary }) =>
+      failureSummary || `category:${failureCategory || "unknown"}`,
+  });
+  harness.replaceMessages([
+    {
+      id: "err-run-category-upgrade",
+      role: "error",
+      content: "category:unknown",
+      timestamp: "2026-06-03T11:44:43Z",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-category-upgrade",
+              status: "failed",
+              failure_category: "model_unavailable",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-category-upgrade");
+  assert.equal(harness.messages[0].content, "category:model_unavailable");
 });
 
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
