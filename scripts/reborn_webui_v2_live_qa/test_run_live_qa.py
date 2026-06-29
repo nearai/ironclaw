@@ -303,12 +303,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_routine_creation_case_can_preinstall_extensions(self):
         captured: dict[str, object] = {}
 
-        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
-            captured.update(kwargs)
-            extra_details = kwargs.get("extra_details") or {}
+        async def fake_live_chat_with_extensions_case(
+            _ctx,
+            *,
+            case_name,
+            prompt,
+            marker,
+            required_text,
+            extensions,
+            timeout,
+            extra_details,
+        ):
+            captured.update(
+                {
+                    "case_name": case_name,
+                    "prompt": prompt,
+                    "marker": marker,
+                    "required_text": required_text,
+                    "extensions": extensions,
+                    "timeout": timeout,
+                    "extra_details": extra_details,
+                }
+            )
+            extra_details = extra_details or {}
             return run_live_qa.ProbeResult(
                 provider="test",
-                mode=f"live:{kwargs['case_name']}",
+                mode=f"live:{case_name}",
                 success=True,
                 latency_ms=1,
                 details={
@@ -345,8 +365,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
+        self.assertEqual(captured["case_name"], "qa_test_routine")
         self.assertEqual(captured["prompt"], "original sheet prompt")
+        self.assertIsNone(captured["marker"])
+        self.assertEqual(captured["required_text"], ["routine"])
         self.assertEqual(captured["extensions"][0]["package_id"], "google-sheets")
+        self.assertEqual(captured["timeout"], 180.0)
         self.assertTrue(result.details["fixture_ready"])
 
     def test_slack_delivery_target_dm_detection(self):
@@ -460,21 +484,155 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
         )
 
+    def test_qa_7a_requires_new_connect_capability_completions(self):
+        class FakeLocator:
+            @property
+            def last(self):
+                return self
+
+            async def fill(self, _text):
+                return None
+
+            async def press(self, _key):
+                return None
+
+        class FakePage:
+            async def goto(self, _url, **_kwargs):
+                return None
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+        class FakeExpectation:
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                return None
+
+        capability_ids = run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS
+        baseline = {capability_id: ["completed"] for capability_id in capability_ids}
+        stale = {capability_id: ["completed"] for capability_id in capability_ids}
+        fresh = {
+            capability_id: ["completed", "completed"]
+            for capability_id in capability_ids
+        }
+        status_sequence = [baseline, stale, fresh]
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_wait_for_assistant_reply(_page, **_kwargs):
+            return "Slack is connected"
+
+        async def fake_approve_visible_tool_gate(_page):
+            return None
+
+        async def fake_sleep(_seconds):
+            return None
+
+        def fake_capability_run_statuses(_reborn_home, _capability_ids):
+            return status_sequence.pop(0) if status_sequence else fresh
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_slack_preflight",
+                return_value={
+                    "delivery_target_present": True,
+                    "route_configured_from_env": True,
+                },
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D12345"),
+            patch.object(run_live_qa, "_with_page", side_effect=fake_with_page),
+            patch.object(
+                run_live_qa,
+                "_wait_for_assistant_reply",
+                side_effect=fake_wait_for_assistant_reply,
+            ),
+            patch.object(
+                run_live_qa,
+                "_approve_visible_tool_gate",
+                side_effect=fake_approve_visible_tool_gate,
+            ),
+            patch.object(
+                run_live_qa,
+                "_capability_run_statuses",
+                side_effect=fake_capability_run_statuses,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
+            patch("playwright.async_api.expect", return_value=FakeExpectation()),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_7a_slack_product_channel_connect(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["baseline_capability_statuses"], baseline)
+        self.assertEqual(result.details["capability_statuses"], fresh)
+        self.assertEqual(result.details["text_excerpt"], "Slack is connected")
+
+    def test_completed_capability_counts_ignore_stale_completed_runs(self):
+        counts = run_live_qa._completed_capability_counts(
+            {
+                "extension_search": ["completed", "failed", "completed"],
+                "extension_install": ["running"],
+                "extension_activate": [],
+            }
+        )
+
+        self.assertEqual(counts["extension_search"], 2)
+        self.assertEqual(counts["extension_install"], 0)
+        self.assertEqual(counts["extension_activate"], 0)
+
     def test_qa_7c_prepares_bug_logging_sheet_before_sheet_prompt(self):
         captured_fixture: dict[str, object] = {}
         captured_routine: dict[str, object] = {}
 
-        async def fake_create_google_spreadsheet_fixture(**kwargs):
-            captured_fixture.update(kwargs)
+        async def fake_create_google_spreadsheet_fixture(
+            *,
+            access_token,
+            title,
+            values,
+            sheet_name="Sheet1",
+        ):
+            captured_fixture.update(
+                {
+                    "access_token": access_token,
+                    "title": title,
+                    "values": values,
+                    "sheet_name": sheet_name,
+                }
+            )
             return {
                 "spreadsheet_id": "sheet-123",
                 "spreadsheet_url": "https://docs.google.com/spreadsheets/d/sheet-123/edit",
-                "title": kwargs["title"],
+                "title": title,
             }
 
-        async def fake_routine_creation_case(_ctx, **kwargs):
-            captured_routine.update(kwargs)
-            extra_details = kwargs.get("extra_details") or {}
+        async def fake_routine_creation_case(
+            _ctx,
+            *,
+            case_name,
+            prompt,
+            marker,
+            routine_name,
+            required_text,
+            extensions,
+            extra_details,
+        ):
+            captured_routine.update(
+                {
+                    "case_name": case_name,
+                    "prompt": prompt,
+                    "marker": marker,
+                    "routine_name": routine_name,
+                    "required_text": required_text,
+                    "extensions": extensions,
+                    "extra_details": extra_details,
+                }
+            )
+            extra_details = extra_details or {}
             return run_live_qa.ProbeResult(
                 provider="test",
                 mode="live:qa_7c_slack_bug_logger_routine",
@@ -505,14 +663,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
+        self.assertEqual(captured_fixture["access_token"], "fresh-access-token")
         self.assertEqual(
             captured_fixture["title"],
             run_live_qa.QA_7C_BUG_LOGGING_SHEET_TITLE,
         )
+        self.assertEqual(captured_fixture["sheet_name"], "Sheet1")
         self.assertEqual(
             captured_fixture["values"],
             [["Summary", "Reporter", "Slack Timestamp", "Status", "QA Marker"]],
         )
+        self.assertEqual(captured_routine["case_name"], "qa_7c_slack_bug_logger_routine")
+        self.assertIsNone(captured_routine["marker"])
+        self.assertEqual(captured_routine["routine_name"], "reborn-qa-7c-slack-bug-sheet")
+        self.assertEqual(captured_routine["required_text"], ["routine", "bug"])
         self.assertEqual(
             captured_routine["prompt"],
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
@@ -527,7 +691,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
 
     def test_qa_7d_accepts_signed_slack_event_into_reborn_run(self):
+        captured_event: dict[str, object] = {}
+
         async def fake_post_signed_slack_dm_event(_ctx, **kwargs):
+            captured_event.update(kwargs)
             return {
                 "status_code": 200,
                 "event_id": kwargs["event_id"],
@@ -566,6 +733,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertTrue(result.details["accepted_run_id"].startswith("run-for-"))
         self.assertEqual(result.details["signed_event"]["status_code"], 200)
+        self.assertTrue(
+            str(captured_event["text"]).startswith("bug: reborn QA bug logger smoke ")
+        )
+        self.assertNotIn("In Slack", str(captured_event["text"]))
+        self.assertEqual(result.details["slack_event_text"], captured_event["text"])
+        self.assertEqual(
+            result.details["qa_sheet_prompt"],
+            run_live_qa._qa_sheet_prompt("qa_7d_slack_bug_message_trigger"),
+        )
 
     def test_endpoint_status_routine_prompt_uses_real_endpoint(self):
         captured: dict[str, object] = {}
@@ -592,6 +768,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         prompt = str(captured["prompt"])
         self.assertNotIn("[endpoint URL]", prompt)
         self.assertIn(run_live_qa.ENDPOINT_STATUS_URL, prompt)
+        self.assertIsNone(captured["marker"])
+        self.assertEqual(captured["required_text"], ["routine"])
 
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
@@ -1373,6 +1551,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(sharded_cases), len(set(sharded_cases)))
         self.assertEqual(sharded_cases, selected_cases)
+        all_shard_cases_match = re.search(
+            r"(?ms)^\s+ALL_SHARD_CASES:\s*>-\n(?P<cases>.*?)(?=^\s+run:\s*\|)",
+            match.group("body"),
+        )
+        self.assertIsNotNone(
+            all_shard_cases_match,
+            "Reborn WebUI v2 live QA all-case validation list missing",
+        )
+        all_shard_cases = [
+            case_name.strip()
+            for line in all_shard_cases_match.group("cases").splitlines()
+            for case_name in line.split(",")
+            if case_name.strip()
+        ]
+        self.assertEqual(all_shard_cases, selected_cases)
+        self.assertIn(
+            "Unknown Reborn WebUI v2 live QA case",
+            match.group("body"),
+        )
+        self.assertIn(
+            "target_ref is disabled for reborn-webui-v2-live-qa",
+            match.group("body"),
+        )
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -640,6 +640,7 @@ def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list
     lines.extend(_format_reborn_tool_summary(cases))
     blocks: list[dict] = []
     current: list[str] = []
+    continuation_header = f"{status} *QA {group}* — continued"
     for line in lines:
         candidate = "\n".join([*current, line])
         if current and len(candidate) > 2900:
@@ -652,7 +653,7 @@ def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list
                     },
                 }
             )
-            current = [line]
+            current = [continuation_header, line]
         else:
             current.append(line)
     if current:

@@ -1741,6 +1741,15 @@ def _capability_run_statuses(
     return statuses
 
 
+def _completed_capability_counts(
+    statuses: dict[str, list[str]],
+) -> dict[str, int]:
+    return {
+        capability_id: capability_statuses.count("completed")
+        for capability_id, capability_statuses in statuses.items()
+    }
+
+
 async def _extension_chat_connect_case(
     ctx: LiveQaContext,
     *,
@@ -2986,7 +2995,10 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
                 f"got channel_id={channel_id!r}"
             )
         slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
-        text = f"bug: {_qa_sheet_prompt(case_name)}"
+        qa_sheet_prompt = _qa_sheet_prompt(case_name)
+        text = f"bug: reborn QA bug logger smoke {suffix}"
+        observed["qa_sheet_prompt"] = qa_sheet_prompt
+        observed["slack_event_text"] = text
         event_id = f"EvREBORNQA7D{suffix}"
         post_result = await _post_signed_slack_dm_event(
             ctx,
@@ -3222,6 +3234,13 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
             )
 
         async def action(page: object) -> None:
+            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
+            baseline_statuses = _capability_run_statuses(
+                ctx.reborn_home,
+                capability_ids,
+            )
+            baseline_completed = _completed_capability_counts(baseline_statuses)
+            observed["baseline_capability_statuses"] = baseline_statuses
             await page.goto(
                 f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
                 wait_until="domcontentloaded",
@@ -3234,16 +3253,23 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
+            observed["text_excerpt"] = await _wait_for_assistant_reply(
+                page,
+                marker=None,
+                required_text=["slack"],
+                timeout=180.0,
+            )
             deadline = time.monotonic() + 180.0
             while time.monotonic() < deadline:
                 await _approve_visible_tool_gate(page)
                 statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
                 observed["capability_statuses"] = statuses
+                completed = _completed_capability_counts(statuses)
                 missing = [
                     capability_id
                     for capability_id in capability_ids
-                    if "completed" not in statuses.get(capability_id, [])
+                    if completed.get(capability_id, 0)
+                    <= baseline_completed.get(capability_id, 0)
                 ]
                 if not missing:
                     return

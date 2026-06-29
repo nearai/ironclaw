@@ -415,6 +415,32 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertTrue(any("*QA 8*" in text for text in section_texts))
         self.assertFalse(any("*QA 2A" in text for text in section_texts))
 
+    def test_reborn_group_continuation_blocks_repeat_group_label(self):
+        cases = [
+            notify.RebornQaCaseReport(
+                rows=("7A",),
+                case=f"qa_7a_failure_{idx}",
+                feature=f"Slack product channel connect {idx}",
+                success=False,
+                message="failure detail " + ("x" * 900),
+            )
+            for idx in range(8)
+        ]
+
+        blocks = notify._format_reborn_qa_group("7", cases)
+        section_texts = [
+            block["text"]["text"]
+            for block in blocks
+            if block.get("type") == "section"
+        ]
+
+        self.assertGreater(len(section_texts), 1)
+        self.assertTrue(section_texts[0].startswith(":x: *QA 7* — "))
+        self.assertTrue(
+            all(text.startswith(":x: *QA 7* — ") for text in section_texts[1:])
+        )
+        self.assertTrue(any("continued" in text for text in section_texts[1:]))
+
 
 if __name__ == "__main__":
     unittest.main()
