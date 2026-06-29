@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use crate::{
     Args, RunSummary,
+    process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::{FailureCauseSummary, LatencySummary},
     user_turn::UserTurnStageLatencySummary,
 };
@@ -39,6 +40,7 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
         "Operation latency",
         &[("operation", summary.attempted, &summary.latency)],
     );
+    push_process_table(&mut output, &summary.process);
     if let Some(stages) = &summary.stage_latency {
         push_stage_latency_table(&mut output, stages);
     }
@@ -67,6 +69,7 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
         .unwrap_or("unknown");
     let errors = aggregate_errors(summaries);
     let failure_causes = aggregate_failure_causes(summaries);
+    let process = aggregate_process_metrics(summaries.iter().map(|summary| &summary.process));
 
     let mut output = String::new();
     push_overview(
@@ -86,6 +89,7 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             ("throughput_ops_sec", format!("{throughput_ops_sec:.2}")),
         ],
     );
+    push_process_table(&mut output, &process);
     push_child_table(&mut output, summaries);
     push_errors_table(&mut output, &errors);
     push_failure_causes_table(&mut output, &failure_causes);
@@ -150,6 +154,42 @@ fn push_stage_latency_table(output: &mut String, stages: &UserTurnStageLatencySu
     if !rows.is_empty() {
         push_latency_table(output, "Stage latency", &rows);
     }
+}
+
+fn push_process_table(output: &mut String, process: &ProcessMetrics) {
+    let _ = writeln!(output, "\nProcess metrics");
+    let _ = writeln!(output, "{:<24} {:>12}", "metric", "value");
+    let _ = writeln!(output, "{:-<24} {:->12}", "", "");
+    push_metric(
+        output,
+        "cpu_total",
+        format_optional_ms(process.delta_cpu_ms),
+    );
+    push_metric(
+        output,
+        "cpu_user",
+        format_optional_ms(process.delta_user_cpu_ms),
+    );
+    push_metric(
+        output,
+        "cpu_system",
+        format_optional_ms(process.delta_system_cpu_ms),
+    );
+    push_metric(output, "peak_rss", format_optional_kb(process.peak_rss_kb));
+    push_metric(
+        output,
+        "peak_threads",
+        format_optional(process.peak_threads),
+    );
+    push_metric(
+        output,
+        "peak_open_fds",
+        format_optional(process.peak_open_fds),
+    );
+}
+
+fn push_metric(output: &mut String, name: &str, value: String) {
+    let _ = writeln!(output, "{name:<24} {value:>12}");
 }
 
 fn push_child_table(output: &mut String, summaries: &[RunSummary]) {
@@ -276,6 +316,27 @@ fn format_latency_us(us: u128) -> String {
         format!("{:.1}ms", us as f64 / 1_000.0)
     } else {
         format!("{us}us")
+    }
+}
+
+fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_ms(value: Option<u128>) -> String {
+    value
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_kb(value: Option<u64>) -> String {
+    match value {
+        Some(value) if value >= 1024 * 1024 => format!("{:.2}GB", value as f64 / 1024.0 / 1024.0),
+        Some(value) if value >= 1024 => format!("{:.1}MB", value as f64 / 1024.0),
+        Some(value) => format!("{value}KB"),
+        None => "-".to_string(),
     }
 }
 

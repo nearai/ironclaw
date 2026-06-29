@@ -1,6 +1,8 @@
 mod capture;
 mod child_io;
 mod human;
+mod process_metrics;
+mod process_pressure;
 mod progress;
 mod redaction;
 mod report;
@@ -28,6 +30,7 @@ use std::{
 use crate::{
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
+    process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::{redact_libsql_path, redact_postgres_url},
     summary::{
@@ -139,6 +142,14 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) min_throughput: Option<f64>,
 
+    /// Fail when any run's peak RSS is above this many MiB.
+    #[arg(long)]
+    pub(crate) max_rss_mb: Option<u64>,
+
+    /// Fail when any run's CPU time is above this many milliseconds.
+    #[arg(long)]
+    pub(crate) max_cpu_ms: Option<u128>,
+
     /// Synthetic model latency for mixed-user-session operations.
     #[arg(long, default_value_t = 0)]
     pub(crate) model_latency_ms: u64,
@@ -155,6 +166,18 @@ pub(crate) struct Args {
     /// Max structured spans to emit per process. Set to 0 for unlimited.
     #[arg(long, default_value_t = 100)]
     pub(crate) span_sample_limit: usize,
+
+    /// CPU loop iterations per cpu-burn operation.
+    #[arg(long, default_value_t = 250_000)]
+    pub(crate) cpu_work_units: u64,
+
+    /// Bytes allocated and touched per memory-churn operation.
+    #[arg(long, default_value_t = 1_048_576)]
+    pub(crate) memory_bytes: usize,
+
+    /// Milliseconds to hold each memory allocation before dropping it.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) memory_hold_ms: u64,
 
     #[arg(long, hide = true)]
     pub(crate) child_index: Option<usize>,
@@ -183,6 +206,8 @@ pub(crate) enum Scenario {
     ReserveReconcile,
     ChatTurn,
     MixedUserSession,
+    CpuBurn,
+    MemoryChurn,
 }
 
 impl Scenario {
@@ -192,6 +217,8 @@ impl Scenario {
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
             Self::MixedUserSession => "mixed-user-session",
+            Self::CpuBurn => "cpu-burn",
+            Self::MemoryChurn => "memory-churn",
         }
     }
 
@@ -201,6 +228,10 @@ impl Scenario {
 
     pub(crate) fn is_user_turn(self) -> bool {
         matches!(self, Self::ChatTurn | Self::MixedUserSession)
+    }
+
+    pub(crate) fn is_process_local(self) -> bool {
+        matches!(self, Self::CpuBurn | Self::MemoryChurn)
     }
 }
 
@@ -235,6 +266,7 @@ struct RunSummary {
     duration_ms: u128,
     throughput_ops_sec: f64,
     latency: LatencySummary,
+    process: ProcessMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
@@ -344,6 +376,18 @@ fn validate_args(args: &Args) -> Result<(), String> {
         && min_throughput < 0.0
     {
         return Err("--min-throughput must be greater than or equal to 0".to_string());
+    }
+    if matches!(args.max_rss_mb, Some(0)) {
+        return Err("--max-rss-mb must be greater than 0".to_string());
+    }
+    if matches!(args.max_cpu_ms, Some(0)) {
+        return Err("--max-cpu-ms must be greater than 0".to_string());
+    }
+    if args.cpu_work_units == 0 {
+        return Err("--cpu-work-units must be greater than 0".to_string());
+    }
+    if args.memory_bytes == 0 {
+        return Err("--memory-bytes must be greater than 0".to_string());
     }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
@@ -504,6 +548,9 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
         run_id
     );
     let total_operations = args.concurrency.saturating_mul(args.operations);
+    if args.scenario.is_process_local() {
+        return run_process_pressure_in_process(args, run_id, total_operations).await;
+    }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
@@ -511,6 +558,55 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
     }
 
     run_user_turn_in_process(args, run_id, total_operations, identities).await
+}
+
+async fn run_process_pressure_in_process(
+    args: &Args,
+    run_id: &str,
+    total_operations: usize,
+) -> Result<RunSummary, String> {
+    eprintln!(
+        "{} running target=process://local concurrency={} operations_per_thread={} total_operations={} progress_interval_seconds={}",
+        log_prefix(args),
+        args.concurrency,
+        args.operations,
+        total_operations,
+        args.progress_interval_seconds
+    );
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let started = Instant::now();
+    let args_clone = args.clone();
+    let samples = tokio::task::spawn_blocking(move || process_pressure::run(&args_clone))
+        .await
+        .map_err(|error| {
+            if error.is_panic() {
+                eprintln!("process pressure task panicked: {error:?}");
+                "process pressure task panicked".to_string()
+            } else {
+                eprintln!("process pressure task cancelled: {error:?}");
+                "process pressure task cancelled".to_string()
+            }
+        })??;
+    let elapsed = started.elapsed();
+    let process = metrics.finish();
+    let summary = summarize(
+        args,
+        run_id,
+        "process://local".to_string(),
+        elapsed,
+        samples,
+        process,
+    );
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
 }
 
 async fn run_resource_governor_in_process(
@@ -531,6 +627,7 @@ async fn run_resource_governor_in_process(
         args.tenants,
         args.progress_interval_seconds
     );
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let started = Instant::now();
     let governor = Arc::clone(&backend.governor);
     let args_clone = args.clone();
@@ -547,7 +644,8 @@ async fn run_resource_governor_in_process(
                 }
             })??;
     let elapsed = started.elapsed();
-    let summary = summarize(args, run_id, backend.target, elapsed, samples);
+    let process = metrics.finish();
+    let summary = summarize(args, run_id, backend.target, elapsed, samples, process);
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
         log_prefix(args),
@@ -578,11 +676,13 @@ async fn run_user_turn_in_process(
         args.tenants,
         args.progress_interval_seconds
     );
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let started = Instant::now();
     let target = workload.target().to_string();
     let samples = run_user_turn_tasks(workload, args, identities).await?;
     let elapsed = started.elapsed();
-    let summary = summarize(args, run_id, target, elapsed, samples);
+    let process = metrics.finish();
+    let summary = summarize(args, run_id, target, elapsed, samples, process);
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
         log_prefix(args),
@@ -697,6 +797,9 @@ fn run_one_operation(
         Scenario::MixedUserSession => {
             unreachable!("mixed-user-session uses the async user-turn workload")
         }
+        Scenario::CpuBurn | Scenario::MemoryChurn => {
+            unreachable!("process-only scenarios use the local pressure workload")
+        }
     };
     let latency = started.elapsed();
     let failure = outcome
@@ -717,6 +820,7 @@ fn summarize(
     target: String,
     elapsed: Duration,
     samples: Vec<Sample>,
+    process: ProcessMetrics,
 ) -> RunSummary {
     let mut errors = BTreeMap::new();
     let mut latencies: Vec<u128> = samples
@@ -752,6 +856,7 @@ fn summarize(
         duration_ms: elapsed.as_millis(),
         throughput_ops_sec: attempted as f64 / elapsed_secs,
         latency: latency_summary(&latencies),
+        process,
         stage_latency: summarize_user_turn_stages(&samples),
         errors,
         failure_causes: summarize_failure_causes(&samples),

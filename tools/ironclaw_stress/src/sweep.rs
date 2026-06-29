@@ -15,6 +15,8 @@ pub(crate) struct RunMetrics {
     pub(crate) attempted: u64,
     pub(crate) failed: u64,
     pub(crate) throughput_ops_sec: f64,
+    pub(crate) cpu_ms: Option<u128>,
+    pub(crate) peak_rss_kb: Option<u64>,
     pub(crate) p95_us: u128,
     pub(crate) p99_us: u128,
     pub(crate) max_us: u128,
@@ -187,6 +189,25 @@ pub(crate) fn enforce_thresholds(args: &Args, runs: &[(String, RunMetrics)]) -> 
                 metrics.throughput_ops_sec, min_throughput
             ));
         }
+        if let Some(max_rss_mb) = args.max_rss_mb
+            && let Some(peak_rss_kb) = metrics.peak_rss_kb
+            && peak_rss_kb > max_rss_mb.saturating_mul(1024)
+        {
+            violations.push(format!(
+                "{label}: peak_rss {} > {max_rss_mb}MB",
+                format_kb(peak_rss_kb)
+            ));
+        }
+        if let Some(max_cpu_ms) = args.max_cpu_ms
+            && let Some(cpu_ms) = metrics.cpu_ms
+            && cpu_ms > max_cpu_ms
+        {
+            violations.push(format!(
+                "{label}: cpu {} > {}",
+                format_duration_ms(cpu_ms),
+                format_duration_ms(max_cpu_ms)
+            ));
+        }
     }
     if violations.is_empty() {
         Ok(())
@@ -238,7 +259,7 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
     let _ = writeln!(output, "\nSweep summary");
     let _ = writeln!(
         output,
-        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10}",
+        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "label",
         "run",
         "conc",
@@ -249,18 +270,20 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
         "ops/sec",
         "p95",
         "p99",
-        "max"
+        "max",
+        "cpu",
+        "rss"
     );
     let _ = writeln!(
         output,
-        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10}",
-        "", "", "", "", "", "", "", "", "", "", ""
+        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:->10}",
+        "", "", "", "", "", "", "", "", "", "", "", "", ""
     );
     for result in results {
         let short_run_id = result.run_id.chars().take(8).collect::<String>();
         let _ = writeln!(
             output,
-            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10}",
+            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:>10}",
             truncate(&result.label, 18),
             short_run_id,
             result.case.concurrency,
@@ -272,6 +295,8 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
             format_latency_us(result.metrics.p95_us),
             format_latency_us(result.metrics.p99_us),
             format_latency_us(result.metrics.max_us),
+            format_optional_ms(result.metrics.cpu_ms),
+            format_optional_kb(result.metrics.peak_rss_kb),
         );
     }
     output
@@ -285,6 +310,34 @@ fn format_latency_us(us: u128) -> String {
     } else {
         format!("{us}us")
     }
+}
+
+fn format_duration_ms(ms: u128) -> String {
+    if ms >= 1_000 {
+        format!("{:.2}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn format_kb(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.2}GB", kb as f64 / 1024.0 / 1024.0)
+    } else if kb >= 1024 {
+        format!("{:.1}MB", kb as f64 / 1024.0)
+    } else {
+        format!("{kb}KB")
+    }
+}
+
+fn format_optional_ms(value: Option<u128>) -> String {
+    value
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_kb(value: Option<u64>) -> String {
+    value.map(format_kb).unwrap_or_else(|| "-".to_string())
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

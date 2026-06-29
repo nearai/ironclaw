@@ -88,6 +88,8 @@ fn thresholds_report_violating_run_label() {
         attempted: 10,
         failed: 2,
         throughput_ops_sec: 100.0,
+        cpu_ms: Some(10),
+        peak_rss_kb: Some(1024),
         p95_us: 1_000,
         p99_us: 1_000,
         max_us: 1_000,
@@ -98,6 +100,34 @@ fn thresholds_report_violating_run_label() {
 
     assert!(error.contains("c2"));
     assert!(error.contains("failure_rate"));
+}
+
+#[test]
+fn process_pressure_cpu_burn_generates_successful_samples() {
+    let mut args = test_args();
+    args.scenario = Scenario::CpuBurn;
+    args.concurrency = 1;
+    args.operations = 2;
+    args.cpu_work_units = 10;
+
+    let samples = process_pressure::run(&args).expect("cpu burn samples");
+
+    assert_eq!(samples.len(), 2);
+    assert!(samples.iter().all(|sample| sample.error.is_none()));
+}
+
+#[test]
+fn process_pressure_memory_churn_generates_successful_samples() {
+    let mut args = test_args();
+    args.scenario = Scenario::MemoryChurn;
+    args.concurrency = 1;
+    args.operations = 2;
+    args.memory_bytes = 4096;
+
+    let samples = process_pressure::run(&args).expect("memory churn samples");
+
+    assert_eq!(samples.len(), 2);
+    assert!(samples.iter().all(|sample| sample.error.is_none()));
 }
 
 #[test]
@@ -168,6 +198,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         duration_ms: 1,
         throughput_ops_sec: 1.0,
         latency: latency(1_000),
+        process: ProcessMetrics::default(),
         stage_latency: Some(UserTurnStageLatencySummary {
             ensure_thread: empty_stage(),
             accept_inbound: empty_stage(),
@@ -221,10 +252,15 @@ fn test_args() -> Args {
         max_failure_rate: None,
         max_p95_ms: None,
         min_throughput: None,
+        max_rss_mb: None,
+        max_cpu_ms: None,
         model_latency_ms: 0,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,
+        cpu_work_units: 10,
+        memory_bytes: 4096,
+        memory_hold_ms: 0,
         child_index: None,
     }
 }

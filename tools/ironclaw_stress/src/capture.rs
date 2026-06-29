@@ -1,4 +1,4 @@
-use crate::{RunSummary, sweep};
+use crate::{RunSummary, process_metrics::aggregate_process_metrics, sweep};
 
 #[derive(Debug)]
 pub(crate) enum CapturedRun {
@@ -27,6 +27,8 @@ impl CapturedRun {
                 attempted: summary.attempted,
                 failed: summary.failed,
                 throughput_ops_sec: summary.throughput_ops_sec,
+                cpu_ms: summary.process.delta_cpu_ms,
+                peak_rss_kb: summary.process.peak_rss_kb,
                 p95_us: summary.latency.p95_us,
                 p99_us: summary.latency.p99_us,
                 max_us: summary.latency.max_us,
@@ -44,10 +46,14 @@ impl CapturedRun {
                 } else {
                     attempted as f64 / (max_duration_ms as f64 / 1000.0)
                 };
+                let process =
+                    aggregate_process_metrics(summaries.iter().map(|summary| &summary.process));
                 sweep::RunMetrics {
                     attempted,
                     failed,
                     throughput_ops_sec,
+                    cpu_ms: process.delta_cpu_ms,
+                    peak_rss_kb: process.peak_rss_kb,
                     p95_us: summaries
                         .iter()
                         .map(|summary| summary.latency.p95_us)

@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::{Args, RunSummary, capture::CapturedRun, human, summary::FailureCauseSummary};
+use crate::{
+    Args, RunSummary, capture::CapturedRun, human, process_metrics::aggregate_process_metrics,
+    summary::FailureCauseSummary,
+};
 
 pub(crate) fn print_captured_run(
     args: &Args,
@@ -68,6 +71,7 @@ pub(crate) fn parent_summary_value(
         .first()
         .map(|summary| summary.target.as_str())
         .unwrap_or("unknown");
+    let process = aggregate_process_metrics(summaries.iter().map(|summary| &summary.process));
 
     serde_json::json!({
         "backend": args.backend,
@@ -83,6 +87,7 @@ pub(crate) fn parent_summary_value(
         "throughput_ops_sec": throughput_ops_sec,
         "worst_child_p99_us": p99_us,
         "worst_child_max_us": max_us,
+        "process": process,
         "errors": errors,
         "failure_causes": failure_causes,
         "children": summaries,

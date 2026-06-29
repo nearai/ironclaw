@@ -25,6 +25,7 @@ ironclaw_resources = { path = "../../crates/ironclaw_resources", version = "0.1.
 ironclaw_threads = { path = "../../crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../../crates/ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libc = "0.2"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 serde = { version = "1", features = ["derive"] }
