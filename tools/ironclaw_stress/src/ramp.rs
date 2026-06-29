@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{Args, run_once, sweep};
+use crate::{Args, compare, run_once, sweep};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum RampAxis {
@@ -174,6 +174,9 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
     }
     if args.bottleneck_report {
         eprint!("{}", render_ramp_bottleneck_report(axis, &results));
+    }
+    if let Some(path) = &args.compare_json {
+        eprint!("{}", compare::render_comparison_report(path, &suite)?);
     }
     Ok(())
 }

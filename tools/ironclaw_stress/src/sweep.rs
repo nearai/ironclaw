@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{Args, run_once};
+use crate::{Args, compare, run_once};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) struct RunMetrics {
@@ -171,6 +171,9 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
     }
     if args.bottleneck_report {
         eprint!("{}", render_sweep_bottleneck_report(&results));
+    }
+    if let Some(path) = &args.compare_json {
+        eprint!("{}", compare::render_comparison_report(path, &suite)?);
     }
 
     let threshold_inputs = results

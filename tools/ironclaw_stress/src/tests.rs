@@ -398,6 +398,156 @@ fn bottleneck_report_surfaces_missing_trace_file() {
     assert!(rendered.contains("ironclaw-missing-trace-test.jsonl"));
 }
 
+#[test]
+fn comparison_report_flags_single_run_regressions() {
+    let baseline_path = temp_compare_path("single");
+    let baseline = serde_json::json!({
+        "attempted": 100,
+        "failed": 0,
+        "throughput_ops_sec": 100.0,
+        "latency": {
+            "p95_us": 1_000,
+            "p99_us": 2_000,
+            "max_us": 3_000
+        },
+        "process": {
+            "delta_cpu_ms": 100,
+            "peak_rss_kb": 1_000
+        }
+    });
+    std::fs::write(&baseline_path, baseline.to_string()).expect("write baseline");
+    let current = serde_json::json!({
+        "attempted": 100,
+        "failed": 5,
+        "throughput_ops_sec": 70.0,
+        "latency": {
+            "p95_us": 2_000,
+            "p99_us": 3_000,
+            "max_us": 4_000
+        },
+        "process": {
+            "delta_cpu_ms": 140,
+            "peak_rss_kb": 1_400
+        }
+    });
+
+    let rendered =
+        compare::render_comparison_report(&baseline_path, &current).expect("comparison report");
+
+    assert!(rendered.contains("Comparison report"));
+    assert!(rendered.contains("throughput regression"));
+    assert!(rendered.contains("p95 regression"));
+    assert!(rendered.contains("failure-rate regression"));
+    assert!(rendered.contains("CPU regression"));
+    assert!(rendered.contains("RSS regression"));
+    let _ = std::fs::remove_file(baseline_path);
+}
+
+#[test]
+fn comparison_report_accepts_jsonl_suite() {
+    let baseline_path = temp_compare_path("jsonl");
+    let baseline = [
+        serde_json::json!({
+            "label": "c1",
+            "metrics": {
+                "attempted": 10,
+                "failed": 0,
+                "throughput_ops_sec": 10.0,
+                "p95_us": 1_000,
+                "p99_us": 1_000,
+                "max_us": 1_000
+            }
+        }),
+        serde_json::json!({
+            "label": "c2",
+            "metrics": {
+                "attempted": 10,
+                "failed": 0,
+                "throughput_ops_sec": 20.0,
+                "p95_us": 1_000,
+                "p99_us": 1_000,
+                "max_us": 1_000
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|value| value.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    std::fs::write(&baseline_path, baseline).expect("write baseline jsonl");
+    let current = serde_json::json!({
+        "runs": [
+            {
+                "label": "c1",
+                "metrics": {
+                    "attempted": 10,
+                    "failed": 0,
+                    "throughput_ops_sec": 8.0,
+                    "p95_us": 1_500,
+                    "p99_us": 1_500,
+                    "max_us": 1_500
+                }
+            },
+            {
+                "label": "c2",
+                "metrics": {
+                    "attempted": 10,
+                    "failed": 0,
+                    "throughput_ops_sec": 20.0,
+                    "p95_us": 1_000,
+                    "p99_us": 1_000,
+                    "max_us": 1_000
+                }
+            }
+        ]
+    });
+
+    let rendered =
+        compare::render_comparison_report(&baseline_path, &current).expect("comparison report");
+
+    assert!(rendered.contains("c1"));
+    assert!(rendered.contains("c2"));
+    assert!(rendered.contains("c1 throughput regression"));
+    assert!(rendered.contains("c1 p95 regression"));
+    let _ = std::fs::remove_file(baseline_path);
+}
+
+#[test]
+fn comparison_report_compares_single_runs_with_different_labels() {
+    let baseline_path = temp_compare_path("single-jsonl");
+    let baseline = serde_json::json!({
+        "label": "baseline-point",
+        "metrics": {
+            "attempted": 10,
+            "failed": 0,
+            "throughput_ops_sec": 10.0,
+            "p95_us": 1_000,
+            "p99_us": 1_000,
+            "max_us": 1_000
+        }
+    });
+    std::fs::write(&baseline_path, baseline.to_string()).expect("write baseline jsonl");
+    let current = serde_json::json!({
+        "attempted": 10,
+        "failed": 0,
+        "throughput_ops_sec": 5.0,
+        "latency": {
+            "p95_us": 1_000,
+            "p99_us": 1_000,
+            "max_us": 1_000
+        }
+    });
+
+    let rendered =
+        compare::render_comparison_report(&baseline_path, &current).expect("comparison report");
+
+    assert!(rendered.contains("baseline-point -> run"));
+    assert!(rendered.contains("throughput regression"));
+    assert!(!rendered.contains("missing_in_baseline"));
+    assert!(!rendered.contains("missing_in_current"));
+    let _ = std::fs::remove_file(baseline_path);
+}
+
 fn run_summary_with_bottlenecks() -> RunSummary {
     let mut errors = std::collections::BTreeMap::new();
     errors.insert("turn_thread_busy".to_string(), 1);
@@ -491,6 +641,7 @@ fn test_args() -> Args {
         progress_interval_seconds: 0,
         human_read: false,
         bottleneck_report: false,
+        compare_json: None,
         ramp_concurrency: None,
         ramp_users: None,
         ramp_factor: 2,
@@ -566,4 +717,11 @@ fn latency(p50_us: u128) -> LatencySummary {
         p99_us: p50_us,
         max_us: p50_us,
     }
+}
+
+fn temp_compare_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "ironclaw-compare-{label}-{}.json",
+        std::process::id()
+    ))
 }

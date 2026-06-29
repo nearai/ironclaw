@@ -1,6 +1,7 @@
 mod analysis;
 mod capture;
 mod child_io;
+mod compare;
 mod db_probe;
 mod human;
 mod process_metrics;
@@ -127,6 +128,10 @@ pub(crate) struct Args {
     /// Emit a heuristic bottleneck report to stderr after the JSON summary.
     #[arg(long, default_value_t = false)]
     pub(crate) bottleneck_report: bool,
+
+    /// Compare this run's JSON summary against a previous JSON or JSONL output file.
+    #[arg(long)]
+    pub(crate) compare_json: Option<PathBuf>,
 
     /// Ramp --concurrency from the current value to this maximum, stopping at the first threshold breach.
     #[arg(long)]
