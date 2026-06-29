@@ -169,8 +169,6 @@ impl ProviderRepo {
     }
 
     fn acquire_lock(&self) -> Result<fs::File, ProviderRepoError> {
-        use fs4::FileExt as _;
-
         let lock_path = lock_path_for(&self.path);
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent).map_err(|source| ProviderRepoError::Lock {
@@ -188,11 +186,10 @@ impl ProviderRepo {
                 path: lock_path.clone(),
                 source,
             })?;
-        file.lock_exclusive()
-            .map_err(|source| ProviderRepoError::Lock {
-                path: lock_path,
-                source,
-            })?;
+        file.lock().map_err(|source| ProviderRepoError::Lock {
+            path: lock_path,
+            source,
+        })?;
         Ok(file)
     }
 }

@@ -3276,6 +3276,49 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
 }
 
 #[tokio::test]
+async fn model_port_rejects_missing_explicit_tool_result_reference_before_gateway_call() {
+    let fixture = ThreadFixture::new().await;
+    let missing_tool_result_ref =
+        LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("44444444-4444-4444-4444-444444444444").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::User,
+        tool_result_provider_call: None,
+        content: "newer user message still exists".to_string(),
+        image_attachments: Vec::new(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: missing_tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .expect_err("missing tool result reference should fail before model call");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(error.safe_summary, "model message reference is unavailable");
+    assert!(gateway.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
     let fixture = ThreadFixture::new_with_user_content(
         "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input",

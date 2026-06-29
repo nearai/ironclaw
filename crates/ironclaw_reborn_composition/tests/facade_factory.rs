@@ -719,9 +719,11 @@ async fn local_dev_builds_facades_without_production_claim() {
 #[tokio::test]
 async fn hosted_single_tenant_volume_hides_process_capabilities() {
     let dir = tempfile::tempdir().unwrap();
-    let input = ironclaw_reborn_composition::hosted_single_tenant_volume_build_input(
+    let input = ironclaw_reborn_composition::local_runtime_build_input_with_options(
+        RebornCompositionProfile::HostedSingleTenantVolume,
         "hosted-volume-owner",
         dir.path().to_path_buf(),
+        Default::default(),
     )
     .unwrap();
     let services = build_reborn_services(input).await.unwrap();

@@ -158,8 +158,8 @@ pub fn extract_document_text_by_filename(
 }
 
 /// Read a zip entry into a string with configurable decompressed size limits.
-fn bounded_read_zip_entry_with_limits(
-    file: &mut zip::read::ZipFile<'_>,
+fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
+    file: &mut zip::read::ZipFile<'_, R>,
     total_decompressed: &mut u64,
     max_entry: u64,
     max_total: u64,
@@ -228,8 +228,8 @@ fn bounded_read_zip_entry_with_limits(
 /// single entry at `MAX_DECOMPRESSED_ENTRY`. If the reader hits that cap
 /// exactly we fail closed — the entry was truncated, meaning the real size
 /// exceeds the limit.
-fn bounded_read_zip_entry(
-    file: &mut zip::read::ZipFile<'_>,
+fn bounded_read_zip_entry<R: Read + ?Sized>(
+    file: &mut zip::read::ZipFile<'_, R>,
     total_decompressed: &mut u64,
 ) -> Result<String, ExtractionError> {
     bounded_read_zip_entry_with_limits(

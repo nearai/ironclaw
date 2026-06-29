@@ -1184,10 +1184,20 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     .client
                     .clone()
                     .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                // Wrap the credential-account service in
+                // `ProviderBackedCredentialAccountService` (via `with_provider_client`) so the
+                // runtime token-refresh path (`refresh_account`) routes through the OAuth
+                // provider client. `from_shared_with_provider` stores the provider client in a
+                // separate field but does NOT wrap the account service, so without this the
+                // durable `FilesystemAuthProductServices::refresh_account` stub returns
+                // `BackendUnavailable` — Google OAuth access tokens are never refreshed and every
+                // capability call reauths once the 1h access token expires. The sibling branch
+                // routes through `compose_product_auth_services`, which applies the same wrap.
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
-                    provider_client,
+                    provider_client.clone(),
                 )
+                .with_provider_client(provider_client)
                 .into_services(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                     Arc::clone(&secret_store),
@@ -4880,6 +4890,7 @@ mod tests {
             .await
             .expect("create Google account");
 
+        disable_global_auto_approve(local_runtime, &gmail_context).await;
         let failure = invoke_json(
             &services,
             "gmail.send_message",
@@ -4900,6 +4911,7 @@ mod tests {
         assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
+        disable_global_auto_approve(local_runtime, &calendar_context).await;
         let failure = invoke_json(
             &services,
             "google-calendar.create_event",
@@ -6190,6 +6202,8 @@ mod tests {
             .await
             .expect("enabling global auto-approve should succeed");
     }
+
+    use crate::approval_test_support::disable_global_auto_approve;
 
     fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");

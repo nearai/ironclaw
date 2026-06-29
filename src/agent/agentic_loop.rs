@@ -13,8 +13,8 @@ use std::hash::{Hash, Hasher};
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
 use ironclaw_llm::{
-    ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult, ResponseMetadata,
-    ToolCall,
+    ChatMessage, FinishReason, Reasoning, ReasoningContext, ReasoningDetails, RespondResult,
+    ResponseMetadata, ToolCall,
 };
 
 /// Signal from the delegate indicating how the loop should proceed.
@@ -128,6 +128,7 @@ pub trait LoopDelegate: Send + Sync {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
+        reasoning_details: Option<ReasoningDetails>,
     ) -> Result<Option<LoopOutcome>, Error>;
 
     /// Called when the LLM expresses tool intent without actually calling a tool.
@@ -255,6 +256,7 @@ pub async fn run_agentic_loop(
                 tool_calls,
                 content,
                 reasoning: _,
+                reasoning_details: _,
             } => {
                 let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                 tracing::debug!(
@@ -310,6 +312,7 @@ pub async fn run_agentic_loop(
                 tool_calls,
                 content,
                 reasoning,
+                reasoning_details,
             } => {
                 // If the response was truncated, tool call parameters are likely
                 // incomplete. Discard them and tell the LLM to try a different
@@ -348,7 +351,13 @@ pub async fn run_agentic_loop(
                 reason_ctx.last_tool_batch_all_failed = false;
 
                 if let Some(outcome) = delegate
-                    .execute_tool_calls(tool_calls, content, reason_ctx, reasoning)
+                    .execute_tool_calls(
+                        tool_calls,
+                        content,
+                        reason_ctx,
+                        reasoning,
+                        reasoning_details,
+                    )
                     .await?
                 {
                     return Ok(outcome);
@@ -438,6 +447,7 @@ mod tests {
                 tool_calls: calls,
                 content: None,
                 reasoning: None,
+                reasoning_details: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
@@ -537,6 +547,7 @@ mod tests {
             _content: Option<String>,
             reason_ctx: &mut ReasoningContext,
             _reasoning: Option<String>,
+            _reasoning_details: Option<ReasoningDetails>,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
             reason_ctx
@@ -735,6 +746,7 @@ mod tests {
                 _: Option<String>,
                 _: &mut ReasoningContext,
                 _: Option<String>,
+                _: Option<ReasoningDetails>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -796,6 +808,7 @@ mod tests {
                 _: Option<String>,
                 _: &mut ReasoningContext,
                 _: Option<String>,
+                _: Option<ReasoningDetails>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -922,6 +935,7 @@ mod tests {
                 tool_calls: vec![truncated_tool_call],
                 content: Some("I'll write the report.".to_string()),
                 reasoning: None,
+                reasoning_details: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
@@ -974,6 +988,7 @@ mod tests {
                 }],
                 content: None,
                 reasoning: None,
+                reasoning_details: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
@@ -1268,6 +1283,7 @@ mod tests {
                 _: Option<String>,
                 reason_ctx: &mut ReasoningContext,
                 _reasoning: Option<String>,
+                _reasoning_details: Option<ReasoningDetails>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
                 reason_ctx.messages.push(ChatMessage::user("tool error"));

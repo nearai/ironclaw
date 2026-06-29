@@ -8161,11 +8161,11 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .expect("operator config");
     assert_eq!(
         operator_config_entry_value(&initial, "agent.auto_approve_tools"),
-        &json!(false)
+        &json!(true)
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
-        "ask_each_time"
+        "always_allow"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
@@ -8173,8 +8173,8 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
-        "ask_each_time",
-        "default-allow tools must still ask while global auto-approve is off"
+        "always_allow",
+        "follow-global tools auto-approve while global auto-approve defaults on"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
@@ -8382,10 +8382,14 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .set_operator_config_key(
             alice_tenant_a.clone(),
             "agent.auto_approve_tools".to_string(),
-            RebornOperatorConfigSetRequest { value: json!(true) },
+            // Set the non-default (off) so isolation is provable: other
+            // users/tenants must still read the default (on), not this value.
+            RebornOperatorConfigSetRequest {
+                value: json!(false),
+            },
         )
         .await
-        .expect("alice enables auto approve in tenant alpha");
+        .expect("alice disables auto approve in tenant alpha");
     services
         .set_operator_config_key(
             alice_tenant_a.clone(),
@@ -8410,7 +8414,7 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .expect("same tenant/user operator config");
     assert_eq!(
         operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
-        &json!(true),
+        &json!(false),
         "auto-approve settings are scoped by tenant/user, not agent/project"
     );
     assert_eq!(
@@ -8430,13 +8434,13 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
             .expect("isolated operator config");
         assert_eq!(
             operator_config_entry_value(&config, "agent.auto_approve_tools"),
-            &json!(false),
+            &json!(true),
             "auto-approve must not leak across user or tenant"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["state"],
-            "ask_each_time",
-            "tool override must not leak across user or tenant"
+            "always_allow",
+            "tool override must not leak across user or tenant (follows global default-on)"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],

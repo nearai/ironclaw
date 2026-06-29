@@ -113,6 +113,28 @@ mod tests {
     }
 
     #[test]
+    fn hard_floor_forces_approval_for_high_risk_effects_on_real_policy() {
+        // The production gate policy must hard-floor these even under the most
+        // permissive profile (yolo), so global auto-approve / always-allow can
+        // never bypass them.
+        let p = policy(RuntimeProfile::LocalYolo);
+        for effect in [
+            EffectKind::Financial,
+            EffectKind::ModifyApproval,
+            EffectKind::ModifyBudget,
+        ] {
+            assert!(
+                p.effects_force_approval(&[effect]),
+                "{effect:?} must be hard-floored by the production policy"
+            );
+        }
+        // Ordinary effects and the empty set are not floored.
+        assert!(!p.effects_force_approval(&[EffectKind::WriteFilesystem]));
+        assert!(!p.effects_force_approval(&[EffectKind::SpawnProcess]));
+        assert!(!p.effects_force_approval(&[]));
+    }
+
+    #[test]
     fn minimal_only_disables_gates_for_local_and_hosted_yolo_profiles() {
         for profile in [
             RuntimeProfile::LocalYolo,

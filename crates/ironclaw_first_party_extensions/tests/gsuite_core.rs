@@ -149,6 +149,336 @@ async fn calendar_create_event_does_not_forward_list_query_fields() {
 }
 
 #[tokio::test]
+async fn calendar_list_events_defaults_to_upcoming_ordered_request() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({}),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let url = &requests[0].url;
+    assert!(url.contains("/calendars/primary/events"));
+    assert!(url.contains("singleEvents=true"));
+    assert!(url.contains("orderBy=startTime"));
+    assert!(url.contains("timeMin="));
+    assert!(url.contains("maxResults=25"));
+    assert!(!url.contains("timeMax="));
+}
+
+#[tokio::test]
+async fn calendar_list_events_can_merge_all_calendar_results() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(fixture("calendar", "calendar_list.json")),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "primary-later",
+                "summary": "Primary later sync",
+                "start": { "dateTime": "2026-05-21T16:00:00Z" },
+                "end": { "dateTime": "2026-05-21T16:30:00Z" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "team-earlier",
+                "summary": "Team earlier sync",
+                "start": { "dateTime": "2026-05-21T10:00:00Z" },
+                "end": { "dateTime": "2026-05-21T10:30:00Z" }
+            }]
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "include_all_calendars": true,
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_results": 10,
+            "query": "sync"
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0]
+            .url
+            .ends_with("/users/me/calendarList?maxResults=250")
+    );
+    assert!(requests[1].url.contains("/calendars/primary/events"));
+    assert!(
+        requests[2]
+            .url
+            .contains("/calendars/team%40example.com/events")
+    );
+    for request in &requests[1..] {
+        assert!(request.url.contains("singleEvents=true"));
+        assert!(request.url.contains("orderBy=startTime"));
+        assert!(request.url.contains("timeMin=2026-05-21T00%3A00%3A00Z"));
+        assert!(request.url.contains("timeMax=2026-05-22T00%3A00%3A00Z"));
+        assert!(request.url.contains("maxResults=10"));
+        assert!(request.url.contains("q=sync"));
+    }
+
+    let items = output["body"]["items"]
+        .as_array()
+        .expect("merged events array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["summary"], "Team earlier sync");
+    assert_eq!(items[0]["calendarId"], "team@example.com");
+    assert_eq!(items[1]["summary"], "Primary later sync");
+    assert_eq!(items[1]["calendarId"], "primary");
+    assert_eq!(
+        output["body"]["calendarIds"],
+        json!(["primary", "team@example.com"])
+    );
+}
+
+#[tokio::test]
+async fn calendar_list_events_marks_discovery_truncation_at_calendar_cap() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let calendar_items: Vec<_> = (0..51)
+        .map(|index| json!({ "id": format!("calendar-{index}@example.com") }))
+        .collect();
+    let mut responses = vec![RecordingEgress::json(json!({ "items": calendar_items }))];
+    responses.extend(
+        (0..50).map(|_| RecordingEgress::json(json!({ "kind": "calendar#events", "items": [] }))),
+    );
+    let egress = Arc::new(RecordingEgress::with_responses(responses));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({ "include_all_calendars": true }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(
+        output["body"]["calendarIds"]
+            .as_array()
+            .expect("calendar ids")
+            .len(),
+        50
+    );
+    assert_eq!(output["body"]["calendarDiscoveryTruncated"], json!(true));
+}
+
+#[tokio::test]
+async fn calendar_list_events_can_merge_explicit_calendar_ids_without_discovery() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "nextPageToken": "primary-next",
+            "items": [{
+                "id": "primary-later",
+                "summary": "Primary later sync",
+                "start": { "dateTime": "2026-05-21T09:30:00-07:00" },
+                "end": { "dateTime": "2026-05-21T10:00:00-07:00" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "nextPageToken": "team-next",
+            "items": [{
+                "id": "team-earlier",
+                "calendarId": "wrong-calendar@example.com",
+                "summary": "Team earlier sync",
+                "start": { "dateTime": "2026-05-21T18:00:00+02:00" },
+                "end": { "dateTime": "2026-05-21T18:30:00+02:00" }
+            }]
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "calendar_ids": ["primary", "team@example.com"],
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_results": 10,
+            "page_tokens": {
+                "primary": "primary-page",
+                "team@example.com": "team-page"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("/users/me/calendarList"))
+    );
+    assert!(requests[0].url.contains("/calendars/primary/events"));
+    assert!(requests[0].url.contains("pageToken=primary-page"));
+    assert!(
+        requests[1]
+            .url
+            .contains("/calendars/team%40example.com/events")
+    );
+    assert!(requests[1].url.contains("pageToken=team-page"));
+
+    let items = output["body"]["items"]
+        .as_array()
+        .expect("merged events array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["summary"], "Team earlier sync");
+    assert_eq!(items[0]["calendarId"], "team@example.com");
+    assert_eq!(items[1]["summary"], "Primary later sync");
+    assert_eq!(items[1]["calendarId"], "primary");
+    assert_eq!(
+        output["body"]["calendarIds"],
+        json!(["primary", "team@example.com"])
+    );
+    assert_eq!(
+        output["body"]["nextPageTokens"],
+        json!({
+            "primary": "primary-next",
+            "team@example.com": "team-next"
+        })
+    );
+}
+
+#[tokio::test]
+async fn calendar_list_events_rejects_overlapping_calendar_selectors() {
+    let inputs = [
+        json!({
+            "calendar_id": "primary",
+            "calendar_ids": ["team@example.com"]
+        }),
+        json!({
+            "calendar_id": "primary",
+            "include_all_calendars": true
+        }),
+        json!({
+            "calendar_ids": ["primary"],
+            "include_all_calendars": true
+        }),
+    ];
+
+    for input in inputs {
+        let scope = scope();
+        let auth =
+            auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+                .await;
+        let egress = Arc::new(RecordingEgress::permissive_success());
+
+        let error = dispatch_error(
+            auth,
+            scope,
+            CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+            input,
+            egress.clone(),
+        )
+        .await;
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn calendar_list_events_sanitizes_partial_failure_body() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "primary",
+                "summary": "Primary sync",
+                "start": { "dateTime": "2026-05-21T16:00:00Z" }
+            }]
+        })),
+        RecordingEgress::json_status(
+            403,
+            json!({
+                "error": {
+                    "status": "PERMISSION_DENIED",
+                    "message": "private backend detail",
+                    "errors": [{ "reason": "forbidden" }]
+                }
+            }),
+        ),
+        RecordingEgress::json_status(
+            500,
+            json!({
+                "error": {
+                    "status": "private backend detail",
+                    "message": "proxy leaked details",
+                    "errors": [{ "reason": "sql: private backend detail" }]
+                }
+            }),
+        ),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "calendar_ids": ["primary", "private@example.com", "unknown@example.com"],
+            "time_min": "2026-05-21T00:00:00Z"
+        }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(
+        output["body"]["partialFailures"],
+        json!([{
+            "calendarId": "private@example.com",
+            "status": 403,
+            "reason": "PERMISSION_DENIED"
+        }, {
+            "calendarId": "unknown@example.com",
+            "status": 500
+        }])
+    );
+    assert!(output["body"]["partialFailures"][0]["body"].is_null());
+    let rendered = serde_json::to_string(&output).expect("output serializes");
+    assert!(!rendered.contains("private backend detail"));
+    assert!(!rendered.contains("proxy leaked details"));
+}
+
+#[tokio::test]
 async fn gsuite_handler_refreshes_expired_google_token_once_and_retries() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
