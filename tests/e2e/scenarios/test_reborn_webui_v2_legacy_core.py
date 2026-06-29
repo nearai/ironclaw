@@ -97,14 +97,14 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
         """
     )
 
-    async def fulfill_json(route, body, status=200):
+    async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
             status=status,
             content_type="application/json",
             body=json.dumps(body),
         )
 
-    async def handle_session(route):
+    async def handle_session(route) -> None:
         auth_header = route.request.headers.get("authorization", "")
         session_requests.append(auth_header)
         if auth_header == "Bearer token-user-a":
@@ -130,10 +130,10 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
             },
         )
 
-    async def handle_threads(route):
+    async def handle_threads(route) -> None:
         await fulfill_json(route, {"threads": [], "next_cursor": None})
 
-    async def handle_logout(route):
+    async def handle_logout(route) -> None:
         await fulfill_json(route, {"status": "logged_out"})
 
     await page.route("**/api/webchat/v2/session", handle_session)
@@ -239,7 +239,7 @@ async def test_reborn_legacy_first_conversation_appears_in_sidebar(reborn_v2_pag
         timeout=30000
     )
 
-    sidebar_row = reborn_v2_page.locator("#gateway-sidebar").get_by_role(
+    sidebar_row = reborn_v2_page.locator(SEL_V2["sidebar"]).get_by_role(
         "button"
     ).filter(has_text=title).first
     await expect(sidebar_row).to_be_visible(timeout=15000)

@@ -233,10 +233,14 @@ SEL_V2 = {
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "new_chat":       "[data-testid='new-chat']",  # "+ New" client-side new-chat button
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "chat_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    "msg_assistant_markdown": '[data-testid="msg-assistant"] .markdown-body',
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
+    "message_copy_button": "button[title]",
+    "sidebar_button": "#gateway-sidebar button",
     "message_list_scroll": "[data-testid='message-list-scroll']",
     "message_list_content": "[data-testid='message-list-content']",
     "message_list_load_older": "[data-testid='message-list-load-older']",

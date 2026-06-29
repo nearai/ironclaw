@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel.js";
 import { messagesFromTimeline } from "./history-messages.js";
 
 test("messagesFromTimeline: pending messages default to optimistic user messages", () => {
@@ -377,4 +378,28 @@ test("messagesFromTimeline: attachments are undefined when a record has none", (
     { message_id: "m3", kind: "user", content: "text only", sequence: 1 },
   ]);
   assert.equal(messages[0].attachments, undefined);
+});
+
+test("messagesFromTimeline: hides only the opaque attachment-only sentinel", () => {
+  const withSentinel = messagesFromTimeline([
+    {
+      message_id: "m4",
+      kind: "user",
+      content: ATTACHMENTS_ONLY_CONTENT,
+      sequence: 1,
+      attachments: [{ id: "a", mime_type: "text/plain", filename: "notes.txt" }],
+    },
+  ]);
+  assert.equal(withSentinel[0].content, "");
+
+  const userVisibleText = messagesFromTimeline([
+    {
+      message_id: "m5",
+      kind: "user",
+      content: "(files attached)",
+      sequence: 1,
+      attachments: [{ id: "a", mime_type: "text/plain", filename: "notes.txt" }],
+    },
+  ]);
+  assert.equal(userVisibleText[0].content, "(files attached)");
 });

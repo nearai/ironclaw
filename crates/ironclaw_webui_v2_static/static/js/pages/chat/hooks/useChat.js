@@ -825,10 +825,22 @@ export function useChat(threadId) {
       if (!content && attachments.length === 0) return;
 
       const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
+      const restoreFailedIfNoReplacement = (prev) => {
+        const hasReplacement = prev.some(
+          (item) =>
+            item.id !== message.id &&
+            item.role === "user" &&
+            item.status === "error" &&
+            item.retryContent === content,
+        );
+        return hasReplacement || prev.some((item) => item.id === message.id)
+          ? prev
+          : [...prev, message];
+      };
       setMessages(removeFailed);
       if (threadId) seedThreadMessages(threadId, removeFailed);
       try {
-        await send(content, {
+        const response = await send(content, {
           threadId,
           attachments,
           displayContent:
@@ -836,8 +848,16 @@ export function useChat(threadId) {
               ? message.retryDisplayContent
               : message.content,
         });
+        if (response === null) {
+          setMessages(restoreFailedIfNoReplacement);
+          if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
+        }
       } catch {
-        // `send` renders the replacement failed optimistic message itself.
+        // `send` renders a replacement failed optimistic message after
+        // admission. If admission failed before that point, restore the
+        // original retryable error bubble.
+        setMessages(restoreFailedIfNoReplacement);
+        if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
       }
     },
     [send, seedThreadMessages, setMessages, threadId],

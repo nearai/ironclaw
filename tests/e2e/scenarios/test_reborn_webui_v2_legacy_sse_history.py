@@ -4,11 +4,10 @@ from contextlib import AsyncExitStack
 import json
 from urllib.parse import parse_qs, urlparse
 
-import aiohttp
 import httpx
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_sse_comment
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, sse_stream, wait_for_sse_comment
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
@@ -922,7 +921,7 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
         await page.wait_for_function("() => window.__v2SseUrls.length === 1", timeout=5000)
 
         await page.evaluate("() => window.__emitV2Sse('keep_alive', {}, 'cursor-thread-a')")
-        await page.locator("#gateway-sidebar button").filter(has_text="Thread B").first.click()
+        await page.locator(SEL_V2["sidebar_button"]).filter(has_text="Thread B").first.click()
         thread_b_message = page.locator(SEL_V2["msg_user"]).filter(has_text="Message from thread B")
         await expect(thread_b_message).to_be_visible(timeout=15000)
         await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
@@ -983,30 +982,36 @@ async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
         thread_id = await _create_thread(client, reborn_v2_server)
 
     events_path = f"/api/webchat/v2/threads/{thread_id}/events"
-    events_url = f"{reborn_v2_server}{events_path}"
     params = {"token": REBORN_V2_AUTH_TOKEN}
-    request_headers = {"Accept": "text/event-stream"}
-    timeout = aiohttp.ClientTimeout(total=15, sock_read=15)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with AsyncExitStack() as stack:
-            for _ in range(3):
-                response = await stack.enter_async_context(
-                    session.get(events_url, params=params, headers=request_headers)
+    async with AsyncExitStack() as stack:
+        for _ in range(3):
+            response = await stack.enter_async_context(
+                sse_stream(
+                    reborn_v2_server,
+                    events_path,
+                    token=REBORN_V2_AUTH_TOKEN,
+                    params=params,
+                    timeout=15,
                 )
-                assert response.status == 200, await response.text()
-                assert response.headers.get("content-type", "").startswith(
-                    "text/event-stream"
-                )
+            )
+            assert response.status == 200, await response.text()
+            assert response.headers.get("content-type", "").startswith(
+                "text/event-stream"
+            )
 
-            async with session.get(
-                events_url, params=params, headers=request_headers
-            ) as rejected:
-                body = await rejected.json(content_type=None)
-                assert rejected.status == 429, body
-                assert body["error"] == "rate_limited"
-                assert body["kind"] == "busy"
-                assert body["retryable"] is True
+        async with sse_stream(
+            reborn_v2_server,
+            events_path,
+            token=REBORN_V2_AUTH_TOKEN,
+            params=params,
+            timeout=15,
+        ) as rejected:
+            body = await rejected.json(content_type=None)
+            assert rejected.status == 429, body
+            assert body["error"] == "rate_limited"
+            assert body["kind"] == "busy"
+            assert body["retryable"] is True
 
 
 async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
@@ -1015,14 +1020,14 @@ async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
-    timeout = aiohttp.ClientTimeout(total=25, sock_read=25)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(
-            events_url,
-            params={"token": REBORN_V2_AUTH_TOKEN},
-            headers={"Accept": "text/event-stream"},
-        ) as response:
-            assert response.status == 200, await response.text()
-            keepalive = await wait_for_sse_comment(response, timeout=22)
-            assert keepalive.startswith(":")
+    events_path = f"/api/webchat/v2/threads/{thread_id}/events"
+    async with sse_stream(
+        reborn_v2_server,
+        events_path,
+        token=REBORN_V2_AUTH_TOKEN,
+        params={"token": REBORN_V2_AUTH_TOKEN},
+        timeout=25,
+    ) as response:
+        assert response.status == 200, await response.text()
+        keepalive = await wait_for_sse_comment(response, timeout=22)
+        assert keepalive.startswith(":")
