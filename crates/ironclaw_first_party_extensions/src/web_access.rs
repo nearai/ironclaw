@@ -725,7 +725,7 @@ fn parse_fetch_results(
         .collect::<HashSet<_>>();
     if lines
         .iter()
-        .any(|line| fetch_error_url(line).is_some_and(|url| requested.contains(url)))
+        .any(|line| fetch_error_mentions_requested(line, &requested))
     {
         return Err(operation_error());
     }
@@ -742,9 +742,14 @@ fn parse_fetch_results(
     let mut results = Vec::new();
     for (position, start) in starts.iter().enumerate() {
         let end = starts.get(position + 1).copied().unwrap_or(lines.len());
-        let title = lines[*start].trim_start_matches("# ").trim().to_string();
+        let title = lines[*start]
+            .strip_prefix("# ")
+            .unwrap_or(lines[*start])
+            .trim()
+            .to_string();
         let url = lines[*start + 1]
-            .trim_start_matches("URL: ")
+            .strip_prefix("URL: ")
+            .unwrap_or(lines[*start + 1])
             .trim()
             .to_string();
         let content = lines[*start + 2..end].join("\n").trim().to_string();
@@ -775,10 +780,17 @@ fn parse_fetch_results(
     }])
 }
 
-fn fetch_error_url(line: &str) -> Option<&str> {
-    line.strip_prefix("Error fetching ")
-        .and_then(|remainder| remainder.rsplit_once(':').map(|(url, _)| url.trim()))
-        .filter(|url| !url.is_empty())
+fn fetch_error_mentions_requested(line: &str, requested: &HashSet<&str>) -> bool {
+    let Some(remainder) = line.strip_prefix("Error fetching ") else {
+        return false;
+    };
+    let remainder = remainder.trim();
+    requested.iter().any(|url| {
+        remainder == *url
+            || remainder
+                .strip_prefix(*url)
+                .is_some_and(|suffix| suffix.trim_start().starts_with(':'))
+    })
 }
 
 fn line_value(block: &str, prefix: &str) -> Option<String> {
@@ -1250,6 +1262,17 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
                 "https://example.com".to_string(),
                 "https://bad.example".to_string(),
             ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
+    }
+
+    #[test]
+    fn parse_exa_fetch_result_blocks_rejects_bare_requested_url_failures() {
+        let error = parse_fetch_results(
+            "Error fetching https://bad.example",
+            &["https://bad.example".to_string()],
         )
         .unwrap_err();
 
