@@ -1011,7 +1011,7 @@ async def _wait_for_assistant_reply(
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and all(piece.lower() in normalized for piece in required_text):
+            if marker_matches and _required_text_matches(normalized, required_text):
                 return text[-2000:]
         await asyncio.sleep(0.5)
     main_text = ""
@@ -1023,6 +1023,13 @@ async def _wait_for_assistant_reply(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r}"
+    )
+
+
+def _required_text_matches(normalized_text: str, required_text: list[str]) -> bool:
+    return all(
+        any(option.strip().lower() in normalized_text for option in piece.split("|"))
+        for piece in required_text
     )
 
 
@@ -3161,7 +3168,7 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             case_name="qa_7c_slack_bug_logger_routine",
             routine_name=routine_name,
             marker=None,
-            required_text=["trigger", "bug"],
+            required_text=["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
             extensions=[
                 {

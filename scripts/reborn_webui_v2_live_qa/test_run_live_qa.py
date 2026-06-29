@@ -373,6 +373,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 180.0)
         self.assertTrue(result.details["fixture_ready"])
 
+    def test_required_text_accepts_explicit_alternatives(self):
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                "fires every 5 minutes and watches slack for bug messages",
+                ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+            )
+        )
+        self.assertFalse(
+            run_live_qa._required_text_matches(
+                "records bug messages in a sheet",
+                ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+            )
+        )
+
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
@@ -676,7 +690,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_routine["case_name"], "qa_7c_slack_bug_logger_routine")
         self.assertIsNone(captured_routine["marker"])
         self.assertEqual(captured_routine["routine_name"], "reborn-qa-7c-slack-bug-sheet")
-        self.assertEqual(captured_routine["required_text"], ["trigger", "bug"])
+        self.assertEqual(
+            captured_routine["required_text"],
+            ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+        )
         self.assertEqual(
             captured_routine["prompt"],
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
