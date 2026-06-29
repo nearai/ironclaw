@@ -80,6 +80,8 @@ pub(crate) fn parent_summary_value(
         "target": target,
         "processes": args.processes,
         "concurrency_per_process": args.concurrency,
+        "duration_seconds": args.duration_seconds,
+        "warmup_seconds": args.warmup_seconds,
         "attempted": attempted,
         "succeeded": succeeded,
         "failed": failed,

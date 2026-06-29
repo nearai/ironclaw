@@ -77,6 +77,15 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 200)]
     pub(crate) operations: usize,
 
+    /// Run workers for this many measured seconds instead of a fixed operation count. Set to 0
+    /// for fixed-operation mode.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) duration_seconds: u64,
+
+    /// Warm up for this many seconds before measuring. Requires --duration-seconds.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) warmup_seconds: u64,
+
     /// Synthetic users distributed across operations.
     #[arg(long, default_value_t = 50)]
     pub(crate) users: usize,
@@ -215,6 +224,80 @@ pub(crate) struct Args {
 
     #[arg(long, hide = true)]
     pub(crate) child_index: Option<usize>,
+
+    #[arg(long, hide = true, default_value_t = false)]
+    pub(crate) warmup_phase: bool,
+}
+
+impl Args {
+    pub(crate) fn uses_duration_mode(&self) -> bool {
+        self.duration_seconds > 0
+    }
+
+    pub(crate) fn operation_target(&self) -> OperationTarget {
+        if self.uses_duration_mode() {
+            OperationTarget::Duration {
+                duration: Duration::from_secs(self.duration_seconds),
+            }
+        } else {
+            OperationTarget::Fixed {
+                operations_per_worker: self.operations,
+                total_operations: self.concurrency.saturating_mul(self.operations),
+            }
+        }
+    }
+
+    pub(crate) fn initial_worker_sample_capacity(&self) -> usize {
+        if self.uses_duration_mode() {
+            self.operations.clamp(1, 1024)
+        } else {
+            self.operations
+        }
+    }
+
+    pub(crate) fn warmup_args(&self) -> Option<Self> {
+        if self.warmup_seconds == 0 {
+            return None;
+        }
+        let mut args = self.clone();
+        args.duration_seconds = self.warmup_seconds;
+        args.warmup_seconds = 0;
+        args.warmup_phase = true;
+        Some(args)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OperationTarget {
+    Fixed {
+        operations_per_worker: usize,
+        total_operations: usize,
+    },
+    Duration {
+        duration: Duration,
+    },
+}
+
+impl OperationTarget {
+    pub(crate) fn progress_total(self) -> Option<usize> {
+        match self {
+            Self::Fixed {
+                total_operations, ..
+            } => Some(total_operations),
+            Self::Duration { .. } => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Fixed {
+                total_operations, ..
+            } => format!("total_operations={total_operations}"),
+            Self::Duration { duration } => {
+                format!("duration_seconds={}", duration.as_secs())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
@@ -315,6 +398,8 @@ struct RunSummary {
     processes: usize,
     concurrency: usize,
     operations_per_thread: usize,
+    duration_seconds: u64,
+    warmup_seconds: u64,
     users: usize,
     tenants: usize,
     model_latency_ms: u64,
@@ -416,6 +501,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.operations == 0 {
         return Err("--operations must be greater than 0".to_string());
+    }
+    if args.warmup_seconds > 0 && args.duration_seconds == 0 {
+        return Err("--warmup-seconds requires --duration-seconds".to_string());
     }
     if args.users == 0 {
         return Err("--users must be greater than 0".to_string());
@@ -524,6 +612,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.concurrency.to_string())
             .arg("--operations")
             .arg(args.operations.to_string())
+            .arg("--duration-seconds")
+            .arg(args.duration_seconds.to_string())
+            .arg("--warmup-seconds")
+            .arg(args.warmup_seconds.to_string())
             .arg("--users")
             .arg(args.users.to_string())
             .arg("--tenants")
@@ -637,32 +729,51 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
         args.scenario.as_str(),
         run_id
     );
-    let total_operations = args.concurrency.saturating_mul(args.operations);
+    let operation_target = args.operation_target();
     if args.scenario.is_process_local() {
-        return run_process_pressure_in_process(args, run_id, total_operations).await;
+        return run_process_pressure_in_process(args, run_id, operation_target).await;
     }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
-        return run_resource_governor_in_process(args, run_id, total_operations, identities).await;
+        return run_resource_governor_in_process(args, run_id, operation_target, identities).await;
     }
 
-    run_user_turn_in_process(args, run_id, total_operations, identities).await
+    run_user_turn_in_process(args, run_id, operation_target, identities).await
 }
 
 async fn run_process_pressure_in_process(
     args: &Args,
     run_id: &str,
-    total_operations: usize,
+    operation_target: OperationTarget,
 ) -> Result<RunSummary, String> {
     eprintln!(
-        "{} running target=process://local concurrency={} operations_per_thread={} total_operations={} progress_interval_seconds={}",
+        "{} running target=process://local concurrency={} operations_per_thread={} {} warmup_seconds={} progress_interval_seconds={}",
         log_prefix(args),
         args.concurrency,
         args.operations,
-        total_operations,
+        operation_target.label(),
+        args.warmup_seconds,
         args.progress_interval_seconds
     );
+    if let Some(warmup_args) = args.warmup_args() {
+        eprintln!(
+            "{} warming up target=process://local duration_seconds={}",
+            log_prefix(args),
+            warmup_args.duration_seconds
+        );
+        let _ = tokio::task::spawn_blocking(move || process_pressure::run(&warmup_args))
+            .await
+            .map_err(|error| {
+                if error.is_panic() {
+                    eprintln!("process pressure warmup task panicked: {error:?}");
+                    "process pressure warmup task panicked".to_string()
+                } else {
+                    eprintln!("process pressure warmup task cancelled: {error:?}");
+                    "process pressure warmup task cancelled".to_string()
+                }
+            })??;
+    }
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let started = Instant::now();
     let args_clone = args.clone();
@@ -703,21 +814,44 @@ async fn run_process_pressure_in_process(
 async fn run_resource_governor_in_process(
     args: &Args,
     run_id: &str,
-    total_operations: usize,
+    operation_target: OperationTarget,
     identities: Arc<SyntheticIds>,
 ) -> Result<RunSummary, String> {
     let backend = build_backend(args, run_id).await?;
     eprintln!(
-        "{} running target={} concurrency={} operations_per_thread={} total_operations={} users={} tenants={} progress_interval_seconds={}",
+        "{} running target={} concurrency={} operations_per_thread={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
         log_prefix(args),
         backend.target,
         args.concurrency,
         args.operations,
-        total_operations,
+        operation_target.label(),
+        args.warmup_seconds,
         args.users,
         args.tenants,
         args.progress_interval_seconds
     );
+    if let Some(warmup_args) = args.warmup_args() {
+        eprintln!(
+            "{} warming up target={} duration_seconds={}",
+            log_prefix(args),
+            backend.target,
+            warmup_args.duration_seconds
+        );
+        let governor = Arc::clone(&backend.governor);
+        let identities = Arc::clone(&identities);
+        let _ =
+            tokio::task::spawn_blocking(move || run_threads(&governor, &warmup_args, &identities))
+                .await
+                .map_err(|error| {
+                    if error.is_panic() {
+                        eprintln!("run_threads warmup task panicked: {error:?}");
+                        "run_threads warmup task panicked".to_string()
+                    } else {
+                        eprintln!("run_threads warmup task cancelled: {error:?}");
+                        "run_threads warmup task cancelled".to_string()
+                    }
+                })??;
+    }
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let db_probe_before = db_probe::capture(args).await;
     let started = Instant::now();
@@ -762,21 +896,32 @@ async fn run_resource_governor_in_process(
 async fn run_user_turn_in_process(
     args: &Args,
     run_id: &str,
-    total_operations: usize,
+    operation_target: OperationTarget,
     identities: Arc<SyntheticIds>,
 ) -> Result<RunSummary, String> {
     let workload = Arc::new(build_user_turn_workload(args, run_id).await?);
     eprintln!(
-        "{} running target={} concurrency={} operations_per_task={} total_operations={} users={} tenants={} progress_interval_seconds={}",
+        "{} running target={} concurrency={} operations_per_task={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
         log_prefix(args),
         workload.target(),
         args.concurrency,
         args.operations,
-        total_operations,
+        operation_target.label(),
+        args.warmup_seconds,
         args.users,
         args.tenants,
         args.progress_interval_seconds
     );
+    if let Some(warmup_args) = args.warmup_args() {
+        eprintln!(
+            "{} warming up target={} duration_seconds={}",
+            log_prefix(args),
+            workload.target(),
+            warmup_args.duration_seconds
+        );
+        let _ = run_user_turn_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
+            .await?;
+    }
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
     let db_probe_before = db_probe::capture(args).await;
     let started = Instant::now();
@@ -811,14 +956,14 @@ fn run_threads(
     args: &Args,
     identities: &Arc<SyntheticIds>,
 ) -> Result<Vec<Sample>, String> {
-    let total_operations = args.concurrency.saturating_mul(args.operations);
+    let operation_target = args.operation_target();
     let progress = Arc::new(ProgressCounters::default());
     let progress_reporter = spawn_progress_reporter(
         log_prefix(args),
         args.backend.as_str(),
         args.scenario.as_str(),
         args.progress_interval_seconds,
-        total_operations,
+        operation_target.progress_total(),
         Arc::clone(&progress),
     );
     let result = run_threads_inner(governor, args, identities, &progress);
@@ -844,8 +989,10 @@ fn run_threads_inner(
         let handle = match thread::Builder::new()
             .name(format!("ironclaw-stress-{worker_index}"))
             .spawn(move || -> Result<(), String> {
-                let mut samples = Vec::with_capacity(args.operations);
-                for operation_index in 0..args.operations {
+                let mut samples = Vec::with_capacity(args.initial_worker_sample_capacity());
+                let started = Instant::now();
+                let mut operation_index = 0;
+                while should_run_operation(args.operation_target(), started, operation_index) {
                     let sample = run_one_operation(
                         &governor,
                         &args,
@@ -855,6 +1002,7 @@ fn run_threads_inner(
                     );
                     progress.record(sample.error.is_some());
                     samples.push(sample);
+                    operation_index += 1;
                 }
                 sender
                     .send(samples)
@@ -875,14 +1023,29 @@ fn run_threads_inner(
         samples.extend(worker_samples);
     }
     join_workers(handles)?;
-    let expected = args.concurrency * args.operations;
-    if samples.len() != expected {
+    if let Some(expected) = args.operation_target().progress_total()
+        && samples.len() != expected
+    {
         return Err(format!(
             "collected {} samples but expected {expected}",
             samples.len()
         ));
     }
     Ok(samples)
+}
+
+fn should_run_operation(
+    operation_target: OperationTarget,
+    started: Instant,
+    operation_index: usize,
+) -> bool {
+    match operation_target {
+        OperationTarget::Fixed {
+            operations_per_worker,
+            ..
+        } => operation_index < operations_per_worker,
+        OperationTarget::Duration { duration } => started.elapsed() < duration,
+    }
 }
 
 fn run_one_operation(
@@ -962,6 +1125,8 @@ fn summarize(
         processes: args.processes,
         concurrency: args.concurrency,
         operations_per_thread: args.operations,
+        duration_seconds: args.duration_seconds,
+        warmup_seconds: args.warmup_seconds,
         users: args.users,
         tenants: args.tenants,
         model_latency_ms: args.model_latency_ms,

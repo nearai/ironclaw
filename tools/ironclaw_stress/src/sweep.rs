@@ -120,6 +120,8 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "users": case.users,
             "tenants": case_args.tenants,
             "operations_per_thread": case_args.operations,
+            "duration_seconds": case_args.duration_seconds,
+            "warmup_seconds": case_args.warmup_seconds,
             "model_latency_ms": case.model_latency_ms,
             "model_latency_profile": case_args.model_latency_profile,
             "model_latency_jitter_ms": case_args.model_latency_jitter_ms,

@@ -10,14 +10,14 @@ use crate::{
 };
 
 pub(crate) fn run(args: &Args) -> Result<Vec<Sample>, String> {
-    let total_operations = args.concurrency.saturating_mul(args.operations);
+    let operation_target = args.operation_target();
     let progress = Arc::new(ProgressCounters::default());
     let progress_reporter = spawn_progress_reporter(
         crate::log_prefix(args),
         args.backend.as_str(),
         args.scenario.as_str(),
         args.progress_interval_seconds,
-        total_operations,
+        operation_target.progress_total(),
         Arc::clone(&progress),
     );
     let samples = run_threads_inner(args, &progress);
@@ -36,11 +36,14 @@ fn run_threads_inner(args: &Args, progress: &Arc<ProgressCounters>) -> Result<Ve
         let handle = match thread::Builder::new()
             .name(format!("ironclaw-stress-pressure-{worker_index}"))
             .spawn(move || -> Result<(), String> {
-                let mut samples = Vec::with_capacity(args.operations);
-                for operation_index in 0..args.operations {
+                let mut samples = Vec::with_capacity(args.initial_worker_sample_capacity());
+                let started = Instant::now();
+                let mut operation_index = 0;
+                while should_run_operation(args.operation_target(), started, operation_index) {
                     let sample = run_one_operation(&args, worker_index, operation_index);
                     progress.record(sample.error.is_some());
                     samples.push(sample);
+                    operation_index += 1;
                 }
                 sender
                     .send(samples)
@@ -61,14 +64,29 @@ fn run_threads_inner(args: &Args, progress: &Arc<ProgressCounters>) -> Result<Ve
         samples.extend(worker_samples);
     }
     join_workers(handles)?;
-    let expected = args.concurrency * args.operations;
-    if samples.len() != expected {
+    if let Some(expected) = args.operation_target().progress_total()
+        && samples.len() != expected
+    {
         return Err(format!(
             "collected {} samples but expected {expected}",
             samples.len()
         ));
     }
     Ok(samples)
+}
+
+fn should_run_operation(
+    operation_target: crate::OperationTarget,
+    started: Instant,
+    operation_index: usize,
+) -> bool {
+    match operation_target {
+        crate::OperationTarget::Fixed {
+            operations_per_worker,
+            ..
+        } => operation_index < operations_per_worker,
+        crate::OperationTarget::Duration { duration } => started.elapsed() < duration,
+    }
 }
 
 fn run_one_operation(args: &Args, worker_index: usize, operation_index: usize) -> Sample {

@@ -92,6 +92,29 @@ fn context_growth_rejects_zero_turns_per_operation() {
 }
 
 #[test]
+fn warmup_requires_duration_mode() {
+    let mut args = test_args();
+    args.duration_seconds = 0;
+    args.warmup_seconds = 1;
+
+    let error = validate_args(&args).expect_err("warmup without duration is invalid");
+
+    assert!(error.contains("--warmup-seconds requires --duration-seconds"));
+}
+
+#[test]
+fn duration_mode_has_no_fixed_progress_total() {
+    let mut args = test_args();
+    args.duration_seconds = 10;
+
+    assert!(matches!(
+        args.operation_target(),
+        OperationTarget::Duration { .. }
+    ));
+    assert_eq!(args.operation_target().progress_total(), None);
+}
+
+#[test]
 fn sweep_concurrency_rejects_zero_values() {
     let mut args = test_args();
     args.sweep_concurrency = vec![1, 0, 2];
@@ -239,6 +262,8 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         processes: 1,
         concurrency: 1,
         operations_per_thread: 1,
+        duration_seconds: 0,
+        warmup_seconds: 0,
         users: 1,
         tenants: 1,
         model_latency_ms: 0,
@@ -296,6 +321,8 @@ fn test_args() -> Args {
         processes: 1,
         concurrency: 2,
         operations: 3,
+        duration_seconds: 0,
+        warmup_seconds: 0,
         users: 4,
         tenants: 2,
         scenario: Scenario::ReserveRelease,
@@ -331,6 +358,7 @@ fn test_args() -> Args {
         memory_bytes: 4096,
         memory_hold_ms: 0,
         child_index: None,
+        warmup_phase: false,
     }
 }
 

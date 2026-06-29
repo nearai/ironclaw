@@ -34,15 +34,15 @@ pub(crate) fn spawn_progress_reporter(
     backend: &'static str,
     scenario: &'static str,
     progress_interval_seconds: u64,
-    total_operations: usize,
+    total_operations: Option<usize>,
     progress: Arc<ProgressCounters>,
 ) -> Option<ProgressReporter> {
-    if progress_interval_seconds == 0 || total_operations == 0 {
+    if progress_interval_seconds == 0 || matches!(total_operations, Some(0)) {
         return None;
     }
 
     let interval = Duration::from_secs(progress_interval_seconds);
-    let total_operations = total_operations as u64;
+    let total_operations = total_operations.map(|value| value as u64);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
         .name("ironclaw-stress-progress".to_string())
@@ -61,8 +61,12 @@ pub(crate) fn spawn_progress_reporter(
                         let recent_elapsed = last_report.elapsed().as_secs_f64();
                         let recent_ops_sec =
                             recent_attempted as f64 / recent_elapsed.max(f64::MIN_POSITIVE);
+                        let attempted_display = match total_operations {
+                            Some(total_operations) => format!("{attempted}/{total_operations}"),
+                            None => attempted.to_string(),
+                        };
                         eprintln!(
-                            "{prefix} progress backend={backend} scenario={scenario} attempted={attempted}/{total_operations} succeeded={succeeded} failed={failed} elapsed_ms={} recent_ops_sec={recent_ops_sec:.1}",
+                            "{prefix} progress backend={backend} scenario={scenario} attempted={attempted_display} succeeded={succeeded} failed={failed} elapsed_ms={} recent_ops_sec={recent_ops_sec:.1}",
                             started.elapsed().as_millis()
                         );
                         last_attempted = attempted;

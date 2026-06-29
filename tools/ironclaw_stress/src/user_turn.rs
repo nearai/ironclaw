@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::{
-    Args, Backend, LatencySummary, ModelLatencyProfile, Sample, Scenario,
+    Args, Backend, LatencySummary, ModelLatencyProfile, OperationTarget, Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
     summary::FailureCause,
@@ -149,7 +149,7 @@ pub(crate) async fn run_user_turn_tasks(
     args: &Args,
     identities: Arc<SyntheticIds>,
 ) -> Result<Vec<Sample>, String> {
-    let total_operations = args.concurrency.saturating_mul(args.operations);
+    let operation_target = args.operation_target();
     let progress = Arc::new(ProgressCounters::default());
     let span_budget = Arc::new(AtomicUsize::new(span_sample_limit(args.span_sample_limit)));
     let progress_reporter = spawn_progress_reporter(
@@ -157,7 +157,7 @@ pub(crate) async fn run_user_turn_tasks(
         args.backend.as_str(),
         args.scenario.as_str(),
         args.progress_interval_seconds,
-        total_operations,
+        operation_target.progress_total(),
         Arc::clone(&progress),
     );
 
@@ -171,8 +171,10 @@ pub(crate) async fn run_user_turn_tasks(
         handles.push((
             worker_index,
             tokio::spawn(async move {
-                let mut samples = Vec::with_capacity(args.operations);
-                for operation_index in 0..args.operations {
+                let mut samples = Vec::with_capacity(args.initial_worker_sample_capacity());
+                let started = Instant::now();
+                let mut operation_index = 0;
+                while should_run_operation(args.operation_target(), started, operation_index) {
                     let sample = workload
                         .run_operation(
                             &args,
@@ -184,13 +186,17 @@ pub(crate) async fn run_user_turn_tasks(
                         .await;
                     progress.record(sample.error.is_some());
                     samples.push(sample);
+                    operation_index += 1;
                 }
                 samples
             }),
         ));
     }
 
-    let mut samples = Vec::with_capacity(total_operations);
+    let mut samples = Vec::with_capacity(operation_target.progress_total().unwrap_or_else(|| {
+        args.concurrency
+            .saturating_mul(args.initial_worker_sample_capacity())
+    }));
     let mut first_error = None;
     for (worker_index, handle) in handles {
         match handle.await {
@@ -213,13 +219,29 @@ pub(crate) async fn run_user_turn_tasks(
     if let Some(error) = first_error {
         return Err(error);
     }
-    if samples.len() != total_operations {
+    if let Some(expected) = operation_target.progress_total()
+        && samples.len() != expected
+    {
         return Err(format!(
-            "collected {} samples but expected {total_operations}",
+            "collected {} samples but expected {expected}",
             samples.len()
         ));
     }
     Ok(samples)
+}
+
+fn should_run_operation(
+    operation_target: OperationTarget,
+    started: Instant,
+    operation_index: usize,
+) -> bool {
+    match operation_target {
+        OperationTarget::Fixed {
+            operations_per_worker,
+            ..
+        } => operation_index < operations_per_worker,
+        OperationTarget::Duration { duration } => started.elapsed() < duration,
+    }
 }
 
 impl UserTurnWorkload {
@@ -706,10 +728,17 @@ pub(crate) fn synthetic_model_wait_ms(
             args.model_latency_ms + deterministic_jitter_ms(args, worker_index, operation_index)
         }
         ModelLatencyProfile::TailSpike => {
-            let sequence = worker_index
-                .saturating_mul(args.operations)
-                .saturating_add(operation_index)
-                .saturating_add(1);
+            let sequence = if args.uses_duration_mode() {
+                operation_index
+                    .saturating_mul(args.concurrency)
+                    .saturating_add(worker_index)
+                    .saturating_add(1)
+            } else {
+                worker_index
+                    .saturating_mul(args.operations)
+                    .saturating_add(operation_index)
+                    .saturating_add(1)
+            };
             if args.model_latency_spike_every > 0
                 && sequence.is_multiple_of(args.model_latency_spike_every)
             {
@@ -761,10 +790,12 @@ fn stress_payload(mut base: String, minimum_bytes: usize) -> String {
 }
 
 fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> String {
+    let phase = if args.warmup_phase { ":warmup" } else { "" };
     format!(
-        "{}:child-{}:worker-{worker_index}:op-{operation_index}",
+        "{}:child-{}{}:worker-{worker_index}:op-{operation_index}",
         args.run_id.as_deref().unwrap_or("unknown-run"),
-        args.child_index.unwrap_or(0)
+        args.child_index.unwrap_or(0),
+        phase
     )
 }
 
