@@ -5977,6 +5977,7 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
             blocked_gate: None,
             sanitized_reason: None,
             retryable: None,
+            detail: None,
         })
         .await
         .unwrap();

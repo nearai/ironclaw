@@ -92,6 +92,7 @@ impl AgentLoopDriver for BarrierDriver {
         // Return an error (controlled fail) — always valid, no host evidence needed.
         Err(AgentLoopDriverError::Failed {
             reason_kind: "test_concurrent_barrier".to_string(),
+            detail: None,
         })
     }
 

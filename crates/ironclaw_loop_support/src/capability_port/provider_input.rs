@@ -11,7 +11,7 @@ pub(super) fn prepare_provider_arguments(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
-    prepare_provider_arguments_with_detail(arguments, schema, label).map_err(|error| error.error)
+    prepare_provider_arguments_with_detail(arguments, schema, label).map_err(|error| *error.error)
 }
 
 pub(super) fn prepare_provider_arguments_with_detail(
@@ -25,14 +25,18 @@ pub(super) fn prepare_provider_arguments_with_detail(
 }
 
 pub(super) struct ProviderArgumentError {
-    pub(super) error: AgentLoopHostError,
+    // Boxed to keep the `Result<_, ProviderArgumentError>` Err-variant small:
+    // `AgentLoopHostError` carries a safe_summary plus several optional refs
+    // and a model-visible detail string, and embedding it inline tripped
+    // clippy's `result_large_err`.
+    pub(super) error: Box<AgentLoopHostError>,
     pub(super) detail: Option<CapabilityFailureDetail>,
 }
 
 impl From<AgentLoopHostError> for ProviderArgumentError {
     fn from(error: AgentLoopHostError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: None,
         }
     }
@@ -161,12 +165,12 @@ fn validate_provider_arguments_schema(
             }
         }
         return Err(ProviderArgumentError {
-            error: AgentLoopHostError::new(
+            error: Box::new(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 format!(
                     "{label} failed schema validation at instance path {instance_path} against schema path {schema_path}"
                 ),
-            ),
+            )),
             detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
         });
     }

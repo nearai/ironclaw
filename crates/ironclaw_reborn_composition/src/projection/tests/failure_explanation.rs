@@ -429,6 +429,7 @@ async fn webui_event_stream_projects_retryable_flag_for_failed_run() {
                 blocked_gate: None,
                 sanitized_reason: Some("lease_expired".to_string()),
                 retryable: Some(true),
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -500,6 +501,7 @@ async fn assert_failed_run_status_summary_with_explainer(
                 blocked_gate: None,
                 sanitized_reason: Some(failure_category.to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -607,6 +609,7 @@ async fn webui_event_stream_uses_model_failure_explanation_when_available() {
                 blocked_gate: None,
                 sanitized_reason: Some("driver_invalid_request".to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -683,6 +686,7 @@ async fn webui_event_stream_caches_model_failure_explanation_across_replay() {
                 blocked_gate: None,
                 sanitized_reason: Some("driver_invalid_request".to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -758,6 +762,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
                 blocked_gate: None,
                 sanitized_reason: Some("driver_failed".to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -831,6 +836,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                 blocked_gate: None,
                 sanitized_reason: Some("scheduler_executor_panic".to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -905,6 +911,7 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
             failure_category: "driver_invalid_request".to_string(),
             fallback_summary: "The agent runtime rejected the request before producing a reply."
                 .to_string(),
+            detail: None,
         })
         .await;
 
@@ -918,6 +925,51 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
     assert_eq!(
         requests[0].identity.task_kind,
         SystemTaskKind::FailureExplanation
+    );
+}
+
+#[test]
+fn failure_explanation_user_prompt_renders_detail_line() {
+    let prompt = failure_explanation_user_prompt(&FailureExplanationInput {
+        failure_category: "host_stage_unavailable_model".to_string(),
+        fallback_summary: "The run could not reach the model service.".to_string(),
+        detail: Some(
+            "missing input_schema_ref at /system/extensions/list_calendars.json".to_string(),
+        ),
+    });
+    assert!(
+        prompt.contains("detail:"),
+        "prompt should carry a detail line: {prompt}"
+    );
+    assert!(
+        prompt.contains("/system/extensions/list_calendars.json"),
+        "prompt should carry the raw path from detail: {prompt}"
+    );
+}
+
+#[test]
+fn failure_explanation_user_prompt_omits_detail_line_when_absent() {
+    let prompt = failure_explanation_user_prompt(&FailureExplanationInput {
+        failure_category: "host_stage_unavailable_model".to_string(),
+        fallback_summary: "The run could not reach the model service.".to_string(),
+        detail: None,
+    });
+    assert!(
+        !prompt.contains("detail:"),
+        "prompt should not render an empty detail line: {prompt}"
+    );
+}
+
+#[test]
+fn failure_explanation_user_prompt_redacts_secret_value_in_detail() {
+    let prompt = failure_explanation_user_prompt(&FailureExplanationInput {
+        failure_category: "model_credentials_unavailable".to_string(),
+        fallback_summary: "The run could not authenticate to the model provider.".to_string(),
+        detail: Some("auth failed for token sk-ABCDEF0123456789ABCDEF0123456789".to_string()),
+    });
+    assert!(
+        !prompt.contains("sk-ABCDEF0123456789ABCDEF0123456789"),
+        "secret token value must be redacted from the detail line: {prompt}"
     );
 }
 
@@ -935,6 +987,7 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
         .explain_failure(FailureExplanationInput {
             failure_category: "driver_unavailable".to_string(),
             fallback_summary: "The run could not start the agent runtime.".to_string(),
+            detail: None,
         })
         .await;
 
