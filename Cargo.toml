@@ -352,6 +352,10 @@ name = "reborn_group_memory"
 path = "tests/reborn_group_memory/main.rs"
 
 [[test]]
+name = "reborn_group_extensions"
+path = "tests/reborn_group_extensions/main.rs"
+
+[[test]]
 name = "reborn_integration_oauth_refresh"
 required-features = ["libsql"]
 
