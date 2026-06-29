@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::{
         Arc,
@@ -29,13 +30,14 @@ use ironclaw_turns::{
     runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
 use crate::{
     Args, Backend, LatencySummary, ModelLatencyProfile, OperationTarget, Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
-    summary::FailureCause,
+    summary::{FailureCause, latency_summary},
     synthetic::SyntheticIds,
     trace::{spawn_trace_reporter, stop_trace_reporter},
 };
@@ -106,6 +108,20 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) update_assistant_draft: Option<Duration>,
     pub(crate) resource_reconcile: Option<Duration>,
     pub(crate) resource_release: Option<Duration>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PrefillSummary {
+    pub(crate) threads: usize,
+    pub(crate) turns_per_thread: usize,
+    pub(crate) concurrency: usize,
+    pub(crate) attempted: u64,
+    pub(crate) succeeded: u64,
+    pub(crate) failed: u64,
+    pub(crate) duration_ms: u128,
+    pub(crate) throughput_ops_sec: f64,
+    pub(crate) latency: LatencySummary,
+    pub(crate) errors: BTreeMap<String, u64>,
 }
 
 pub(crate) async fn build_user_turn_workload(
@@ -244,6 +260,100 @@ pub(crate) async fn run_user_turn_tasks(
     Ok(samples)
 }
 
+pub(crate) async fn prefill_user_turn_history(
+    workload: Arc<UserTurnWorkload>,
+    args: &Args,
+    identities: Arc<SyntheticIds>,
+) -> Result<Option<PrefillSummary>, String> {
+    if !args.prefill_enabled() {
+        return Ok(None);
+    }
+
+    let total_turns = args
+        .prefill_threads
+        .saturating_mul(args.prefill_turns_per_thread);
+    eprintln!(
+        "{} prefill starting target={} threads={} turns_per_thread={} total_turns={} concurrency={}",
+        crate::log_prefix(args),
+        workload.target(),
+        args.prefill_threads,
+        args.prefill_turns_per_thread,
+        total_turns,
+        args.prefill_concurrency
+    );
+
+    let started = Instant::now();
+    let semaphore = Arc::new(Semaphore::new(args.prefill_concurrency));
+    let mut handles = Vec::with_capacity(args.prefill_threads);
+    for thread_index in 0..args.prefill_threads {
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| "prefill semaphore closed".to_string())?;
+        let workload = Arc::clone(&workload);
+        let identities = Arc::clone(&identities);
+        let args = args.clone();
+        handles.push((
+            thread_index,
+            tokio::spawn(async move {
+                let _permit = permit;
+                let mut samples = Vec::with_capacity(args.prefill_turns_per_thread);
+                for turn_index in 0..args.prefill_turns_per_thread {
+                    samples.push(
+                        workload
+                            .prefill_turn(&args, &identities, thread_index, turn_index)
+                            .await,
+                    );
+                }
+                samples
+            }),
+        ));
+    }
+
+    let mut samples = Vec::with_capacity(total_turns);
+    let mut first_error = None;
+    for (thread_index, handle) in handles {
+        match handle.await {
+            Ok(thread_samples) => samples.extend(thread_samples),
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    if error.is_panic() {
+                        eprintln!("prefill thread {thread_index} panicked: {error:?}");
+                        format!("prefill thread {thread_index} panicked")
+                    } else {
+                        eprintln!("prefill thread {thread_index} cancelled: {error:?}");
+                        format!("prefill thread {thread_index} cancelled")
+                    }
+                });
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    let summary = summarize_prefill(args, started.elapsed(), &samples);
+    eprintln!(
+        "{} prefill finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        crate::log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    if summary.failed > 0 {
+        return Err(format!(
+            "prefill failed attempted={} failed={} errors={}",
+            summary.attempted,
+            summary.failed,
+            format_prefill_errors(&summary.errors)
+        ));
+    }
+
+    Ok(Some(summary))
+}
+
 fn should_run_operation(
     operation_target: OperationTarget,
     started: Instant,
@@ -256,6 +366,48 @@ fn should_run_operation(
         } => operation_index < operations_per_worker,
         OperationTarget::Duration { duration } => started.elapsed() < duration,
     }
+}
+
+fn summarize_prefill(args: &Args, elapsed: Duration, samples: &[Sample]) -> PrefillSummary {
+    let mut errors = BTreeMap::new();
+    let mut latencies: Vec<u128> = samples
+        .iter()
+        .map(|sample| sample.latency.as_micros())
+        .collect();
+    latencies.sort_unstable();
+    let failed = samples
+        .iter()
+        .filter_map(|sample| sample.error.as_ref())
+        .map(|error| {
+            *errors.entry(error.clone()).or_insert(0) += 1;
+        })
+        .count() as u64;
+    let attempted = samples.len() as u64;
+    let succeeded = attempted.saturating_sub(failed);
+    let elapsed_secs = elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+    PrefillSummary {
+        threads: args.prefill_threads,
+        turns_per_thread: args.prefill_turns_per_thread,
+        concurrency: args.prefill_concurrency,
+        attempted,
+        succeeded,
+        failed,
+        duration_ms: elapsed.as_millis(),
+        throughput_ops_sec: attempted as f64 / elapsed_secs,
+        latency: latency_summary(&latencies),
+        errors,
+    }
+}
+
+fn format_prefill_errors(errors: &BTreeMap<String, u64>) -> String {
+    if errors.is_empty() {
+        return "-".to_string();
+    }
+    errors
+        .iter()
+        .map(|(error, count)| format!("{error}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl UserTurnWorkload {
@@ -291,12 +443,185 @@ impl UserTurnWorkload {
             }
         }
     }
+
+    async fn prefill_turn(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+        turn_index: usize,
+    ) -> Sample {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::Libsql(services) => {
+                services
+                    .prefill_turn(args, identities, thread_index, turn_index)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(services) => {
+                services
+                    .prefill_turn(args, identities, thread_index, turn_index)
+                    .await
+            }
+        }
+    }
 }
 
 impl<F> UserTurnServices<F>
 where
     F: RootFilesystem + 'static,
 {
+    async fn prefill_turn(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+        turn_index: usize,
+    ) -> Sample {
+        let mut stages = UserTurnStageDurations::default();
+        let started = Instant::now();
+        let outcome = self
+            .prefill_turn_inner(args, identities, thread_index, turn_index, &mut stages)
+            .await;
+        let latency = started.elapsed();
+        let failure = outcome.err().map(|failure| failure.cause);
+        let error = failure.as_ref().map(|cause| cause.bucket.clone());
+        Sample {
+            latency,
+            error,
+            failure,
+            stages: Some(stages),
+        }
+    }
+
+    async fn prefill_turn_inner(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+        turn_index: usize,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let context = identities
+            .user_turn_context_for_user_index(thread_index)
+            .map_err(|error| OperationFailure::invalid_request("prefill_context", error))?;
+        let turn_store = self.turn_store_for_context(&context)?;
+        let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
+        let source_binding = "ironclaw-stress-prefill";
+        let reply_target = "ironclaw-stress-prefill-reply";
+        let operation_ref = format!("prefill:{}:{thread_index}:{turn_index}", self.run_id);
+        let user_message = stress_payload(
+            format!("prefill stress message {operation_ref}"),
+            args.user_message_bytes,
+        );
+        let assistant_message = stress_payload(
+            format!("prefill stress response {operation_ref}"),
+            args.assistant_message_bytes,
+        );
+
+        let thread = time_stage(
+            &mut stages.ensure_thread,
+            self.thread_service.ensure_thread(EnsureThreadRequest {
+                scope: context.thread_scope.clone(),
+                thread_id: Some(context.thread_id.clone()),
+                created_by_actor_id: context.user_id.as_str().to_string(),
+                title: Some(format!("Storage stress {}", context.user_id.as_str())),
+                metadata_json: None,
+            }),
+        )
+        .await
+        .map_err(|error| thread_failure("prefill_ensure_thread", error))?;
+
+        let accepted = time_stage(
+            &mut stages.accept_inbound,
+            self.thread_service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope: context.thread_scope.clone(),
+                    thread_id: thread.thread_id.clone(),
+                    actor_id: context.user_id.as_str().to_string(),
+                    source_binding_id: Some(source_binding.to_string()),
+                    reply_target_binding_id: Some(reply_target.to_string()),
+                    external_event_id: Some(operation_ref.clone()),
+                    content: MessageContent::text(user_message),
+                }),
+        )
+        .await
+        .map_err(|error| thread_failure("prefill_accept_inbound", error))?;
+
+        let SubmitTurnResponse::Accepted {
+            turn_id, run_id, ..
+        } = time_stage(
+            &mut stages.submit_turn,
+            turn_coordinator.submit_turn(SubmitTurnRequest {
+                scope: context.turn_scope.clone(),
+                actor: TurnActor::new(context.user_id.clone()),
+                accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
+                    .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
+                source_binding_ref: SourceBindingRef::new(source_binding)
+                    .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
+                    .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new(format!(
+                    "ironclaw-stress-prefill:{operation_ref}"
+                ))
+                .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("prefill_submit", error))?;
+
+        time_stage(
+            &mut stages.mark_submitted,
+            self.thread_service.mark_message_submitted(
+                &context.thread_scope,
+                &thread.thread_id,
+                accepted.message_id,
+                turn_id.to_string(),
+                run_id.to_string(),
+            ),
+        )
+        .await
+        .map_err(|error| thread_failure("prefill_mark_submitted", error))?;
+
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = time_stage(
+            &mut stages.claim_run,
+            turn_store.claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(context.turn_scope.clone()),
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("prefill_claim_run", error))?
+        .ok_or_else(|| {
+            OperationFailure::new(
+                "turn_claim_miss",
+                "prefill_claim_run",
+                "prefill run was not claimable",
+            )
+        })?;
+
+        self.write_assistant_turn(
+            &context,
+            &thread.thread_id,
+            &turn_store,
+            &claimed,
+            assistant_message,
+            stages,
+        )
+        .await
+    }
+
     async fn run_operation(
         &self,
         args: &Args,

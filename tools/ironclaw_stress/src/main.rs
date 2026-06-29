@@ -98,6 +98,18 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 1)]
     pub(crate) tenants: usize,
 
+    /// Distinct synthetic user threads to prefill before measured user-turn runs.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) prefill_threads: usize,
+
+    /// Completed chat turns to prefill per synthetic thread.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) prefill_turns_per_thread: usize,
+
+    /// Synthetic threads to prefill concurrently.
+    #[arg(long, default_value_t = 4)]
+    pub(crate) prefill_concurrency: usize,
+
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
 
@@ -337,6 +349,10 @@ impl Args {
         args.warmup_phase = true;
         Some(args)
     }
+
+    pub(crate) fn prefill_enabled(&self) -> bool {
+        self.prefill_threads > 0 || self.prefill_turns_per_thread > 0
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -478,6 +494,9 @@ struct RunSummary {
     trace_interval_seconds: u64,
     users: usize,
     tenants: usize,
+    prefill_threads: usize,
+    prefill_turns_per_thread: usize,
+    prefill_concurrency: usize,
     model_latency_ms: u64,
     model_latency_profile: ModelLatencyProfile,
     model_latency_jitter_ms: u64,
@@ -501,10 +520,21 @@ struct RunSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     db_probe: Option<DbProbeSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prefill: Option<user_turn::PrefillSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     failure_causes: BTreeMap<String, FailureCauseSummary>,
+}
+
+struct SummaryInput {
+    target: String,
+    elapsed: Duration,
+    samples: Vec<Sample>,
+    process: ProcessMetrics,
+    db_probe: Option<DbProbeSummary>,
+    prefill: Option<user_turn::PrefillSummary>,
 }
 
 #[tokio::main]
@@ -699,6 +729,34 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.tool_output_bytes > 16 * 1024 {
         return Err("--tool-output-bytes must be at most 16384".to_string());
     }
+    if args.prefill_concurrency == 0 {
+        return Err("--prefill-concurrency must be greater than 0".to_string());
+    }
+    if args.prefill_enabled() {
+        if args.prefill_threads == 0 || args.prefill_turns_per_thread == 0 {
+            return Err(
+                "--prefill-threads and --prefill-turns-per-thread must both be greater than 0"
+                    .to_string(),
+            );
+        }
+        if !args.scenario.is_user_turn() {
+            return Err(format!(
+                "--prefill-threads requires a user-turn scenario, got {}",
+                args.scenario.as_str()
+            ));
+        }
+        if args.prefill_threads > args.users {
+            return Err("--prefill-threads must be less than or equal to --users".to_string());
+        }
+        if let Some(min_sweep_users) = args.sweep_users.iter().min()
+            && args.prefill_threads > *min_sweep_users
+        {
+            return Err(
+                "--prefill-threads must be less than or equal to every --sweep-users value"
+                    .to_string(),
+            );
+        }
+    }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
             "--scenario {} requires --processes 1",
@@ -768,6 +826,12 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.users.to_string())
             .arg("--tenants")
             .arg(args.tenants.to_string())
+            .arg("--prefill-threads")
+            .arg(args.prefill_threads.to_string())
+            .arg("--prefill-turns-per-thread")
+            .arg(args.prefill_turns_per_thread.to_string())
+            .arg("--prefill-concurrency")
+            .arg(args.prefill_concurrency.to_string())
             .arg("--scenario")
             .arg(args.scenario.as_str())
             .arg("--postgres-pool-size")
@@ -956,11 +1020,14 @@ async fn run_process_pressure_in_process(
     let summary = summarize(
         args,
         run_id,
-        "process://local".to_string(),
-        elapsed,
-        samples,
-        process,
-        None,
+        SummaryInput {
+            target: "process://local".to_string(),
+            elapsed,
+            samples,
+            process,
+            db_probe: None,
+            prefill: None,
+        },
     );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
@@ -1042,11 +1109,14 @@ async fn run_resource_governor_in_process(
     let summary = summarize(
         args,
         run_id,
-        backend.target,
-        elapsed,
-        samples,
-        process,
-        Some(db_probe),
+        SummaryInput {
+            target: backend.target,
+            elapsed,
+            samples,
+            process,
+            db_probe: Some(db_probe),
+            prefill: None,
+        },
     );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
@@ -1079,6 +1149,9 @@ async fn run_user_turn_in_process(
         args.tenants,
         args.progress_interval_seconds
     );
+    let prefill =
+        user_turn::prefill_user_turn_history(Arc::clone(&workload), args, Arc::clone(&identities))
+            .await?;
     if let Some(warmup_args) = args.warmup_args() {
         eprintln!(
             "{} warming up target={} duration_seconds={}",
@@ -1100,11 +1173,14 @@ async fn run_user_turn_in_process(
     let summary = summarize(
         args,
         run_id,
-        target,
-        elapsed,
-        samples,
-        process,
-        Some(db_probe),
+        SummaryInput {
+            target,
+            elapsed,
+            samples,
+            process,
+            db_probe: Some(db_probe),
+            prefill,
+        },
     );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
@@ -1260,37 +1336,31 @@ fn run_one_operation(
     }
 }
 
-fn summarize(
-    args: &Args,
-    run_id: &str,
-    target: String,
-    elapsed: Duration,
-    samples: Vec<Sample>,
-    process: ProcessMetrics,
-    db_probe: Option<DbProbeSummary>,
-) -> RunSummary {
+fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
     let mut errors = BTreeMap::new();
-    let mut latencies: Vec<u128> = samples
+    let mut latencies: Vec<u128> = input
+        .samples
         .iter()
         .map(|sample| sample.latency.as_micros())
         .collect();
     latencies.sort_unstable();
-    let failed = samples
+    let failed = input
+        .samples
         .iter()
         .filter_map(|sample| sample.error.as_ref())
         .map(|error| {
             *errors.entry(error.clone()).or_insert(0) += 1;
         })
         .count() as u64;
-    let attempted = samples.len() as u64;
+    let attempted = input.samples.len() as u64;
     let succeeded = attempted.saturating_sub(failed);
-    let elapsed_secs = elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+    let elapsed_secs = input.elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
 
     RunSummary {
         backend: args.backend,
         scenario: args.scenario,
         run_id: run_id.to_string(),
-        target,
+        target: input.target,
         child_index: args.child_index,
         processes: args.processes,
         concurrency: args.concurrency,
@@ -1301,6 +1371,9 @@ fn summarize(
         trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
         tenants: args.tenants,
+        prefill_threads: args.prefill_threads,
+        prefill_turns_per_thread: args.prefill_turns_per_thread,
+        prefill_concurrency: args.prefill_concurrency,
         model_latency_ms: args.model_latency_ms,
         model_latency_profile: args.model_latency_profile,
         model_latency_jitter_ms: args.model_latency_jitter_ms,
@@ -1317,14 +1390,15 @@ fn summarize(
         attempted,
         succeeded,
         failed,
-        duration_ms: elapsed.as_millis(),
+        duration_ms: input.elapsed.as_millis(),
         throughput_ops_sec: attempted as f64 / elapsed_secs,
         latency: latency_summary(&latencies),
-        process,
-        db_probe,
-        stage_latency: summarize_user_turn_stages(&samples),
+        process: input.process,
+        db_probe: input.db_probe,
+        prefill: input.prefill,
+        stage_latency: summarize_user_turn_stages(&input.samples),
         errors,
-        failure_causes: summarize_failure_causes(&samples),
+        failure_causes: summarize_failure_causes(&input.samples),
     }
 }
 

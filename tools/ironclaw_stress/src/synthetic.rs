@@ -81,8 +81,21 @@ impl SyntheticIds {
         worker_index: usize,
         operation_index: usize,
     ) -> Result<UserTurnContext, String> {
-        let (tenant_index, user_index, _) =
-            self.synthetic_indexes(args, worker_index, operation_index);
+        let (_, user_index, _) = self.synthetic_indexes(args, worker_index, operation_index);
+        self.user_turn_context_for_user_index(user_index)
+    }
+
+    pub(crate) fn user_turn_context_for_user_index(
+        &self,
+        user_index: usize,
+    ) -> Result<UserTurnContext, String> {
+        if user_index >= self.users.len() {
+            return Err(format!(
+                "synthetic user index {user_index} out of range for {} users",
+                self.users.len()
+            ));
+        }
+        let tenant_index = user_index % self.tenants.len();
         let tenant_id = self.tenants[tenant_index].clone();
         let user_id = self.users[user_index].clone();
         let thread_id = ThreadId::new(format!("thread-{tenant_index:04}-{user_index:06}"))

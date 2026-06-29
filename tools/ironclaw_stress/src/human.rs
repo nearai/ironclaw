@@ -36,6 +36,15 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             ),
             ("users", summary.users.to_string()),
             ("tenants", summary.tenants.to_string()),
+            ("prefill_threads", summary.prefill_threads.to_string()),
+            (
+                "prefill_turns_per_thread",
+                summary.prefill_turns_per_thread.to_string(),
+            ),
+            (
+                "prefill_concurrency",
+                summary.prefill_concurrency.to_string(),
+            ),
             ("model_latency_ms", summary.model_latency_ms.to_string()),
             (
                 "model_latency_profile",
@@ -92,6 +101,9 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
     if let Some(db_probe) = &summary.db_probe {
         push_db_probe_table(&mut output, db_probe);
     }
+    if let Some(prefill) = &summary.prefill {
+        push_prefill_table(&mut output, prefill);
+    }
     if let Some(stages) = &summary.stage_latency {
         push_stage_latency_table(&mut output, stages);
     }
@@ -143,6 +155,12 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
                 "trace_interval_seconds",
                 args.trace_interval_seconds.to_string(),
             ),
+            ("prefill_threads", args.prefill_threads.to_string()),
+            (
+                "prefill_turns_per_thread",
+                args.prefill_turns_per_thread.to_string(),
+            ),
+            ("prefill_concurrency", args.prefill_concurrency.to_string()),
             ("model_latency_ms", args.model_latency_ms.to_string()),
             (
                 "model_latency_profile",
@@ -253,6 +271,32 @@ fn push_stage_latency_table(output: &mut String, stages: &UserTurnStageLatencySu
     if !rows.is_empty() {
         push_latency_table(output, "Stage latency", &rows);
     }
+}
+
+fn push_prefill_table(output: &mut String, prefill: &crate::user_turn::PrefillSummary) {
+    let _ = writeln!(output, "\nPrefill");
+    let _ = writeln!(
+        output,
+        "{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10}",
+        "threads", "turns", "ok", "failed", "duration", "ops/sec", "p95", "max"
+    );
+    let _ = writeln!(
+        output,
+        "{:-<12} {:->8} {:->8} {:->8} {:->10} {:->10} {:->10} {:->10}",
+        "", "", "", "", "", "", "", ""
+    );
+    let _ = writeln!(
+        output,
+        "{:<12} {:>8} {:>8} {:>8} {:>10} {:>10.2} {:>10} {:>10}",
+        prefill.threads,
+        prefill.turns_per_thread,
+        prefill.succeeded,
+        prefill.failed,
+        format_duration_ms(prefill.duration_ms),
+        prefill.throughput_ops_sec,
+        format_latency_us(prefill.latency.p95_us),
+        format_latency_us(prefill.latency.max_us),
+    );
 }
 
 fn push_process_table(output: &mut String, process: &ProcessMetrics) {

@@ -123,6 +123,56 @@ fn tool_session_rejects_oversized_preview_output() {
 }
 
 #[test]
+fn prefill_requires_both_thread_and_turn_counts() {
+    let mut args = test_args();
+    args.scenario = Scenario::ChatTurn;
+    args.prefill_threads = 2;
+
+    let error = validate_args(&args).expect_err("partial prefill settings are invalid");
+
+    assert!(error.contains("--prefill-threads and --prefill-turns-per-thread"));
+}
+
+#[test]
+fn prefill_rejects_non_user_turn_scenarios() {
+    let mut args = test_args();
+    args.scenario = Scenario::ReserveRelease;
+    args.prefill_threads = 2;
+    args.prefill_turns_per_thread = 3;
+
+    let error = validate_args(&args).expect_err("resource scenario prefill is invalid");
+
+    assert!(error.contains("--prefill-threads requires a user-turn scenario"));
+}
+
+#[test]
+fn prefill_rejects_more_threads_than_users() {
+    let mut args = test_args();
+    args.scenario = Scenario::ChatTurn;
+    args.users = 2;
+    args.prefill_threads = 3;
+    args.prefill_turns_per_thread = 1;
+
+    let error = validate_args(&args).expect_err("prefill thread count exceeds users");
+
+    assert!(error.contains("--prefill-threads must be less than or equal to --users"));
+}
+
+#[test]
+fn prefill_rejects_sweep_user_values_below_prefill_threads() {
+    let mut args = test_args();
+    args.scenario = Scenario::ChatTurn;
+    args.users = 4;
+    args.prefill_threads = 3;
+    args.prefill_turns_per_thread = 1;
+    args.sweep_users = vec![2, 4];
+
+    let error = validate_args(&args).expect_err("sweep users below prefill threads");
+
+    assert!(error.contains("every --sweep-users value"));
+}
+
+#[test]
 fn warmup_requires_duration_mode() {
     let mut args = test_args();
     args.duration_seconds = 0;
@@ -402,6 +452,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
     assert!(rendered.contains("resource_reserve"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("append_tool_result"));
+    assert!(rendered.contains("Prefill"));
     assert!(rendered.contains("DB probe"));
     assert!(rendered.contains("libsql_file"));
     assert!(rendered.contains("Failure causes"));
@@ -615,6 +666,9 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         trace_interval_seconds: 1,
         users: 1,
         tenants: 1,
+        prefill_threads: 1,
+        prefill_turns_per_thread: 2,
+        prefill_concurrency: 1,
         model_latency_ms: 0,
         model_latency_profile: ModelLatencyProfile::Fixed,
         model_latency_jitter_ms: 0,
@@ -636,6 +690,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         latency: latency(1_000),
         process: ProcessMetrics::default(),
         db_probe: Some(db_probe_summary()),
+        prefill: Some(prefill_summary()),
         stage_latency: Some(UserTurnStageLatencySummary {
             ensure_thread: empty_stage(),
             accept_inbound: empty_stage(),
@@ -671,6 +726,9 @@ fn test_args() -> Args {
         warmup_seconds: 0,
         users: 4,
         tenants: 2,
+        prefill_threads: 0,
+        prefill_turns_per_thread: 0,
+        prefill_concurrency: 4,
         scenario: Scenario::ReserveRelease,
         run_id: None,
         libsql_path: None,
@@ -739,6 +797,21 @@ fn db_probe_summary() -> db_probe::DbProbeSummary {
             libsql_file_bytes: Some(1024),
             ..db_probe::DbProbeDelta::default()
         },
+    }
+}
+
+fn prefill_summary() -> user_turn::PrefillSummary {
+    user_turn::PrefillSummary {
+        threads: 1,
+        turns_per_thread: 2,
+        concurrency: 1,
+        attempted: 2,
+        succeeded: 2,
+        failed: 0,
+        duration_ms: 10,
+        throughput_ops_sec: 200.0,
+        latency: latency(1_000),
+        errors: std::collections::BTreeMap::new(),
     }
 }
 
