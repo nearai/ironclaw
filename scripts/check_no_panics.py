@@ -239,10 +239,16 @@ def is_test_only_path(path: str) -> bool:
     parts = posix_path.parts
     if "tests" in parts or posix_path.name == "tests.rs":
         return True
-    # test_support modules are exempt only under src/ (feature-gated, never in prod);
-    # a bin/ or other non-src test_support.rs would be real production code.
-    in_src = "src" in parts
-    return in_src and ("test_support" in parts or posix_path.name == "test_support.rs")
+    # Exempt only the canonical feature-gated module root: `.../src/test_support.rs`
+    # or `.../src/test_support/**`. The component immediately after `src` must be
+    # `test_support` — `src/bin/test_support.rs` (compiled into a binary) and a
+    # nested `src/foo/test_support.rs` are NOT exempt.
+    try:
+        src_idx = parts.index("src")
+    except ValueError:
+        return False
+    suffix = parts[src_idx + 1 :]
+    return bool(suffix) and (suffix[0] == "test_support" or suffix == ("test_support.rs",))
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -426,6 +432,12 @@ class CheckNoPanicsTests(unittest.TestCase):
         # into production binaries and must be checked for panics.
         self.assertFalse(is_test_only_path("crates/foo/bin/test_support.rs"))
         self.assertFalse(is_test_only_path("crates/foo/bin/test_support/x.rs"))
+        # `src/bin/test_support*` IS compiled into a binary — must not be exempt.
+        self.assertFalse(is_test_only_path("crates/foo/src/bin/test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/bin/test_support/mod.rs"))
+        # A nested test_support.rs (not the canonical `src/test_support.rs` root)
+        # is not the blessed feature-gated module either.
+        self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
