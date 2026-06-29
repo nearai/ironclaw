@@ -850,18 +850,10 @@ fn is_workspace_file_error_summary(value: &str, lower: &str) -> bool {
     if contains_internal_workspace_filename(lower) {
         return true;
     }
-    if contains_filename_like_token(lower) {
+    let mentions_workspace_file = mentions_workspace_file_context(lower);
+    if mentions_workspace_file && contains_filename_like_token(lower) {
         return true;
     }
-    let mentions_workspace_file = lower.contains("workspace file")
-        || lower.contains("workspace path")
-        || lower.contains("filesystem")
-        || lower.contains("file not found")
-        || lower.contains("file failed")
-        || lower.contains("read_file")
-        || lower.contains("write_file")
-        || lower.contains("list_dir")
-        || lower.contains("path workspace");
     mentions_workspace_file
         && (lower.contains("failed")
             || lower.contains("not found")
@@ -869,6 +861,18 @@ fn is_workspace_file_error_summary(value: &str, lower: &str) -> bool {
             || lower.contains("missing")
             || lower.contains("can't access")
             || lower.contains("cannot access"))
+}
+
+fn mentions_workspace_file_context(lower: &str) -> bool {
+    lower.contains("workspace file")
+        || lower.contains("workspace path")
+        || lower.contains("filesystem")
+        || lower.contains("file not found")
+        || lower.contains("file failed")
+        || lower.contains("read_file")
+        || lower.contains("write_file")
+        || lower.contains("list_dir")
+        || lower.contains("path workspace")
 }
 
 fn contains_internal_workspace_filename(lower: &str) -> bool {
@@ -1164,6 +1168,22 @@ mod tests {
         assert_eq!(
             decoded.error_summary.as_deref(),
             Some("the tool input could not be encoded")
+        );
+
+        let non_filesystem_identifier_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary("builtin.json returned invalid input");
+        let wire = serde_json::to_string(&non_filesystem_identifier_event)
+            .expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("builtin.json returned invalid input")
         );
 
         let internal_filename_event = RuntimeEvent::capability_activity_failed(
