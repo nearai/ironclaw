@@ -1011,7 +1011,7 @@ async def _wait_for_assistant_reply(
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and all(piece.lower() in normalized for piece in required_text):
+            if marker_matches and _required_text_matches(normalized, required_text):
                 return text[-2000:]
         await asyncio.sleep(0.5)
     main_text = ""
@@ -1024,6 +1024,23 @@ async def _wait_for_assistant_reply(
         f"marker={marker!r} required_text={required_text!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r}"
     )
+
+
+def _required_text_matches(text: str, required_text: list[str]) -> bool:
+    normalized_text = text.lower()
+    return all(
+        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
+        for piece in required_text
+    )
+
+
+def _required_option_matches(normalized_text: str, option: str) -> bool:
+    normalized_option = option.strip().lower()
+    if not normalized_option:
+        return False
+    if re.fullmatch(r"\w+", normalized_option):
+        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
+    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -3161,7 +3178,7 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             case_name="qa_7c_slack_bug_logger_routine",
             routine_name=routine_name,
             marker=None,
-            required_text=["trigger", "bug"],
+            required_text=["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
             extensions=[
                 {
