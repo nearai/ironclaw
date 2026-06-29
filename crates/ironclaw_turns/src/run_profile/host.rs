@@ -386,6 +386,14 @@ impl LoopSafeSummary {
         validate_loop_safe_summary(value.into()).map(Self)
     }
 
+    pub fn capability_failure_summary(value: impl Into<String>) -> Self {
+        Self::new(value).unwrap_or_else(|_| Self::tool_failure_details_redacted())
+    }
+
+    pub fn tool_failure_details_redacted() -> Self {
+        Self("the tool failure details were redacted".to_string())
+    }
+
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
     }

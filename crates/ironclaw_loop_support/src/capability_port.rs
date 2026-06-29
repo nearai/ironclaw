@@ -2590,14 +2590,7 @@ fn runtime_terminal_milestone(
             let safe_summary = failure
                 .message
                 .as_deref()
-                .map(LoopSafeSummary::new)
-                .transpose()
-                .map_err(|reason| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Invalid,
-                        format!("capability failure summary rejected: {reason}"),
-                    )
-                })?;
+                .map(LoopSafeSummary::capability_failure_summary);
             Some(LoopHostMilestoneKind::CapabilityFailed {
                 activity_id,
                 capability_id: failure.capability_id.clone(),
@@ -4599,10 +4592,11 @@ mod tests {
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
-                    message: Some("invalid input".to_string()),
+                    message: Some("invalid JSON: expected value near {invalid".to_string()),
                     detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
+                Some("the tool failure details were redacted"),
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -4611,10 +4605,11 @@ mod tests {
                     message: Some("custom failure".to_string()),
                 }),
                 capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+                None,
             ),
         ];
 
-        for (outcome, expected_kind) in cases {
+        for (outcome, expected_kind, expected_summary) in cases {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
@@ -4652,6 +4647,15 @@ mod tests {
                     ..
                 } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
             ));
+            if let Some(expected_summary) = expected_summary {
+                assert!(matches!(
+                    &milestones[1].kind,
+                    ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                        safe_summary: Some(summary),
+                        ..
+                    } if summary.as_str() == expected_summary
+                ));
+            }
         }
     }
 

@@ -506,16 +506,7 @@ where
         reason_kind: CapabilityFailureKind,
         safe_summary: Option<String>,
     ) -> Result<(), AgentLoopHostError> {
-        let safe_summary =
-            safe_summary
-                .map(LoopSafeSummary::new)
-                .transpose()
-                .map_err(|reason| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Invalid,
-                        format!("capability failure summary rejected: {reason}"),
-                    )
-                })?;
+        let safe_summary = safe_summary.map(LoopSafeSummary::capability_failure_summary);
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id,
