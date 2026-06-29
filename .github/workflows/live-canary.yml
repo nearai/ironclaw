@@ -32,13 +32,14 @@ on:
           - auth-live-seeded
           - auth-browser-consent
           - workflow-canary
+          - reborn-webui-v2-live-qa
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
         type: string
         required: false
         default: ""
       cases:
-        description: "Optional comma-separated provider list for auth live lanes"
+        description: "Optional comma-separated case/provider list for Python live canary lanes. Use all for the full Reborn WebUI v2 QA suite."
         required: false
         default: ""
         type: string
@@ -493,6 +494,117 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 14
 
+  reborn-webui-v2-live-qa:
+    name: Reborn WebUI v2 Live QA
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
+      REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
+      REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
+      IRONCLAW_REBORN_GOOGLE_CLIENT_ID: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID || secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI: ${{ vars.IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI || vars.GOOGLE_OAUTH_REDIRECT_URI }}
+      IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT: ${{ vars.IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT || vars.GOOGLE_ALLOWED_HD }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
+      LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
+      LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL || 'Qwen/Qwen3.5-122B-A10B' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-reborn-webui-v2-live-qa
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels
+        run: ./scripts/build-wasm-extensions.sh --channels
+      - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
+        shell: bash
+        env:
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY || secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          LIVE_OPENAI_COMPATIBLE_API_KEY: ${{ secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          IRONCLAW_REBORN_SLACK_SIGNING_SECRET: ${{ secrets.IRONCLAW_REBORN_SLACK_SIGNING_SECRET }}
+          IRONCLAW_REBORN_SLACK_BOT_TOKEN: ${{ secrets.IRONCLAW_REBORN_SLACK_BOT_TOKEN }}
+          IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET || secrets.GOOGLE_CLIENT_SECRET || secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
+          AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
+          AUTH_LIVE_GITHUB_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN || secrets.LIVE_CANARY_GITHUB_TOKEN || github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.LIVE_CANARY_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET || secrets.LIVE_CANARY_TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          set +x
+          set -euo pipefail
+          secret_dir="${RUNNER_TEMP}/reborn-webui-v2-live-qa-secrets"
+          mkdir -p "${secret_dir}"
+          chmod 700 "${secret_dir}"
+          write_secret() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            local path="${secret_dir}/${name}"
+            printf '%s' "${value}" > "${path}"
+            chmod 600 "${path}"
+            echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
+          }
+          write_secret "NEARAI_API_KEY" "${NEARAI_API_KEY:-}"
+          write_secret "LIVE_OPENAI_COMPATIBLE_API_KEY" "${LIVE_OPENAI_COMPATIBLE_API_KEY:-}"
+          write_secret "IRONCLAW_REBORN_SLACK_SIGNING_SECRET" "${IRONCLAW_REBORN_SLACK_SIGNING_SECRET:-}"
+          write_secret "IRONCLAW_REBORN_SLACK_BOT_TOKEN" "${IRONCLAW_REBORN_SLACK_BOT_TOKEN:-}"
+          write_secret "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET" "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}"
+          write_secret "AUTH_LIVE_GOOGLE_ACCESS_TOKEN" "${AUTH_LIVE_GOOGLE_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_GOOGLE_REFRESH_TOKEN" "${AUTH_LIVE_GOOGLE_REFRESH_TOKEN:-}"
+          write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
+          write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
+          write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
+      - name: Resolve Reborn WebUI v2 live QA cases
+        shell: bash
+        env:
+          REQUESTED_CASES: ${{ inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
+        run: |
+          set -euo pipefail
+          cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
+          if [[ "${cases}" == "all" ]]; then
+            echo "CASES=all" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=promoted-non-telegram" >> "${GITHUB_ENV}"
+            echo "CASES=all requested; running the promoted non-Telegram Reborn QA suite."
+          else
+            echo "CASES=${cases}" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested" >> "${GITHUB_ENV}"
+          fi
+      - name: Run Reborn WebUI v2 live QA lane
+        env:
+          LANE: reborn-webui-v2-live-qa
+          PROVIDER: reborn-webui-v2
+          COMMAND_TIMEOUT: 90m
+          PLAYWRIGHT_INSTALL: with-deps
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-reborn-webui-v2-live-qa
+          path: artifacts/live-canary/
+          retention-days: 14
+
   persona-rotating:
     name: Rotating Persona Live
     if: >
@@ -771,6 +883,7 @@ jobs:
       - auth-live-seeded
       - auth-browser-consent
       - workflow-canary
+      - reborn-webui-v2-live-qa
       - deterministic-replay
       - public-smoke
       - persona-rotating
