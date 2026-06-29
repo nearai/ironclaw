@@ -864,15 +864,41 @@ fn is_workspace_file_error_summary(value: &str, lower: &str) -> bool {
 }
 
 fn mentions_workspace_file_context(lower: &str) -> bool {
-    lower.contains("workspace file")
-        || lower.contains("workspace path")
-        || lower.contains("filesystem")
-        || lower.contains("file not found")
-        || lower.contains("file failed")
-        || lower.contains("read_file")
-        || lower.contains("write_file")
-        || lower.contains("list_dir")
-        || lower.contains("path workspace")
+    [
+        "workspace file",
+        "workspace path",
+        "filesystem",
+        "file not found",
+        "file failed",
+        "read_file",
+        "write_file",
+        "list_dir",
+        "path workspace",
+    ]
+    .iter()
+    .any(|phrase| contains_bounded_phrase(lower, phrase))
+}
+
+fn contains_bounded_phrase(value: &str, phrase: &str) -> bool {
+    value.match_indices(phrase).any(|(start, matched)| {
+        let end = start + matched.len();
+        is_phrase_boundary(char_before(value, start)) && is_phrase_boundary(char_at(value, end))
+    })
+}
+
+fn char_before(value: &str, byte_index: usize) -> Option<char> {
+    value.get(..byte_index)?.chars().next_back()
+}
+
+fn char_at(value: &str, byte_index: usize) -> Option<char> {
+    value.get(byte_index..)?.chars().next()
+}
+
+fn is_phrase_boundary(character: Option<char>) -> bool {
+    match character {
+        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
+        None => true,
+    }
 }
 
 fn contains_internal_workspace_filename(lower: &str) -> bool {
@@ -1184,6 +1210,22 @@ mod tests {
         assert_eq!(
             decoded.error_summary.as_deref(),
             Some("builtin.json returned invalid input")
+        );
+
+        let non_filesystem_suffix_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary("profile not found for builtin.json");
+        let wire =
+            serde_json::to_string(&non_filesystem_suffix_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("profile not found for builtin.json")
         );
 
         let internal_filename_event = RuntimeEvent::capability_activity_failed(

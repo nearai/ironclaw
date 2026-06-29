@@ -4647,15 +4647,14 @@ mod tests {
                     ..
                 } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
             ));
-            if let Some(expected_summary) = expected_summary {
-                assert!(matches!(
-                    &milestones[1].kind,
-                    ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
-                        safe_summary: Some(summary),
-                        ..
-                    } if summary.as_str() == expected_summary
-                ));
-            }
+            let actual_summary = match &milestones[1].kind {
+                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                    safe_summary,
+                    ..
+                } => safe_summary.as_ref().map(|summary| summary.as_str()),
+                _ => unreachable!("milestone kind was asserted above"),
+            };
+            assert_eq!(actual_summary, expected_summary);
         }
     }
 
