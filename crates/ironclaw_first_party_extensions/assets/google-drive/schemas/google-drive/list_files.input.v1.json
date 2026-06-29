@@ -10,7 +10,7 @@
         "string",
         "null"
       ],
-      "description": "Drive search query. For a Google Sheet named ABC, use a query like name = 'ABC' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false."
+      "description": "Drive search query. To find a Google Sheet by exact title, use a query like name = '<spreadsheet title>' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false."
     },
     "page_size": {
       "type": "integer",

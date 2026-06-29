@@ -29,7 +29,7 @@
 //!
 //! ```json
 //! {"action": "list_files", "query": "name contains 'report' and mimeType = 'application/pdf'"}
-//! {"action": "list_files", "query": "name = 'ABC' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"}
+//! {"action": "list_files", "query": "name = '<spreadsheet title>' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"}
 //! {"action": "list_files", "corpora": "drive", "drive_id": "0ABcd...", "query": "trashed = false"}
 //! {"action": "share_file", "file_id": "abc123", "email": "alice@company.com", "role": "writer"}
 //! ```
