@@ -717,9 +717,8 @@ async fn build_storage_composite(
                 &mut composite,
             )
             .await?;
-            // The production factory creates the db at this fixed filename within
-            // `dir` (see `build_default_local_dev_database_roots` in factory.rs).
-            Some(dir.join("reborn-local-dev.db"))
+            // The canonical filename is the production constant — one source of truth.
+            Some(dir.join(ironclaw_reborn_composition::LOCAL_DEV_DB_FILENAME))
         }
     };
     Ok((Arc::new(composite), db_path))
