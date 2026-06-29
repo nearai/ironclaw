@@ -1,22 +1,19 @@
 name: Live Canary
 
 on:
-  # Every job's `if:` guard matches the one cron below. Adding a new
-  # scheduled slot means also updating those guards, so keep this
-  # block and the job conditions in lockstep.
+  # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
+  # Legacy canary lanes remain available through workflow_dispatch for
+  # manual diagnosis, but do not run on cron.
   schedule:
-    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
-    # jobs in the same workflow run; one run = one red dot on failure,
-    # one notification, one place to drill into per-lane status.
-    # Job-level `if:` guards below all match this cron.
-    - cron: "0 */6 * * *"
+    # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       lane:
         description: "Lane to run"
         type: choice
         required: true
-        default: public-smoke
+        default: reborn-webui-v2-live-qa
         options:
           - all
           - deterministic-replay
@@ -67,8 +64,7 @@ jobs:
   auth-smoke:
     name: Auth Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -99,8 +95,7 @@ jobs:
   auth-full:
     name: Auth Full
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -131,8 +126,7 @@ jobs:
   auth-channels:
     name: Auth Channels
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -163,8 +157,7 @@ jobs:
   auth-live-seeded:
     name: Auth Live Seeded
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -253,8 +246,7 @@ jobs:
   auth-browser-consent:
     name: Auth Browser Consent
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -355,8 +347,7 @@ jobs:
   workflow-canary:
     name: Workflow Canary
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -410,8 +401,7 @@ jobs:
   deterministic-replay:
     name: Deterministic Replay
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' &&
+      github.event_name == 'workflow_dispatch' &&
       (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -451,8 +441,7 @@ jobs:
   public-smoke:
     name: Public Live Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -497,7 +486,7 @@ jobs:
   reborn-webui-v2-live-qa:
     name: Reborn WebUI v2 Live QA
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -575,7 +564,7 @@ jobs:
       - name: Resolve Reborn WebUI v2 live QA cases
         shell: bash
         env:
-          REQUESTED_CASES: ${{ inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
+          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
         run: |
           set -euo pipefail
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
@@ -608,8 +597,7 @@ jobs:
   persona-rotating:
     name: Rotating Persona Live
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -665,8 +653,7 @@ jobs:
   private-oauth:
     name: Private OAuth Live
     if: >
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')
     runs-on: [self-hosted, ironclaw-live]
     timeout-minutes: 120
     env:
@@ -725,8 +712,7 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
