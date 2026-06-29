@@ -106,6 +106,68 @@ fn failure_causes_are_grouped_by_bucket_and_stage() {
     assert_eq!(busy.sample_detail, "thread already has an active run");
 }
 
+#[test]
+fn human_summary_includes_stage_latency_and_failure_tables() {
+    let mut errors = std::collections::BTreeMap::new();
+    errors.insert("turn_thread_busy".to_string(), 1);
+    let mut cause_stages = std::collections::BTreeMap::new();
+    cause_stages.insert("submit_turn".to_string(), 1);
+    let mut failure_causes = std::collections::BTreeMap::new();
+    failure_causes.insert(
+        "turn_thread_busy".to_string(),
+        FailureCauseSummary {
+            count: 1,
+            stages: cause_stages,
+            sample_detail: "thread already has an active run".to_string(),
+        },
+    );
+    let summary = RunSummary {
+        backend: Backend::Libsql,
+        scenario: Scenario::MixedUserSession,
+        run_id: "run".to_string(),
+        target: "libsql://<redacted-local-path>".to_string(),
+        child_index: None,
+        processes: 1,
+        concurrency: 1,
+        operations_per_thread: 1,
+        users: 1,
+        tenants: 1,
+        attempted: 1,
+        succeeded: 0,
+        failed: 1,
+        duration_ms: 1,
+        throughput_ops_sec: 1.0,
+        latency: latency(1_000),
+        stage_latency: Some(UserTurnStageLatencySummary {
+            ensure_thread: empty_stage(),
+            accept_inbound: empty_stage(),
+            submit_turn: stage(1, 2_000),
+            mark_submitted: empty_stage(),
+            mark_rejected_busy: empty_stage(),
+            claim_run: empty_stage(),
+            append_assistant: empty_stage(),
+            finalize_assistant: empty_stage(),
+            complete_run: empty_stage(),
+            load_context: empty_stage(),
+            resource_reserve: stage(1, 3_000),
+            model_wait: stage(1, 1_000_000),
+            resource_reconcile: empty_stage(),
+            resource_release: empty_stage(),
+        }),
+        errors,
+        failure_causes,
+    };
+
+    let rendered = human::render_run_summary(&summary);
+
+    assert!(rendered.contains("Stage latency"));
+    assert!(rendered.contains("submit_turn"));
+    assert!(rendered.contains("resource_reserve"));
+    assert!(rendered.contains("model_wait"));
+    assert!(rendered.contains("Failure causes"));
+    assert!(rendered.contains("turn_thread_busy"));
+}
+
 fn test_args() -> Args {
     Args {
         backend: Backend::Libsql,
@@ -120,10 +182,32 @@ fn test_args() -> Args {
         postgres_url: None,
         postgres_pool_size: 4,
         progress_interval_seconds: 0,
+        human_read: false,
         model_latency_ms: 0,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,
         child_index: None,
+    }
+}
+
+fn stage(count: u64, p50_us: u128) -> user_turn::StageLatencySummary {
+    user_turn::StageLatencySummary {
+        count,
+        latency: latency(p50_us),
+    }
+}
+
+fn empty_stage() -> user_turn::StageLatencySummary {
+    stage(0, 0)
+}
+
+fn latency(p50_us: u128) -> LatencySummary {
+    LatencySummary {
+        min_us: p50_us,
+        p50_us,
+        p95_us: p50_us,
+        p99_us: p50_us,
+        max_us: p50_us,
     }
 }

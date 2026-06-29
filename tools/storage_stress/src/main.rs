@@ -1,4 +1,5 @@
 mod child_io;
+mod human;
 mod progress;
 mod redaction;
 mod resource_ops;
@@ -97,6 +98,10 @@ pub(crate) struct Args {
     /// Emit live progress to stderr every N seconds. Set to 0 to disable.
     #[arg(long, default_value_t = 1)]
     pub(crate) progress_interval_seconds: u64,
+
+    /// Emit a human-readable summary table to stderr after the JSON summary.
+    #[arg(long, default_value_t = false)]
+    pub(crate) human_read: bool,
 
     /// Synthetic model latency for mixed-user-session operations.
     #[arg(long, default_value_t = 0)]
@@ -237,9 +242,7 @@ async fn run() -> Result<(), String> {
         }
     } else {
         match run_in_process(&args, &run_id).await {
-            Ok(summary) => serde_json::to_string_pretty(&summary)
-                .map_err(|error| error.to_string())
-                .map(|encoded| println!("{encoded}")),
+            Ok(summary) => print_run_summary(&args, &summary),
             Err(error) => Err(error),
         }
     };
@@ -249,6 +252,15 @@ async fn run() -> Result<(), String> {
     }
 
     result
+}
+
+fn print_run_summary(args: &Args, summary: &RunSummary) -> Result<(), String> {
+    let encoded = serde_json::to_string_pretty(summary).map_err(display_err)?;
+    println!("{encoded}");
+    if args.human_read && args.child_index.is_none() {
+        eprint!("{}", human::render_run_summary(summary));
+    }
+    Ok(())
 }
 
 fn validate_args(args: &Args) -> Result<(), String> {
@@ -755,6 +767,9 @@ fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> 
     });
     let encoded = serde_json::to_string_pretty(&aggregate).map_err(display_err)?;
     println!("{encoded}");
+    if args.human_read {
+        eprint!("{}", human::render_parent_summary(args, run_id, summaries));
+    }
     Ok(())
 }
 
