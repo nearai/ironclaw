@@ -520,11 +520,52 @@ fn failure_causes_are_grouped_by_bucket_and_stage() {
 }
 
 #[test]
+fn operation_attribution_groups_user_turn_stage_durations() {
+    let samples = vec![Sample {
+        latency: Duration::from_micros(50),
+        error: None,
+        failure: None,
+        stages: Some(UserTurnStageDurations {
+            ensure_thread: Some(Duration::from_micros(1)),
+            accept_inbound: Some(Duration::from_micros(2)),
+            submit_turn: Some(Duration::from_micros(3)),
+            claim_run: Some(Duration::from_micros(4)),
+            complete_run: Some(Duration::from_micros(5)),
+            load_context: Some(Duration::from_micros(6)),
+            resource_reserve: Some(Duration::from_micros(7)),
+            resource_reconcile: Some(Duration::from_micros(8)),
+            resource_release: Some(Duration::from_micros(9)),
+            model_wait: Some(Duration::from_micros(10)),
+            tool_wait: Some(Duration::from_micros(11)),
+            append_assistant: Some(Duration::from_micros(12)),
+            finalize_assistant: Some(Duration::from_micros(13)),
+            append_tool_result: Some(Duration::from_micros(14)),
+            append_tool_preview: Some(Duration::from_micros(15)),
+            update_assistant_draft: Some(Duration::from_micros(16)),
+            ..UserTurnStageDurations::default()
+        }),
+    }];
+
+    let attribution =
+        summary::summarize_user_turn_operation_attribution(&samples).expect("attribution summary");
+
+    assert_eq!(attribution.thread_store_writes.count, 1);
+    assert_eq!(attribution.thread_store_writes.latency.p95_us, 73);
+    assert_eq!(attribution.turn_store.latency.p95_us, 12);
+    assert_eq!(attribution.context_reads.latency.p95_us, 6);
+    assert_eq!(attribution.resource_governor.latency.p95_us, 24);
+    assert_eq!(attribution.synthetic_wait.latency.p95_us, 21);
+}
+
+#[test]
 fn human_summary_includes_stage_latency_and_failure_tables() {
     let summary = run_summary_with_bottlenecks();
 
     let rendered = human::render_run_summary(&summary);
 
+    assert!(rendered.contains("Operation attribution"));
+    assert!(rendered.contains("thread_store_writes"));
+    assert!(rendered.contains("synthetic_wait"));
     assert!(rendered.contains("Stage latency"));
     assert!(rendered.contains("submit_turn"));
     assert!(rendered.contains("resource_reserve"));
@@ -548,6 +589,8 @@ fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     assert!(rendered.contains("failure_rate"));
     assert!(rendered.contains("turn_thread_busy"));
     assert!(rendered.contains("top_stage_p95"));
+    assert!(rendered.contains("top_operation_group"));
+    assert!(rendered.contains("synthetic_wait"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("libsql_growth"));
 }
@@ -771,6 +814,13 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         process: ProcessMetrics::default(),
         db_probe: Some(db_probe_summary()),
         prefill: Some(prefill_summary()),
+        operation_attribution: Some(user_turn::UserTurnOperationAttributionSummary {
+            thread_store_writes: attribution(1, 10_000),
+            context_reads: empty_attribution(),
+            turn_store: attribution(1, 2_000),
+            resource_governor: attribution(1, 3_000),
+            synthetic_wait: attribution(1, 1_000_000),
+        }),
         stage_latency: Some(UserTurnStageLatencySummary {
             ensure_thread: empty_stage(),
             accept_inbound: empty_stage(),
@@ -914,6 +964,17 @@ fn stage(count: u64, p50_us: u128) -> user_turn::StageLatencySummary {
 
 fn empty_stage() -> user_turn::StageLatencySummary {
     stage(0, 0)
+}
+
+fn attribution(count: u64, p50_us: u128) -> user_turn::OperationAttributionSummary {
+    user_turn::OperationAttributionSummary {
+        count,
+        latency: latency(p50_us),
+    }
+}
+
+fn empty_attribution() -> user_turn::OperationAttributionSummary {
+    attribution(0, 0)
 }
 
 fn latency(p50_us: u128) -> LatencySummary {

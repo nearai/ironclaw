@@ -5,7 +5,10 @@ use crate::{
     db_probe::{DbProbeSnapshot, DbProbeSummary},
     process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::{FailureCauseSummary, LatencySummary},
-    user_turn::UserTurnStageLatencySummary,
+    user_turn::{
+        UserTurnOperationAttributionSummary, UserTurnStageLatencySummary,
+        operation_attribution_rows,
+    },
 };
 
 pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
@@ -108,6 +111,9 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
     }
     if let Some(prefill) = &summary.prefill {
         push_prefill_table(&mut output, prefill);
+    }
+    if let Some(attribution) = &summary.operation_attribution {
+        push_operation_attribution_table(&mut output, attribution);
     }
     if let Some(stages) = &summary.stage_latency {
         push_stage_latency_table(&mut output, stages);
@@ -281,6 +287,26 @@ fn push_stage_latency_table(output: &mut String, stages: &UserTurnStageLatencySu
     if !rows.is_empty() {
         push_latency_table(output, "Stage latency", &rows);
     }
+}
+
+fn push_operation_attribution_table(
+    output: &mut String,
+    attribution: &UserTurnOperationAttributionSummary,
+) {
+    let rows = operation_attribution_latency_rows(attribution);
+    if !rows.is_empty() {
+        push_latency_table(output, "Operation attribution", &rows);
+    }
+}
+
+fn operation_attribution_latency_rows(
+    attribution: &UserTurnOperationAttributionSummary,
+) -> Vec<(&'static str, u64, &LatencySummary)> {
+    operation_attribution_rows(attribution)
+        .into_iter()
+        .filter(|(_, group)| group.count > 0)
+        .map(|(name, group)| (name, group.count, &group.latency))
+        .collect()
 }
 
 fn push_prefill_table(output: &mut String, prefill: &crate::user_turn::PrefillSummary) {

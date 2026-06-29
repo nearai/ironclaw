@@ -41,12 +41,13 @@ use crate::{
     redaction::{redact_libsql_path, redact_postgres_url},
     summary::{
         FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
-        summarize_failure_causes, summarize_user_turn_stages,
+        summarize_failure_causes, summarize_user_turn_operation_attribution,
+        summarize_user_turn_stages,
     },
     synthetic::SyntheticIds,
     user_turn::{
-        UserTurnStageDurations, UserTurnStageLatencySummary, build_user_turn_workload,
-        run_user_turn_tasks,
+        UserTurnOperationAttributionSummary, UserTurnStageDurations, UserTurnStageLatencySummary,
+        build_user_turn_workload, run_user_turn_tasks,
     },
 };
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
@@ -563,6 +564,8 @@ struct RunSummary {
     db_probe: Option<DbProbeSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prefill: Option<user_turn::PrefillSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_attribution: Option<UserTurnOperationAttributionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
@@ -1561,6 +1564,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         process: input.process,
         db_probe: input.db_probe,
         prefill: input.prefill,
+        operation_attribution: summarize_user_turn_operation_attribution(&input.samples),
         stage_latency: summarize_user_turn_stages(&input.samples),
         errors,
         failure_causes: summarize_failure_causes(&input.samples),

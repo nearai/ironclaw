@@ -16,7 +16,10 @@ use crate::{
     process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::FailureCauseSummary,
     trace,
-    user_turn::{StageLatencySummary, UserTurnStageLatencySummary},
+    user_turn::{
+        StageLatencySummary, UserTurnOperationAttributionSummary, UserTurnStageLatencySummary,
+        operation_attribution_rows,
+    },
 };
 
 pub(crate) fn render_bottleneck_report(
@@ -91,6 +94,12 @@ fn analyze_parent(args: &Args, summaries: &[RunSummary], findings: &mut Vec<Find
     analyze_process(max_duration_ms, &process, findings);
     analyze_child_skew(args, summaries, findings);
     for summary in summaries {
+        if let Some(attribution) = &summary.operation_attribution {
+            analyze_operation_attribution(attribution, findings);
+            break;
+        }
+    }
+    for summary in summaries {
         if let Some(stages) = &summary.stage_latency {
             analyze_stage_latency(stages, findings);
             break;
@@ -108,6 +117,9 @@ fn analyze_summary(summary: &RunSummary, findings: &mut Vec<Finding>) {
         findings,
     );
     analyze_process(summary.duration_ms, &summary.process, findings);
+    if let Some(attribution) = &summary.operation_attribution {
+        analyze_operation_attribution(attribution, findings);
+    }
     if let Some(stages) = &summary.stage_latency {
         analyze_stage_latency(stages, findings);
     }
@@ -193,6 +205,56 @@ fn analyze_stage_latency(stages: &UserTurnStageLatencySummary, findings: &mut Ve
         ),
         next_probe: stage_probe(name),
     });
+}
+
+fn analyze_operation_attribution(
+    attribution: &UserTurnOperationAttributionSummary,
+    findings: &mut Vec<Finding>,
+) {
+    let Some((name, group)) = operation_attribution_rows(attribution)
+        .into_iter()
+        .filter(|(_, group)| group.count > 0)
+        .max_by_key(|(_, group)| group.latency.p95_us)
+    else {
+        return;
+    };
+    findings.push(Finding {
+        level: if group.latency.p95_us >= 500_000 {
+            "high"
+        } else {
+            "info"
+        },
+        signal: "top_operation_group",
+        evidence: format!(
+            "{} p95={} p99={} count={}",
+            name,
+            format_duration_us(group.latency.p95_us),
+            format_duration_us(group.latency.p99_us),
+            group.count
+        ),
+        next_probe: operation_attribution_probe(name),
+    });
+}
+
+fn operation_attribution_probe(name: &str) -> String {
+    match name {
+        "thread_store_writes" => {
+            "Sweep --assistant-message-bytes, --tool-output-bytes, and --active-thread-count to separate payload write cost from hot-thread write contention.".to_string()
+        }
+        "context_reads" => {
+            "Sweep --context-max-messages and --prefill-turns-per-thread to measure context read amplification.".to_string()
+        }
+        "turn_store" => {
+            "Compare --scenario chat-turn against reserve-reconcile; high turn_store points at run claim/complete state transitions.".to_string()
+        }
+        "resource_governor" => {
+            "Run reserve-release and resource-contention presets to isolate governor reservation/reconcile/release writes.".to_string()
+        }
+        "synthetic_wait" => {
+            "Sweep --model-latency-ms and --tool-latency-ms; if this bucket dominates, storage is not the current p95 ceiling.".to_string()
+        }
+        _ => format!("Inspect stage latency under {name} and rerun with --trace-jsonl for interval-level timing."),
+    }
 }
 
 fn stage_probe(name: &str) -> String {

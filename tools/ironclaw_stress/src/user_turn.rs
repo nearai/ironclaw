@@ -88,6 +88,33 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) resource_release: StageLatencySummary,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct OperationAttributionSummary {
+    pub(crate) count: u64,
+    pub(crate) latency: LatencySummary,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UserTurnOperationAttributionSummary {
+    pub(crate) thread_store_writes: OperationAttributionSummary,
+    pub(crate) context_reads: OperationAttributionSummary,
+    pub(crate) turn_store: OperationAttributionSummary,
+    pub(crate) resource_governor: OperationAttributionSummary,
+    pub(crate) synthetic_wait: OperationAttributionSummary,
+}
+
+pub(crate) fn operation_attribution_rows(
+    attribution: &UserTurnOperationAttributionSummary,
+) -> [(&'static str, &OperationAttributionSummary); 5] {
+    [
+        ("thread_store_writes", &attribution.thread_store_writes),
+        ("context_reads", &attribution.context_reads),
+        ("turn_store", &attribution.turn_store),
+        ("resource_governor", &attribution.resource_governor),
+        ("synthetic_wait", &attribution.synthetic_wait),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct UserTurnStageDurations {
     pub(crate) ensure_thread: Option<Duration>,

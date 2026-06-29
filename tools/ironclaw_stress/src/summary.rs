@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Sample,
-    user_turn::{StageLatencySummary, UserTurnStageDurations, UserTurnStageLatencySummary},
+    user_turn::{
+        OperationAttributionSummary, StageLatencySummary, UserTurnOperationAttributionSummary,
+        UserTurnStageDurations, UserTurnStageLatencySummary,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +96,24 @@ pub(crate) fn summarize_user_turn_stages(
     })
 }
 
+pub(crate) fn summarize_user_turn_operation_attribution(
+    samples: &[Sample],
+) -> Option<UserTurnOperationAttributionSummary> {
+    let stages: Vec<UserTurnStageDurations> =
+        samples.iter().filter_map(|sample| sample.stages).collect();
+    if stages.is_empty() {
+        return None;
+    }
+
+    Some(UserTurnOperationAttributionSummary {
+        thread_store_writes: summarize_attribution_group(&stages, thread_store_write_duration),
+        context_reads: summarize_attribution_group(&stages, context_read_duration),
+        turn_store: summarize_attribution_group(&stages, turn_store_duration),
+        resource_governor: summarize_attribution_group(&stages, resource_governor_duration),
+        synthetic_wait: summarize_attribution_group(&stages, synthetic_wait_duration),
+    })
+}
+
 fn summarize_stage(
     stages: &[UserTurnStageDurations],
     stage: impl Fn(&UserTurnStageDurations) -> Option<Duration>,
@@ -126,6 +147,61 @@ pub(crate) fn latency_summary(latencies: &[u128]) -> LatencySummary {
         p99_us: percentile(latencies, 99),
         max_us: latencies[latencies.len() - 1],
     }
+}
+
+fn summarize_attribution_group(
+    stages: &[UserTurnStageDurations],
+    group: impl Fn(&UserTurnStageDurations) -> Duration,
+) -> OperationAttributionSummary {
+    let mut latencies: Vec<u128> = stages
+        .iter()
+        .map(group)
+        .filter(|duration| *duration > Duration::ZERO)
+        .map(|duration| duration.as_micros())
+        .collect();
+    latencies.sort_unstable();
+    OperationAttributionSummary {
+        count: latencies.len() as u64,
+        latency: latency_summary(&latencies),
+    }
+}
+
+fn thread_store_write_duration(stage: &UserTurnStageDurations) -> Duration {
+    sum_durations([
+        stage.ensure_thread,
+        stage.accept_inbound,
+        stage.mark_submitted,
+        stage.mark_rejected_busy,
+        stage.append_assistant,
+        stage.finalize_assistant,
+        stage.append_tool_result,
+        stage.append_tool_preview,
+        stage.update_assistant_draft,
+    ])
+}
+
+fn context_read_duration(stage: &UserTurnStageDurations) -> Duration {
+    sum_durations([stage.load_context])
+}
+
+fn turn_store_duration(stage: &UserTurnStageDurations) -> Duration {
+    sum_durations([stage.submit_turn, stage.claim_run, stage.complete_run])
+}
+
+fn resource_governor_duration(stage: &UserTurnStageDurations) -> Duration {
+    sum_durations([
+        stage.resource_reserve,
+        stage.resource_reconcile,
+        stage.resource_release,
+    ])
+}
+
+fn synthetic_wait_duration(stage: &UserTurnStageDurations) -> Duration {
+    sum_durations([stage.model_wait, stage.tool_wait])
+}
+
+fn sum_durations<const N: usize>(durations: [Option<Duration>; N]) -> Duration {
+    durations.into_iter().flatten().sum()
 }
 
 fn percentile(sorted: &[u128], percentile: usize) -> u128 {
