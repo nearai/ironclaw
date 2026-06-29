@@ -520,6 +520,12 @@ registerPack("fr", {
   "tools.description.builtin.trigger_remove": "Supprimer un déclencheur planifié limité à l'appelant",
   "tools.description.builtin.trigger_pause": "Mettre en pause un déclencheur planifié limité à l'appelant pour le conserver sans déclenchement",
   "tools.description.builtin.trigger_resume": "Reprendre un déclencheur en pause limité à l'appelant afin qu'il puisse se déclencher selon son planning enregistré",
+  "tools.description.builtin.extension_search": "Rechercher dans le catalogue local des extensions Reborn par extension, produit, fournisseur ou nom de service",
+  "tools.description.builtin.extension_install": "Installer une extension Reborn trouvée dans l'état durable du cycle de vie local-dev",
+  "tools.description.builtin.extension_activate": "Activer une extension Reborn installée pour la surface de capacités local-dev visible par le modèle",
+  "tools.description.builtin.extension_remove": "Supprimer une extension Reborn installée de l'état durable du cycle de vie local-dev",
+  "tools.description.nearai.web_search": "Rechercher via le serveur MCP NEAR AI",
+  "tools.description.builtin.outbound_delivery_target_set": "Définir la cible d'envoi sortant de la réponse finale de l'utilisateur actuel, comme un DM Slack ou un canal Slack",
 
   // Settings — skills tab
   "skills.installed": "Skills installées",

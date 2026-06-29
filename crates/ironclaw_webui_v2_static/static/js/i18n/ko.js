@@ -520,6 +520,12 @@ registerPack("ko", {
   "tools.description.builtin.trigger_remove": "호출자 범위의 예약 트리거를 제거합니다",
   "tools.description.builtin.trigger_pause": "호출자 범위의 예약 트리거를 보존하되 실행되지 않도록 일시 중지합니다",
   "tools.description.builtin.trigger_resume": "호출자 범위의 일시 중지된 트리거를 재개해 저장된 일정에 따라 실행되도록 합니다",
+  "tools.description.builtin.extension_search": "확장, 제품, 제공자 또는 서비스 이름으로 로컬 Reborn 확장 카탈로그를 검색합니다",
+  "tools.description.builtin.extension_install": "검색된 Reborn 확장을 영구 local-dev 수명 주기 상태에 설치합니다",
+  "tools.description.builtin.extension_activate": "설치된 Reborn 확장을 모델에 표시되는 local-dev 기능 표면에 활성화합니다",
+  "tools.description.builtin.extension_remove": "설치된 Reborn 확장을 영구 local-dev 수명 주기 상태에서 제거합니다",
+  "tools.description.nearai.web_search": "NEAR AI MCP 서버를 통해 검색합니다",
+  "tools.description.builtin.outbound_delivery_target_set": "Slack DM 또는 Slack 채널 등 현재 사용자의 최종 답변 발송 대상을 설정합니다",
 
   // Settings — skills tab
   "skills.installed": "설치된 스킬",

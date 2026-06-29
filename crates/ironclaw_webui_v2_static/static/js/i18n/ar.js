@@ -520,6 +520,12 @@ registerPack("ar", {
   "tools.description.builtin.trigger_remove": "إزالة مشغّل مجدول محدد بنطاق المستدعي",
   "tools.description.builtin.trigger_pause": "إيقاف مشغّل مجدول محدد بنطاق المستدعي مؤقتًا ليبقى محفوظًا دون أن يعمل",
   "tools.description.builtin.trigger_resume": "استئناف مشغّل متوقف مؤقتًا ضمن نطاق المستدعي ليعمل وفق جدوله المحفوظ",
+  "tools.description.builtin.extension_search": "البحث في فهرس امتدادات Reborn المحلي حسب الامتداد أو المنتج أو المزوّد أو اسم الخدمة",
+  "tools.description.builtin.extension_install": "تثبيت امتداد Reborn تم العثور عليه في حالة دورة حياة local-dev الدائمة",
+  "tools.description.builtin.extension_activate": "تفعيل امتداد Reborn مثبت لسطح قدرات local-dev المرئي للنموذج",
+  "tools.description.builtin.extension_remove": "إزالة امتداد Reborn مثبت من حالة دورة حياة local-dev الدائمة",
+  "tools.description.nearai.web_search": "البحث عبر خادم NEAR AI MCP",
+  "tools.description.builtin.outbound_delivery_target_set": "تعيين هدف تسليم الرد النهائي الصادر للمستخدم الحالي، مثل رسالة Slack خاصة أو قناة Slack",
 
   // Settings — skills tab
   "skills.installed": "المهارات المثبتة",

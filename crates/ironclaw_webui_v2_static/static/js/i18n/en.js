@@ -539,6 +539,12 @@ registerPack("en", {
   "tools.description.builtin.trigger_remove": "Remove a caller-scoped scheduled trigger",
   "tools.description.builtin.trigger_pause": "Pause a caller-scoped scheduled trigger so it remains retained but does not fire",
   "tools.description.builtin.trigger_resume": "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
+  "tools.description.builtin.extension_search": "Search the local Reborn extension catalog by extension, product, provider, or service name",
+  "tools.description.builtin.extension_install": "Install a searched Reborn extension into durable local-dev lifecycle state",
+  "tools.description.builtin.extension_activate": "Activate an installed Reborn extension for the model-visible local-dev capability surface",
+  "tools.description.builtin.extension_remove": "Remove an installed Reborn extension from durable local-dev lifecycle state",
+  "tools.description.nearai.web_search": "Search through the NEAR AI MCP server",
+  "tools.description.builtin.outbound_delivery_target_set": "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel",
 
   // Settings — skills tab
   "skills.installed": "Installed skills",

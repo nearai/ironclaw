@@ -520,6 +520,12 @@ registerPack("hi", {
   "tools.description.builtin.trigger_remove": "caller-scoped scheduled trigger हटाएं",
   "tools.description.builtin.trigger_pause": "caller-scoped scheduled trigger pause करें ताकि वह बना रहे लेकिन fire न हो",
   "tools.description.builtin.trigger_resume": "caller-scoped paused trigger resume करें ताकि वह saved schedule पर fire कर सके",
+  "tools.description.builtin.extension_search": "extension, product, provider या service name से local Reborn extension catalog खोजें",
+  "tools.description.builtin.extension_install": "खोजे गए Reborn extension को durable local-dev lifecycle state में install करें",
+  "tools.description.builtin.extension_activate": "installed Reborn extension को model-visible local-dev capability surface के लिए activate करें",
+  "tools.description.builtin.extension_remove": "installed Reborn extension को durable local-dev lifecycle state से हटाएं",
+  "tools.description.nearai.web_search": "NEAR AI MCP server के माध्यम से खोजें",
+  "tools.description.builtin.outbound_delivery_target_set": "वर्तमान user के final-reply outbound delivery target को set करें, जैसे Slack DM या Slack channel",
 
   // Settings — skills tab
   "skills.installed": "स्थापित कौशल",

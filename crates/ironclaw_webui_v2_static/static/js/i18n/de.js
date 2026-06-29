@@ -520,6 +520,12 @@ registerPack("de", {
   "tools.description.builtin.trigger_remove": "Einen geplanten Trigger im Caller-Geltungsbereich entfernen",
   "tools.description.builtin.trigger_pause": "Einen geplanten Trigger im Caller-Geltungsbereich pausieren, sodass er erhalten bleibt, aber nicht auslöst",
   "tools.description.builtin.trigger_resume": "Einen pausierten Trigger im Caller-Geltungsbereich fortsetzen, sodass er nach seinem gespeicherten Zeitplan auslösen kann",
+  "tools.description.builtin.extension_search": "Den lokalen Reborn-Erweiterungskatalog nach Erweiterung, Produkt, Anbieter oder Dienstname durchsuchen",
+  "tools.description.builtin.extension_install": "Eine gefundene Reborn-Erweiterung in den dauerhaften local-dev-Lebenszykluszustand installieren",
+  "tools.description.builtin.extension_activate": "Eine installierte Reborn-Erweiterung für die modellseitig sichtbare local-dev-Fähigkeitsoberfläche aktivieren",
+  "tools.description.builtin.extension_remove": "Eine installierte Reborn-Erweiterung aus dem dauerhaften local-dev-Lebenszykluszustand entfernen",
+  "tools.description.nearai.web_search": "Über den NEAR AI MCP-Server suchen",
+  "tools.description.builtin.outbound_delivery_target_set": "Das Ziel für ausgehende Abschlussantworten des aktuellen Benutzers festlegen, z. B. eine Slack-DM oder einen Slack-Kanal",
 
   // Settings — skills tab
   "skills.installed": "Installierte Skills",

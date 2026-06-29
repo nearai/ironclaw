@@ -520,6 +520,12 @@ registerPack("pt-BR", {
   "tools.description.builtin.trigger_remove": "Remover um gatilho agendado escopado ao chamador",
   "tools.description.builtin.trigger_pause": "Pausar um gatilho agendado escopado ao chamador para mantê-lo sem disparar",
   "tools.description.builtin.trigger_resume": "Retomar um gatilho pausado escopado ao chamador para que dispare pelo agendamento salvo",
+  "tools.description.builtin.extension_search": "Pesquisar no catálogo local de extensões Reborn por extensão, produto, provedor ou nome de serviço",
+  "tools.description.builtin.extension_install": "Instalar uma extensão Reborn encontrada no estado durável do ciclo de vida local-dev",
+  "tools.description.builtin.extension_activate": "Ativar uma extensão Reborn instalada para a superfície de capacidades local-dev visível ao modelo",
+  "tools.description.builtin.extension_remove": "Remover uma extensão Reborn instalada do estado durável do ciclo de vida local-dev",
+  "tools.description.nearai.web_search": "Pesquisar pelo servidor MCP da NEAR AI",
+  "tools.description.builtin.outbound_delivery_target_set": "Definir o destino de entrega de saída da resposta final do usuário atual, como uma DM ou canal do Slack",
 
   // Settings — skills tab
   "skills.installed": "Skills instaladas",

@@ -520,6 +520,12 @@ registerPack("uk", {
   "tools.description.builtin.trigger_remove": "Видалити запланований тригер в області виклику",
   "tools.description.builtin.trigger_pause": "Призупинити запланований тригер в області виклику, щоб він залишався, але не спрацьовував",
   "tools.description.builtin.trigger_resume": "Відновити призупинений тригер в області виклику, щоб він міг спрацьовувати за збереженим розкладом",
+  "tools.description.builtin.extension_search": "Шукати в локальному каталозі розширень Reborn за розширенням, продуктом, постачальником або назвою сервісу",
+  "tools.description.builtin.extension_install": "Встановити знайдене розширення Reborn у сталий стан життєвого циклу local-dev",
+  "tools.description.builtin.extension_activate": "Активувати встановлене розширення Reborn для видимої моделі поверхні можливостей local-dev",
+  "tools.description.builtin.extension_remove": "Видалити встановлене розширення Reborn зі сталого стану життєвого циклу local-dev",
+  "tools.description.nearai.web_search": "Шукати через сервер MCP NEAR AI",
+  "tools.description.builtin.outbound_delivery_target_set": "Задати ціль вихідної доставки фінальної відповіді поточного користувача, наприклад Slack DM або канал Slack",
 
   // Settings — skills tab
   "skills.installed": "Встановлені скіли",

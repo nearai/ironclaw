@@ -520,6 +520,12 @@ registerPack("zh-CN", {
   "tools.description.builtin.trigger_remove": "移除调用者作用域内的计划触发器",
   "tools.description.builtin.trigger_pause": "暂停调用者作用域内的计划触发器，使其保留但不触发",
   "tools.description.builtin.trigger_resume": "恢复调用者作用域内已暂停的触发器，使其可按保存的计划触发",
+  "tools.description.builtin.extension_search": "搜索本地 Reborn 扩展目录，可按扩展、产品、提供方或服务名称查询",
+  "tools.description.builtin.extension_install": "将搜索到的 Reborn 扩展安装到持久本地开发生命周期状态",
+  "tools.description.builtin.extension_activate": "激活已安装的 Reborn 扩展，使模型可见的本地开发能力可用",
+  "tools.description.builtin.extension_remove": "从持久本地开发生命周期状态中移除已安装的 Reborn 扩展",
+  "tools.description.nearai.web_search": "通过 NEAR AI MCP 服务器搜索",
+  "tools.description.builtin.outbound_delivery_target_set": "设置当前用户最终回复的出站投递目标，例如 Slack 私信或 Slack 频道",
 
   // Settings — skills tab
   "skills.installed": "已安装技能",

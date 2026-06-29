@@ -520,6 +520,12 @@ registerPack("es", {
   "tools.description.builtin.trigger_remove": "Eliminar un disparador programado acotado al llamador",
   "tools.description.builtin.trigger_pause": "Pausar un disparador programado acotado al llamador para conservarlo sin dispararlo",
   "tools.description.builtin.trigger_resume": "Reanudar un disparador pausado acotado al llamador para que pueda ejecutarse según su programación guardada",
+  "tools.description.builtin.extension_search": "Buscar en el catálogo local de extensiones de Reborn por extensión, producto, proveedor o nombre de servicio",
+  "tools.description.builtin.extension_install": "Instalar una extensión de Reborn encontrada en el estado duradero del ciclo de vida local-dev",
+  "tools.description.builtin.extension_activate": "Activar una extensión de Reborn instalada para la superficie de capacidades local-dev visible para el modelo",
+  "tools.description.builtin.extension_remove": "Eliminar una extensión de Reborn instalada del estado duradero del ciclo de vida local-dev",
+  "tools.description.nearai.web_search": "Buscar mediante el servidor MCP de NEAR AI",
+  "tools.description.builtin.outbound_delivery_target_set": "Configurar el destino de entrega saliente de la respuesta final del usuario actual, como un DM o canal de Slack",
 
   // Settings — skills tab
   "skills.installed": "Skills instaladas",

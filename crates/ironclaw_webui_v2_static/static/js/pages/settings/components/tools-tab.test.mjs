@@ -232,6 +232,33 @@ test("Tool rows localize descriptions when backend payload omits description", (
   assert.ok(collectScalars(rendered).includes("回显一条消息"));
 });
 
+test("Tool rows localize extension and provider capability descriptions", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.extension_search": "搜索本地 Reborn 扩展目录",
+      "tools.description.nearai.web_search": "通过 NEAR AI MCP 服务器搜索",
+    },
+  });
+  const renderDescription = (name) =>
+    collectScalars(
+      exports.ToolRow({
+        tool: {
+          name,
+          description: "Backend description",
+          state: "always_allow",
+          default_state: "ask_each_time",
+          effective_source: "global",
+          locked: false,
+        },
+        onPermissionChange: () => {},
+        isSaved: false,
+      })
+    );
+
+  assert.ok(renderDescription("builtin.extension_search").includes("搜索本地 Reborn 扩展目录"));
+  assert.ok(renderDescription("nearai.web_search").includes("通过 NEAR AI MCP 服务器搜索"));
+});
+
 test("Tools tab search matches localized and raw tool descriptions", () => {
   const tools = [
     {

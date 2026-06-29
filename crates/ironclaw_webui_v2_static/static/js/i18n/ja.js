@@ -520,6 +520,12 @@ registerPack("ja", {
   "tools.description.builtin.trigger_remove": "呼び出し元スコープのスケジュールトリガーを削除します",
   "tools.description.builtin.trigger_pause": "呼び出し元スコープのスケジュールトリガーを保持したまま発火しないよう一時停止します",
   "tools.description.builtin.trigger_resume": "呼び出し元スコープの一時停止中トリガーを再開し、保存済みスケジュールで発火できるようにします",
+  "tools.description.builtin.extension_search": "拡張機能、製品、プロバイダー、サービス名でローカルの Reborn 拡張カタログを検索します",
+  "tools.description.builtin.extension_install": "検索した Reborn 拡張機能を永続的な local-dev ライフサイクル状態にインストールします",
+  "tools.description.builtin.extension_activate": "インストール済みの Reborn 拡張機能を、モデルに見える local-dev 能力面で有効化します",
+  "tools.description.builtin.extension_remove": "インストール済みの Reborn 拡張機能を永続的な local-dev ライフサイクル状態から削除します",
+  "tools.description.nearai.web_search": "NEAR AI MCP サーバー経由で検索します",
+  "tools.description.builtin.outbound_delivery_target_set": "Slack DM や Slack チャンネルなど、現在のユーザーの最終返信の送信先を設定します",
 
   // Settings — skills tab
   "skills.installed": "インストール済みスキル",
