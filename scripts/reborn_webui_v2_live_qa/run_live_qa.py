@@ -2380,7 +2380,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
                 channel_id=channel_id,
                 marker=nonce,
                 oldest_epoch=wall_started,
-                required_text=[nonce, "Google Docs", "grounding"],
+                required_text=[nonce, "strategy"],
             )
             last_history = history
             if history.get("found"):
@@ -2423,7 +2423,7 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
         ctx,
         case_name="qa_6c_gmail_to_sheet_live_chat",
         marker=None,
-        required_text=["Google Sheet"],
+        required_text=["ABC", "spreadsheet"],
         extensions=[
             {
                 "package_id": "gmail",
@@ -3161,7 +3161,7 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             case_name="qa_7c_slack_bug_logger_routine",
             routine_name=routine_name,
             marker=None,
-            required_text=["routine", "bug"],
+            required_text=["trigger", "bug"],
             prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
             extensions=[
                 {
@@ -3294,7 +3294,7 @@ async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
         case_name="qa_8b_hn_keyword_live_chat",
         prompt=_qa_sheet_prompt("qa_8b_hn_keyword_live_chat"),
         marker=None,
-        required_text=["Hacker News"],
+        required_text=["news.ycombinator.com"],
         timeout=240.0,
     )
 

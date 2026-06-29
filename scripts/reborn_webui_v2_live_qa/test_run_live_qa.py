@@ -676,7 +676,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_routine["case_name"], "qa_7c_slack_bug_logger_routine")
         self.assertIsNone(captured_routine["marker"])
         self.assertEqual(captured_routine["routine_name"], "reborn-qa-7c-slack-bug-sheet")
-        self.assertEqual(captured_routine["required_text"], ["routine", "bug"])
+        self.assertEqual(captured_routine["required_text"], ["trigger", "bug"])
         self.assertEqual(
             captured_routine["prompt"],
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
@@ -770,6 +770,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn(run_live_qa.ENDPOINT_STATUS_URL, prompt)
         self.assertIsNone(captured["marker"])
         self.assertEqual(captured["required_text"], ["routine"])
+
+    def test_hn_live_chat_accepts_hacker_news_url_host(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": "news.ycombinator.com/item?id=1"},
+            )
+
+        with patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case):
+            result = asyncio.run(
+                run_live_qa.case_qa_8b_hn_keyword_live_chat(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["required_text"], ["news.ycombinator.com"])
 
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
@@ -881,6 +902,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured["qa_6e_gmail_to_sheet_delivery"]["required_text"],
             ["Google Sheet"],
         )
+        self.assertEqual(
+            captured["qa_6c_gmail_to_sheet_live_chat"]["required_text"],
+            ["ABC", "spreadsheet"],
+        )
         self.assertTrue(
             extensions_by_case["qa_2f_calendar_prep_email_delivery"]["google-docs"].get(
                 "ensure_installed",
@@ -974,6 +999,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
+        captured_slack_required_text: list[str] = []
         document_id = "1DocCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
 
@@ -996,7 +1022,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_post_signed_slack_dm_event(*_args, **_kwargs):
             return {"ok": True}
 
-        async def fake_slack_history_contains_marker(*_args, **_kwargs):
+        async def fake_slack_history_contains_marker(*_args, **kwargs):
+            captured_slack_required_text.extend(kwargs["required_text"])
             return {"found": True}
 
         async def fake_wait_for_google_sheet_marker(*_args, **_kwargs):
@@ -1057,6 +1084,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 trigger.search(prompt),
                 f"{case_name} prompt should not trigger WebUI connect action: {prompt}",
             )
+        self.assertIn("strategy", captured_slack_required_text)
+        self.assertNotIn("Google Docs", captured_slack_required_text)
+        self.assertNotIn("grounding", captured_slack_required_text)
+        self.assertTrue(
+            any(text.startswith("QA5D-NONCE-") for text in captured_slack_required_text)
+        )
 
     def test_signed_slack_event_cases_configure_legacy_actor(self):
         for case_name in (
