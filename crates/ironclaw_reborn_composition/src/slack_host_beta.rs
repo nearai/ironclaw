@@ -2399,6 +2399,20 @@ mod tests {
             .install_extension(caller.clone(), package_ref)
             .await
             .expect("install Slack extension");
+        let before_setup = bundle
+            .api
+            .list_extensions(caller.clone())
+            .await
+            .expect("list extensions before setup");
+        let slack_before_setup = before_setup
+            .extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .expect("Slack extension is listed before setup");
+        assert!(
+            !slack_before_setup.active,
+            "test precondition: installed Slack extension must start inactive before setup save"
+        );
 
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
         let response = route_mount

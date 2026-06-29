@@ -120,6 +120,8 @@ pub(crate) trait SlackInstallationSetupStore: Send + Sync + std::fmt::Debug {
         &self,
         setup: &SlackInstallationSetup,
     ) -> Result<(), SlackSetupError>;
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError>;
 }
 
 #[derive(Clone)]
@@ -218,6 +220,14 @@ impl SlackSetupService {
         &self,
         update: SlackInstallationSetupUpdate,
     ) -> Result<SlackInstallationSetup, SlackSetupError> {
+        let (_, setup) = self.save_with_previous(update).await?;
+        Ok(setup)
+    }
+
+    pub(crate) async fn save_with_previous(
+        &self,
+        update: SlackInstallationSetupUpdate,
+    ) -> Result<(Option<SlackInstallationSetup>, SlackInstallationSetup), SlackSetupError> {
         let _save_guard = self.save_lock.lock().await;
         let previous = self.current_setup().await?;
         let revision = previous
@@ -249,7 +259,43 @@ impl SlackSetupService {
         self.store
             .put_slack_installation_setup(&setup.record)
             .await?;
-        Ok(setup.record)
+        Ok((previous, setup.record))
+    }
+
+    pub(crate) async fn rollback_failed_activation_save(
+        &self,
+        saved: &SlackInstallationSetup,
+        previous: Option<&SlackInstallationSetup>,
+    ) -> Result<(), SlackSetupError> {
+        let _save_guard = self.save_lock.lock().await;
+        let current = self.current_setup().await?;
+        if current.as_ref() != Some(saved) {
+            tracing::warn!(
+                "skipping Slack setup activation rollback because setup changed after failed save"
+            );
+            return Ok(());
+        }
+
+        match previous {
+            Some(previous) => {
+                self.store.put_slack_installation_setup(previous).await?;
+            }
+            None => {
+                self.store.delete_slack_installation_setup().await?;
+            }
+        }
+
+        self.delete_secret_if_new(
+            &saved.bot_token_handle,
+            previous.map(|setup| &setup.bot_token_handle),
+        )
+        .await?;
+        self.delete_secret_if_new(
+            &saved.signing_secret_handle,
+            previous.map(|setup| &setup.signing_secret_handle),
+        )
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn signing_secret(
@@ -361,6 +407,21 @@ impl SlackSetupService {
                 SecretMaterial::from(material.expose_secret().to_string()),
                 None,
             )
+            .await
+            .map_err(map_secret_error)?;
+        Ok(())
+    }
+
+    async fn delete_secret_if_new(
+        &self,
+        handle: &SecretHandle,
+        previous_handle: Option<&SecretHandle>,
+    ) -> Result<(), SlackSetupError> {
+        if previous_handle == Some(handle) {
+            return Ok(());
+        }
+        self.secret_store
+            .delete(&self.secret_scope(), handle)
             .await
             .map_err(map_secret_error)?;
         Ok(())
@@ -535,6 +596,11 @@ mod tests {
             setup: &SlackInstallationSetup,
         ) -> Result<(), SlackSetupError> {
             *self.setup.lock().await = Some(setup.clone());
+            Ok(())
+        }
+
+        async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+            *self.setup.lock().await = None;
             Ok(())
         }
     }

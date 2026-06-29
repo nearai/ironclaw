@@ -68,6 +68,7 @@ export function useHistory(threadId, options = {}) {
     setStateThreadId(threadId);
     setState({
       messages: entry?.messages || [],
+      messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
       isLoading: Boolean(threadId) && !entry,
       loadError: null,

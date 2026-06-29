@@ -397,6 +397,30 @@ test("useHistory setMessages restamps messages onto the active thread", async ()
   assert.equal(setCalls.at(-1).messagesThreadId, "thread-active");
 });
 
+test("useHistory stamps messagesThreadId during synchronous thread switches", async () => {
+  const setCalls = [];
+  const React = createPersistentReactStub({ setCalls });
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React,
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  React.__beginRender();
+  context.globalThis.__testExports.useHistory("thread-old", {});
+
+  React.__beginRender();
+  context.globalThis.__testExports.useHistory("thread-new", {});
+
+  assert.equal(setCalls.at(-1).messagesThreadId, "thread-new");
+});
+
 test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {
   const threadId = "thread-activity-order";
   const runId = "run-activity-order";

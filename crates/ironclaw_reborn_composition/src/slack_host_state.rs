@@ -708,6 +708,17 @@ where
             .map(|_| ())
             .map_err(map_setup_fs_error)
     }
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+        let path = ScopedPath::new(SLACK_INSTALLATION_SETUP_PATH)
+            .map_err(|_| SlackSetupError::StoreUnavailable)?;
+        let lock = self.lock_for("slack-installation-setup".to_string());
+        let _guard = lock.lock().await;
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_setup_fs_error(error)),
+        }
+    }
 }
 
 #[async_trait::async_trait]

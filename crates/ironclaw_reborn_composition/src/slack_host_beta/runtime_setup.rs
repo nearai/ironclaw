@@ -1575,6 +1575,13 @@ mod tests {
             self.put(setup.clone()).await;
             Ok(())
         }
+
+        async fn delete_slack_installation_setup(
+            &self,
+        ) -> Result<(), crate::slack_setup::SlackSetupError> {
+            *self.setup.write().await = None;
+            Ok(())
+        }
     }
 
     #[derive(Debug, Default)]
