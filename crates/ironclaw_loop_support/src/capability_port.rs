@@ -2827,12 +2827,12 @@ fn runtime_failure_safe_summary(
 fn runtime_failure_loop_safe_summary(
     failure: &RuntimeCapabilityFailure,
 ) -> Option<LoopSafeSummary> {
+    if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
+        return Some(runtime_input_encode_summary());
+    }
     let summary = failure.safe_summary()?;
     if let Ok(summary) = LoopSafeSummary::new(summary.clone()) {
         return Some(summary);
-    }
-    if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
-        return Some(runtime_input_encode_summary());
     }
     Some(LoopSafeSummary::capability_failure_summary(summary))
 }
@@ -4632,6 +4632,16 @@ mod tests {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid JSON: expected value near {invalid".to_string()),
+                    detail: None,
+                }),
+                CapabilityFailureKind::InvalidInput,
+                Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+            ),
+            (
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: RuntimeFailureKind::InvalidInput,
+                    message: None,
                     detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,

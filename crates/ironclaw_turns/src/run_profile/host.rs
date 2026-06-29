@@ -143,8 +143,13 @@ fn validate_loop_safe_identifier(
     Ok(value)
 }
 
+const TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "the tool input could not be encoded";
+
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    if value == TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY {
+        return Ok(value);
+    }
     if value.chars().any(|character| {
         matches!(
             character,
@@ -417,7 +422,7 @@ impl LoopSafeSummary {
     }
 
     pub fn tool_input_could_not_be_encoded() -> Self {
-        Self("the tool input could not be encoded".to_string())
+        Self(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string())
     }
 
     pub fn model_gateway_failed() -> Self {
@@ -2436,5 +2441,18 @@ mod tests {
                 "summary must be redacted: {raw_summary}"
             );
         }
+    }
+
+    #[test]
+    fn loop_safe_summary_accepts_fixed_input_encode_summary() {
+        let summary = LoopSafeSummary::new(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY)
+            .expect("fixed host-authored input encode summary is safe");
+        assert_eq!(summary.as_str(), TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY);
+
+        let raw_input_summary = LoopSafeSummary::new("tool input contained raw payload");
+        assert!(
+            raw_input_summary.is_err(),
+            "only the fixed fallback summary should bypass the raw-input denylist"
+        );
     }
 }

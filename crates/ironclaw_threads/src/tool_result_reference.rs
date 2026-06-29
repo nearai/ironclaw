@@ -18,6 +18,7 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
+const TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "the tool input could not be encoded";
 const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
     "access token",
     "api key",
@@ -349,6 +350,9 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
         return Err(
             "tool result summary must not contain raw payload or path delimiters".to_string(),
         );
+    }
+    if value == TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY {
+        return Ok(value);
     }
 
     let lower = value.to_ascii_lowercase();
@@ -828,7 +832,8 @@ mod tests {
     use ironclaw_host_api::{CapabilityId, ProviderToolName};
 
     use super::{
-        ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+        ProviderToolCallReferenceEnvelope, TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY,
+        ToolResultReferenceEnvelope, ToolResultSafeSummary,
     };
 
     #[test]
@@ -848,6 +853,15 @@ mod tests {
     fn safe_summary_api_key_check_is_token_based() {
         assert!(ToolResultSafeSummary::new("sky-high confidence").is_ok());
         assert!(ToolResultSafeSummary::new("completed with sk-live-token").is_err());
+    }
+
+    #[test]
+    fn safe_summary_accepts_fixed_input_encode_summary() {
+        let summary = ToolResultSafeSummary::new(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY)
+            .expect("fixed host-authored input encode summary is safe");
+        assert_eq!(summary.as_str(), TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY);
+
+        assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
     }
 
     #[test]
