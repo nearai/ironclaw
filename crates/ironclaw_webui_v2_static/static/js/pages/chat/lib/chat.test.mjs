@@ -234,6 +234,38 @@ test("Chat cancel button ignores active runs from another thread", () => {
   assert.equal(props.canCancel, false);
 });
 
+test("Chat does not let another thread's active run disable the current composer", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-2", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const props = componentProps(emptyState, components.EmptyState);
+  assert.equal(props.sendDisabled, false);
+  assert.equal(props.canCancel, false);
+});
+
 test("Chat keeps composer send blocked while a gate owns the run decision", async () => {
   const pendingGate = {
     kind: "gate",

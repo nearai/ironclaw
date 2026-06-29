@@ -78,8 +78,14 @@ export function Chat({
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
-  const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
-  const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
+  const activeRunBelongsToActiveThread =
+    !activeRun?.threadId || activeRun.threadId === activeThreadId;
+  const activeThreadHasGate = Boolean(
+    activeThreadId && pendingGate && activeRunBelongsToActiveThread
+  );
+  const activeThreadIsProcessing = Boolean(
+    activeThreadId && isProcessing && activeRunBelongsToActiveThread
+  );
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
@@ -188,7 +194,7 @@ export function Chat({
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
-    if (isProcessing) {
+    if (activeThreadIsProcessing) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
     }
@@ -197,7 +203,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, isProcessing]);
+  }, [activeThreadId, pendingGate, activeThreadIsProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -274,7 +280,7 @@ export function Chat({
                 onDismiss=${dismissChannelConnectAction}
               />
             `}
-            ${pendingGate &&
+            ${activeThreadHasGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
                 ? html`

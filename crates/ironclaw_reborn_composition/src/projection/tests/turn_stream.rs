@@ -632,7 +632,7 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
+async fn webui_event_stream_fails_closed_for_projection_allow_always_without_context() {
     let tenant_id = TenantId::new("webui-events-approval-no-prompt-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-no-prompt-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-no-prompt-agent").unwrap();
@@ -675,9 +675,11 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
             state: TurnRunState {
                 status: TurnStatus::BlockedApproval,
                 gate_ref: Some(gate_ref.clone()),
-                // Cursor mismatch suppresses the transient prompt payload; the
-                // durable projection still needs to fail closed on affordances.
-                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(2))
+                // No approval store is wired for this test, so the parsed
+                // approval gate has no contextual approval request. Prompt
+                // fallback stays actionable, while projection fails closed on
+                // affordances.
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
     );
@@ -692,11 +694,14 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
         .await
         .unwrap();
 
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.payload(), ProductOutboundPayload::GatePrompt(_)))
-    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::GatePrompt(prompt)
+            if prompt.turn_run_id == turn_run
+                && prompt.gate_ref == gate_ref.as_str()
+                && prompt.approval_context.is_none()
+                && prompt.allow_always
+    )));
     assert!(events.iter().any(|event| matches!(
         event.payload(),
         ProductOutboundPayload::ProjectionUpdate { state }
@@ -1265,7 +1270,7 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
+async fn webui_event_stream_does_not_project_gate_for_stale_blocked_event() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1278,9 +1283,11 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
     );
     let run_id = TurnRunId::new();
     let blocked_activity_id = ironclaw_turns::CapabilityActivityId::new();
-    let blocked_invocation_id = InvocationId::from_uuid(blocked_activity_id.as_uuid());
     let mut state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
+    state.status = TurnStatus::BlockedAuth;
     state.event_cursor = TurnEventCursor(2);
+    state.gate_ref = Some(GateRef::new("gate:auth-required").unwrap());
+    state.blocked_activity_id = Some(blocked_activity_id);
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let services = build_reborn_projection_services(
         event_log,
@@ -1324,18 +1331,18 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
         ProductOutboundPayload::ProjectionUpdate { state }
             if state.items.iter().any(|item| matches!(
                 item,
-                ProductProjectionItem::Gate {
+                ProductProjectionItem::RunStatus {
                     run_id: projected_run_id,
-                    gate_kind,
-                    gate_ref,
-                    invocation_id,
+                    status,
                     ..
-                } if *projected_run_id == run_id
-                    && *gate_kind == ProductGateKind::Auth
-                    && gate_ref == "gate:auth-required"
-                    && *invocation_id == Some(blocked_invocation_id)
+                } if *projected_run_id == run_id && status == "blocked_auth"
             ))
+                && !state.items.iter().any(|item| matches!(item, ProductProjectionItem::Gate { .. }))
     ));
+    assert!(!events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::AuthPrompt(_) | ProductOutboundPayload::GatePrompt(_)
+    )));
 }
 
 #[tokio::test]

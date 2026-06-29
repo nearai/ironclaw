@@ -59,6 +59,7 @@ export function useChatEvents({
     (envelope) => {
       const { type, frame } = envelope || {};
       if (!type || !frame) return;
+      if (envelope.sourceThreadId && envelope.sourceThreadId !== threadId) return;
 
       switch (type) {
         case "accepted": {

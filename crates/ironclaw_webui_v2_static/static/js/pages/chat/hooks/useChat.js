@@ -399,7 +399,9 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      if (pendingGate || pendingGateRef.current) {
+      const sendTargetsCurrentThread =
+        !targetThreadId || targetThreadId === threadId;
+      if (sendTargetsCurrentThread && (pendingGate || pendingGateRef.current)) {
         throw approvalGatePendingSendError();
       }
       // Admission: block a send only when the *destination* thread is the one
@@ -421,7 +423,9 @@ export function useChat(threadId) {
       const processingBlocksSend =
         isProcessingRef.current &&
         Boolean(sendTargetThreadId) &&
-        sendTargetThreadId === threadId;
+        (!activeRunForSend?.threadId
+          ? sendTargetThreadId === threadId
+          : activeRunForSend.threadId === sendTargetThreadId);
       if (
         submitBusyRef.current ||
         processingBlocksSend ||

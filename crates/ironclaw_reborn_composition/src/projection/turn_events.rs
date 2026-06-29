@@ -22,7 +22,7 @@ use ironclaw_turns::{
     GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
     TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
     TurnEventProjectionRequest, TurnEventProjectionSource, TurnEventReducerService,
-    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -289,8 +289,8 @@ async fn turn_event_payloads(
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
-    let blocked_prompt = if matches!(event.kind, TurnEventKind::Blocked) {
-        blocked_prompt_payload(
+    let blocked_gate_projection = if matches!(event.kind, TurnEventKind::Blocked) {
+        current_blocked_gate_projection(
             caller_user_id,
             coordinator,
             auth_challenges,
@@ -306,10 +306,16 @@ async fn turn_event_payloads(
             failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
                 .await;
         payloads.push(ProductOutboundPayload::ProjectionUpdate {
-            state: turn_event_projection_state(event, failure_details, blocked_prompt.as_ref())?,
+            state: turn_event_projection_state(
+                event,
+                failure_details,
+                blocked_gate_projection.as_ref(),
+            )?,
         });
     }
-    if let Some(prompt) = blocked_prompt {
+    if let Some(projection) = blocked_gate_projection
+        && let Some(prompt) = projection.prompt
+    {
         payloads.push(prompt);
     }
     Ok(payloads)
@@ -363,13 +369,19 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
     }
 }
 
-async fn blocked_prompt_payload(
+struct CurrentBlockedGateProjection {
+    gate_ref: String,
+    invocation_id: Option<InvocationId>,
+    prompt: Option<ProductOutboundPayload>,
+}
+
+async fn current_blocked_gate_projection(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
     event: &TurnLifecycleEvent,
-) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
+) -> Result<Option<CurrentBlockedGateProjection>, ProductAdapterError> {
     let state = match coordinator
         .get_run_state(GetRunStateRequest {
             scope: event.scope.clone(),
@@ -393,7 +405,7 @@ async fn blocked_prompt_payload(
     if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
-    let blocked_invocation_id = event
+    let invocation_id = event
         .blocked_gate
         .as_ref()
         .and_then(|gate| gate.activity_id)
@@ -402,56 +414,105 @@ async fn blocked_prompt_payload(
     let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
+    if event
+        .blocked_gate
+        .as_ref()
+        .is_some_and(|blocked_gate| &blocked_gate.gate_ref != gate_ref)
+    {
+        return Ok(None);
+    }
     let gate_ref_str = gate_ref.as_str().to_string();
-    match event.status {
+    let prompt = if state.event_cursor == event.cursor {
+        blocked_gate_prompt(BlockedGatePromptRequest {
+            caller_user_id,
+            auth_challenges,
+            approval_requests,
+            event,
+            state: &state,
+            gate_ref,
+            gate_ref_str: &gate_ref_str,
+            invocation_id,
+        })
+        .await?
+    } else {
+        None
+    };
+    Ok(Some(CurrentBlockedGateProjection {
+        gate_ref: gate_ref_str,
+        invocation_id,
+        prompt,
+    }))
+}
+
+struct BlockedGatePromptRequest<'a> {
+    caller_user_id: &'a UserId,
+    auth_challenges: Option<&'a dyn AuthChallengeProvider>,
+    approval_requests: Option<&'a dyn ApprovalRequestStore>,
+    event: &'a TurnLifecycleEvent,
+    state: &'a TurnRunState,
+    gate_ref: &'a GateRef,
+    gate_ref_str: &'a str,
+    invocation_id: Option<InvocationId>,
+}
+
+async fn blocked_gate_prompt(
+    request: BlockedGatePromptRequest<'_>,
+) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
+    let prompt = match request.event.status {
         TurnStatus::BlockedAuth => {
             let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
-                fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
-                scope: &event.scope,
-                run_id: event.run_id,
-                gate_ref: &gate_ref_str,
-                invocation_id: blocked_invocation_id,
-                body: event
+                fallback_owner_user_id: request
+                    .event
+                    .owner_user_id
+                    .as_ref()
+                    .unwrap_or(request.caller_user_id),
+                scope: &request.event.scope,
+                run_id: request.event.run_id,
+                gate_ref: request.gate_ref_str,
+                invocation_id: request.invocation_id,
+                body: request
+                    .event
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                credential_requirements: &state.credential_requirements,
-                auth_challenges,
+                credential_requirements: &request.state.credential_requirements,
+                auth_challenges: request.auth_challenges,
             })
             .await?;
-            Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
+            Some(ProductOutboundPayload::AuthPrompt(view))
         }
-        TurnStatus::BlockedApproval => Ok(Some(
+        TurnStatus::BlockedApproval => Some(
             approval_gate_prompt(
-                caller_user_id,
-                approval_requests,
-                event,
-                gate_ref,
-                gate_ref_str,
+                request.caller_user_id,
+                request.approval_requests,
+                request.event,
+                request.gate_ref,
+                request.gate_ref_str.to_string(),
             )
             .await,
-        )),
-        TurnStatus::BlockedResource => Ok(Some(gate_prompt(
-            event,
-            gate_ref_str,
+        ),
+        TurnStatus::BlockedResource => Some(gate_prompt(
+            request.event,
+            request.gate_ref_str.to_string(),
             "Resource unavailable",
             false,
-        ))),
+        )),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedDependentRun
-        // External-tool gates are not user-clickable prompts; the OpenAI
-        // Responses surface reads them via its own projection path. No generic
-        // gate-prompt payload here.
+        // External-tool gates have no user-clickable prompt payload here. The
+        // generic projection may still emit a gate row, while the OpenAI
+        // Responses surface may project them through its own path.
         | TurnStatus::BlockedExternalTool
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested
         | TurnStatus::Completed
         | TurnStatus::Cancelled
-        | TurnStatus::Failed => Ok(None),
-    }
+        | TurnStatus::Failed => None,
+    };
+    Ok(prompt)
 }
 
 async fn approval_gate_prompt(
@@ -710,7 +771,7 @@ fn projects_run_status(kind: &TurnEventKind) -> bool {
 fn turn_event_projection_state(
     event: &TurnLifecycleEvent,
     failure_details: FailureProjectionDetails,
-    blocked_prompt: Option<&ProductOutboundPayload>,
+    blocked_gate_projection: Option<&CurrentBlockedGateProjection>,
 ) -> Result<ProductProjectionState, ProductAdapterError> {
     let mut items = vec![ProductProjectionItem::RunStatus {
         run_id: event.run_id,
@@ -718,7 +779,7 @@ fn turn_event_projection_state(
         failure_category: failure_details.category,
         failure_summary: failure_details.summary,
     }];
-    if let Some(item) = gate_projection_item(event, blocked_prompt)? {
+    if let Some(item) = gate_projection_item(event, blocked_gate_projection)? {
         items.push(item);
     }
     ProductProjectionState::new(event.scope.thread_id.to_string(), items)
@@ -741,7 +802,7 @@ fn gate_projection_prompt_context(
             invocation_id: prompt.invocation_id,
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
-            allow_always: Some(prompt.allow_always),
+            allow_always: Some(prompt.allow_always && prompt.approval_context.is_some()),
             auth_context: None,
         },
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {
@@ -758,18 +819,18 @@ fn gate_projection_prompt_context(
 
 fn gate_projection_item(
     event: &TurnLifecycleEvent,
-    blocked_prompt: Option<&ProductOutboundPayload>,
+    blocked_gate_projection: Option<&CurrentBlockedGateProjection>,
 ) -> Result<Option<ProductProjectionItem>, ProductAdapterError> {
     if !matches!(event.kind, TurnEventKind::Blocked) {
         return Ok(None);
     }
+    let Some(blocked_gate_projection) = blocked_gate_projection else {
+        return Ok(None);
+    };
     let Some(blocked_gate) = event.blocked_gate.as_ref() else {
         return Ok(None);
     };
-    let prompt_context = gate_projection_prompt_context(blocked_prompt)?;
-    let blocked_invocation_id = blocked_gate
-        .activity_id
-        .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
+    let prompt_context = gate_projection_prompt_context(blocked_gate_projection.prompt.as_ref())?;
     let body = prompt_context.body.unwrap_or_else(|| {
         event
             .sanitized_reason
@@ -779,8 +840,10 @@ fn gate_projection_item(
     Ok(Some(ProductProjectionItem::Gate {
         run_id: event.run_id,
         gate_kind: product_gate_kind(blocked_gate.gate_kind),
-        gate_ref: blocked_gate.gate_ref.as_str().to_string(),
-        invocation_id: prompt_context.invocation_id.or(blocked_invocation_id),
+        gate_ref: blocked_gate_projection.gate_ref.clone(),
+        invocation_id: prompt_context
+            .invocation_id
+            .or(blocked_gate_projection.invocation_id),
         headline: prompt_context
             .headline
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
