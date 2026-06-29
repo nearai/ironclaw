@@ -89,6 +89,45 @@ fn mixed_user_session_rejects_multi_process_runs() {
 }
 
 #[test]
+fn large_context_preset_populates_workload_defaults() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--preset",
+        "large-context",
+    ]);
+
+    assert_eq!(args.preset, Some(StressPreset::LargeContext));
+    assert_eq!(args.scenario, Scenario::MixedUserSession);
+    assert_eq!(args.concurrency, 4);
+    assert_eq!(args.operations, 50);
+    assert_eq!(args.users, 100);
+    assert_eq!(args.prefill_threads, 100);
+    assert_eq!(args.prefill_turns_per_thread, 50);
+    assert_eq!(args.context_max_messages, 100);
+}
+
+#[test]
+fn preset_respects_explicit_overrides() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--preset",
+        "large-context",
+        "--users",
+        "7",
+        "--context-max-messages",
+        "11",
+    ]);
+
+    assert_eq!(args.users, 7);
+    assert_eq!(args.prefill_threads, 7);
+    assert_eq!(args.context_max_messages, 11);
+}
+
+#[test]
 fn context_growth_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ContextGrowth;
@@ -692,6 +731,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
     );
     RunSummary {
         backend: Backend::Libsql,
+        preset: Some(StressPreset::ToolHeavy),
         scenario: Scenario::MixedUserSession,
         run_id: "run".to_string(),
         target: "libsql://<redacted-local-path>".to_string(),
@@ -759,6 +799,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
 fn test_args() -> Args {
     Args {
         backend: Backend::Libsql,
+        preset: None,
         processes: 1,
         concurrency: 2,
         operations: 3,
@@ -823,6 +864,13 @@ fn test_args() -> Args {
         child_index: None,
         warmup_phase: false,
     }
+}
+
+fn parse_test_args<const N: usize>(args: [&str; N]) -> Args {
+    let matches = Args::command()
+        .try_get_matches_from(args)
+        .expect("parse test args");
+    parse_args_from_matches(&matches).expect("build args")
 }
 
 fn db_probe_summary() -> db_probe::DbProbeSummary {

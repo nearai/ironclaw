@@ -91,6 +91,7 @@ pub(crate) fn parent_summary_value(
 
     serde_json::json!({
         "backend": args.backend,
+        "preset": args.preset,
         "scenario": args.scenario,
         "run_id": run_id,
         "target": target,

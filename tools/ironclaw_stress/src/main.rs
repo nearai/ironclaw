@@ -49,7 +49,7 @@ use crate::{
         run_user_turn_tasks,
     },
 };
-use clap::{Parser, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
@@ -67,6 +67,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct Args {
     #[arg(long, value_enum)]
     pub(crate) backend: Backend,
+
+    /// Named workload preset. Explicit CLI flags override preset defaults.
+    #[arg(long, value_enum)]
+    pub(crate) preset: Option<StressPreset>,
 
     /// OS processes to run against the same snapshot path. Use >1 to exercise
     /// cross-process CAS contention that the in-process lock cannot serialize.
@@ -430,7 +434,35 @@ impl ModelLatencyProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StressPreset {
+    ChatBaseline,
+    HotThread,
+    LargeContext,
+    ToolHeavy,
+    ModelTail,
+    ResourceContention,
+    CpuBurn,
+    MemoryChurn,
+}
+
+impl StressPreset {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatBaseline => "chat-baseline",
+            Self::HotThread => "hot-thread",
+            Self::LargeContext => "large-context",
+            Self::ToolHeavy => "tool-heavy",
+            Self::ModelTail => "model-tail",
+            Self::ResourceContention => "resource-contention",
+            Self::CpuBurn => "cpu-burn",
+            Self::MemoryChurn => "memory-churn",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Scenario {
     ReserveRelease,
@@ -489,6 +521,7 @@ pub(crate) struct Sample {
 #[derive(Debug, Serialize, Deserialize)]
 struct RunSummary {
     backend: Backend,
+    preset: Option<StressPreset>,
     scenario: Scenario,
     run_id: String,
     target: String,
@@ -555,7 +588,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let mut args = Args::parse();
+    let mut args = parse_args()?;
     validate_args(&args)?;
 
     let run_id = args
@@ -597,6 +630,105 @@ async fn run() -> Result<(), String> {
     }
 
     result
+}
+
+fn parse_args() -> Result<Args, String> {
+    let matches = Args::command().get_matches();
+    parse_args_from_matches(&matches)
+}
+
+fn parse_args_from_matches(matches: &ArgMatches) -> Result<Args, String> {
+    let mut args = Args::from_arg_matches(matches).map_err(|error| error.to_string())?;
+    apply_preset(&mut args, matches);
+    Ok(args)
+}
+
+fn apply_preset(args: &mut Args, matches: &ArgMatches) {
+    let Some(preset) = args.preset else {
+        return;
+    };
+
+    macro_rules! set_default {
+        ($field:ident = $value:expr) => {
+            if arg_is_defaulted(matches, stringify!($field)) {
+                args.$field = $value;
+            }
+        };
+    }
+
+    match preset {
+        StressPreset::ChatBaseline => {
+            set_default!(scenario = Scenario::ChatTurn);
+            set_default!(concurrency = 4);
+            set_default!(operations = 100);
+            set_default!(users = 100);
+            set_default!(active_thread_count = 0);
+        }
+        StressPreset::HotThread => {
+            set_default!(scenario = Scenario::ChatTurn);
+            set_default!(concurrency = 8);
+            set_default!(operations = 100);
+            set_default!(users = 100);
+            set_default!(active_thread_count = 1);
+            set_default!(span_log_failures = true);
+        }
+        StressPreset::LargeContext => {
+            set_default!(scenario = Scenario::MixedUserSession);
+            set_default!(concurrency = 4);
+            set_default!(operations = 50);
+            set_default!(users = 100);
+            set_default!(active_thread_count = 0);
+            set_default!(prefill_threads = args.users);
+            set_default!(prefill_turns_per_thread = 50);
+            set_default!(prefill_concurrency = 8);
+            set_default!(context_max_messages = 100);
+            set_default!(user_message_bytes = 512);
+            set_default!(assistant_message_bytes = 1024);
+        }
+        StressPreset::ToolHeavy => {
+            set_default!(scenario = Scenario::ToolSession);
+            set_default!(concurrency = 4);
+            set_default!(operations = 50);
+            set_default!(users = 50);
+            set_default!(active_thread_count = 0);
+            set_default!(tool_calls_per_turn = 8);
+            set_default!(tool_output_bytes = 4096);
+            set_default!(assistant_message_bytes = 1024);
+        }
+        StressPreset::ModelTail => {
+            set_default!(scenario = Scenario::MixedUserSession);
+            set_default!(concurrency = 6);
+            set_default!(operations = 50);
+            set_default!(users = 100);
+            set_default!(model_latency_ms = 100);
+            set_default!(model_latency_profile = ModelLatencyProfile::TailSpike);
+            set_default!(model_latency_spike_every = 10);
+            set_default!(model_latency_spike_ms = 2000);
+        }
+        StressPreset::ResourceContention => {
+            set_default!(scenario = Scenario::ReserveReconcile);
+            set_default!(concurrency = 8);
+            set_default!(operations = 200);
+            set_default!(users = 100);
+        }
+        StressPreset::CpuBurn => {
+            set_default!(scenario = Scenario::CpuBurn);
+            set_default!(concurrency = 4);
+            set_default!(operations = 100);
+            set_default!(cpu_work_units = 1_000_000);
+        }
+        StressPreset::MemoryChurn => {
+            set_default!(scenario = Scenario::MemoryChurn);
+            set_default!(concurrency = 4);
+            set_default!(operations = 100);
+            set_default!(memory_bytes = 16 * 1024 * 1024);
+            set_default!(memory_hold_ms = 10);
+        }
+    }
+}
+
+fn arg_is_defaulted(matches: &ArgMatches, id: &str) -> bool {
+    !matches!(matches.value_source(id), Some(ValueSource::CommandLine))
 }
 
 pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, String> {
@@ -904,6 +1036,9 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(child_index.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(preset) = args.preset {
+            command.arg("--preset").arg(preset.as_str());
+        }
         if args.span_log_failures {
             command.arg("--span-log-failures");
         }
@@ -1386,6 +1521,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
 
     RunSummary {
         backend: args.backend,
+        preset: args.preset,
         scenario: args.scenario,
         run_id: run_id.to_string(),
         target: input.target,

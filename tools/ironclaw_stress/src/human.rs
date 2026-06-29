@@ -15,6 +15,7 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
         "Run summary",
         &[
             ("backend", summary.backend.as_str().to_string()),
+            ("preset", format_preset(summary.preset)),
             ("scenario", summary.scenario.as_str().to_string()),
             ("run_id", summary.run_id.clone()),
             ("target", summary.target.clone()),
@@ -144,6 +145,7 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
         "Run summary",
         &[
             ("backend", args.backend.as_str().to_string()),
+            ("preset", format_preset(args.preset)),
             ("scenario", args.scenario.as_str().to_string()),
             ("run_id", run_id.to_string()),
             ("target", target.to_string()),
@@ -568,6 +570,13 @@ fn format_active_thread_count(active_thread_count: usize, users: usize) -> Strin
     } else {
         active_thread_count.to_string()
     }
+}
+
+fn format_preset(preset: Option<crate::StressPreset>) -> String {
+    preset
+        .map(crate::StressPreset::as_str)
+        .unwrap_or("-")
+        .to_string()
 }
 
 fn format_latency_us(us: u128) -> String {

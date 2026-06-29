@@ -181,6 +181,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "run_id": run_id,
             "label": label,
             "backend": case_args.backend,
+            "preset": case_args.preset,
             "scenario": case_args.scenario,
             "processes": case_args.processes,
             "concurrency": case.concurrency,
