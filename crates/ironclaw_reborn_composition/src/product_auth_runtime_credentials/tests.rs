@@ -8,7 +8,10 @@ use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, ThreadId,
     UserId,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
+};
 
 use super::*;
 
@@ -51,6 +54,79 @@ impl RuntimeCredentialAccountRefreshPort for TestRuntimeCredentialRefreshPort {
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         self.0.refresh_account(request).await
+    }
+}
+
+struct MetadataUnavailableSecretStore {
+    inner: Arc<InMemorySecretStore>,
+}
+
+#[async_trait::async_trait]
+impl SecretStore for MetadataUnavailableSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.inner.put(scope, handle, material, expires_at).await
+    }
+
+    async fn metadata(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "metadata unavailable for test".to_string(),
+        })
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata_for_scope(scope).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.inner.leases_for_scope(scope).await
     }
 }
 
@@ -608,7 +684,21 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
-    let resolver = resolver_with_refresh(accounts.clone());
+    assert!(
+        accounts.has_pending_refresh_backend_failure_for_tests(account.id),
+        "test must start with a staged backend refresh failure"
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    secret_store
+        .put(
+            scope.clone(),
+            access_secret.clone(),
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            None,
+        )
+        .await
+        .expect("seed access-token metadata without expiry");
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -623,6 +713,127 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
 
     assert_eq!(resolved.handle, access_secret);
     assert_eq!(resolved.scope, scope);
+    assert!(
+        !accounts.has_pending_refresh_backend_failure_for_tests(account.id),
+        "resolver must attempt refresh and consume the staged backend failure"
+    );
+}
+
+#[tokio::test]
+async fn resolver_propagates_backend_error_when_stale_access_token_cannot_refresh() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_expired_access_refresh_backend_down").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh_backend_down_expired").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    secret_store
+        .put(
+            account.scope.resource.clone(),
+            access_secret,
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() - chrono::Duration::minutes(1)),
+        )
+        .await
+        .expect("seed expired access-token metadata");
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("known-stale access token plus backend refresh failure is backend, not auth");
+
+    assert_eq!(error, CredentialStageError::Backend);
+}
+
+#[tokio::test]
+async fn resolver_propagates_backend_error_when_access_secret_metadata_is_missing() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_missing_access_metadata").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret))
+        .refresh_secret(SecretHandle::new("google_refresh_missing_metadata").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+    let resolver = resolver_with_refresh_and_store(accounts, Arc::new(InMemorySecretStore::new()));
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("missing access-token metadata must not fall back after refresh failure");
+
+    assert_eq!(error, CredentialStageError::Backend);
+}
+
+#[tokio::test]
+async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unreadable() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_unreadable_access_metadata").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh_unreadable_metadata").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+    let inner_store = Arc::new(InMemorySecretStore::new());
+    inner_store
+        .put(
+            scope.clone(),
+            access_secret,
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("seed access-token metadata before wrapping unreadable store");
+    let resolver = resolver_with_refresh_and_store(
+        accounts,
+        Arc::new(MetadataUnavailableSecretStore { inner: inner_store }),
+    );
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("unreadable access-token metadata must fail closed after refresh failure");
+
+    assert_eq!(error, CredentialStageError::Backend);
 }
 
 #[tokio::test]
@@ -1158,7 +1369,7 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
 
 fn resolver_with_refresh_and_store(
     accounts: Arc<InMemoryAuthProductServices>,
-    secret_store: Arc<InMemorySecretStore>,
+    secret_store: Arc<dyn SecretStore>,
 ) -> ProductAuthRuntimeCredentialResolver {
     ProductAuthRuntimeCredentialResolver::new_with_refresh(
         Arc::new(

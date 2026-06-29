@@ -145,8 +145,7 @@ use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolve
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -435,6 +434,9 @@ pub struct RebornServices {
         allow(dead_code)
     )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
@@ -762,6 +764,8 @@ impl RebornServices {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         }
@@ -780,7 +784,8 @@ pub async fn build_reborn_services(
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => build_local_runtime(input).await,
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -879,6 +884,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 LocalDevStorageBackendInput::LocalDefault,
                 None::<ironclaw_secrets::SecretMaterial>,
             ),
+            #[cfg(feature = "postgres")]
+            RebornStorageInput::HostedSingleTenantPostgres { .. }
+                if profile != RebornCompositionProfile::HostedSingleTenant =>
+            {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{profile} profile requires local-runtime storage input"),
+                });
+            }
             #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 root,
@@ -1148,7 +1161,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
     services = attach_hosted_mcp_runtime(services)?;
-    services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
@@ -1176,14 +1188,25 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     .client
                     .clone()
                     .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                // Wrap the credential-account service in
+                // `ProviderBackedCredentialAccountService` (via `with_provider_client`) so the
+                // runtime token-refresh path (`refresh_account`) routes through the OAuth
+                // provider client. `from_shared_with_provider` stores the provider client in a
+                // separate field but does NOT wrap the account service, so without this the
+                // durable `FilesystemAuthProductServices::refresh_account` stub returns
+                // `BackendUnavailable` — Google OAuth access tokens are never refreshed and every
+                // capability call reauths once the 1h access token expires. The sibling branch
+                // routes through `compose_product_auth_services`, which applies the same wrap.
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
-                    provider_client,
+                    Arc::clone(&provider_client),
                 )
+                .with_provider_client(Arc::clone(&provider_client))
                 .into_services(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                     Arc::clone(&secret_store),
                 )
+                .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
@@ -1229,6 +1252,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             product_auth.runtime_credential_account_refresh_service(),
         ),
     ));
+    services = attach_wasm_runtime(services)?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1337,6 +1361,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_wasm_runtime_credential_provider_captured =
+        services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
 
@@ -1354,6 +1381,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: None,
         secret_store,
+        #[cfg(any(test, feature = "test-support"))]
+        local_dev_wasm_runtime_credential_provider_captured,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
@@ -1623,7 +1652,7 @@ fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
 ) -> Result<VirtualPath, RebornBuildError> {
-    if profile != RebornCompositionProfile::HostedSingleTenant {
+    if !profile.uses_hosted_extension_installation_state() {
         return FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path is invalid: {error}"),
@@ -3780,7 +3809,6 @@ where
         services,
         production_wiring.runtime_process_binding,
     );
-    let services = attach_wasm_runtime(services)?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -3846,6 +3874,7 @@ where
             product_auth_services.runtime_credential_account_refresh_service(),
         ),
     ));
+    let services = attach_wasm_runtime(services)?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth_services.credential_account_service(),
@@ -3859,6 +3888,9 @@ where
     })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_wasm_runtime_credential_provider_captured =
+        services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
 
@@ -3874,6 +3906,8 @@ where
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
+        #[cfg(any(test, feature = "test-support"))]
+        local_dev_wasm_runtime_credential_provider_captured,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.
@@ -3978,30 +4012,7 @@ fn readiness_for(
     turn_coordinator: bool,
     product_auth: bool,
 ) -> RebornReadiness {
-    let (state, diagnostics) = match profile {
-        RebornCompositionProfile::Disabled => (
-            RebornReadinessState::Disabled,
-            vec![RebornReadinessDiagnostic::disabled()],
-        ),
-        RebornCompositionProfile::LocalDev => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev()],
-        ),
-        RebornCompositionProfile::LocalDevYolo => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev_yolo()],
-        ),
-        RebornCompositionProfile::HostedSingleTenant => (
-            RebornReadinessState::HostedSingleTenantValidated,
-            vec![RebornReadinessDiagnostic::hosted_single_tenant()],
-        ),
-        RebornCompositionProfile::Production => {
-            (RebornReadinessState::ProductionValidated, Vec::new())
-        }
-        RebornCompositionProfile::MigrationDryRun => {
-            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
-        }
-    };
+    let (state, diagnostics) = crate::readiness::readiness_contract_for_profile(profile);
 
     RebornReadiness {
         profile,
@@ -4057,6 +4068,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
+        RebornReadinessDiagnostic, RebornReadinessState,
         extension_lifecycle::ExtensionActivationMode,
         local_dev_capability_policy::{
             LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
@@ -4084,6 +4096,24 @@ mod tests {
         };
         let path = local_dev_extension_installation_state_path(
             RebornCompositionProfile::HostedSingleTenant,
+            Some(&identity),
+        )
+        .expect("state path");
+
+        assert_eq!(
+            path.as_str(),
+            "/tenants/acme/system/extensions/.installations/state.json"
+        );
+    }
+
+    #[test]
+    fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume() {
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
+        };
+        let path = local_dev_extension_installation_state_path(
+            RebornCompositionProfile::HostedSingleTenantVolume,
             Some(&identity),
         )
         .expect("state path");
@@ -4876,6 +4906,7 @@ mod tests {
             .await
             .expect("create Google account");
 
+        disable_global_auto_approve(local_runtime, &gmail_context).await;
         let failure = invoke_json(
             &services,
             "gmail.send_message",
@@ -4896,6 +4927,7 @@ mod tests {
         assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
+        disable_global_auto_approve(local_runtime, &calendar_context).await;
         let failure = invoke_json(
             &services,
             "google-calendar.create_event",
@@ -6089,6 +6121,21 @@ mod tests {
             yolo.diagnostics,
             vec![RebornReadinessDiagnostic::local_dev_yolo()]
         );
+
+        let hosted_volume = readiness_for(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            hosted_volume.state,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+        );
+        assert_eq!(
+            hosted_volume.diagnostics,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
+        );
     }
 
     async fn invoke_json(
@@ -6171,6 +6218,8 @@ mod tests {
             .await
             .expect("enabling global auto-approve should succeed");
     }
+
+    use crate::approval_test_support::disable_global_auto_approve;
 
     fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");

@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{TriggerError, TriggerPromptMaterializer, TriggerRepository, TriggerSourceProvider};
 
-use super::{TriggerActiveRunLookup, TrustedTriggerFireSubmitter};
+use super::{TriggerActiveRunLookup, TriggerFireSettlementObserver, TrustedTriggerFireSubmitter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerPollerWorkerConfig {
@@ -56,4 +56,5 @@ pub struct TriggerPollerWorkerDeps {
     pub materializer: Arc<dyn TriggerPromptMaterializer>,
     pub trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    pub fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver>,
 }

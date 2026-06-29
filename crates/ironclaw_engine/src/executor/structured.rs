@@ -431,7 +431,7 @@ pub async fn execute_action_calls(
                     .unwrap_or(crate::gate::ResumeKind::Approval {
                         allow_always: false,
                     }),
-                    resume_output: result.output.get("resume_output").cloned(),
+                    resume_output: result.output.get("resume_output").cloned().map(Box::new),
                     paused_lease: result
                         .output
                         .get("paused_lease")

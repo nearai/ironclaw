@@ -32,7 +32,7 @@ use ironclaw_turns::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 use tokio::{sync::Notify, time::timeout};
@@ -542,9 +542,12 @@ impl HangingExecutor {
 
 struct HeartbeatTrackingTransitions {
     store: Arc<InMemoryTurnStateStore>,
+    heartbeat_attempts: AtomicUsize,
     heartbeats: AtomicUsize,
+    notify_heartbeat_attempt: Notify,
     notify_heartbeat: Notify,
     heartbeat_delay: Mutex<Option<Duration>>,
+    one_shot_heartbeat_delay: Mutex<Option<Duration>>,
 }
 
 struct ClaimRecordingTransitions {
@@ -552,19 +555,68 @@ struct ClaimRecordingTransitions {
     claim_runner_ids: Mutex<Vec<TurnRunnerId>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChaosOperation {
+    ClaimNextRun,
+    Heartbeat,
+    RecoverExpiredLeases,
+    RecordModelRouteSnapshot,
+    BlockRun,
+    CompleteRun,
+    CancelRun,
+    FailRun,
+    RecordRunnerFailure,
+    RelinquishRun,
+    ApplyValidatedLoopExit,
+}
+
+struct ChaosRule {
+    operation: ChaosOperation,
+    remaining_drops: usize,
+}
+
+struct ChaosTransitionPort {
+    store: Arc<InMemoryTurnStateStore>,
+    rules: Mutex<Vec<ChaosRule>>,
+    calls: Mutex<Vec<ChaosOperation>>,
+    hold_after_relinquish: Mutex<Option<Arc<Notify>>>,
+}
+
 impl HeartbeatTrackingTransitions {
     fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
         Self {
             store,
+            heartbeat_attempts: AtomicUsize::new(0),
             heartbeats: AtomicUsize::new(0),
+            notify_heartbeat_attempt: Notify::new(),
             notify_heartbeat: Notify::new(),
             heartbeat_delay: Mutex::new(None),
+            one_shot_heartbeat_delay: Mutex::new(None),
         }
     }
 
     fn with_heartbeat_delay(self, delay: Duration) -> Self {
         *self.heartbeat_delay.lock().unwrap() = Some(delay);
         self
+    }
+
+    fn with_one_shot_heartbeat_delay(self, delay: Duration) -> Self {
+        *self.one_shot_heartbeat_delay.lock().unwrap() = Some(delay);
+        self
+    }
+
+    async fn wait_for_heartbeat_attempts(&self, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = self.notify_heartbeat_attempt.notified();
+                if self.heartbeat_attempts.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("scheduler did not attempt expected heartbeats");
     }
 
     async fn wait_for_heartbeats(&self, expected: usize) {
@@ -591,6 +643,76 @@ impl ClaimRecordingTransitions {
     }
 }
 
+impl ChaosTransitionPort {
+    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+        Self {
+            store,
+            rules: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            hold_after_relinquish: Mutex::new(None),
+        }
+    }
+
+    fn drop_next(self, operation: ChaosOperation) -> Self {
+        self.drop_next_n(operation, 1)
+    }
+
+    fn drop_next_n(self, operation: ChaosOperation, count: usize) -> Self {
+        self.rules.lock().unwrap().push(ChaosRule {
+            operation,
+            remaining_drops: count,
+        });
+        self
+    }
+
+    fn call_count(&self, operation: ChaosOperation) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|recorded| **recorded == operation)
+            .count()
+    }
+
+    fn hold_after_relinquish(self, gate: Arc<Notify>) -> Self {
+        *self.hold_after_relinquish.lock().unwrap() = Some(gate);
+        self
+    }
+
+    async fn wait_for_call_count(&self, operation: ChaosOperation, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if self.call_count(operation) >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "chaos transition port did not observe {expected} calls for {operation:?}; saw {}",
+                self.call_count(operation)
+            )
+        });
+    }
+
+    fn maybe_drop(&self, operation: ChaosOperation) -> Result<(), TurnError> {
+        self.calls.lock().unwrap().push(operation);
+        let mut rules = self.rules.lock().unwrap();
+        if let Some(rule) = rules
+            .iter_mut()
+            .find(|rule| rule.operation == operation && rule.remaining_drops > 0)
+        {
+            rule.remaining_drops -= 1;
+            return Err(TurnError::Unavailable {
+                reason: format!("chaos monkey dropped {operation:?}"),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
     async fn claim_next_run(
@@ -604,7 +726,14 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: HeartbeatRequest,
     ) -> Result<ironclaw_turns::EventCursor, TurnError> {
-        let delay = *self.heartbeat_delay.lock().unwrap();
+        self.heartbeat_attempts.fetch_add(1, Ordering::SeqCst);
+        self.notify_heartbeat_attempt.notify_waiters();
+        let delay = self
+            .one_shot_heartbeat_delay
+            .lock()
+            .unwrap()
+            .take()
+            .or_else(|| *self.heartbeat_delay.lock().unwrap());
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
@@ -660,6 +789,95 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
+        self.store.apply_validated_loop_exit(request).await
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for ChaosTransitionPort {
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.maybe_drop(ChaosOperation::ClaimNextRun)?;
+        self.store.claim_next_run(request).await
+    }
+
+    async fn heartbeat(
+        &self,
+        request: HeartbeatRequest,
+    ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        self.maybe_drop(ChaosOperation::Heartbeat)?;
+        self.store.heartbeat(request).await
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        self.maybe_drop(ChaosOperation::RecoverExpiredLeases)?;
+        self.store.recover_expired_leases(request).await
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::RecordModelRouteSnapshot)?;
+        self.store.record_model_route_snapshot(request).await
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::BlockRun)?;
+        self.store.block_run(request).await
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::CompleteRun)?;
+        self.store.complete_run(request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::CancelRun)?;
+        self.store.cancel_run(request).await
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::FailRun)?;
+        self.store.fail_run(request).await
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::RecordRunnerFailure)?;
+        self.store.record_runner_failure(request).await
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::RelinquishRun)?;
+        let result = self.store.relinquish_run(request).await;
+        let gate = self.hold_after_relinquish.lock().unwrap().clone();
+        if result.is_ok()
+            && let Some(gate) = gate
+        {
+            gate.notified().await;
+        }
+        result
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::ApplyValidatedLoopExit)?;
         self.store.apply_validated_loop_exit(request).await
     }
 }
@@ -1478,7 +1696,189 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
 }
 
 #[tokio::test]
-async fn scheduler_records_failure_when_heartbeat_call_times_out() {
+async fn chaos_scheduler_recovers_after_transient_claim_and_heartbeat_drops() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store))
+            .drop_next(ChaosOperation::ClaimNextRun)
+            .drop_next(ChaosOperation::Heartbeat),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let gate = Arc::new(Notify::new());
+    let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_claim_error_backoff(Duration::from_millis(1))
+            .with_runner_heartbeat_interval(Duration::from_millis(5))
+            .with_max_consecutive_heartbeat_failures(3),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-chaos-claim-heartbeat", "idem-chaos-claim-heartbeat");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    chaos
+        .wait_for_call_count(ChaosOperation::ClaimNextRun, 2)
+        .await;
+    executor.wait_for_started(1).await;
+    chaos
+        .wait_for_call_count(ChaosOperation::Heartbeat, 2)
+        .await;
+    gate.notify_waiters();
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+
+    assert!(chaos.call_count(ChaosOperation::ClaimNextRun) >= 2);
+    assert!(chaos.call_count(ChaosOperation::Heartbeat) >= 2);
+}
+
+#[tokio::test]
+async fn scheduler_tolerates_transient_heartbeat_timeout_until_executor_completes() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let transitions = Arc::new(
+        HeartbeatTrackingTransitions::new(Arc::clone(&store))
+            .with_one_shot_heartbeat_delay(Duration::from_secs(60)),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let gate = Arc::new(Notify::new());
+    let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(5))
+            .with_max_consecutive_heartbeat_failures(2),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request(
+        "thread-heartbeat-transient-timeout",
+        "idem-heartbeat-transient-timeout",
+    );
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    executor.wait_for_started(1).await;
+
+    transitions.wait_for_heartbeats(1).await;
+    gate.notify_waiters();
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn chaos_scheduler_retries_terminal_failure_recording_after_transient_store_drop() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store)).drop_next(ChaosOperation::RecordRunnerFailure),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let executor = Arc::new(FailingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_terminal_failure_record_attempts(3)
+            .with_terminal_failure_record_backoff(Duration::from_millis(1)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request(
+        "thread-chaos-terminal-recording",
+        "idem-chaos-terminal-recording",
+    );
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    executor.wait_for_started().await;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Failed {
+                assert_eq!(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                    Some("scheduler_test_error")
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not persist failed state after transient terminal-recording drop");
+    handle.shutdown().await;
+
+    assert_eq!(chaos.call_count(ChaosOperation::RecordRunnerFailure), 2);
+}
+
+#[tokio::test]
+async fn chaos_scheduler_relinquishes_run_when_terminal_failure_recording_is_exhausted() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let relinquish_gate = Arc::new(Notify::new());
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store))
+            .drop_next_n(ChaosOperation::RecordRunnerFailure, 3)
+            .hold_after_relinquish(Arc::clone(&relinquish_gate)),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let executor = Arc::new(FailingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_terminal_failure_record_attempts(3)
+            .with_terminal_failure_record_backoff(Duration::from_millis(1)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request(
+        "thread-chaos-terminal-recording-exhausted",
+        "idem-chaos-terminal-recording-exhausted",
+    );
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    executor.wait_for_started().await;
+    wait_for_status(&*store, scope, run_id, TurnStatus::Queued).await;
+    assert_eq!(chaos.call_count(ChaosOperation::RecordRunnerFailure), 3);
+    assert_eq!(chaos.call_count(ChaosOperation::RelinquishRun), 1);
+
+    relinquish_gate.notify_one();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_keeps_executor_alive_during_sustained_heartbeat_timeouts() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
@@ -1489,20 +1889,66 @@ async fn scheduler_records_failure_when_heartbeat_call_times_out() {
         HeartbeatTrackingTransitions::new(Arc::clone(&store))
             .with_heartbeat_delay(Duration::from_secs(60)),
     );
-    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
-    let executor = Arc::new(HangingExecutor::default());
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let gate = Arc::new(Notify::new());
+    let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
     let scheduler = TurnRunScheduler::new(
         transition_port,
         executor.clone(),
         fast_config()
             .with_poll_interval(Duration::from_secs(60))
-            .with_runner_heartbeat_interval(Duration::from_millis(10)),
+            .with_runner_heartbeat_interval(Duration::from_millis(10))
+            .with_max_consecutive_heartbeat_failures(2),
     );
     let handle = scheduler.start();
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
 
     let request = submit_turn_request("thread-heartbeat-timeout", "idem-heartbeat-timeout");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    executor.wait_for_started(1).await;
+    transitions.wait_for_heartbeat_attempts(3).await;
+
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Running);
+    gate.notify_waiters();
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_records_failure_after_repeated_heartbeat_errors() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store)).drop_next_n(ChaosOperation::Heartbeat, 2),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(10))
+            .with_max_consecutive_heartbeat_failures(2),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-heartbeat-error", "idem-heartbeat-error");
     let scope = request.scope.clone();
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
     executor.wait_for_started().await;
@@ -1527,7 +1973,7 @@ async fn scheduler_records_failure_when_heartbeat_call_times_out() {
         }
     })
     .await
-    .expect("run did not move to failed after heartbeat timeout");
+    .expect("run did not move to failed after heartbeat errors");
     handle.shutdown().await;
 }
 

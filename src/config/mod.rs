@@ -151,9 +151,9 @@ pub struct Config {
 /// with `--features libsql` had a publicly-known key in their process.
 #[cfg(feature = "libsql")]
 fn generate_test_master_key() -> secrecy::SecretString {
-    use rand::RngCore;
+    use rand::RngExt as _;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     let mut hex = String::with_capacity(64);
     for b in bytes {
         use std::fmt::Write;

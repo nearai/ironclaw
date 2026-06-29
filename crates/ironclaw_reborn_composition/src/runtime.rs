@@ -60,7 +60,7 @@ use ironclaw_product_workflow::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, ResourceGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -284,6 +284,17 @@ fn enforce_runtime_cutover_gate(
                 return Err(RebornRuntimeError::InvalidArgument {
                     reason: format!(
                         "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; required_state=HostedSingleTenantValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantVolumePreviewValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant-volume cannot start Reborn runtime before hosted volume preview readiness is validated; required_state=HostedSingleTenantVolumePreviewValidated, state={:?}",
                         readiness.state
                     ),
                 });
@@ -802,6 +813,44 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .as_str()
         .strip_prefix("gate:approval-")
         .and_then(|value| ApprovalRequestId::parse(value).ok())
+}
+
+struct LocalDevResourceGateEvidence {
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+#[async_trait::async_trait]
+impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
+    async fn pending_resource_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref)? else {
+            return Ok(false);
+        };
+        let record = self
+            .budget_gate_store
+            .get(&scope.to_resource_scope(), gate_id)
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("budget gate evidence lookup failed: {error}"),
+            })?;
+        Ok(record
+            .map(|record| record.status == ironclaw_resources::BudgetGateStatus::Pending)
+            .unwrap_or(false))
+    }
+}
+
+fn budget_gate_id_from_gate_ref(
+    gate_ref: &LoopGateRef,
+) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
+    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+        return Ok(None);
+    };
+    let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
+        reason: format!("invalid budget gate ref `{}`: {error}", gate_ref.as_str()),
+    })?;
+    Ok(Some(ironclaw_resources::BudgetGateId::from_uuid(id)))
 }
 
 #[async_trait::async_trait]
@@ -1955,26 +2004,42 @@ impl RebornRuntime {
             // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
             // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
+                if self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(
+                        run_id = %run_id,
+                        "failed to cancel run after terminal-wait timeout"
+                    );
+                }
                 return Err(RebornRuntimeError::RunTimeout {
                     timeout: self.poll_settings.max_total,
                 });
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
+                    if self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "failed to cancel run after caller cancellation"
+                        );
+                    }
                     return Err(RebornRuntimeError::OperationCancelled);
                 }
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
@@ -2371,7 +2436,8 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2408,23 +2474,22 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::Production => {}
-        RebornCompositionProfile::MigrationDryRun => {
+    if !profile.starts_live_runtime() {
+        if profile == RebornCompositionProfile::MigrationDryRun {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason:
                     "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
                         .to_string(),
             });
         }
-        RebornCompositionProfile::Disabled => {
+        if profile == RebornCompositionProfile::Disabled {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
             });
         }
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("profile={profile} must not start live Reborn runtime traffic"),
+        });
     }
     if services_input.runtime_policy().is_none() {
         return Err(RebornRuntimeError::InvalidArgument {
@@ -2510,7 +2575,8 @@ pub async fn build_reborn_runtime(
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => {
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2734,6 +2800,11 @@ pub async fn build_reborn_runtime(
             LocalDevApprovalGateEvidence {
                 approval_requests: Arc::clone(&local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+            },
+        ));
+        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
+            LocalDevResourceGateEvidence {
+                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
             },
         ));
     }
@@ -3038,6 +3109,9 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            planned_default_iteration_limit: optional_u32_env(
+                "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
+            )?,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -3466,6 +3540,33 @@ struct LocalDevSkillContextSource {
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed =
+                trimmed
+                    .parse::<u32>()
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("{key} must be a positive integer: {error}"),
+                    })?;
+            if parsed == 0 {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!("{key} must be greater than zero"),
+                });
+            }
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {key}: {error}"),
+        }),
+    }
+}
 
 /// Build the [`SkillActivationSelectorConfig`] used by the local-dev
 /// filesystem skill context source. Extracted from
@@ -3915,6 +4016,21 @@ mod tests {
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     #[test]
+    fn budget_gate_ref_parser_rejects_malformed_budget_ref() {
+        let gate_ref =
+            ironclaw_turns::LoopGateRef::new("gate:budget-not-a-uuid").expect("gate ref");
+        let error = super::budget_gate_id_from_gate_ref(&gate_ref)
+            .expect_err("malformed budget gate refs should fail loudly");
+
+        assert!(matches!(
+            error,
+            ironclaw_turns::TurnError::InvalidRequest { reason }
+                if reason.contains("invalid budget gate ref")
+                    && reason.contains("gate:budget-not-a-uuid")
+        ));
+    }
+
+    #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
         let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
         let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
@@ -3931,6 +4047,58 @@ mod tests {
             ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
                 &resolver,
                 &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
+
+    #[test]
+    fn persistent_grantee_resolver_maps_registered_capability_to_provider() {
+        let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "approval-provider"
+name = "approval-provider"
+version = "0.1.0"
+description = "approval provider"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/approval-provider.wasm"
+
+[[capabilities]]
+id = "approval-provider.write"
+description = "write"
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/write.input.json"
+output_schema_ref = "schemas/write.output.json"
+"#;
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            manifest,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_api::HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        let package = ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new("/system/extensions/approval-provider")
+                .expect("root"),
+        )
+        .expect("package builds");
+        let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+        registry.insert(package).expect("package inserts");
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::new(registry))
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new("approval-provider.write").expect("capability id");
+        let expected_provider =
+            ironclaw_host_api::ExtensionId::new("approval-provider").expect("extension id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id,
             ),
             Some(Principal::Extension(expected_provider))
         );
@@ -4827,6 +4995,7 @@ mod tests {
                 output_tokens: 1,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
                 reasoning: None,
+                reasoning_details: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -5368,6 +5537,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::WorkerError;
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ToolCall,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ReasoningDetails, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
@@ -88,6 +88,12 @@ pub struct ProxyToolCompletionResponse {
     /// before the next LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Provider-emitted typed reasoning artifacts (encrypted/redacted/summary
+    /// blocks, signatures). Threaded back so worker-backed runs can replay
+    /// OpenRouter/DeepSeek/Gemini typed reasoning on the next turn, matching
+    /// the in-process path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<ReasoningDetails>,
 }
 
 /// Completion result for the worker to report when done.
@@ -278,6 +284,7 @@ impl WorkerHttpClient {
             cache_read_input_tokens: proxy_resp.cache_read_input_tokens,
             cache_creation_input_tokens: proxy_resp.cache_creation_input_tokens,
             reasoning: proxy_resp.reasoning,
+            reasoning_details: proxy_resp.reasoning_details,
         })
     }
 
