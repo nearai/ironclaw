@@ -312,6 +312,8 @@ pub struct RebornIntegrationHarness {
     baseline_egress_count: usize,
     /// Capability-result count at harness construction. See `baseline_invocation_count`.
     baseline_result_count: usize,
+    /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
+    baseline_process_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -505,8 +507,12 @@ impl RebornIntegrationHarness {
     /// port and that the recorded command string contains `substr`. This proves
     /// the shell tool call was dispatched through the process port without
     /// spawning a real OS process (slice 5 safety invariant).
+    ///
+    /// Checks only the `[baseline_process_count..]` delta so a group thread
+    /// never spuriously passes on a prior thread's entry (R2).
     pub async fn assert_shell_command_recorded(&self, substr: &str) -> HarnessResult<()> {
-        let commands = self.capability_recorder.recorded_process_commands();
+        let all = self.capability_recorder.recorded_process_commands();
+        let commands = &all[self.baseline_process_count..];
         if commands.iter().any(|cmd| cmd.contains(substr)) {
             return Ok(());
         }
@@ -516,10 +522,14 @@ impl RebornIntegrationHarness {
 
     /// Asserts ≥1 shell command was dispatched through the inert recording
     /// process port, proving no real OS process was spawned. Passes when
-    /// `recorded_process_commands()` is non-empty (the harness used the
-    /// recording path, not the live-shell opt-in).
+    /// the `[baseline_process_count..]` delta is non-empty (the harness used
+    /// the recording path, not the live-shell opt-in).
+    ///
+    /// Checks only the `[baseline_process_count..]` delta so a group thread
+    /// never spuriously passes on a prior thread's entry (R2).
     pub async fn assert_shell_ran_through_inert_port(&self) -> HarnessResult<()> {
-        let commands = self.capability_recorder.recorded_process_commands();
+        let all = self.capability_recorder.recorded_process_commands();
+        let commands = &all[self.baseline_process_count..];
         if !commands.is_empty() {
             return Ok(());
         }
@@ -539,6 +549,51 @@ impl RebornIntegrationHarness {
     pub async fn assert_mcp_tool_called(&self, tool_name: &str) -> HarnessResult<()> {
         self.assert_tool_invoked(&format!("{MOCK_MCP_PROVIDER_ID}.{tool_name}"))
             .await
+    }
+
+    /// Assert that the workspace file at `relative` (a path under the
+    /// `/workspace` mount, e.g. `"approved.txt"`) exists on disk and its
+    /// contents contain `expected`. Reads the REAL persisted file the gated
+    /// capability wrote after approval — the genuine side effect — not a
+    /// recorded result (a `builtin.write_file` result does not echo the written
+    /// content). Only available on a host-runtime capability harness; returns
+    /// `Err` for the Echo backend.
+    pub async fn assert_workspace_file_contains(
+        &self,
+        relative: &str,
+        expected: &str,
+    ) -> HarnessResult<()> {
+        let path = self
+            .capability_recorder
+            .workspace_file_path(relative)
+            .ok_or("harness is not using host-runtime capabilities")?;
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            format!("workspace file {relative:?} not readable at {path:?}: {error}")
+        })?;
+        if contents.contains(expected) {
+            return Ok(());
+        }
+        Err(
+            format!("workspace file {relative:?} did not contain {expected:?}; got {contents:?}")
+                .into(),
+        )
+    }
+
+    /// Assert that no workspace file exists at `relative` — i.e. a gated capability
+    /// that was denied never performed its write. The faithful negative
+    /// side-effect check (the file on disk, not the absence of a recorded result).
+    pub async fn assert_workspace_file_absent(&self, relative: &str) -> HarnessResult<()> {
+        let path = self
+            .capability_recorder
+            .workspace_file_path(relative)
+            .ok_or("harness is not using host-runtime capabilities")?;
+        if path.exists() {
+            return Err(format!(
+                "workspace file {relative:?} exists at {path:?} but should not (write was denied)"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Snapshot of the recorded capability results (tool outputs) for this thread
@@ -938,6 +993,7 @@ pub(crate) async fn assemble_thread_runtime(
     let baseline_invocation_count = capability_recorder.invocations().len();
     let baseline_egress_count = capability_recorder.runtime_http_requests().len();
     let baseline_result_count = capability_recorder.capability_results().len();
+    let baseline_process_count = capability_recorder.recorded_process_commands().len();
 
     // --- loop-exit evidence ------------------------------------------------
     // When the capability backend wires the real local-dev approval stores
@@ -1031,5 +1087,6 @@ pub(crate) async fn assemble_thread_runtime(
         baseline_invocation_count,
         baseline_egress_count,
         baseline_result_count,
+        baseline_process_count,
     })
 }

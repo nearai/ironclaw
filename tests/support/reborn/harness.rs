@@ -269,7 +269,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
+    pub(crate) fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => Some(harness.workspace_file_path(relative)),

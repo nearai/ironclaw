@@ -201,7 +201,7 @@ Constructors:
 - `ScriptedOAuthTokenEgress::with_error_response(status, error_code)` — scripted non-200 body (e.g. `400`, `"invalid_grant"`) as the default for every call.
 - `push_response(status, body)` — enqueue a per-call FIFO override; consumed before the default response.
 
-Assertion accessors: `captured_count()` / `captured_bodies()`.
+Assertion accessors: `captured_count()` / `captured_grant_types()` (returns only the non-secret `grant_type` discriminator — e.g. `"authorization_code"` or `"refresh_token"` — extracted from each captured request body, never raw secrets).
 
 **`OAuthProductAuthTestBundle`** — bundles `Arc<RebornProductAuthServices>` wired
 over real `FilesystemAuthProductServices<InMemoryBackend>` alongside a

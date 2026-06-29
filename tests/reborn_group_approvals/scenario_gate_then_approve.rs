@@ -36,7 +36,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Approve through the real resolver + resume; the gated capability re-runs.
     h.approve_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
-    h.assert_reply_contains("file written after approval")
+    // The approved write actually re-ran AND PERSISTED: the real file on disk
+    // holds the written content. This proves approve→resume re-dispatched the
+    // gated capability and the write took effect — not merely that the scripted
+    // reply was emitted (`builtin.write_file`'s result does not echo content).
+    h.assert_workspace_file_contains("approved.txt", "approved write")
         .await?;
     Ok(())
 }

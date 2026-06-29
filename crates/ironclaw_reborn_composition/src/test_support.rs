@@ -319,20 +319,50 @@ impl ScriptedOAuthTokenEgress {
             .len()
     }
 
-    /// Request body bytes of every captured token-exchange call, in order.
+    /// The OAuth `grant_type` of every captured token-exchange request, in order.
     ///
-    /// Exposes only the body (not the full `RuntimeHttpEgressRequest`, whose
-    /// url/headers are `ZeroizeOnDrop` because they carry injected credentials)
-    /// so a test can assert the OAuth `grant_type` — distinguishing the
-    /// authorization-code connect exchange from the refresh exchange.
-    pub fn captured_bodies(&self) -> Vec<Vec<u8>> {
+    /// Deliberately returns ONLY the non-secret `grant_type` discriminator —
+    /// NOT the raw request body, which carries the authorization code / refresh
+    /// token / client credentials. Tests use this to distinguish the
+    /// `authorization_code` connect exchange from the `refresh_token` exchange
+    /// without exposing secrets in assertion output.
+    pub fn captured_grant_types(&self) -> Vec<String> {
         self.captured
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|request| request.body.clone())
+            .map(|request| parse_grant_type(&request.body))
             .collect()
     }
+}
+
+/// Extract the `grant_type` value from an `application/x-www-form-urlencoded`
+/// token-exchange body. Returns `"<unknown>"` if the field is absent or the
+/// body is not valid UTF-8.
+///
+/// OAuth `grant_type` values (`authorization_code`, `refresh_token`) are ASCII
+/// alphanumeric + underscore and are never percent-encoded; no decoder is
+/// needed for these specific values.
+///
+/// # Security
+///
+/// This helper is intentionally narrow: it returns ONLY the grant_type string
+/// and never echoes authorization codes, refresh tokens, client secrets, or
+/// any other field from the body. Call sites must not widen this to expose
+/// additional body fields.
+fn parse_grant_type(body: &[u8]) -> String {
+    let text = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return "<unknown>".to_string(),
+    };
+    for pair in text.split('&') {
+        if let Some(value) = pair.strip_prefix("grant_type=") {
+            // grant_type values are ASCII alphanumeric + underscore; they are
+            // not percent-encoded and contain no secret material.
+            return value.to_string();
+        }
+    }
+    "<unknown>".to_string()
 }
 
 impl std::fmt::Debug for ScriptedOAuthTokenEgress {

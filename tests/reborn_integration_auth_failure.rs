@@ -373,3 +373,110 @@ async fn normal_sweep_does_not_mark_account_revoked() {
         post_sweep.status
     );
 }
+
+// ─── FIFO + default-fallback unit test ───────────────────────────────────────
+//
+// Drives `ScriptedOAuthTokenEgress::execute` directly (no OAuth flow, no DB,
+// no network) to verify the queued per-call override FIFO and the
+// constructor-default fallback path, plus the `captured_count` accessor.
+// Not gated on any database feature — it exercises only the scripted egress
+// type itself.
+
+/// [`ScriptedOAuthTokenEgress`] queued responses are consumed in FIFO order;
+/// once the queue is exhausted, subsequent calls fall back to the constructor
+/// default.
+///
+/// This test drives [`RuntimeHttpEgress::execute`] directly — no OAuth flow,
+/// no real network — to verify the FIFO queue + default-fallback path and
+/// the [`captured_count`] accessor in isolation, exercising the
+/// `push_response` / `with_error_response` pairing described in the
+/// `ScriptedOAuthTokenEgress` documentation.
+#[tokio::test]
+async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeHttpEgress,
+        RuntimeHttpEgressRequest, RuntimeKind, UserId,
+    };
+    use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
+
+    // Default response: 400 with `{"error":"invalid_grant"}`.
+    let egress = ScriptedOAuthTokenEgress::with_error_response(400, "invalid_grant");
+
+    // Queue two per-call overrides (FIFO: body_a first, body_b second).
+    let body_a = b"queued-response-A".to_vec();
+    let body_b = b"queued-response-B".to_vec();
+    egress.push_response(200, body_a.clone());
+    egress.push_response(500, body_b.clone());
+
+    // Build a minimal dummy request.  `ScriptedOAuthTokenEgress::execute`
+    // only reads `request.body.len()` and records the full request; the other
+    // fields are unused by the scripted impl.
+    let dummy_request = || RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope: ResourceScope::local_default(
+            UserId::new("fifo-test-user").unwrap(),
+            InvocationId::new(),
+        )
+        .expect("local_default scope must build"),
+        capability_id: CapabilityId::new("builtin.test").unwrap(),
+        method: NetworkMethod::Post,
+        url: "https://oauth.test.example.com/token".to_string(),
+        headers: vec![],
+        body: vec![],
+        network_policy: NetworkPolicy::default(),
+        credential_injections: vec![],
+        response_body_limit: None,
+        save_body_to: None,
+        timeout_ms: None,
+    };
+
+    // Call 1: first queued override consumed (FIFO).
+    let resp1 = egress
+        .execute(dummy_request())
+        .await
+        .expect("execute call 1 must not error");
+    assert_eq!(
+        resp1.status, 200,
+        "call 1 must return the first queued status (200)"
+    );
+    assert_eq!(
+        resp1.body, body_a,
+        "call 1 must return the first queued body"
+    );
+
+    // Call 2: second queued override consumed (FIFO).
+    let resp2 = egress
+        .execute(dummy_request())
+        .await
+        .expect("execute call 2 must not error");
+    assert_eq!(
+        resp2.status, 500,
+        "call 2 must return the second queued status (500)"
+    );
+    assert_eq!(
+        resp2.body, body_b,
+        "call 2 must return the second queued body"
+    );
+
+    // Call 3: queue exhausted — falls back to the constructor default.
+    let resp3 = egress
+        .execute(dummy_request())
+        .await
+        .expect("execute call 3 must not error");
+    assert_eq!(
+        resp3.status, 400,
+        "call 3 must fall back to the default error status (400)"
+    );
+    let resp3_body = String::from_utf8_lossy(&resp3.body);
+    assert!(
+        resp3_body.contains("invalid_grant"),
+        "call 3 must fall back to the default error body containing 'invalid_grant'; got: {resp3_body}"
+    );
+
+    // All three execute calls must be captured.
+    assert_eq!(
+        egress.captured_count(),
+        3,
+        "all three execute calls must be captured by the scripted egress"
+    );
+}

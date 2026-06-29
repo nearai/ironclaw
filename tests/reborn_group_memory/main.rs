@@ -29,8 +29,8 @@ async fn memory_group_e2e() {
     let mut report = ScenarioReport::new();
 
     // Scenario 1 (HEADLINE): write in thread A → read in thread B over the
-    // shared store. Writer must succeed before the reader runs, so we use `?`
-    // (dependent) rather than `report.record` (independent).
+    // shared store. The write→read dependency is internal to this single
+    // scenario; `report.record` is correct here.
     report.record(
         "write_then_read_cross_thread",
         scenario_write_then_read_cross_thread::run(&g).await,

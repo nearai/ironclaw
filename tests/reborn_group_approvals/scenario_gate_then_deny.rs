@@ -39,16 +39,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
 
     // The denied write must NOT have executed: unlike the approve path, the gated
-    // capability is never re-dispatched, so no capability result carries the write
-    // content. This proves deny actually blocked the side effect, not merely that
-    // the run terminated.
-    if h.assert_tool_result_contains("should not persist")
-        .await
-        .is_ok()
-    {
-        return Err(
-            "deny did not block the write: its content appears in a recorded tool result".into(),
-        );
-    }
+    // capability is never re-dispatched, so the target file is never created. We
+    // assert the real persisted state — the file is absent on disk — which proves
+    // deny blocked the side effect, not merely that the run terminated.
+    h.assert_workspace_file_absent("denied.txt").await?;
     Ok(())
 }

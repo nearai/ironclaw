@@ -13,9 +13,9 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthProductScope,
     AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
-    CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, NewAuthFlow,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
@@ -138,21 +138,28 @@ async fn oauth_connect_flow_persists_credential_account() {
 
     // Step 6 — verify the connect exchange used the authorization_code grant
     // (not the refresh grant) — proves the right OAuth flow crossed the egress.
-    let bodies = bundle.egress.captured_bodies();
-    let body = String::from_utf8_lossy(&bodies[0]);
-    assert!(
-        body.contains("authorization_code"),
-        "connect-flow token exchange must use the authorization_code grant; body: {body}"
+    let grant_types = bundle.egress.captured_grant_types();
+    assert_eq!(
+        grant_types.first().map(String::as_str),
+        Some("authorization_code"),
+        "connect-flow token exchange must use the authorization_code grant; grant_types: {grant_types:?}"
     );
 }
 
 /// Guard test: attempting an OAuth callback for a non-existent flow must fail
 /// with `UnknownOrExpiredFlow`.  No credential account must be created, and no
 /// token-exchange call should be made.
+///
+/// Both guarantees are verified: `captured_count()` asserts no token-exchange
+/// HTTP call was made; `list_accounts` asserts no credential account was
+/// persisted to the durable store.
 #[tokio::test]
 async fn oauth_callback_without_prior_flow_fails() {
     let bundle = build_oauth_product_auth_for_test();
     let scope = test_scope();
+    // Clone scope before it is moved into the callback request so we can use
+    // it for the list_accounts assertion after the error is returned.
+    let scope_for_assert = scope.clone();
     let state_hash = OpaqueStateHash::new(hex64(0xdd)).unwrap();
     let pkce_hash = PkceVerifierHash::new(hex64(0xee)).unwrap();
     let code_hash = AuthorizationCodeHash::new(hex64(0xff)).unwrap();
@@ -195,5 +202,21 @@ async fn oauth_callback_without_prior_flow_fails() {
         bundle.egress.captured_count(),
         0,
         "no token-exchange call should be made when the flow is missing"
+    );
+
+    // The failed claim step must not have created any credential account.
+    let page = bundle
+        .services
+        .credential_account_service()
+        .list_accounts(CredentialAccountListRequest::new(
+            scope_for_assert,
+            AuthProviderId::new("test-oauth-provider").unwrap(),
+        ))
+        .await
+        .expect("list_accounts must not error after a failed callback");
+    assert!(
+        page.accounts.is_empty(),
+        "no credential account must be created when the flow is missing; got {} accounts",
+        page.accounts.len()
     );
 }
