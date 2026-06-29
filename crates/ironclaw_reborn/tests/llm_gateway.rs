@@ -2407,7 +2407,7 @@ async fn gateway_sanitizes_provider_errors() {
 }
 
 #[tokio::test]
-async fn gateway_maps_offline_provider_to_unavailable_without_leaking_details() {
+async fn gateway_maps_offline_provider_to_unavailable_scrubbing_only_secret_tokens() {
     let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
         provider: "offline-provider".to_string(),
         reason: "connection refused at https://api.example.test with sk-provider-secret"
@@ -2426,16 +2426,38 @@ async fn gateway_maps_offline_provider_to_unavailable_without_leaking_details() 
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    // The host-authored summary stays a fixed, leak-free string.
     assert_eq!(error.safe_summary, "model service is unavailable");
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
+
+    // Policy: only secret VALUES are withheld; the non-secret provider cause now
+    // flows to the model via the scrubbed `detail` channel so the failure
+    // explainer can describe the real fault (retry/explain), instead of a bare
+    // category. See sanitize_model_visible_text / model_token_needs_redaction.
+    let detail = error
+        .detail
+        .as_deref()
+        .expect("offline-provider cause must surface on the model-visible detail channel");
+    assert!(
+        detail.contains("connection refused"),
+        "non-secret provider reason must reach the model: {detail}"
+    );
+    assert!(
+        detail.contains("https://api.example.test"),
+        "non-secret endpoint must reach the model: {detail}"
+    );
+
+    // The credential-looking token MUST be scrubbed everywhere it could surface
+    // (detail channel and the full Debug rendering).
+    assert!(
+        !detail.contains("sk-provider-secret"),
+        "secret token must be scrubbed from detail: {detail}"
+    );
     let debug = format!("{error:?}");
-    for sentinel in [
-        "connection refused",
-        "https://api.example.test",
-        "sk-provider-secret",
-    ] {
-        assert!(!debug.contains(sentinel));
-    }
+    assert!(
+        !debug.contains("sk-provider-secret"),
+        "secret token must never appear in the error Debug: {debug}"
+    );
 }
 
 #[tokio::test]
