@@ -1,3 +1,4 @@
+mod analysis;
 mod capture;
 mod child_io;
 mod db_probe;
@@ -121,6 +122,10 @@ pub(crate) struct Args {
     /// Emit a human-readable summary table to stderr after the JSON summary.
     #[arg(long, default_value_t = false)]
     pub(crate) human_read: bool,
+
+    /// Emit a heuristic bottleneck report to stderr after the JSON summary.
+    #[arg(long, default_value_t = false)]
+    pub(crate) bottleneck_report: bool,
 
     /// Comma-separated concurrency values to sweep.
     #[arg(long, value_delimiter = ',')]

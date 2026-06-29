@@ -305,6 +305,50 @@ fn failure_causes_are_grouped_by_bucket_and_stage() {
 
 #[test]
 fn human_summary_includes_stage_latency_and_failure_tables() {
+    let summary = run_summary_with_bottlenecks();
+
+    let rendered = human::render_run_summary(&summary);
+
+    assert!(rendered.contains("Stage latency"));
+    assert!(rendered.contains("submit_turn"));
+    assert!(rendered.contains("resource_reserve"));
+    assert!(rendered.contains("model_wait"));
+    assert!(rendered.contains("append_tool_result"));
+    assert!(rendered.contains("DB probe"));
+    assert!(rendered.contains("libsql_file"));
+    assert!(rendered.contains("Failure causes"));
+    assert!(rendered.contains("turn_thread_busy"));
+}
+
+#[test]
+fn bottleneck_report_identifies_failure_stage_and_db_growth() {
+    let args = test_args();
+    let captured = capture::CapturedRun::Single(Box::new(run_summary_with_bottlenecks()));
+
+    let rendered = analysis::render_bottleneck_report(&args, "run", &captured);
+
+    assert!(rendered.contains("Bottleneck analysis"));
+    assert!(rendered.contains("failure_rate"));
+    assert!(rendered.contains("turn_thread_busy"));
+    assert!(rendered.contains("top_stage_p95"));
+    assert!(rendered.contains("model_wait"));
+    assert!(rendered.contains("libsql_growth"));
+}
+
+#[test]
+fn bottleneck_report_surfaces_missing_trace_file() {
+    let mut args = test_args();
+    args.trace_jsonl = Some(PathBuf::from("/tmp/ironclaw-missing-trace-test.jsonl"));
+    let _ = std::fs::remove_file(args.trace_jsonl.as_ref().expect("trace path"));
+    let captured = capture::CapturedRun::Single(Box::new(run_summary_with_bottlenecks()));
+
+    let rendered = analysis::render_bottleneck_report(&args, "run", &captured);
+
+    assert!(rendered.contains("trace_read_error"));
+    assert!(rendered.contains("ironclaw-missing-trace-test.jsonl"));
+}
+
+fn run_summary_with_bottlenecks() -> RunSummary {
     let mut errors = std::collections::BTreeMap::new();
     errors.insert("turn_thread_busy".to_string(), 1);
     let mut cause_stages = std::collections::BTreeMap::new();
@@ -318,7 +362,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
             sample_detail: "thread already has an active run".to_string(),
         },
     );
-    let summary = RunSummary {
+    RunSummary {
         backend: Backend::Libsql,
         scenario: Scenario::MixedUserSession,
         run_id: "run".to_string(),
@@ -376,19 +420,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         }),
         errors,
         failure_causes,
-    };
-
-    let rendered = human::render_run_summary(&summary);
-
-    assert!(rendered.contains("Stage latency"));
-    assert!(rendered.contains("submit_turn"));
-    assert!(rendered.contains("resource_reserve"));
-    assert!(rendered.contains("model_wait"));
-    assert!(rendered.contains("append_tool_result"));
-    assert!(rendered.contains("DB probe"));
-    assert!(rendered.contains("libsql_file"));
-    assert!(rendered.contains("Failure causes"));
-    assert!(rendered.contains("turn_thread_busy"));
+    }
 }
 
 fn test_args() -> Args {
@@ -408,6 +440,7 @@ fn test_args() -> Args {
         postgres_pool_size: 4,
         progress_interval_seconds: 0,
         human_read: false,
+        bottleneck_report: false,
         sweep_concurrency: Vec::new(),
         sweep_users: Vec::new(),
         sweep_model_latency_ms: Vec::new(),

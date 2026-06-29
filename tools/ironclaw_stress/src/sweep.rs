@@ -169,6 +169,9 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
     if args.human_read {
         eprint!("{}", render_sweep_summary(&results));
     }
+    if args.bottleneck_report {
+        eprint!("{}", render_sweep_bottleneck_report(&results));
+    }
 
     let threshold_inputs = results
         .iter()
@@ -315,6 +318,100 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
             format_optional_kb(result.metrics.peak_rss_kb),
         );
     }
+    output
+}
+
+fn render_sweep_bottleneck_report(results: &[SweepResult]) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "\nSweep bottleneck analysis");
+    let _ = writeln!(output, "{:<22} {:<18} evidence", "signal", "point");
+    let _ = writeln!(output, "{:-<22} {:-<18} {:-<56}", "", "", "");
+    if results.is_empty() {
+        let _ = writeln!(output, "{:<22} {:<18} no sweep points", "none", "-");
+        return output;
+    }
+
+    if let Some(result) = results.iter().max_by(|left, right| {
+        left.metrics
+            .failure_rate()
+            .partial_cmp(&right.metrics.failure_rate())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) && result.metrics.failed > 0
+    {
+        let _ = writeln!(
+            output,
+            "{:<22} {:<18} failed={} attempted={} fail_rate={:.2}%",
+            "failure_ceiling",
+            truncate(&result.label, 18),
+            result.metrics.failed,
+            result.metrics.attempted,
+            result.metrics.failure_rate() * 100.0
+        );
+    }
+
+    if let Some(result) = results.iter().min_by(|left, right| {
+        left.metrics
+            .throughput_ops_sec
+            .partial_cmp(&right.metrics.throughput_ops_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
+        let _ = writeln!(
+            output,
+            "{:<22} {:<18} throughput={:.2} ops/sec",
+            "lowest_throughput",
+            truncate(&result.label, 18),
+            result.metrics.throughput_ops_sec
+        );
+    }
+
+    if let Some(result) = results.iter().max_by_key(|result| result.metrics.p95_us) {
+        let _ = writeln!(
+            output,
+            "{:<22} {:<18} p95={} p99={}",
+            "highest_latency",
+            truncate(&result.label, 18),
+            format_latency_us(result.metrics.p95_us),
+            format_latency_us(result.metrics.p99_us)
+        );
+    }
+
+    if let Some(result) = results
+        .iter()
+        .filter(|result| result.metrics.cpu_ms.is_some())
+        .max_by_key(|result| result.metrics.cpu_ms)
+    {
+        let _ = writeln!(
+            output,
+            "{:<22} {:<18} cpu={}",
+            "highest_cpu",
+            truncate(&result.label, 18),
+            format_optional_ms(result.metrics.cpu_ms)
+        );
+    }
+
+    if let Some(result) = results
+        .iter()
+        .filter(|result| result.metrics.peak_rss_kb.is_some())
+        .max_by_key(|result| result.metrics.peak_rss_kb)
+    {
+        let _ = writeln!(
+            output,
+            "{:<22} {:<18} peak_rss={}",
+            "highest_rss",
+            truncate(&result.label, 18),
+            format_optional_kb(result.metrics.peak_rss_kb)
+        );
+    }
+
+    let _ = writeln!(output, "\nNext probes");
+    let _ = writeln!(
+        output,
+        "- Rerun the worst latency/throughput point with --trace-jsonl and --bottleneck-report to capture interval collapse."
+    );
+    let _ = writeln!(
+        output,
+        "- Add one dimension at a time to distinguish user fanout, concurrency, model latency, and storage growth."
+    );
     output
 }
 

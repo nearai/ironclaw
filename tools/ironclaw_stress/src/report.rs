@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Args, RunSummary, capture::CapturedRun, human, process_metrics::aggregate_process_metrics,
-    summary::FailureCauseSummary,
+    Args, RunSummary, analysis, capture::CapturedRun, human,
+    process_metrics::aggregate_process_metrics, summary::FailureCauseSummary,
 };
 
 pub(crate) fn print_captured_run(
@@ -14,6 +14,14 @@ pub(crate) fn print_captured_run(
         CapturedRun::Single(summary) => print_run_summary(args, summary),
         CapturedRun::Parent { summaries, .. } => print_parent_summary(args, run_id, summaries),
     }
+    .map(|_| {
+        if args.bottleneck_report && args.child_index.is_none() {
+            eprint!(
+                "{}",
+                analysis::render_bottleneck_report(args, run_id, captured)
+            );
+        }
+    })
 }
 
 pub(crate) fn parent_summary_value(
