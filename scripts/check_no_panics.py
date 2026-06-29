@@ -222,12 +222,23 @@ def is_test_only_path(path: str) -> bool:
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
     exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant
-    literals, so they are exempt by exact filename (a ``my_test_support.rs`` is
-    NOT exempt).
+    literals, so they are exempt whether the module is a single
+    ``src/test_support.rs`` file or a ``src/test_support/**`` directory module
+    (so growing test-support coverage needs no further changes here). A file
+    merely *containing* the substring, e.g. ``my_test_support.rs``, is NOT
+    exempt — the match is on the exact filename or an exact path component.
+
+    NOTE: the scanner only ever looks at ``src/`` and ``crates/`` (see
+    ``changed_rust_files``). Top-level ``tests/**`` integration tests and their
+    support trees are never scanned at all, so they need no exemption here.
     """
     posix_path = pathlib.PurePosixPath(path)
     parts = posix_path.parts
-    return "tests" in parts or posix_path.name in ("tests.rs", "test_support.rs")
+    return (
+        "tests" in parts
+        or "test_support" in parts
+        or posix_path.name in ("tests.rs", "test_support.rs")
+    )
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -401,7 +412,12 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertTrue(
             is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
         )
+        # Directory-module form: src/test_support/**.rs is also exempt, so
+        # growing a test_support module never needs another change here.
+        self.assertTrue(is_test_only_path("crates/foo/src/test_support/oauth.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/test_support/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/my_test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/test_supportish/x.rs"))
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
