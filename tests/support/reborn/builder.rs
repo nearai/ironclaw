@@ -33,7 +33,8 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, RuntimeHttpEgressRequest,
+    VirtualPath,
 };
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
@@ -62,8 +63,10 @@ use ironclaw_reborn::subagent::{
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{InMemoryLoopHostMilestoneSink, ModelProfileId};
 use ironclaw_turns::{
-    FilesystemTurnStateStore, GetRunStateRequest, InMemoryCheckpointStateStore,
-    LoopCheckpointStore, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    FilesystemTurnStateStore, GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey,
+    InMemoryCheckpointStateStore, LoopCheckpointStore, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, TurnActor, TurnCoordinator,
+    TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::harness::{
@@ -124,6 +127,12 @@ enum RebornCapabilityBackend {
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
     MockMcp { mcp_url: String },
+    /// Real first-party file tools wired to the local-dev approval stores
+    /// (`ApprovalRequestStore` + `CapabilityLeaseStore` + `AutoApproveSettingStore`)
+    /// so a gated tool call raises a real `TurnStatus::BlockedApproval` gate that
+    /// the test resolves through `approve_gate` / `deny_gate`. Selected by
+    /// `.with_live_approvals()`.
+    LiveApprovals,
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -211,6 +220,23 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire the real local-dev approval stores so a gated tool call raises a real
+    /// `TurnStatus::BlockedApproval` gate (`with_live_*` = swap a no-op stub for
+    /// the real subsystem, sibling of [`with_live_shell`](Self::with_live_shell)).
+    ///
+    /// Surfaces the first-party `builtin.write_file` / `builtin.read_file` tools
+    /// (PermissionMode::Ask) and disables the per-`(tenant, user)` auto-approve
+    /// toggle for the harness run scope at `build()` time, so a scripted
+    /// `builtin.write_file` call blocks on approval instead of auto-approving.
+    /// Resolve with [`approve_gate`](RebornIntegrationHarness::approve_gate) or
+    /// [`deny_gate`](RebornIntegrationHarness::deny_gate); flip the toggle back on
+    /// with [`enable_auto_approve`](RebornIntegrationHarness::enable_auto_approve)
+    /// for the no-gate settings arm.
+    pub fn with_live_approvals(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::LiveApprovals;
+        self
+    }
+
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
@@ -225,6 +251,10 @@ impl RebornIntegrationHarnessBuilder {
             "agent-itest",
             Some("project-itest"),
         );
+        // `scope` is the run's `ResourceScope` (tenant + user keyed). Kept past the
+        // product-harness move so `.with_live_approvals()` can disable the
+        // per-`(tenant, user)` auto-approve toggle for this exact scope below.
+        let run_resource_scope = scope.clone();
         let product_harness =
             super::product_workflow::RebornProductWorkflowHarness::filesystem_temp(scope)?;
 
@@ -294,6 +324,7 @@ impl RebornIntegrationHarnessBuilder {
         // `HarnessCapabilityMode::into_parts` wiring (single mechanism). The echo
         // arm surfaces the port's own allowlist (not `CapabilityAllowSet::All`);
         // benign because a text-only turn invokes no tool.
+        let live_approvals = matches!(self.capability, RebornCapabilityBackend::LiveApprovals);
         let capability_mode = match self.capability {
             RebornCapabilityBackend::Echo => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
@@ -319,6 +350,14 @@ impl RebornIntegrationHarnessBuilder {
                 .await?;
                 HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
             }
+            RebornCapabilityBackend::LiveApprovals => {
+                // Real local-dev approval stores: `builtin.write_file` is
+                // PermissionMode::Ask, so with auto-approve disabled (below) a
+                // scripted write blocks on a real `BlockedApproval` gate.
+                let host_runtime =
+                    HostRuntimeCapabilityHarness::file_tools_requiring_approval().await?;
+                HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
+            }
         };
         let (
             capability_factory,
@@ -327,6 +366,16 @@ impl RebornIntegrationHarnessBuilder {
             capability_result_writer,
             capability_recorder,
         ) = capability_mode.into_parts(milestone_sink.clone())?;
+
+        // `.with_live_approvals()`: disable the per-`(tenant, user)` auto-approve
+        // toggle for the run's own scope. The toggle key is `(tenant_id, user_id)`
+        // only, so the constructor's product-scope disable does not cover this
+        // integration run's tenant — gate it explicitly here.
+        if live_approvals {
+            capability_recorder
+                .disable_auto_approve_for(run_resource_scope.clone())
+                .await?;
+        }
 
         // --- loop-exit evidence (plain; no gates/blocks in slice 1) ---------
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
@@ -408,6 +457,8 @@ impl RebornIntegrationHarnessBuilder {
             turn_scope,
             turn_store,
             thread_harness,
+            coordinator: composition.coordinator.clone(),
+            run_resource_scope,
             scheduler_handle: Some(composition.scheduler_handle),
             event_seq: AtomicU64::new(1),
             capability_recorder,
@@ -428,6 +479,13 @@ pub struct RebornIntegrationHarness {
     turn_scope: TurnScope,
     turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
     thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
+    /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
+    /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
+    /// harness's `resume_with_gate` path.
+    coordinator: Arc<dyn TurnCoordinator>,
+    /// The run's `(tenant, user)`-keyed `ResourceScope`, reused by
+    /// `enable_auto_approve` to flip the auto-approve toggle for the no-gate arm.
+    run_resource_scope: ResourceScope,
     scheduler_handle: Option<ironclaw_host_runtime::TurnRunSchedulerHandle>,
     event_seq: AtomicU64,
     capability_recorder: HarnessCapabilityRecorder,
@@ -465,6 +523,15 @@ impl RebornIntegrationHarness {
 
     /// Submit a user turn and wait for it to complete.
     pub async fn submit_turn(&self, text: &str) -> HarnessResult<TurnRunId> {
+        let run_id = self.submit_turn_async(text).await?;
+        self.wait_for_status(run_id, TurnStatus::Completed).await?;
+        Ok(run_id)
+    }
+
+    /// Submit a user turn and return its run id **without** waiting for any status
+    /// — the caller drives the wait (`wait_for_status`). Used by approval/auth flows
+    /// where the turn blocks on a gate rather than completing.
+    pub async fn submit_turn_async(&self, text: &str) -> HarnessResult<TurnRunId> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -474,14 +541,30 @@ impl RebornIntegrationHarness {
             ProductTriggerReason::DirectChat,
         )?;
         let ack = self.workflow.accept_inbound(envelope).await?;
-        let run_id = match ack {
+        match ack {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
-            } => submitted_run_id,
-            other => return Err(format!("expected accepted inbound ack, got {other:?}").into()),
-        };
-        self.wait_for_completion(run_id).await?;
-        Ok(run_id)
+            } => Ok(submitted_run_id),
+            other => Err(format!("expected accepted inbound ack, got {other:?}").into()),
+        }
+    }
+
+    /// Submit a user turn and wait until it blocks on an approval gate, returning
+    /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
+    /// destructive tool call against `.with_live_approvals()` blocks here; the test
+    /// then calls `approve_gate`/`deny_gate` and `wait_for_status(Completed)`.
+    pub async fn submit_turn_until_blocked(
+        &self,
+        text: &str,
+    ) -> HarnessResult<(TurnRunId, GateRef)> {
+        let run_id = self.submit_turn_async(text).await?;
+        let state = self
+            .wait_for_status(run_id, TurnStatus::BlockedApproval)
+            .await?;
+        let gate_ref = state
+            .gate_ref
+            .ok_or("blocked approval run missing gate ref")?;
+        Ok((run_id, gate_ref))
     }
 
     /// Assert the finalized assistant reply in thread history contains `text`.
@@ -644,7 +727,17 @@ impl RebornIntegrationHarness {
         self.capability_recorder.capability_results()
     }
 
-    async fn wait_for_completion(&self, run_id: TurnRunId) -> HarnessResult<()> {
+    /// Poll the turn-state store until the run reaches `expected`, returning the
+    /// matching `TurnRunState`. Fails fast if the run reaches a *different*
+    /// terminal status first (terminal states are never left, so it can never
+    /// reach `expected`). One loop, three callers: `submit_turn` waits on
+    /// `Completed`, `submit_turn_until_blocked` on `BlockedApproval`, and the auth
+    /// slice on `BlockedAuth`. Mirrors the binary-E2E harness's `wait_for_status`.
+    pub async fn wait_for_status(
+        &self,
+        run_id: TurnRunId,
+        expected: TurnStatus,
+    ) -> HarnessResult<TurnRunState> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let state = self
@@ -654,25 +747,86 @@ impl RebornIntegrationHarness {
                     run_id,
                 })
                 .await?;
-            if state.status == TurnStatus::Completed {
-                return Ok(());
+            if state.status == expected {
+                return Ok(state);
             }
             if state.status.is_terminal() {
                 return Err(format!(
-                    "run reached terminal status {:?} before Completed; failure={:?}",
+                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
                     state.status, state.failure
                 )
                 .into());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "timed out waiting for Completed; last status={:?} failure={:?}",
+                    "timed out waiting for {expected:?}; last status={:?} failure={:?}",
                     state.status, state.failure
                 )
                 .into());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// Approve a blocked approval gate and resume the run (the user-approves path).
+    /// Resolves the persisted approval request to an issued lease, then resumes the
+    /// run so the originally-gated capability re-dispatches and the turn completes.
+    pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        self.capability_recorder
+            .approve_local_dev_gate(gate_ref)
+            .await?;
+        self.resume_run(run_id, gate_ref.clone(), None).await
+    }
+
+    /// Deny a blocked approval gate and resume the run (the user-declines path).
+    /// Resolves the persisted request to `Denied` (no lease) and resumes with
+    /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
+    /// authorization failure to the model rather than re-dispatching the gate.
+    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        self.capability_recorder
+            .deny_local_dev_gate(gate_ref)
+            .await?;
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+        )
+        .await
+    }
+
+    /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run scope
+    /// via the real CAS-persisted `AutoApproveSettingStore` (the no-gate settings
+    /// arm: with auto-approve on, the same capability completes without a gate).
+    pub async fn enable_auto_approve(&self) -> HarnessResult<()> {
+        self.capability_recorder
+            .enable_auto_approve_for(self.run_resource_scope.clone())
+            .await
+    }
+
+    async fn resume_run(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        resume_disposition: Option<GateResumeDisposition>,
+    ) -> HarnessResult<()> {
+        let response = self
+            .coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: self.turn_scope.clone(),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
+                run_id,
+                gate_resolution_ref: gate_ref,
+                precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                source_binding_ref: SourceBindingRef::new("src:resume")?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
+                idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
+                resume_disposition,
+            })
+            .await?;
+        if response.status != TurnStatus::Queued {
+            return Err(format!("expected resumed run to queue, got {:?}", response.status).into());
+        }
+        Ok(())
     }
 }
 
