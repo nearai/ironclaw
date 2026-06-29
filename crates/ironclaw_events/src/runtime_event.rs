@@ -785,6 +785,7 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
 const MAX_ERROR_SUMMARY_BYTES: usize = 512;
+const WORKSPACE_FILE_ERROR_SUMMARY: &str = "can't access your workspace file";
 
 /// Collapse any error_kind value that does not match the stable classification
 /// shape into the single `Unclassified` token. This is the redaction guard
@@ -814,10 +815,117 @@ pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
 pub fn sanitize_error_summary(summary: impl Into<String>) -> Option<String> {
     let value = summary.into();
     let trimmed = value.trim();
-    if trimmed.is_empty() || !is_safe_error_summary(trimmed) {
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_workspace_file_error_summary(trimmed) {
+        return Some(WORKSPACE_FILE_ERROR_SUMMARY.to_string());
+    }
+    if !is_safe_error_summary(trimmed) {
         return None;
     }
     Some(truncate_error_summary(trimmed))
+}
+
+fn is_workspace_file_error_summary(value: &str) -> bool {
+    if value == WORKSPACE_FILE_ERROR_SUMMARY {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    if contains_internal_workspace_filename(&lower) {
+        return true;
+    }
+    if contains_filename_like_token(&lower) {
+        return true;
+    }
+    let mentions_workspace_file = lower.contains("workspace file")
+        || lower.contains("workspace path")
+        || lower.contains("filesystem")
+        || lower.contains("file not found")
+        || lower.contains("file failed")
+        || lower.contains("read_file")
+        || lower.contains("write_file")
+        || lower.contains("list_dir")
+        || lower.contains("path workspace");
+    mentions_workspace_file
+        && (lower.contains("failed")
+            || lower.contains("not found")
+            || lower.contains("denied")
+            || lower.contains("missing")
+            || lower.contains("can't access")
+            || lower.contains("cannot access"))
+}
+
+fn contains_internal_workspace_filename(lower: &str) -> bool {
+    [
+        ".system",
+        "agents.md",
+        "bootstrap.md",
+        "heartbeat.md",
+        "identity.md",
+        "memory.md",
+        "soul.md",
+        "tools.md",
+        "user.md",
+    ]
+    .iter()
+    .any(|forbidden| lower.contains(forbidden))
+}
+
+fn contains_filename_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| character.is_whitespace())
+        .map(|token| {
+            token.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '"' | '\'' | '(' | ')' | ',' | ':' | ';' | '[' | ']' | '{' | '}'
+                )
+            })
+        })
+        .any(is_filename_like_token)
+}
+
+fn is_filename_like_token(token: &str) -> bool {
+    let Some((stem, extension)) = token.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || extension.is_empty() || extension.len() > 8 {
+        return false;
+    }
+    if !is_common_filename_extension(extension) {
+        return false;
+    }
+    stem.chars()
+        .any(|character| character.is_ascii_alphanumeric())
+        && extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn is_common_filename_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "bash"
+            | "css"
+            | "csv"
+            | "env"
+            | "html"
+            | "js"
+            | "json"
+            | "jsonl"
+            | "lock"
+            | "log"
+            | "md"
+            | "py"
+            | "rs"
+            | "sh"
+            | "toml"
+            | "ts"
+            | "txt"
+            | "yaml"
+            | "yml"
+    )
 }
 
 fn is_safe_error_summary(value: &str) -> bool {
@@ -1003,7 +1111,53 @@ mod tests {
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
         assert_eq!(
             decoded.error_summary.as_deref(),
-            Some("read_file failed for path workspace ironclaw_issues.json: file not found")
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let tool_input_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary("the tool input could not be encoded");
+        let wire = serde_json::to_string(&tool_input_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("the tool input could not be encoded")
+        );
+
+        let internal_filename_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("failed to read AGENTS.md");
+        let wire =
+            serde_json::to_string(&internal_filename_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let path_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("read_file failed for /tmp/api_key.txt: secret leaked");
+        let wire = serde_json::to_string(&path_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
         );
 
         let unsafe_event = RuntimeEvent::capability_activity_failed(
@@ -1013,7 +1167,7 @@ mod tests {
             None,
             "operation_failed",
         )
-        .with_error_summary("read_file failed for /tmp/api_key.txt: secret leaked");
+        .with_error_summary("provider error: bearer token leaked");
         let wire = serde_json::to_string(&unsafe_event).expect("serialize runtime event");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
         assert_eq!(decoded.error_summary, None);

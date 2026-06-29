@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
         assert_eq!(
             event.error_summary.as_deref(),
-            Some("read_file failed for path workspace ironclaw_issues.json: file not found")
+            Some("can't access your workspace file")
         );
     }
 

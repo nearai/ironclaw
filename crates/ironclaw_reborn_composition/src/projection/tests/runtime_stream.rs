@@ -354,7 +354,7 @@ async fn webui_event_stream_projects_runtime_activity_failure_summary() {
                     && activity.status == CapabilityActivityStatusView::Failed
                     && activity.error_kind.as_deref() == Some("operation_failed")
                     && activity.error_detail.as_deref()
-                        == Some("read_file failed for path workspace ironclaw_issues.json: file not found")
+                        == Some("can't access your workspace file")
         )
     }));
 }
