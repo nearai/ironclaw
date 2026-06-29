@@ -38,6 +38,12 @@ struct SweepCase {
     concurrency: usize,
     users: usize,
     model_latency_ms: u64,
+    user_message_bytes: usize,
+    assistant_message_bytes: usize,
+    context_max_messages: usize,
+    context_growth_turns_per_operation: usize,
+    tool_calls_per_turn: usize,
+    tool_output_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -52,6 +58,12 @@ pub(crate) fn is_enabled(args: &Args) -> bool {
     !args.sweep_concurrency.is_empty()
         || !args.sweep_users.is_empty()
         || !args.sweep_model_latency_ms.is_empty()
+        || !args.sweep_user_message_bytes.is_empty()
+        || !args.sweep_assistant_message_bytes.is_empty()
+        || !args.sweep_context_max_messages.is_empty()
+        || !args.sweep_context_growth_turns_per_operation.is_empty()
+        || !args.sweep_tool_calls_per_turn.is_empty()
+        || !args.sweep_tool_output_bytes.is_empty()
         || args.repetitions > 1
         || args.output_jsonl.is_some()
 }
@@ -79,23 +91,70 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
 
     for case in cases {
         let run_id = format!(
-            "{suite_run_id}-r{}-c{}-u{}-m{}",
-            case.repetition, case.concurrency, case.users, case.model_latency_ms
+            "{suite_run_id}-r{}-c{}-u{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
+            case.repetition,
+            case.concurrency,
+            case.users,
+            case.model_latency_ms,
+            case.user_message_bytes,
+            case.assistant_message_bytes,
+            case.context_max_messages,
+            case.context_growth_turns_per_operation,
+            case.tool_calls_per_turn,
+            case.tool_output_bytes
         );
         let label = format!(
-            "r{} c{} u{} m{}",
-            case.repetition, case.concurrency, case.users, case.model_latency_ms
+            "r{} c{} u{} m{} ub{} ab{} ctx{} cg{} tc{} tb{}",
+            case.repetition,
+            case.concurrency,
+            case.users,
+            case.model_latency_ms,
+            case.user_message_bytes,
+            case.assistant_message_bytes,
+            case.context_max_messages,
+            case.context_growth_turns_per_operation,
+            case.tool_calls_per_turn,
+            case.tool_output_bytes
         );
         let mut case_args = args.clone();
         case_args.concurrency = case.concurrency;
         case_args.users = case.users;
         case_args.model_latency_ms = case.model_latency_ms;
+        case_args.user_message_bytes = case.user_message_bytes;
+        case_args.assistant_message_bytes = case.assistant_message_bytes;
+        case_args.context_max_messages = case.context_max_messages;
+        case_args.context_growth_turns_per_operation = case.context_growth_turns_per_operation;
+        case_args.tool_calls_per_turn = case.tool_calls_per_turn;
+        case_args.tool_output_bytes = case.tool_output_bytes;
         case_args.run_id = Some(run_id.clone());
         case_args.repetitions = 1;
         case_args.sweep_concurrency.clear();
         case_args.sweep_users.clear();
         case_args.sweep_model_latency_ms.clear();
+        case_args.sweep_user_message_bytes.clear();
+        case_args.sweep_assistant_message_bytes.clear();
+        case_args.sweep_context_max_messages.clear();
+        case_args.sweep_context_growth_turns_per_operation.clear();
+        case_args.sweep_tool_calls_per_turn.clear();
+        case_args.sweep_tool_output_bytes.clear();
         case_args.output_jsonl = None;
+        if let Some(trace_jsonl) = &args.trace_jsonl {
+            let trace_label = format!(
+                "sweep-r{}-c{}-u{}-m{}-ub{}-ab{}-ctx{}-cg{}-tc{}-tb{}",
+                case.repetition,
+                case.concurrency,
+                case.users,
+                case.model_latency_ms,
+                case.user_message_bytes,
+                case.assistant_message_bytes,
+                case.context_max_messages,
+                case.context_growth_turns_per_operation,
+                case.tool_calls_per_turn,
+                case.tool_output_bytes
+            );
+            case_args.trace_jsonl =
+                Some(crate::trace::labeled_trace_path(trace_jsonl, &trace_label));
+        }
 
         eprintln!(
             "{} sweep point label=\"{}\" backend={} scenario={}",
@@ -104,6 +163,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             case_args.backend.as_str(),
             case_args.scenario.as_str()
         );
+        crate::trace::prepare_trace_outputs(&case_args).await?;
         let started = Instant::now();
         let captured = run_once(&case_args, &run_id).await?;
         let metrics = captured.metrics();
@@ -123,6 +183,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "duration_seconds": case_args.duration_seconds,
             "warmup_seconds": case_args.warmup_seconds,
             "trace_jsonl_enabled": case_args.trace_jsonl.is_some(),
+            "trace_jsonl": case_args.trace_jsonl.as_ref().map(|path| path.display().to_string()),
             "trace_interval_seconds": case_args.trace_interval_seconds,
             "model_latency_ms": case.model_latency_ms,
             "model_latency_profile": case_args.model_latency_profile,
@@ -257,18 +318,69 @@ fn build_cases(args: &Args) -> Vec<SweepCase> {
     } else {
         args.sweep_model_latency_ms.clone()
     };
+    let user_message_byte_values = if args.sweep_user_message_bytes.is_empty() {
+        vec![args.user_message_bytes]
+    } else {
+        args.sweep_user_message_bytes.clone()
+    };
+    let assistant_message_byte_values = if args.sweep_assistant_message_bytes.is_empty() {
+        vec![args.assistant_message_bytes]
+    } else {
+        args.sweep_assistant_message_bytes.clone()
+    };
+    let context_max_message_values = if args.sweep_context_max_messages.is_empty() {
+        vec![args.context_max_messages]
+    } else {
+        args.sweep_context_max_messages.clone()
+    };
+    let context_growth_turn_values = if args.sweep_context_growth_turns_per_operation.is_empty() {
+        vec![args.context_growth_turns_per_operation]
+    } else {
+        args.sweep_context_growth_turns_per_operation.clone()
+    };
+    let tool_calls_per_turn_values = if args.sweep_tool_calls_per_turn.is_empty() {
+        vec![args.tool_calls_per_turn]
+    } else {
+        args.sweep_tool_calls_per_turn.clone()
+    };
+    let tool_output_byte_values = if args.sweep_tool_output_bytes.is_empty() {
+        vec![args.tool_output_bytes]
+    } else {
+        args.sweep_tool_output_bytes.clone()
+    };
 
     let mut cases = Vec::new();
     for repetition in 1..=args.repetitions {
         for concurrency in &concurrency_values {
             for users in &user_values {
                 for model_latency_ms in &model_latency_values {
-                    cases.push(SweepCase {
-                        repetition,
-                        concurrency: *concurrency,
-                        users: *users,
-                        model_latency_ms: *model_latency_ms,
-                    });
+                    for user_message_bytes in &user_message_byte_values {
+                        for assistant_message_bytes in &assistant_message_byte_values {
+                            for context_max_messages in &context_max_message_values {
+                                for context_growth_turns_per_operation in
+                                    &context_growth_turn_values
+                                {
+                                    for tool_calls_per_turn in &tool_calls_per_turn_values {
+                                        for tool_output_bytes in &tool_output_byte_values {
+                                            cases.push(SweepCase {
+                                                repetition,
+                                                concurrency: *concurrency,
+                                                users: *users,
+                                                model_latency_ms: *model_latency_ms,
+                                                user_message_bytes: *user_message_bytes,
+                                                assistant_message_bytes: *assistant_message_bytes,
+                                                context_max_messages: *context_max_messages,
+                                                context_growth_turns_per_operation:
+                                                    *context_growth_turns_per_operation,
+                                                tool_calls_per_turn: *tool_calls_per_turn,
+                                                tool_output_bytes: *tool_output_bytes,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -281,12 +393,18 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
     let _ = writeln!(output, "\nSweep summary");
     let _ = writeln!(
         output,
-        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "label",
         "run",
         "conc",
         "users",
         "model",
+        "uB",
+        "aB",
+        "ctx",
+        "cg",
+        "tc",
+        "outB",
         "attempted",
         "fail%",
         "ops/sec",
@@ -298,19 +416,25 @@ fn render_sweep_summary(results: &[SweepResult]) -> String {
     );
     let _ = writeln!(
         output,
-        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:->10}",
-        "", "", "", "", "", "", "", "", "", "", "", "", ""
+        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->6} {:->6} {:->5} {:->5} {:->5} {:->6} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:->10}",
+        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""
     );
     for result in results {
         let short_run_id = result.run_id.chars().take(8).collect::<String>();
         let _ = writeln!(
             output,
-            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>6} {:>6} {:>5} {:>5} {:>5} {:>6} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:>10}",
             truncate(&result.label, 18),
             short_run_id,
             result.case.concurrency,
             result.case.users,
             result.case.model_latency_ms,
+            result.case.user_message_bytes,
+            result.case.assistant_message_bytes,
+            result.case.context_max_messages,
+            result.case.context_growth_turns_per_operation,
+            result.case.tool_calls_per_turn,
+            result.case.tool_output_bytes,
             result.metrics.attempted,
             result.metrics.failure_rate() * 100.0,
             result.metrics.throughput_ops_sec,

@@ -156,6 +156,44 @@ fn sweep_concurrency_rejects_zero_values() {
 }
 
 #[test]
+fn sweep_payload_axes_enable_sweep() {
+    let mut args = test_args();
+    args.sweep_tool_output_bytes = vec![0, 1024];
+
+    assert!(sweep::is_enabled(&args));
+}
+
+#[test]
+fn sweep_context_axes_reject_zero_values() {
+    let mut args = test_args();
+    args.sweep_context_max_messages = vec![0];
+
+    let error = validate_args(&args).expect_err("zero sweep context max is invalid");
+
+    assert!(error.contains("--sweep-context-max-messages"));
+}
+
+#[test]
+fn sweep_tool_call_axes_reject_zero_values() {
+    let mut args = test_args();
+    args.sweep_tool_calls_per_turn = vec![0];
+
+    let error = validate_args(&args).expect_err("zero sweep tool calls are invalid");
+
+    assert!(error.contains("--sweep-tool-calls-per-turn"));
+}
+
+#[test]
+fn sweep_tool_output_axes_reject_oversized_values() {
+    let mut args = test_args();
+    args.sweep_tool_output_bytes = vec![16 * 1024 + 1];
+
+    let error = validate_args(&args).expect_err("oversized sweep tool output is invalid");
+
+    assert!(error.contains("--sweep-tool-output-bytes"));
+}
+
+#[test]
 fn ramp_builds_bounded_geometric_values() {
     assert_eq!(ramp::build_values(3, 20, 2), vec![3, 6, 12, 20]);
     assert_eq!(ramp::build_values(4, 4, 2), vec![4]);
@@ -648,6 +686,12 @@ fn test_args() -> Args {
         sweep_concurrency: Vec::new(),
         sweep_users: Vec::new(),
         sweep_model_latency_ms: Vec::new(),
+        sweep_user_message_bytes: Vec::new(),
+        sweep_assistant_message_bytes: Vec::new(),
+        sweep_context_max_messages: Vec::new(),
+        sweep_context_growth_turns_per_operation: Vec::new(),
+        sweep_tool_calls_per_turn: Vec::new(),
+        sweep_tool_output_bytes: Vec::new(),
         repetitions: 1,
         output_jsonl: None,
         trace_jsonl: None,

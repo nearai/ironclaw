@@ -157,6 +157,30 @@ pub(crate) struct Args {
     #[arg(long, value_delimiter = ',')]
     pub(crate) sweep_model_latency_ms: Vec<u64>,
 
+    /// Comma-separated user message byte sizes to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_user_message_bytes: Vec<usize>,
+
+    /// Comma-separated assistant message byte sizes to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_assistant_message_bytes: Vec<usize>,
+
+    /// Comma-separated context load message counts to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_context_max_messages: Vec<usize>,
+
+    /// Comma-separated context-growth turns per operation to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_context_growth_turns_per_operation: Vec<usize>,
+
+    /// Comma-separated tool-call counts per turn to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_tool_calls_per_turn: Vec<usize>,
+
+    /// Comma-separated tool output byte sizes to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_tool_output_bytes: Vec<usize>,
+
     /// Repetitions per sweep point.
     #[arg(long, default_value_t = 1)]
     pub(crate) repetitions: usize,
@@ -605,6 +629,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
         && (!args.sweep_concurrency.is_empty()
             || !args.sweep_users.is_empty()
             || !args.sweep_model_latency_ms.is_empty()
+            || !args.sweep_user_message_bytes.is_empty()
+            || !args.sweep_assistant_message_bytes.is_empty()
+            || !args.sweep_context_max_messages.is_empty()
+            || !args.sweep_context_growth_turns_per_operation.is_empty()
+            || !args.sweep_tool_calls_per_turn.is_empty()
+            || !args.sweep_tool_output_bytes.is_empty()
             || args.repetitions > 1)
     {
         return Err(
@@ -616,6 +646,24 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.sweep_users.contains(&0) {
         return Err("--sweep-users values must be greater than 0".to_string());
+    }
+    if args.sweep_context_max_messages.contains(&0) {
+        return Err("--sweep-context-max-messages values must be greater than 0".to_string());
+    }
+    if args.sweep_context_growth_turns_per_operation.contains(&0) {
+        return Err(
+            "--sweep-context-growth-turns-per-operation values must be greater than 0".to_string(),
+        );
+    }
+    if args.sweep_tool_calls_per_turn.contains(&0) {
+        return Err("--sweep-tool-calls-per-turn values must be greater than 0".to_string());
+    }
+    if args
+        .sweep_tool_output_bytes
+        .iter()
+        .any(|bytes| *bytes > 16 * 1024)
+    {
+        return Err("--sweep-tool-output-bytes values must be at most 16384".to_string());
     }
     if let Some(max_failure_rate) = args.max_failure_rate
         && !(0.0..=1.0).contains(&max_failure_rate)
