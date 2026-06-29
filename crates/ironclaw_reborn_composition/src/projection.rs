@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
@@ -81,6 +82,13 @@ pub(crate) struct RebornProjectionServices {
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    /// Monotonic live-progress sequence shared by every publisher minted from
+    /// these services. Live cursors are `LIVE_PROGRESS_CURSOR_BASE + sequence`;
+    /// resetting per-publisher (the old bug) let a post-run publisher re-issue a
+    /// cursor at/below one already consumed on an open SSE stream, so the resume
+    /// drain filtered the bubble out. Sharing keeps cursors strictly increasing
+    /// across publisher instances for the lifetime of the services.
+    live_sequence: Arc<AtomicU64>,
 }
 
 impl RebornProjectionServices {
@@ -169,6 +177,7 @@ impl RebornProjectionServices {
         Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
+            Arc::clone(&self.live_sequence),
         ))
     }
 
@@ -203,6 +212,7 @@ pub(crate) fn build_reborn_projection_services(
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
         auth_challenges: None,
+        live_sequence: Arc::new(AtomicU64::new(0)),
     }
 }
 
