@@ -3,7 +3,7 @@ name = "ironclaw_runtime_policy"
 version = "0.1.0"
 edition = "2024"
 # Keep in sync with the workspace-level package.rust-version.
-rust-version = "1.96"
+rust-version.workspace = true
 description = "Runtime profile resolver for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"

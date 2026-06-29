@@ -26,11 +26,10 @@
 
 # ── Stage 1: build the sandbox_daemon binary ─────────────────────────
 #
-# We compile against the same Rust toolchain the host uses. Pinning to a
-# minor version keeps build-cache hit rates stable across reproducible
-# builds. Override at build time with `--build-arg RUST_VERSION=<v>`.
-ARG RUST_VERSION=1.96
-FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+# We compile against the same Rust toolchain the host uses. The default image is
+# digest-pinned so sandbox image rebuilds cannot silently drift.
+ARG RUST_IMAGE=rust:1.96-slim-bookworm@sha256:4732ca96fd086cb9be682050c3f0176288eebaac2b80aa2bcefccfaf198e1950
+FROM ${RUST_IMAGE} AS builder
 
 WORKDIR /build
 

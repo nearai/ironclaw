@@ -2,7 +2,7 @@
 name = "ironclaw_reborn_config"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version.workspace = true
 description = "Boot configuration contracts for the standalone IronClaw Reborn binary"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"

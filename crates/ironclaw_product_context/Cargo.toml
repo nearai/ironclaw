@@ -2,7 +2,7 @@
 name = "ironclaw_product_context"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version.workspace = true
 description = "Ingress resolver — single owner of turn-origin/surface/owner classification"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
