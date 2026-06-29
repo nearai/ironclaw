@@ -799,6 +799,13 @@ fn resolve_google_oauth_config(
         client = client.with_hosted_domain_hint(hosted_domain_hint);
     }
 
+    tracing::debug!(
+        target = "ironclaw::reborn::cli::google_oauth",
+        has_client_secret = client.client_secret.is_some(),
+        has_hosted_domain_hint = hosted_domain_hint.is_some(),
+        "Google OAuth backend config resolved from environment"
+    );
+
     Ok(Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint,
