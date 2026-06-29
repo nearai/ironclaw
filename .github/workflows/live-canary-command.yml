@@ -1,0 +1,160 @@
+name: Live Canary Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write        # dispatch live-canary.yml
+  contents: read
+  issues: write         # comment on PR threads and react to trigger comments
+  pull-requests: write  # reactions on PR comments require PR write in this repo
+
+concurrency:
+  group: live-canary-command-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch Live Canary
+    if: >-
+      github.event.issue.pull_request != null
+      && (
+        github.event.comment.body == '/canary'
+        || startsWith(github.event.comment.body, '/canary ')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check commenter has write permission
+        id: auth
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            let permission = 'none';
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: context.payload.comment.user.login,
+              });
+              permission = data.permission;
+            } catch (err) {
+              if (err.status !== 404) throw err;
+            }
+
+            const ok = ['admin', 'write', 'maintain'].includes(permission);
+            core.setOutput('authorized', ok ? 'yes' : 'no');
+            if (!ok) {
+              core.notice(`Comment author @${context.payload.comment.user.login} is not authorized to trigger live canary (permission: ${permission}).`);
+            }
+
+      - name: Parse command and resolve pull request
+        id: parse
+        if: steps.auth.outputs.authorized == 'yes'
+        env:
+          BODY: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          usage=$'Usage: `/canary [all|cases=<case-list>|<case-list>]`\n\nExamples:\n- `/canary`\n- `/canary all`\n- `/canary cases=2A,2D,5C`'
+          body_norm="$(printf '%s' "$BODY" | tr '\n\t' '  ' | tr -s ' ' | sed -E 's/^ +| +$//g')"
+          args="${body_norm#/canary}"
+          args="$(printf '%s' "$args" | sed -E 's/^ +| +$//g')"
+
+          cases="all"
+          if [ -n "$args" ] && [ "$args" != "all" ]; then
+            case "$args" in
+              cases=*) cases="${args#cases=}" ;;
+              case=*) cases="${args#case=}" ;;
+              *) cases="$args" ;;
+            esac
+          fi
+
+          if ! printf '%s' "$cases" | grep -Eq '^(all|[A-Za-z0-9_.:-]+(,[A-Za-z0-9_.:-]+)*)$'; then
+            gh pr comment "$PR" --repo "$REPO" --body "Could not parse \`/canary\` cases argument."$'\n\n'"$usage"
+            exit 0
+          fi
+
+          is_cross_repository="$(gh pr view "$PR" --repo "$REPO" --json isCrossRepository --jq .isCrossRepository)"
+          if [ "$is_cross_repository" = "true" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body \
+              "Refusing to run live canary on a forked PR. The live canary uses production-like integration secrets, so \`/canary\` is limited to branches in this repository."
+            exit 0
+          fi
+
+          head_sha="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          short_sha="${head_sha:0:10}"
+          trigger_context="/canary PR #${PR} ${short_sha} comment ${COMMENT_ID} by @${COMMENT_AUTHOR}"
+
+          {
+            echo "cases=$cases"
+            echo "head_sha=$head_sha"
+            echo "short_sha=$short_sha"
+            echo "trigger_context=$trigger_context"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge with rocket reaction
+        if: steps.parse.outputs.head_sha != ''
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -F content=rocket
+
+      - name: Dispatch Reborn WebUI v2 live canary
+        if: steps.parse.outputs.head_sha != ''
+        env:
+          CASES: ${{ steps.parse.outputs.cases }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
+          REPO: ${{ github.repository }}
+          TRIGGER_CONTEXT: ${{ steps.parse.outputs.trigger_context }}
+        run: |
+          set -euo pipefail
+          gh workflow run live-canary.yml \
+            --repo "$REPO" \
+            --ref main \
+            -f lane=reborn-webui-v2-live-qa \
+            -f cases="$CASES" \
+            -f target_ref="$HEAD_SHA" \
+            -f trigger_context="$TRIGGER_CONTEXT"
+
+      - name: Post started comment
+        if: steps.parse.outputs.head_sha != ''
+        env:
+          CASES: ${{ steps.parse.outputs.cases }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          SHORT_SHA: ${{ steps.parse.outputs.short_sha }}
+          TRIGGER_CONTEXT: ${{ steps.parse.outputs.trigger_context }}
+        run: |
+          set -euo pipefail
+          run_url=""
+          for _ in $(seq 1 12); do
+            runs_json="$(gh run list \
+              --repo "$REPO" \
+              --workflow live-canary.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json displayTitle,url)"
+            run_url="$(printf '%s' "$runs_json" | jq -r --arg title "$TRIGGER_CONTEXT" '.[] | select(.displayTitle == $title) | .url' | head -n 1)"
+            if [ -n "$run_url" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$run_url" ]; then
+            run_url="https://github.com/${REPO}/actions/workflows/live-canary.yml"
+          fi
+
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "Started Reborn WebUI v2 live canary for \`${SHORT_SHA}\` with cases \`${CASES}\`: ${run_url}"

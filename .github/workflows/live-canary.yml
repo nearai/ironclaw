@@ -1,4 +1,5 @@
 name: Live Canary
+run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
   # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
@@ -42,6 +43,16 @@ on:
         type: string
       previous_ref:
         description: "Previous release/tag for upgrade-canary"
+        type: string
+        required: false
+        default: ""
+      target_ref:
+        description: "Optional ref/SHA for the Reborn WebUI v2 live QA checkout. Used by /canary PR comments."
+        type: string
+        required: false
+        default: ""
+      trigger_context:
+        description: "Optional run label supplied by ChatOps dispatchers."
         type: string
         required: false
         default: ""
@@ -507,6 +518,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.target_ref || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:

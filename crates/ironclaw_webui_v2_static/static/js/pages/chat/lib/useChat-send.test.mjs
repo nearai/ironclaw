@@ -57,14 +57,42 @@ function createReactStub({
   setCalls = [],
   stateSlots = new Map(),
   refs = [],
+  runEffects = false,
 } = {}) {
   let stateIndex = 0;
-  return {
+  let refIndex = 0;
+  let effectIndex = 0;
+  const refSlots = [];
+  const effectSlots = [];
+  const depsChanged = (previous, next) => {
+    if (!previous || !next || previous.length !== next.length) return true;
+    return next.some((value, index) => !Object.is(value, previous[index]));
+  };
+  const react = {
+    __beginRender: () => {
+      stateIndex = 0;
+      refIndex = 0;
+      effectIndex = 0;
+    },
     useCallback: (fn) => fn,
-    useEffect: () => {},
+    useEffect: (effect, deps) => {
+      if (!runEffects) return;
+      const index = effectIndex++;
+      const slot = effectSlots[index] || { deps: null, cleanup: null };
+      if (!depsChanged(slot.deps, deps)) {
+        effectSlots[index] = slot;
+        return;
+      }
+      if (typeof slot.cleanup === "function") slot.cleanup();
+      slot.deps = deps ? [...deps] : null;
+      slot.cleanup = effect() || null;
+      effectSlots[index] = slot;
+    },
     useRef: (value) => {
-      const ref = { current: value };
-      refs.push(ref);
+      const index = refIndex++;
+      const ref = refSlots[index] || { current: value };
+      refSlots[index] = ref;
+      if (!refs.includes(ref)) refs.push(ref);
       return ref;
     },
     useState: (initial) => {
@@ -86,6 +114,7 @@ function createReactStub({
       ];
     },
   };
+  return react;
 }
 
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
@@ -2305,6 +2334,304 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
   const third = await chat.send("message after settlement");
 
   assert.equal(third.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+});
+
+test("useChat.send: created thread stays blocked until accepted run settles", async () => {
+  const createdThreadId = "thread-created";
+  let renderedMessages = [];
+  let createThreadCalls = 0;
+  let sendCalls = 0;
+  const seededByThread = new Map();
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalls += 1;
+      return { thread: { thread_id: createdThreadId } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: `msg:created-${sendCalls}`,
+        run_id: `run-${sendCalls}`,
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const prev = seededByThread.get(threadId) || [];
+        seededByThread.set(
+          threadId,
+          typeof updater === "function" ? updater(prev) : updater,
+        );
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const first = await chat.send("first message creates the thread");
+  assert.equal(createThreadCalls, 1);
+  assert.equal(first.run_id, "run-1");
+  assert.equal(first.thread_id, createdThreadId);
+
+  context.chatEventsArgs.setIsProcessing(false);
+  context.chatEventsArgs.setActiveRun(null);
+
+  const second = await chat.send("draft while the reply is still running", {
+    threadId: createdThreadId,
+  });
+  assert.equal(second, null);
+  assert.equal(sendCalls, 1);
+
+  context.chatEventsArgs.onRunSettled("run-1", { success: true });
+
+  const third = await chat.send("message after settlement", {
+    threadId: createdThreadId,
+  });
+  assert.equal(third.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+});
+
+test("useChat.send: clears local busy when run settles before send response", async () => {
+  const createdThreadId = "thread-created";
+  let renderedMessages = [];
+  let sendCalls = 0;
+  const seededByThread = new Map();
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => ({
+      thread: { thread_id: createdThreadId },
+    }),
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sendCalls += 1;
+      const runId = `run-${sendCalls}`;
+      if (sendCalls === 1) {
+        context.chatEventsArgs.setIsProcessing(false);
+        context.chatEventsArgs.setActiveRun(null);
+        context.chatEventsArgs.onRunSettled(runId, { success: true });
+      }
+      return {
+        accepted_message_ref: `msg:early-settled-${sendCalls}`,
+        run_id: runId,
+        status: sendCalls === 1 ? "completed" : "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const prev = seededByThread.get(threadId) || [];
+        seededByThread.set(
+          threadId,
+          typeof updater === "function" ? updater(prev) : updater,
+        );
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const first = await chat.send("first message settles before response");
+  const second = await chat.send("message after early settlement", {
+    threadId: createdThreadId,
+  });
+
+  assert.equal(first.run_id, "run-1");
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+});
+
+test("useChat.send: clears local admission when navigating away before settlement", async () => {
+  const threadA = "thread-a";
+  const threadB = "thread-b";
+  let renderedMessages = [];
+  let sendCalls = 0;
+  const seededByThread = new Map();
+  const ReactStub = createReactStub({ runEffects: true });
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: ReactStub,
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("threads already exist in this scenario");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: `msg:navigation-${sendCalls}`,
+        run_id: `run-${sendCalls}`,
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const prev = seededByThread.get(threadId) || [];
+        seededByThread.set(
+          threadId,
+          typeof updater === "function" ? updater(prev) : updater,
+        );
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+  const renderChat = (threadId) => {
+    ReactStub.__beginRender();
+    return context.globalThis.__testExports.useChat(threadId);
+  };
+
+  let chat = renderChat(threadA);
+  const first = await chat.send("first message on thread A");
+  assert.equal(first.run_id, "run-1");
+
+  renderChat(threadB);
+  renderChat(threadB);
+
+  chat = renderChat(threadA);
+  chat = renderChat(threadA);
+  context.chatEventsArgs.setIsProcessing(false);
+  context.chatEventsArgs.setActiveRun(null);
+
+  const second = await chat.send("resend after returning to thread A");
+
+  assert.equal(second.run_id, "run-2");
   assert.equal(sendCalls, 2);
 });
 
