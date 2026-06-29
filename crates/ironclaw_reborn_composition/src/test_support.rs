@@ -701,10 +701,7 @@ where
 pub fn build_local_dev_secret_store_for_test<F>(
     root: &std::path::Path,
     scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
-) -> Result<
-    std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>,
-    crate::RebornBuildError,
->
+) -> Result<std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>, crate::RebornBuildError>
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {

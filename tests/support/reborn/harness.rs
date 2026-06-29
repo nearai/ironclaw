@@ -104,8 +104,9 @@ use ironclaw_reborn::subagent::{
 };
 use ironclaw_reborn::{
     loop_exit_applier::{
-        BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-        FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
+        ApprovalGateEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
+        FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
+        ThreadCheckpointLoopExitEvidencePort,
     },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
@@ -339,6 +340,67 @@ impl HarnessCapabilityRecorder {
             }
             Self::HostRuntime(harness) => harness.enable_auto_approve_for(scope).await,
         }
+    }
+
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.approval_requests_store(),
+        }
+    }
+
+    pub(crate) fn capability_user_id(&self) -> Option<UserId> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => Some(harness.user_id().clone()),
+        }
+    }
+}
+
+/// Test-tree [`ApprovalGateEvidenceStore`] over the real approval-request store —
+/// mirrors the private production `LocalDevApprovalGateEvidence`
+/// (`ironclaw_reborn_composition::runtime`). The integration runtime wires this
+/// so a `BlockedApproval` run is verified against the persisted `Pending`
+/// approval request at loop exit and pauses, instead of being rejected as
+/// unverified and going terminal `Failed` (`driver_protocol_violation`).
+pub(crate) struct HarnessApprovalGateEvidence {
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+}
+
+impl HarnessApprovalGateEvidence {
+    pub(crate) fn new(
+        approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    ) -> Self {
+        Self { approval_requests }
+    }
+}
+
+#[async_trait]
+impl ApprovalGateEvidenceStore for HarnessApprovalGateEvidence {
+    async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(request_id) = gate_ref
+            .as_str()
+            .strip_prefix("gate:approval-")
+            .and_then(|value| ApprovalRequestId::parse(value).ok())
+        else {
+            return Ok(false);
+        };
+        let record = self
+            .approval_requests
+            .get(&scope.to_resource_scope(), request_id)
+            .await
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("approval request evidence lookup failed: {error}"),
+            })?;
+        Ok(record
+            .map(|record| record.status == ironclaw_run_state::ApprovalStatus::Pending)
+            .unwrap_or(false))
     }
 }
 
@@ -2489,6 +2551,43 @@ impl HostRuntimeCapabilityHarness {
     /// setting-flip arm of the C1 approval-settings test).
     pub(crate) async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
         self.enable_global_auto_approve(scope).await
+    }
+
+    /// The persisted approval-request store, when this harness wires the real
+    /// local-dev approval stores (`file_tools_requiring_approval`). The
+    /// integration runtime builds an [`ApprovalGateEvidenceStore`] over it so a
+    /// `BlockedApproval` run is verified at loop exit (mirrors production
+    /// `runtime.rs:2799`) and genuinely pauses instead of failing.
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        self.approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.approval_requests))
+    }
+
+    /// The user id this capability harness's first-party tools execute under.
+    /// The dispatch-time auto-approve check is keyed `(tenant, user)` on THIS
+    /// user (not the run's binding owner), so the group derives the auto-approve
+    /// scope from it — see `GroupSharedStorage::auto_approve_scope`.
+    pub(crate) fn user_id(&self) -> &UserId {
+        &self.user_id
+    }
+
+    /// Override the user this capability harness executes first-party tools under.
+    /// The dispatch ResourceScope, approval-request persistence, auto-approve
+    /// keying, and the approval-gate-evidence lookup are ALL keyed on this user
+    /// (`HostRuntimeHarnessCapabilityPortFactory` builds the authority from
+    /// `self.user_id`). The integration harness sets it to the run's binding owner
+    /// so capability dispatch and the turn run under the SAME `(tenant, user)` —
+    /// matching production (where the run owner *is* the capability user) instead
+    /// of the constructor's fixed test user. Without this, a `BlockedApproval`
+    /// run's request persists under the capability user but the gate-evidence
+    /// lookup uses the turn owner, so the gate is never verified and the run goes
+    /// terminal `Failed`.
+    pub(crate) fn with_user_id(mut self, user_id: UserId) -> Self {
+        self.user_id = user_id;
+        self
     }
 
     fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {

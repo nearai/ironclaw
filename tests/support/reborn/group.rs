@@ -75,10 +75,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
+use ironclaw_host_api::ResourceScope;
 
 use super::builder::{
     RebornIntegrationHarness, StorageMode, apply_hermetic_env, assemble_thread_runtime,
-    build_storage_composite,
+    build_storage_composite, resolve_canonical_subject_user,
 };
 use super::harness::{
     HarnessCapabilityMode, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -116,6 +117,26 @@ pub(crate) struct GroupSharedStorage {
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
+}
+
+impl GroupSharedStorage {
+    /// The `(tenant, user)` scope the dispatch-time auto-approve check is keyed
+    /// on for this group's capability backend: the run tenant (from the product
+    /// harness scope) combined with the user the capability harness executes its
+    /// first-party tools under (NOT the binding owner — see
+    /// `HostRuntimeCapabilityHarness::user_id`). Used to disable auto-approve so
+    /// gates fire, and to re-enable it for the no-gate / approve-always arm.
+    /// `None` for the Echo backend (no approval stores).
+    pub(crate) fn auto_approve_scope(&self) -> Option<ResourceScope> {
+        match &self.capability {
+            GroupCapability::HostRuntime(arc) => {
+                let mut scope = self.product_harness.scope.clone();
+                scope.user_id = arc.user_id().clone();
+                Some(scope)
+            }
+            GroupCapability::Recording => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,23 +292,36 @@ impl RebornIntegrationGroupBuilder {
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, libsql_db_path) =
             build_storage_composite(self.storage, turn_root.path()).await?;
-        let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval().await?;
+        // Execute first-party tools under the run's CANONICAL binding subject
+        // user (the hashed `UserId` the actor `host-user` resolves to), not the
+        // constructor's fixed test user, so capability dispatch, approval
+        // persistence, auto-approve keying, and gate-evidence lookup all share the
+        // run's `(tenant, user)` — matching production.
+        let subject_user = resolve_canonical_subject_user(&product_harness).await?;
+        let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
+            .await?
+            .with_user_id(subject_user);
         let arc = Arc::new(host_runtime);
-        // Disable auto-approve for the group scope once at build time so every
-        // thread in this group faces real approval gates (not auto-approved).
-        // Uses product_harness.scope as the single-source ResourceScope (R5).
-        arc.disable_auto_approve_for(product_harness.scope.clone())
-            .await?;
         let capability = GroupCapability::HostRuntime(arc);
+        let shared = GroupSharedStorage {
+            storage: self.storage,
+            composite,
+            libsql_db_path,
+            turn_root,
+            product_harness,
+            capability,
+        };
+        // Disable auto-approve once at build time so every thread in this group
+        // faces real approval gates. The dispatch-time check is keyed on the
+        // capability harness's executor user (NOT the binding owner), so target
+        // `auto_approve_scope()` — `(run tenant, capability user)`.
+        if let (Some(scope), GroupCapability::HostRuntime(arc)) =
+            (shared.auto_approve_scope(), &shared.capability)
+        {
+            arc.disable_auto_approve_for(scope).await?;
+        }
         Ok(RebornIntegrationGroup {
-            shared: Arc::new(GroupSharedStorage {
-                storage: self.storage,
-                composite,
-                libsql_db_path,
-                turn_root,
-                product_harness,
-                capability,
-            }),
+            shared: Arc::new(shared),
         })
     }
 

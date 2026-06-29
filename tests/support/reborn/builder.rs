@@ -33,7 +33,8 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, UserId,
+    VirtualPath,
 };
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
@@ -70,8 +71,9 @@ use ironclaw_turns::{
 
 use super::group::{GroupCapability, GroupSharedStorage};
 use super::harness::{
-    EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
-    HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordedCapabilityResult, test_product_scope,
+    EmptyIdentityContextSource, HarnessApprovalGateEvidence, HarnessCapabilityMode,
+    HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
+    RecordedCapabilityResult, test_product_scope,
 };
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
@@ -83,7 +85,7 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// The actor/user that submits turns. Reused at binding-probe time and submit
 /// time so both resolve to the same conversation binding (and thread).
-const HARNESS_ACTOR_ID: &str = "host-user";
+pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
@@ -652,14 +654,22 @@ impl RebornIntegrationHarness {
         .await
     }
 
-    /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run scope
-    /// via the real CAS-persisted `AutoApproveSettingStore` (the no-gate settings
-    /// arm: with auto-approve on, the same capability completes without a gate).
+    /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
+    /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
+    /// no-gate / approve-always arm: with auto-approve on, the same capability
+    /// completes without a gate, and the flip persists across threads in the
+    /// group because the store is shared).
     ///
-    /// Scope is sourced from `_shared.product_harness.scope` (R5: single source).
+    /// Scope = `_shared.auto_approve_scope()` — `(run tenant, capability user)`,
+    /// the exact `(tenant, user)` the dispatch-time auto-approve check is keyed on
+    /// (NOT the binding owner).
     pub async fn enable_auto_approve(&self) -> HarnessResult<()> {
+        let scope = self
+            ._shared
+            .auto_approve_scope()
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
         self.capability_recorder
-            .enable_auto_approve_for(self._shared.product_harness.scope.clone())
+            .enable_auto_approve_for(scope)
             .await
     }
 
@@ -815,6 +825,37 @@ fn binding_request(
     }
 }
 
+/// Resolve the canonical subject `UserId` that turns submitted under
+/// [`HARNESS_ACTOR_ID`] run as. Product binding resolution maps the external
+/// actor (`"host-user"`) to a hashed canonical `UserId`; the turn scope owner,
+/// the capability dispatch scope, the auto-approve key, and the approval-gate
+/// evidence lookup must all agree on THAT user. The group sets its capability
+/// harness to execute under this user (via `with_user_id`) so a real approval
+/// gate is persisted and verified under one consistent `(tenant, user)` —
+/// matching production, where the run owner is the capability user. The actor →
+/// canonical mapping is deterministic, so the throwaway probe binding here yields
+/// the same user every thread will resolve to.
+pub(crate) async fn resolve_canonical_subject_user(
+    product_harness: &super::product_workflow::RebornProductWorkflowHarness,
+) -> HarnessResult<UserId> {
+    let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
+    let ingress = RebornTestIngress::new(adapter);
+    let probe = ingress.verified_text_envelope_with_trigger(
+        "subject-user-probe",
+        HARNESS_ACTOR_ID,
+        "conv-subject-user-probe",
+        "hi",
+        ProductTriggerReason::DirectChat,
+    )?;
+    let binding = product_harness
+        .binding_service()?
+        .resolve_binding(binding_request(&probe))
+        .await?;
+    binding
+        .subject_user_id
+        .ok_or_else(|| "resolved binding missing subject user id".into())
+}
+
 fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessResult<ThreadScope> {
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
@@ -936,15 +977,28 @@ pub(crate) async fn assemble_thread_runtime(
     let baseline_egress_count = capability_recorder.runtime_http_requests().len();
     let baseline_result_count = capability_recorder.capability_results().len();
 
-    // --- loop-exit evidence (plain; no gates/blocks in slice 1) -----------
+    // --- loop-exit evidence ------------------------------------------------
+    // When the capability backend wires the real local-dev approval stores
+    // (`.with_live_approvals()`), attach the approval-gate evidence store so a
+    // `BlockedApproval` run is verified against the persisted `Pending` request
+    // at loop exit and genuinely pauses — mirrors production
+    // `ironclaw_reborn_composition::runtime` (`with_approval_gate_evidence`,
+    // runtime.rs:2799). Without it the blocked run is rejected as unverified and
+    // goes terminal `Failed` (driver_protocol_violation), so the real gate flow
+    // (`submit_turn_until_blocked` → `approve_gate`/`deny_gate`) cannot fire.
     let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
-    let loop_exit_evidence: Arc<dyn LoopExitEvidencePort> =
-        Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
-            thread_harness.service.clone(),
-            turn_state_for_evidence,
-            Arc::clone(&loop_checkpoint_store),
-            thread_scope.clone(),
+    let mut evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_harness.service.clone(),
+        turn_state_for_evidence,
+        Arc::clone(&loop_checkpoint_store),
+        thread_scope.clone(),
+    );
+    if let Some(approval_requests) = capability_recorder.approval_requests_store() {
+        evidence = evidence.with_approval_gate_evidence(Arc::new(
+            HarnessApprovalGateEvidence::new(approval_requests),
         ));
+    }
+    let loop_exit_evidence: Arc<dyn LoopExitEvidencePort> = Arc::new(evidence);
 
     // --- planned runtime composition ---------------------------------------
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
