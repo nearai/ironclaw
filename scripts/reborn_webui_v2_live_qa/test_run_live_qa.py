@@ -386,6 +386,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
+        self.assertFalse(
+            run_live_qa._required_text_matches(
+                "fires every 5 minutes and watches slack for debug messages",
+                ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+            )
+        )
+        self.assertFalse(
+            run_live_qa._required_text_matches(
+                "fires every 5 minutes and watches slack for bugfix messages",
+                ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+            )
+        )
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                "fires every 5 minutes and watches slack for bug: messages",
+                ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
+            )
+        )
 
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))

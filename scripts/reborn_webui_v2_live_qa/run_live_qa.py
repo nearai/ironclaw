@@ -1029,9 +1029,18 @@ async def _wait_for_assistant_reply(
 def _required_text_matches(text: str, required_text: list[str]) -> bool:
     normalized_text = text.lower()
     return all(
-        any(option.strip().lower() in normalized_text for option in piece.split('|') if option.strip())
+        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
         for piece in required_text
-)
+    )
+
+
+def _required_option_matches(normalized_text: str, option: str) -> bool:
+    normalized_option = option.strip().lower()
+    if not normalized_option:
+        return False
+    if re.fullmatch(r"\w+", normalized_option):
+        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
+    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
