@@ -40,6 +40,8 @@ export function ChatInput({
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const textRef = React.useRef(text);
+  const currentDraftKeyRef = React.useRef(draftKey);
+  currentDraftKeyRef.current = draftKey;
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
@@ -213,6 +215,8 @@ export function ChatInput({
     // ride along with text rather than sending on their own.
     const submittedText = text.trim();
     const submittedAttachments = attachments;
+    const submittedDraftKey = draftKey;
+    const submittedScope = authScope();
     if (!submittedText || sendBlockedRef.current) return;
     sendBlockedRef.current = true;
     setIsSending(true);
@@ -226,15 +230,24 @@ export function ChatInput({
     clearStagedAttachments(draftKey);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     const restoreSubmittedDraft = () => {
-      if (textRef.current === "") {
+      const scopeUnchanged = authScope() === submittedScope;
+      const draftKeyUnchanged = currentDraftKeyRef.current === submittedDraftKey;
+      if (!scopeUnchanged) return;
+      if (draftKeyUnchanged && textRef.current === "") {
         textRef.current = submittedText;
         setText(submittedText);
-        setDraft(draftKey, submittedText);
       }
-      if (attachmentsRef.current.length === 0 && submittedAttachments.length > 0) {
+      setDraft(submittedDraftKey, submittedText);
+      if (
+        draftKeyUnchanged &&
+        attachmentsRef.current.length === 0 &&
+        submittedAttachments.length > 0
+      ) {
         setAttachments(submittedAttachments);
         attachmentsRef.current = submittedAttachments;
-        setStagedAttachments(draftKey, submittedAttachments);
+      }
+      if (submittedAttachments.length > 0) {
+        setStagedAttachments(submittedDraftKey, submittedAttachments);
       }
     };
     try {
