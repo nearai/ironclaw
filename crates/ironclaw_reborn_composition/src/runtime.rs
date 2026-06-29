@@ -201,6 +201,14 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
+#[cfg(feature = "webui-v2-beta")]
+type IronhubLinkInputs<'a> = (
+    &'a Arc<crate::lifecycle::RebornLocalSkillManagementPort>,
+    &'a Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
+    &'a ironclaw_host_runtime::HostRuntimeHttpEgressPort,
+    &'a crate::ironhub::IronhubSharedKey,
+);
+
 /// Started, running Reborn agent runtime.
 ///
 /// `RebornRuntime` is the single user-facing handle returned by
@@ -577,30 +585,43 @@ impl RebornRuntime {
         self.boot.as_ref()
     }
 
-    /// Shared HMAC key for the IronHub deep-link webhooks, when one was wired
-    /// at boot. The WebUI facade uses it to compose the agent-link service.
     #[cfg(feature = "webui-v2-beta")]
-    pub(crate) fn webui_ironhub_agent_shared_key(
-        &self,
-    ) -> Option<crate::ironhub::IronhubSharedKey> {
-        self.ironhub_agent_shared_key.clone()
+    fn ironhub_link_inputs(&self) -> Option<IronhubLinkInputs<'_>> {
+        let local_runtime = self.services.local_runtime.as_ref()?;
+        Some((
+            &local_runtime.skill_management,
+            local_runtime.extension_management.as_ref()?,
+            local_runtime.host_runtime_http_egress.as_ref()?,
+            self.ironhub_agent_shared_key.as_ref()?,
+        ))
     }
 
-    /// Whether the IronHub register/install webhooks have everything the link
-    /// service needs (shared key plus local-runtime extension + host egress),
-    /// matching the facade-attach gate so serve never mounts a webhook the
-    /// facade left unavailable.
+    /// The composed IronHub deep-link service when every input is wired, ready
+    /// to attach to the WebUI facade. `Ok(None)` when the webhooks are disabled.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) fn webui_ironhub_link_service(
+        &self,
+    ) -> Result<Option<Arc<crate::ironhub::RebornIronhubLinkService>>, RebornBuildError> {
+        let Some((skill_management, extension_management, host_runtime_http_egress, shared_key)) =
+            self.ironhub_link_inputs()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(
+            crate::ironhub::RebornIronhubLinkService::new(
+                Arc::clone(skill_management),
+                Arc::clone(extension_management),
+                host_runtime_http_egress.clone(),
+                shared_key.clone(),
+            )?,
+        )))
+    }
+
+    /// Whether the IronHub register/install webhooks are enabled. Reads the same
+    /// input gate as the facade attach so serve and facade cannot drift.
     #[cfg(feature = "webui-v2-beta")]
     pub fn ironhub_register_enabled(&self) -> bool {
-        self.ironhub_agent_shared_key.is_some()
-            && self
-                .services
-                .local_runtime
-                .as_ref()
-                .is_some_and(|local_runtime| {
-                    local_runtime.extension_management.is_some()
-                        && local_runtime.host_runtime_http_egress.is_some()
-                })
+        self.ironhub_link_inputs().is_some()
     }
 
     /// The runtime's NEAR AI session manager, when an LLM seam is wired. The

@@ -10,11 +10,8 @@ use crate::runtime::{RuntimeInputCaller, RuntimeInputOptions};
 
 #[derive(Debug, Args)]
 pub(crate) struct IronHubCommand {
-    #[arg(
-        long = "confirm-host-access",
-        global = true,
-        help = "Confirm trusted-laptop host filesystem access for local-dev-yolo."
-    )]
+    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    #[arg(long = "confirm-host-access", global = true)]
     confirm_host_access: bool,
 
     #[command(subcommand)]
@@ -23,84 +20,82 @@ pub(crate) struct IronHubCommand {
 
 #[derive(Debug, Subcommand)]
 enum IronHubSubcommand {
-    #[command(about = "Search the signed IronHub catalog.")]
+    /// Search the signed IronHub catalog.
     Search(IronHubSearchCommand),
-    #[command(about = "List available IronHub tools or skills.")]
+    /// List available IronHub tools or skills.
     List(IronHubListCommand),
-    #[command(about = "Show one IronHub catalog entry.")]
+    /// Show one IronHub catalog entry.
     Info(IronHubInfoCommand),
-    #[command(about = "Install an IronHub tool or skill into Reborn local-dev state.")]
+    /// Install an IronHub tool or skill into Reborn local-dev state.
     Install(IronHubInstallCommand),
 }
 
 #[derive(Debug, Args)]
 struct IronHubSearchCommand {
-    #[arg(help = "Optional query by name or description. Omit to list all entries.")]
+    /// Optional query by name or description. Omit to list all entries.
     query: Option<String>,
 
-    #[arg(long, help = "Output the lifecycle response as JSON.")]
+    /// Output the lifecycle response as JSON.
+    #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 struct IronHubListCommand {
-    #[arg(long, value_enum, help = "Limit results to tools or skills.")]
+    /// Limit results to tools or skills.
+    #[arg(long, value_enum)]
     kind: Option<IronHubKindArg>,
 
-    #[arg(long, help = "Output the lifecycle response as JSON.")]
+    /// Output the lifecycle response as JSON.
+    #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 struct IronHubInfoCommand {
-    #[arg(help = "Tool or skill name.")]
+    /// Tool or skill name.
     name: String,
 
-    #[arg(
-        long,
-        value_enum,
-        help = "Disambiguate when a name exists as both a tool and a skill."
-    )]
+    /// Disambiguate when a name exists as both a tool and a skill.
+    #[arg(long, value_enum)]
     kind: Option<IronHubKindArg>,
 
-    #[arg(long, help = "Output the lifecycle response as JSON.")]
+    /// Output the lifecycle response as JSON.
+    #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 struct IronHubInstallCommand {
-    #[arg(help = "Tool or skill name.")]
+    /// Tool or skill name.
     name: String,
 
-    #[arg(
-        long,
-        value_enum,
-        help = "Disambiguate when a name exists as both a tool and a skill."
-    )]
+    /// Disambiguate when a name exists as both a tool and a skill.
+    #[arg(long, value_enum)]
     kind: Option<IronHubKindArg>,
 
-    #[arg(long, help = "Replace an already installed package.")]
+    /// Replace an already installed package.
+    #[arg(long)]
     force: bool,
 
-    #[arg(long, help = "Acknowledge installing unverified community content.")]
+    /// Acknowledge installing unverified community content.
+    #[arg(long)]
     acknowledge_unverified: bool,
 
-    #[arg(long, help = "Require the catalog entry to still have this version.")]
+    /// Require the catalog entry to still have this version.
+    #[arg(long)]
     expected_version: Option<String>,
 
-    #[arg(
-        long,
-        help = "Require the catalog entry to still have this artifact digest."
-    )]
+    /// Require the catalog entry to still have this artifact digest.
+    #[arg(long)]
     expected_artifact_digest: Option<String>,
 
-    #[arg(
-        long,
-        help = "Install from a private org-scoped signed manifest URL instead of the public catalog."
-    )]
+    /// Install from a private org-scoped signed manifest URL instead of the public catalog.
+    #[arg(long)]
     private_manifest_url: Option<String>,
 
-    #[arg(long, help = "Output the lifecycle response as JSON.")]
+    /// Output the lifecycle response as JSON.
+    #[arg(long)]
     json: bool,
 }
 

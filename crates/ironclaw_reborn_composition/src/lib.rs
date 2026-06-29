@@ -170,7 +170,7 @@ pub use ironhub::{
     execute_reborn_ironhub_command, render_reborn_ironhub_response,
 };
 #[cfg(feature = "webui-v2-beta")]
-pub use ironhub::IronhubSharedKey;
+pub use ironhub::{IronhubSharedKey, IronhubSharedKeyError};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironhub_link_serve::{IronhubRegisterRouteState, ironhub_register_route_mount};
 #[cfg(feature = "root-llm-provider")]

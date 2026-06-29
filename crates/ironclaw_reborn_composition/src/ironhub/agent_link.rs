@@ -4,12 +4,26 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const MIN_SHARED_KEY_LEN: usize = 16;
+
+#[derive(Debug, thiserror::Error)]
+pub enum IronhubSharedKeyError {
+    #[error("ironhub shared key must be at least {min} bytes")]
+    TooShort { min: usize },
+}
+
 #[derive(Clone)]
 pub struct IronhubSharedKey(String);
 
 impl IronhubSharedKey {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn new(value: impl Into<String>) -> Result<Self, IronhubSharedKeyError> {
+        let value = value.into();
+        if value.len() < MIN_SHARED_KEY_LEN {
+            return Err(IronhubSharedKeyError::TooShort {
+                min: MIN_SHARED_KEY_LEN,
+            });
+        }
+        Ok(Self(value))
     }
 
     pub(super) fn as_str(&self) -> &str {
@@ -45,9 +59,11 @@ pub(super) fn install_payload(request: &IronhubInstallDeliveryRequest) -> String
 
 pub(super) fn verify_signature(shared_key: &str, payload: &str, sig_hex: &str) -> bool {
     let Ok(expected) = hex::decode(sig_hex) else {
+        // silent-ok: a non-hex signature is an invalid signature; reject it.
         return false;
     };
     let Ok(mut mac) = HmacSha256::new_from_slice(shared_key.as_bytes()) else {
+        // silent-ok: HMAC-SHA256 accepts any key length, so this arm never fires.
         return false;
     };
     mac.update(payload.as_bytes());

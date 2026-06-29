@@ -14,7 +14,7 @@ mod service;
 mod tests;
 
 #[cfg(feature = "webui-v2-beta")]
-pub use agent_link::IronhubSharedKey;
+pub use agent_link::{IronhubSharedKey, IronhubSharedKeyError};
 pub(crate) use capabilities::{extend_builtin_first_party_package, insert_handlers};
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) use link_service::RebornIronhubLinkService;

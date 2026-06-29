@@ -60,8 +60,8 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use ironhub_link::{
-    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
-    IronhubLinkService, IronhubRegisterRequest,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubInstallKind,
+    IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -481,9 +481,10 @@ pub trait RebornServicesApi: Send + Sync {
 
     async fn ironhub_deliver_install(
         &self,
+        caller: WebUiAuthenticatedCaller,
         request: IronhubInstallDeliveryRequest,
     ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
-        let _ = request;
+        let _ = (caller, request);
         Err(ironhub_link::ironhub_link_unavailable())
     }
 }
@@ -1315,6 +1316,7 @@ impl RebornServicesApi for RebornServices {
 
     async fn ironhub_deliver_install(
         &self,
+        caller: WebUiAuthenticatedCaller,
         request: IronhubInstallDeliveryRequest,
     ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
         let service = self
@@ -1322,7 +1324,7 @@ impl RebornServicesApi for RebornServices {
             .as_ref()
             .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
         service
-            .deliver_install(request)
+            .deliver_install(caller.user_id, request)
             .await
             .map_err(ironhub_link::map_ironhub_link_error)
     }

@@ -23,10 +23,10 @@ use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
-    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
@@ -463,10 +463,13 @@ pub async fn install_extension(
 /// `POST /api/webchat/v2/ironhub/install`
 pub async fn ironhub_deliver_install(
     State(state): State<WebUiV2State>,
-    Extension(_caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<IronhubInstallDeliveryRequest>,
 ) -> Result<Json<IronhubInstallDeliveryResult>, WebUiV2HttpError> {
-    let response = state.services().ironhub_deliver_install(body).await?;
+    let response = state
+        .services()
+        .ironhub_deliver_install(caller, body)
+        .await?;
     Ok(Json(response))
 }
 

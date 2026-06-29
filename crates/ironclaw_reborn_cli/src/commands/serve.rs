@@ -14,12 +14,12 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
     build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
 };
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_composition::{IronhubRegisterRouteState, ironhub_register_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_composition::{IronhubRegisterRouteState, ironhub_register_route_mount};
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,

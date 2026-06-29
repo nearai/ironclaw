@@ -28,8 +28,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, LifecyclePackageRef,
-    LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
+    LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse,
@@ -85,6 +85,7 @@ struct StubServices {
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
     ironhub_deliver_install_calls: Mutex<Vec<IronhubInstallDeliveryRequest>>,
+    next_ironhub_deliver_install_error: Mutex<Option<RebornServicesError>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
@@ -114,6 +115,13 @@ impl StubServices {
     fn fail_list_connectable_channels(&self, error: RebornServicesError) {
         *self
             .next_list_connectable_channels_error
+            .lock()
+            .expect("lock") = Some(error);
+    }
+
+    fn fail_ironhub_deliver_install(&self, error: RebornServicesError) {
+        *self
+            .next_ironhub_deliver_install_error
             .lock()
             .expect("lock") = Some(error);
     }
@@ -404,8 +412,17 @@ impl RebornServicesApi for StubServices {
 
     async fn ironhub_deliver_install(
         &self,
+        _caller: WebUiAuthenticatedCaller,
         request: IronhubInstallDeliveryRequest,
     ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
+        if let Some(error) = self
+            .next_ironhub_deliver_install_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
         let slug = request.slug.clone();
         self.ironhub_deliver_install_calls
             .lock()
@@ -648,6 +665,65 @@ async fn ironhub_deliver_install_dispatches_through_facade() {
     assert_eq!(calls.len(), 1, "facade called exactly once");
     assert_eq!(calls[0].slug, "my-skill");
     assert_eq!(calls[0].artifact_digest, "sha256:deadbeef");
+}
+
+#[tokio::test]
+async fn ironhub_deliver_install_rejects_malformed_body_without_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        services
+            .ironhub_deliver_install_calls
+            .lock()
+            .expect("lock")
+            .len(),
+        0,
+        "facade must not be called for a malformed body"
+    );
+}
+
+#[tokio::test]
+async fn ironhub_deliver_install_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_ironhub_deliver_install(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

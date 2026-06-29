@@ -20,12 +20,9 @@ use crate::webui_serve::PublicRouteMount;
 
 pub(crate) const IRONHUB_REGISTER_PATH: &str = "/api/ironhub/register";
 const IRONHUB_REGISTER_ROUTE_ID: &str = "ironhub.register";
-// safety: 8 KiB is a non-zero literal.
-const IRONHUB_REGISTER_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(8 * 1024).unwrap();
-// safety: 600 requests is a non-zero literal.
-const IRONHUB_REGISTER_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(600).unwrap();
-// safety: 60 seconds is a non-zero literal.
-const IRONHUB_REGISTER_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap();
+const IRONHUB_REGISTER_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(8 * 1024).unwrap(); // safety: 8 KiB is a non-zero literal.
+const IRONHUB_REGISTER_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(600).unwrap(); // safety: 600 requests is a non-zero literal.
+const IRONHUB_REGISTER_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 seconds is a non-zero literal.
 
 #[derive(Clone)]
 pub struct IronhubRegisterRouteState {
@@ -60,8 +57,7 @@ pub(crate) fn ironhub_register_route_descriptors() -> Vec<IngressRouteDescriptor
         IRONHUB_REGISTER_PATH,
         ironhub_register_policy(),
     )
-    // safety: route id/path are crate-local literals and the policy is built by the sibling helper.
-    .expect("IronHub register route descriptor must validate at startup");
+    .expect("IronHub register route descriptor must validate at startup"); // safety: route id/path are crate-local literals and the policy is built by the sibling helper.
     vec![descriptor]
 }
 
@@ -86,8 +82,7 @@ fn ironhub_register_policy() -> IngressPolicy {
         audit: AuditTraceClass::PublicCallback,
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
-    // safety: policy combines validated constants and a host-resolved webhook-signature scope.
-    .expect("IronHub register ingress policy must validate")
+    .expect("IronHub register ingress policy must validate") // safety: policy combines validated constants and a host-resolved webhook-signature scope.
 }
 
 async fn ironhub_register_handler(

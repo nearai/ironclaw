@@ -569,9 +569,15 @@ fn resolve_manifest_url() -> String {
 }
 
 fn manifest_host(url: &str) -> Option<String> {
-    url::Url::parse(url)
+    let host = url::Url::parse(url)
         .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .and_then(|parsed| parsed.host_str().map(str::to_string));
+    if host.is_none() {
+        tracing::debug!(
+            "ironhub manifest url has no parseable host; catalog host pinning disabled"
+        );
+    }
+    host
 }
 
 fn manifest_cache_get(url: &str, now: Instant) -> Option<Arc<IronHubManifest>> {
@@ -623,10 +629,11 @@ fn enforce_manifest_monotonic(
             reason: format!("manifest generated_at is not RFC3339: {error}"),
         })?
         .with_timezone(&Utc);
+    let key = manifest_replay_key(url, manifest);
     let mut guard = MANIFEST_LAST_SEEN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(previous) = guard.get(url)
+    if let Some(previous) = guard.get(&key)
         && generated_at < *previous
     {
         return Err(IronHubCommandError::Catalog {
@@ -637,8 +644,16 @@ fn enforce_manifest_monotonic(
             ),
         });
     }
-    guard.insert(url.to_string(), generated_at);
+    guard.insert(key, generated_at);
     Ok(())
+}
+
+fn manifest_replay_key(url: &str, manifest: &IronHubManifest) -> String {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_default();
+    format!("{host}|{}", manifest.repo)
 }
 
 fn install_lock(key: &str) -> Arc<AsyncMutex<()>> {
