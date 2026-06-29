@@ -368,6 +368,33 @@ test("useHistory seedThreadMessages updates the mounted target thread", async ()
       isOptimistic: true,
     },
   ]);
+  assert.equal(setCalls.at(-1).messagesThreadId, "thread-visible");
+});
+
+test("useHistory setMessages restamps messages onto the active thread", async () => {
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-active", {});
+  threadHistory.setMessages([
+    {
+      id: "pending-1",
+      role: "user",
+      content: "active update",
+    },
+  ]);
+
+  assert.equal(setCalls.at(-1).messagesThreadId, "thread-active");
 });
 
 test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {

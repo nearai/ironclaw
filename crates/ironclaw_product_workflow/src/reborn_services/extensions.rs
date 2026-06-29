@@ -137,11 +137,11 @@ pub(super) async fn remove_extension(
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let channel = (package_ref.kind == LifecyclePackageKind::Extension)
-        .then(|| package_ref.id.as_str().to_string());
+    let context = lifecycle_surface_context(caller.clone());
+    let channel = removable_channel_id(facade, context.clone(), &package_ref).await?;
     let lifecycle = execute_lifecycle(
         facade,
-        lifecycle_surface_context(caller.clone()),
+        context,
         LifecycleProductAction::ExtensionRemove { package_ref },
     )
     .await?;
@@ -151,6 +151,26 @@ pub(super) async fn remove_extension(
             .await?;
     }
     Ok(action_response(&lifecycle, None, None))
+}
+
+async fn removable_channel_id(
+    facade: &dyn LifecycleProductFacade,
+    context: LifecycleProductContext,
+    package_ref: &LifecyclePackageRef,
+) -> Result<Option<String>, RebornServicesError> {
+    if package_ref.kind != LifecyclePackageKind::Extension {
+        return Ok(None);
+    }
+    let lifecycle =
+        execute_lifecycle(facade, context, LifecycleProductAction::ExtensionList).await?;
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = lifecycle.payload else {
+        return Ok(None);
+    };
+    Ok(extensions.into_iter().find_map(|installed| {
+        (installed.summary.package_ref == *package_ref
+            && has_external_channel_surface(&installed.summary))
+        .then(|| installed.summary.package_ref.id.as_str().to_string())
+    }))
 }
 
 async fn execute_lifecycle(
@@ -294,9 +314,10 @@ fn extension_info(
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
     let summary = installed.summary;
+    let has_external_channel_surface = has_external_channel_surface(&summary);
     let kind = extension_kind(&summary).to_string();
-    let channel_unconnected =
-        kind == "channel" && connections.get(summary.package_ref.id.as_str()) == Some(&false);
+    let channel_unconnected = has_external_channel_surface
+        && connections.get(summary.package_ref.id.as_str()) == Some(&false);
     // A channel extension the calling user has not personally connected (e.g.
     // Slack pairing) surfaces as `setup_required` so the WebUI shows the same
     // Configure affordance as a credential-gated extension. The per-user
@@ -332,14 +353,17 @@ fn extension_info(
 }
 
 fn extension_kind(summary: &LifecycleExtensionSummary) -> &'static str {
-    if summary
-        .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
-    {
+    if has_external_channel_surface(summary) {
         "channel"
     } else {
         summary.runtime_kind.wire_kind()
     }
+}
+
+fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
+    summary
+        .surface_kinds
+        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
 }
 
 fn phase_status(phase: LifecyclePhase) -> &'static str {
@@ -528,8 +552,9 @@ mod tests {
             "the WebUI remove path must clear the caller's per-channel personal connection"
         );
         let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        let (context, action) = &calls[0];
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
+        let (context, action) = &calls[1];
         assert_eq!(
             *action,
             LifecycleProductAction::ExtensionRemove {
@@ -545,6 +570,31 @@ mod tests {
             }
             other => panic!("unexpected lifecycle context: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn remove_action_does_not_disconnect_non_channel_extensions() {
+        let facade = RemoveFacade::non_channel();
+        let caller = caller();
+        let connections = Arc::new(TestConnections::default());
+        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
+
+        let response = remove_extension(&facade, channel_connections, caller, package_ref())
+            .await
+            .expect("remove response");
+
+        assert!(response.success);
+        assert!(
+            connections.disconnects().is_empty(),
+            "non-channel extension removal must not clear channel personal connections"
+        );
+        let calls = facade.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
+        assert!(matches!(
+            calls[1].1,
+            LifecycleProductAction::ExtensionRemove { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1113,9 +1163,27 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct RemoveFacade {
         calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
+        channel: bool,
+    }
+
+    impl Default for RemoveFacade {
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                channel: true,
+            }
+        }
+    }
+
+    impl RemoveFacade {
+        fn non_channel() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                channel: false,
+            }
+        }
     }
 
     #[async_trait]
@@ -1130,6 +1198,26 @@ mod tests {
                 .expect("lock")
                 .push((context, action.clone()));
             match action {
+                LifecycleProductAction::ExtensionList => {
+                    let mut summary = summary_with_onboarding();
+                    if self.channel {
+                        summary.surface_kinds =
+                            vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+                    }
+                    Ok(LifecycleProductResponse {
+                        package_ref: None,
+                        phase: LifecyclePhase::Installed,
+                        blockers: Vec::new(),
+                        message: None,
+                        payload: Some(LifecycleProductPayload::ExtensionList {
+                            extensions: vec![LifecycleInstalledExtensionSummary {
+                                summary,
+                                phase: LifecyclePhase::Installed,
+                            }],
+                            count: 1,
+                        }),
+                    })
+                }
                 LifecycleProductAction::ExtensionRemove { package_ref } => {
                     Ok(LifecycleProductResponse {
                         package_ref: Some(package_ref),

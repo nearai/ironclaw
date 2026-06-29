@@ -219,7 +219,7 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages = apply(s.messages || []);
         putCache(key, { messages, nextCursor: s.nextCursor || null });
-        return { ...s, messages };
+        return { ...s, messages, messagesThreadId: targetThreadId };
       });
       return;
     }
@@ -247,7 +247,11 @@ export function useHistory(threadId, options = {}) {
         if (threadId) {
           putCache(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
         }
-        return { ...s, messages };
+        return {
+          ...s,
+          messages,
+          messagesThreadId: threadId || s.messagesThreadId,
+        };
       }),
   };
 }

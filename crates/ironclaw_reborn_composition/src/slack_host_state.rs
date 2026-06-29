@@ -43,7 +43,7 @@ use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
     SlackPersonalBindingPairingError,
 };
-use crate::slack_serve::SlackUserId;
+use crate::slack_serve::{SlackTeamId, SlackUserId};
 use crate::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
@@ -574,22 +574,8 @@ where
             "{}/{}/{}/{}.json",
             PERSONAL_DM_TARGET_ROOT,
             path_segment(key.installation_id.as_str()),
-            path_segment(&key.team_id),
+            path_segment(key.team_id.as_str()),
             path_segment(key.user_id.as_str())
-        ))
-    }
-
-    fn personal_dm_target_root_path() -> Result<ScopedPath, FilesystemError> {
-        scoped_path(PERSONAL_DM_TARGET_ROOT)
-    }
-
-    fn personal_dm_target_installation_path(
-        installation_id: &AdapterInstallationId,
-    ) -> Result<ScopedPath, FilesystemError> {
-        scoped_path(&format!(
-            "{}/{}",
-            PERSONAL_DM_TARGET_ROOT,
-            path_segment(installation_id.as_str())
         ))
     }
 
@@ -752,6 +738,16 @@ where
         provider: &str,
         user_id: &UserId,
     ) -> Result<bool, RebornUserIdentityLookupError> {
+        self.user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
+            .await
+    }
+
+    async fn user_has_provider_binding_with_provider_user_id_prefix(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
         let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
             .map_err(map_lookup_fs_error)?;
         let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
@@ -776,7 +772,12 @@ where
             else {
                 continue;
             };
-            if record.user_id == user_id.as_str() {
+            if identity_record_matches_user_binding(
+                &record,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
                 return Ok(true);
             }
         }
@@ -879,7 +880,7 @@ where
             else {
                 continue;
             };
-            if !identity_record_matches_disconnect(
+            if !identity_record_matches_user_binding(
                 &candidate,
                 provider,
                 user_id,
@@ -899,7 +900,7 @@ where
             else {
                 continue;
             };
-            if !identity_record_matches_disconnect(
+            if !identity_record_matches_user_binding(
                 &current,
                 provider,
                 user_id,
@@ -959,28 +960,6 @@ where
             Err(error) => Err(map_personal_dm_target_fs_error(error)),
         }
     }
-
-    async fn list_dm_target_segments(
-        &self,
-        path: &ScopedPath,
-    ) -> Result<Vec<FilesystemDmTargetSegment>, SlackPersonalDmTargetError> {
-        let entries = match self.filesystem.list_dir(&self.scope, path).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
-            Err(error) => return Err(map_personal_dm_target_fs_error(error)),
-        };
-        Ok(entries
-            .into_iter()
-            .filter_map(|entry| {
-                let decoded = decode_path_segment(&entry.name)?;
-                Some(FilesystemDmTargetSegment { decoded })
-            })
-            .collect())
-    }
-}
-
-struct FilesystemDmTargetSegment {
-    decoded: String,
 }
 
 #[async_trait::async_trait]
@@ -1024,7 +1003,7 @@ where
         let lock = self.lock_for(format!(
             "personal-dm:{}:{}:{}",
             target.key.installation_id.as_str(),
-            target.key.team_id,
+            target.key.team_id.as_str(),
             target.key.user_id.as_str()
         ));
         let _guard = lock.lock().await;
@@ -1068,7 +1047,7 @@ where
         let lock = self.lock_for(format!(
             "personal-dm:{}:{}:{}",
             key.installation_id.as_str(),
-            key.team_id,
+            key.team_id.as_str(),
             key.user_id.as_str()
         ));
         let _guard = lock.lock().await;
@@ -1083,64 +1062,19 @@ where
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
-        installation_id: Option<&AdapterInstallationId>,
-        team_id: Option<&str>,
+        installation_id: &AdapterInstallationId,
+        team_id: &SlackTeamId,
     ) -> Result<usize, SlackPersonalDmTargetError> {
         if tenant_id != &self.scope.tenant_id {
             return Ok(0);
         }
-        if let (Some(installation_id), Some(team_id)) = (installation_id, team_id) {
-            let key = SlackPersonalDmTargetKey::new(
-                tenant_id.clone(),
-                installation_id.clone(),
-                team_id.to_string(),
-                user_id.clone(),
-            )?;
-            return self.delete_personal_dm_target(&key).await.map(usize::from);
-        }
-
-        let installation_entries = match installation_id {
-            Some(installation_id) => vec![FilesystemDmTargetSegment {
-                decoded: installation_id.as_str().to_string(),
-            }],
-            None => {
-                let root = Self::personal_dm_target_root_path()
-                    .map_err(map_personal_dm_target_fs_error)?;
-                self.list_dm_target_segments(&root).await?
-            }
-        };
-
-        let mut deleted = 0;
-        for installation in installation_entries {
-            let Ok(parsed_installation_id) = AdapterInstallationId::new(installation.decoded)
-            else {
-                continue;
-            };
-            let installation_path =
-                Self::personal_dm_target_installation_path(&parsed_installation_id)
-                    .map_err(map_personal_dm_target_fs_error)?;
-            let team_entries = match team_id {
-                Some(team_id) => vec![FilesystemDmTargetSegment {
-                    decoded: team_id.to_string(),
-                }],
-                None => self.list_dm_target_segments(&installation_path).await?,
-            };
-            for team in team_entries {
-                let key = match SlackPersonalDmTargetKey::new(
-                    tenant_id.clone(),
-                    parsed_installation_id.clone(),
-                    team.decoded,
-                    user_id.clone(),
-                ) {
-                    Ok(key) => key,
-                    Err(_) => continue,
-                };
-                if self.delete_personal_dm_target(&key).await? {
-                    deleted += 1;
-                }
-            }
-        }
-        Ok(deleted)
+        let key = SlackPersonalDmTargetKey::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            team_id.clone(),
+            user_id.clone(),
+        )?;
+        self.delete_personal_dm_target(&key).await.map(usize::from)
     }
 }
 
@@ -1174,7 +1108,7 @@ where
         if let Some((actor_record, _)) = existing_actor.as_ref()
             && actor_record.expires_at <= Utc::now()
         {
-            self.cleanup_actor_pairing_code_record(actor_record).await;
+            self.cleanup_actor_pairing_code_record(actor_record).await?;
         }
 
         self.mint_fresh_challenge(
@@ -1203,7 +1137,7 @@ where
         // Explicit recovery always invalidates any outstanding code (even one
         // still active) so the user is handed a guaranteed-fresh code.
         if let Some((actor_record, _)) = existing_actor.as_ref() {
-            self.cleanup_actor_pairing_code_record(actor_record).await;
+            self.cleanup_actor_pairing_code_record(actor_record).await?;
         }
         self.mint_fresh_challenge(
             challenge,
@@ -1574,14 +1508,13 @@ where
     async fn cleanup_actor_pairing_code_record(
         &self,
         actor_record: &StoredSlackPairingActorChallenge,
-    ) {
-        let Ok(code) = SlackPersonalBindingPairingCode::new(actor_record.code.clone()) else {
-            return;
-        };
-        let Ok(path) = Self::pairing_code_path(&code) else {
-            return;
-        };
-        self.cleanup_pairing_code_record(&path).await;
+    ) -> Result<(), SlackPersonalBindingPairingError> {
+        let code = SlackPersonalBindingPairingCode::new(actor_record.code.clone())?;
+        let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_pairing_fs_error(error)),
+        }
     }
 
     async fn cleanup_pairing_actor_record(
@@ -1653,7 +1586,7 @@ impl StoredSlackUserIdentity {
     }
 }
 
-fn identity_record_matches_disconnect(
+fn identity_record_matches_user_binding(
     record: &StoredSlackUserIdentity,
     provider: &str,
     user_id: &UserId,
@@ -1687,7 +1620,7 @@ impl StoredSlackPersonalDmTarget {
         Self {
             tenant_id: target.key.tenant_id.as_str().to_string(),
             installation_id: target.key.installation_id.as_str().to_string(),
-            team_id: target.key.team_id.clone(),
+            team_id: target.key.team_id.as_str().to_string(),
             user_id: target.key.user_id.as_str().to_string(),
             slack_user_id: target.slack_user_id.as_str().to_string(),
             dm_channel_id: target.dm_channel_id.clone(),
@@ -1705,7 +1638,7 @@ fn stored_personal_dm_target(
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
         AdapterInstallationId::new(record.installation_id)
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
-        record.team_id,
+        SlackTeamId::new(record.team_id),
         UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
     )
     .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
@@ -1958,11 +1891,6 @@ fn path_segment(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(value.as_bytes())
 }
 
-fn decode_path_segment(value: &str) -> Option<String> {
-    let decoded = URL_SAFE_NO_PAD.decode(value.as_bytes()).ok()?;
-    String::from_utf8(decoded).ok()
-}
-
 fn scoped_path(raw: &str) -> Result<ScopedPath, FilesystemError> {
     ScopedPath::new(raw).map_err(|error| FilesystemError::BackendInfrastructure {
         operation: FilesystemOperation::WriteFile,
@@ -2104,6 +2032,28 @@ mod tests {
             "bound user reports connected"
         );
         assert!(
+            state
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    "slack",
+                    &user("user:alice"),
+                    Some("install-alpha:"),
+                )
+                .await
+                .expect("scoped lookup succeeds"),
+            "bound user reports connected inside the matching installation scope"
+        );
+        assert!(
+            !state
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    "slack",
+                    &user("user:alice"),
+                    Some("install-beta:"),
+                )
+                .await
+                .expect("scoped lookup succeeds"),
+            "binding in another installation does not satisfy this scope"
+        );
+        assert!(
             !state
                 .user_has_provider_binding("slack", &user("user:bob"))
                 .await
@@ -2180,7 +2130,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -2236,7 +2186,7 @@ mod tests {
         let foreign_key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-foreign").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -2272,7 +2222,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -2311,7 +2261,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -2375,7 +2325,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -2615,6 +2565,34 @@ mod tests {
                 .get_challenge(&reissued.code)
                 .await
                 .expect("reissued code is active"),
+            challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reissue_stops_when_prior_code_cleanup_fails() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+        let first = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+
+        root.fail_next_pairing_code_deletes(1);
+        let error = state
+            .reissue_challenge(challenge())
+            .await
+            .expect_err("delete failure must stop reissue");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Backend(_)
+        ));
+        assert_eq!(
+            state
+                .get_challenge(&first.code)
+                .await
+                .expect("old code remains active after failed cleanup"),
             challenge()
         );
     }
@@ -3340,6 +3318,7 @@ mod tests {
         route_write_delay: Option<Duration>,
         personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
         route_write_failures: AtomicUsize,
+        pairing_code_delete_failures: AtomicUsize,
         lock_puts: AtomicUsize,
     }
 
@@ -3351,6 +3330,7 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -3362,6 +3342,7 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -3373,6 +3354,7 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -3384,12 +3366,18 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
                 route_write_failures: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
 
         fn fail_next_route_writes(&self, count: usize) {
             self.route_write_failures.store(count, Ordering::SeqCst);
+        }
+
+        fn fail_next_pairing_code_deletes(&self, count: usize) {
+            self.pairing_code_delete_failures
+                .store(count, Ordering::SeqCst);
         }
 
         fn lock_puts(&self) -> usize {
@@ -3462,6 +3450,17 @@ mod tests {
         }
 
         async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            if is_pairing_code_record_path(path)
+                && self.pairing_code_delete_failures.load(Ordering::SeqCst) > 0
+            {
+                self.pairing_code_delete_failures
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Delete,
+                    reason: "injected pairing code delete failure".to_string(),
+                });
+            }
             self.inner.delete(path).await
         }
     }
@@ -3479,6 +3478,12 @@ mod tests {
     fn is_personal_dm_target_record_path(path: &VirtualPath) -> bool {
         path.as_str()
             .contains("/slack-personal-binding/dm-targets/")
+            && path.as_str().ends_with(".json")
+    }
+
+    fn is_pairing_code_record_path(path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains("/slack-personal-binding/pairing/codes/")
             && path.as_str().ends_with(".json")
     }
 

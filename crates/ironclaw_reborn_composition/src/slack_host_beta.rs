@@ -413,6 +413,7 @@ pub struct SlackHostBetaMounts {
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
     pub(crate) tenant_id: TenantId,
     pub(crate) personal_connection_scope: Option<SlackPersonalConnectionScope>,
+    pub(crate) personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
     /// Reverse identity lookup: tells whether the calling WebUI user has
     /// personally connected this channel (Slack personal pairing).
     pub(crate) user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
@@ -431,6 +432,32 @@ pub struct SlackHostBetaMounts {
 pub(crate) struct SlackPersonalConnectionScope {
     pub(crate) installation_id: AdapterInstallationId,
     pub(crate) team_id: SlackTeamId,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait SlackPersonalConnectionScopeResolver: Send + Sync {
+    async fn resolve_personal_connection_scope(
+        &self,
+    ) -> Result<Option<SlackPersonalConnectionScope>, String>;
+}
+
+pub(crate) struct StaticSlackPersonalConnectionScopeResolver {
+    scope: Option<SlackPersonalConnectionScope>,
+}
+
+impl StaticSlackPersonalConnectionScopeResolver {
+    pub(crate) fn new(scope: Option<SlackPersonalConnectionScope>) -> Self {
+        Self { scope }
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalConnectionScopeResolver for StaticSlackPersonalConnectionScopeResolver {
+    async fn resolve_personal_connection_scope(
+        &self,
+    ) -> Result<Option<SlackPersonalConnectionScope>, String> {
+        Ok(self.scope.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -714,16 +741,20 @@ pub fn build_slack_host_beta_mounts(
             Arc::clone(&personal_dm_target_store),
         ));
     if outbound_delivery_provider_already_registered {
+        let personal_connection_scope = SlackPersonalConnectionScope {
+            installation_id: config.installation_id.clone(),
+            team_id: config.team_id.clone(),
+        };
         return Ok(SlackHostBetaMounts {
             events,
             commands,
             personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
             channel_routes,
             tenant_id: config.tenant_id.clone(),
-            personal_connection_scope: Some(SlackPersonalConnectionScope {
-                installation_id: config.installation_id.clone(),
-                team_id: config.team_id.clone(),
-            }),
+            personal_connection_scope: Some(personal_connection_scope.clone()),
+            personal_connection_scope_resolver: Arc::new(
+                StaticSlackPersonalConnectionScopeResolver::new(Some(personal_connection_scope)),
+            ),
             user_identity_lookup: user_identity_lookup.clone(),
             user_identity_delete_store: user_identity_delete_store.clone(),
             personal_dm_target_store: personal_dm_target_store.clone(),
@@ -748,16 +779,20 @@ pub fn build_slack_host_beta_mounts(
             });
         }
     }
+    let personal_connection_scope = SlackPersonalConnectionScope {
+        installation_id: config.installation_id.clone(),
+        team_id: config.team_id.clone(),
+    };
     Ok(SlackHostBetaMounts {
         events,
         commands,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
-        personal_connection_scope: Some(SlackPersonalConnectionScope {
-            installation_id: config.installation_id.clone(),
-            team_id: config.team_id.clone(),
-        }),
+        personal_connection_scope: Some(personal_connection_scope.clone()),
+        personal_connection_scope_resolver: Arc::new(
+            StaticSlackPersonalConnectionScopeResolver::new(Some(personal_connection_scope)),
+        ),
         user_identity_lookup: user_identity_lookup.clone(),
         user_identity_delete_store,
         personal_dm_target_store,
@@ -1113,7 +1148,8 @@ mod tests {
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_workflow::{
-        ProductActorUserResolutionRequest, ProductWorkflowError, RebornChannelConnectStrategy,
+        LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
+        ProductWorkflowError, RebornChannelConnectStrategy, RebornExtensionOnboardingState,
         RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetStatus,
         RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
         WebUiAuthenticatedCaller,
@@ -2297,6 +2333,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_mounts_wire_personal_connection_state_into_extension_list() {
+        let (runtime, _root) = runtime().await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let caller = operator_caller();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("valid slack package ref");
+
+        bundle
+            .api
+            .install_extension(caller.clone(), package_ref)
+            .await
+            .expect("install Slack extension");
+        let response = bundle
+            .api
+            .list_extensions(caller)
+            .await
+            .expect("list extensions");
+        let slack = response
+            .extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .expect("Slack extension is listed");
+
+        assert_eq!(slack.kind, "channel");
+        assert_eq!(
+            slack.onboarding_state,
+            Some(RebornExtensionOnboardingState::SetupRequired)
+        );
+        assert!(!slack.authenticated);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
@@ -2719,7 +2797,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            TEAM.to_string(),
+            SlackTeamId::new(TEAM),
             UserId::new(USER).expect("user"),
         )
         .expect("personal target key");
@@ -2760,7 +2838,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            TEAM.to_string(),
+            SlackTeamId::new(TEAM),
             UserId::new(USER).expect("user"),
         )
         .expect("personal target key");
@@ -4451,8 +4529,8 @@ mod tests {
             &self,
             _tenant_id: &TenantId,
             _user_id: &UserId,
-            _installation_id: Option<&AdapterInstallationId>,
-            _team_id: Option<&str>,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &crate::slack_serve::SlackTeamId,
         ) -> Result<usize, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }

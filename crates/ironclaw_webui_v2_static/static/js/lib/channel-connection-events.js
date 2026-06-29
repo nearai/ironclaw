@@ -194,17 +194,27 @@ export async function resumeWaitingChannelConnections(event = {}) {
     matching.push(waiter);
   }
   if (matching.length === 0) return [];
-  writeWaitingChannelConnections(remaining);
   const content = channelConnectionContinuationMessage(eventChannel);
   const results = [];
-  for (const waiter of matching) {
-    results.push(
-      await sendMessage({
-        threadId: waiter.threadId,
-        content,
-      }),
+  const resumedThreadIds = new Set();
+  try {
+    for (const waiter of matching) {
+      results.push(
+        await sendMessage({
+          threadId: waiter.threadId,
+          content,
+        }),
+      );
+      resumedThreadIds.add(waiter.threadId);
+    }
+  } catch (error) {
+    const unresumed = matching.filter(
+      (waiter) => !resumedThreadIds.has(waiter.threadId),
     );
+    writeWaitingChannelConnections([...remaining, ...unresumed]);
+    throw error;
   }
+  writeWaitingChannelConnections(remaining);
   return results;
 }
 

@@ -10,8 +10,8 @@ export function redeemPairingCode(channel, code, options = {}) {
   return apiFetch(PAIRING_REDEEM_PATH, {
     method: "POST",
     body: JSON.stringify(body),
-  }).then((response) => {
-    notifyChannelConnected({
+  }).then(async (response) => {
+    await notifyChannelConnected({
       channel,
       provider: response.provider,
       providerUserId: response.provider_user_id,

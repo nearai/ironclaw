@@ -2437,6 +2437,7 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
 test("useChat: channel-connected event from same chat does not duplicate the continuation", async () => {
   const threadId = "thread-submitted-code";
   const sendBodies = [];
+  const stateUpdates = [];
   let connectionHandler = null;
 
   const context = {
@@ -2454,11 +2455,13 @@ test("useChat: channel-connected event from same chat does not duplicate the con
             state: "pairing_required",
             extensionName: "slack",
             threadId,
+            sourceMessageId: "tool-slack-submit",
             requestId: null,
           },
         ],
       ]),
       runEffects: true,
+      setCalls: stateUpdates,
     }),
     addPending,
     toRenderAttachment,
@@ -2521,6 +2524,10 @@ test("useChat: channel-connected event from same chat does not duplicate the con
   });
 
   assert.equal(sendBodies.length, 0);
+  assert.ok(
+    stateUpdates.some((update) => update.index === 5 && update.value === null),
+    "the originating chat still clears its blocked pairing panel",
+  );
 });
 
 test("useChat: timeline Slack activation tool card does not open pairing panel", async () => {
@@ -2834,7 +2841,15 @@ function channelConnectionRequiredCard(overrides = {}) {
   };
 }
 
-function channelConnectionContext({ threadId, messages, slackExtension, stateUpdates, storage, messagesThreadId }) {
+function channelConnectionContext({
+  threadId,
+  messages,
+  slackExtension,
+  stateUpdates,
+  storage,
+  messagesThreadId,
+  fetchExtensions,
+}) {
   return {
     AbortController,
     Date,
@@ -2853,7 +2868,9 @@ function channelConnectionContext({ threadId, messages, slackExtension, stateUpd
     createThreadRequest: async () => {
       throw new Error("thread should already exist");
     },
-    fetchExtensions: async () => ({ extensions: slackExtension ? [slackExtension] : [] }),
+    fetchExtensions:
+      fetchExtensions ||
+      (async () => ({ extensions: slackExtension ? [slackExtension] : [] })),
     globalThis: storage ? { localStorage: storage } : {},
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
@@ -2915,6 +2932,30 @@ test("useChat: a channel-connection-required tool card opens the pairing panel w
   assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
   assert.match(onboardingUpdate?.value?.instructions, /Message the IronClaw Reborn app/);
   assert.equal(onboardingUpdate?.value?.inputPlaceholder, "Enter Slack pairing code");
+});
+
+test("useChat: a channel-connection-required tool card opens the pairing panel when connection lookup fails", async () => {
+  const threadId = "thread-activate-slack-lookup-fails";
+  const stateUpdates = [];
+  const context = channelConnectionContext({
+    threadId,
+    messages: [channelConnectionRequiredCard()],
+    stateUpdates,
+    fetchExtensions: async () => {
+      throw new Error("extensions unavailable");
+    },
+  });
+
+  runUseChatSource(context);
+  context.globalThis.__testExports.useChat(threadId);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const onboardingUpdate = stateUpdates.find(
+    (update) => update.value?.state === "pairing_required",
+  );
+  assert.equal(onboardingUpdate?.value?.extensionName, "slack");
+  assert.equal(onboardingUpdate?.value?.threadId, threadId);
+  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
 });
 
 test("useChat: a channel-connection-required tool card does NOT open the panel when Slack is already connected", async () => {

@@ -11,7 +11,7 @@ use ironclaw_product_workflow::{
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
     slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
-    slack_host_beta::SlackPersonalConnectionScope,
+    slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack_outbound_targets::SlackPersonalDmTargetStore,
     slack_personal_binding::RebornUserIdentityBindingDeleteStore,
     webui::build_webui_services_with_connectable_channels,
@@ -137,9 +137,24 @@ impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade 
 struct SlackChannelConnectionFacade {
     tenant_id: TenantId,
     personal_connection_scope: Option<SlackPersonalConnectionScope>,
+    personal_connection_scope_resolver: Option<Arc<dyn SlackPersonalConnectionScopeResolver>>,
     user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
+}
+
+impl SlackChannelConnectionFacade {
+    async fn resolve_personal_connection_scope(
+        &self,
+    ) -> Result<Option<SlackPersonalConnectionScope>, RebornServicesError> {
+        if let Some(resolver) = &self.personal_connection_scope_resolver {
+            return resolver
+                .resolve_personal_connection_scope()
+                .await
+                .map_err(RebornServicesError::internal_from);
+        }
+        Ok(self.personal_connection_scope.clone())
+    }
 }
 
 #[async_trait::async_trait]
@@ -148,9 +163,20 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<HashMap<String, bool>, RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(HashMap::from([("slack".to_string(), false)]));
+        }
+        let Some(scope) = self.resolve_personal_connection_scope().await? else {
+            return Ok(HashMap::from([("slack".to_string(), false)]));
+        };
+        let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
         let connected = self
             .user_identity_lookup
-            .user_has_provider_binding(SLACK_IDENTITY_PROVIDER, &caller.user_id)
+            .user_has_provider_binding_with_provider_user_id_prefix(
+                SLACK_IDENTITY_PROVIDER,
+                &caller.user_id,
+                Some(provider_user_id_prefix.as_str()),
+            )
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         Ok(HashMap::from([("slack".to_string(), connected)]))
@@ -164,32 +190,26 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
         if channel != "slack" || caller.tenant_id != self.tenant_id {
             return Ok(());
         }
-        let provider_user_id_prefix = self
-            .personal_connection_scope
-            .as_ref()
-            .map(|scope| format!("{}:", scope.installation_id.as_str()));
+        let Some(scope) = self.resolve_personal_connection_scope().await? else {
+            return Err(RebornServicesError::internal_from(
+                "Slack personal connection scope is unavailable; refusing unscoped disconnect",
+            ));
+        };
+        let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
         self.user_identity_delete_store
             .delete_user_identity_bindings_for_user(
                 SLACK_IDENTITY_PROVIDER,
                 &caller.user_id,
-                provider_user_id_prefix.as_deref(),
+                Some(provider_user_id_prefix.as_str()),
             )
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
-        let installation_id = self
-            .personal_connection_scope
-            .as_ref()
-            .map(|scope| &scope.installation_id);
-        let team_id = self
-            .personal_connection_scope
-            .as_ref()
-            .map(|scope| scope.team_id.as_str());
         self.personal_dm_target_store
             .delete_personal_dm_targets_for_user(
                 &self.tenant_id,
                 &caller.user_id,
-                installation_id,
-                team_id,
+                &scope.installation_id,
+                &scope.team_id,
             )
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
@@ -203,6 +223,7 @@ fn slack_channel_connection_facade(
     Arc::new(SlackChannelConnectionFacade {
         tenant_id: mounts.tenant_id.clone(),
         personal_connection_scope: mounts.personal_connection_scope.clone(),
+        personal_connection_scope_resolver: Some(mounts.personal_connection_scope_resolver.clone()),
         user_identity_lookup: mounts.user_identity_lookup.clone(),
         user_identity_delete_store: mounts.user_identity_delete_store.clone(),
         personal_dm_target_store: mounts.personal_dm_target_store.clone(),
@@ -369,7 +390,7 @@ mod tests {
         let dm_target_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
             installation_id.clone(),
-            team_id.as_str().to_string(),
+            team_id.clone(),
             user_id.clone(),
         )
         .expect("dm target key");
@@ -390,6 +411,7 @@ mod tests {
                 installation_id: installation_id.clone(),
                 team_id: team_id.clone(),
             }),
+            personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: dm_target_store.clone(),
@@ -431,6 +453,118 @@ mod tests {
                 .await
                 .expect("dm target lookup after disconnect"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_requires_current_installation_scope() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let other_installation_id =
+            AdapterInstallationId::new("install-beta").expect("other installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let other_installation_provider_user_id =
+            slack_user_identity_provider_user_id(&other_installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            other_installation_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup"),
+            HashMap::from([("slack".to_string(), false)])
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_refuses_unscoped_disconnect() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let user_id = UserId::new("user:alice").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: None,
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        };
+        let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, None::<AgentId>, None);
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([("slack".to_string(), false)])
+        );
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller, "slack")
+                .await
+                .is_err(),
+            "disconnect must fail closed when no Slack installation scope is available"
+        );
+        assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_requires_current_tenant() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id,
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        };
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant:other").expect("other tenant"),
+            user_id,
+            None::<AgentId>,
+            None,
+        );
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup"),
+            HashMap::from([("slack".to_string(), false)])
         );
     }
 
@@ -740,15 +874,27 @@ mod tests {
             provider: &str,
             user_id: &UserId,
         ) -> Result<bool, RebornUserIdentityLookupError> {
+            self.user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
+                .await
+        }
+
+        async fn user_has_provider_binding_with_provider_user_id_prefix(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
             if provider != SLACK_IDENTITY_PROVIDER {
                 return Ok(false);
             }
-            Ok(self
-                .bindings
-                .lock()
-                .expect("lock")
-                .values()
-                .any(|bound_user_id| bound_user_id == user_id))
+            Ok(self.bindings.lock().expect("lock").iter().any(
+                |(provider_user_id, bound_user_id)| {
+                    bound_user_id == user_id
+                        && provider_user_id_prefix
+                            .map(|prefix| provider_user_id.starts_with(prefix))
+                            .unwrap_or(true)
+                },
+            ))
         }
     }
 

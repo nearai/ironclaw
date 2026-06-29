@@ -45,6 +45,24 @@ pub trait RebornUserIdentityLookup: Send + Sync {
         provider: &str,
         user_id: &UserId,
     ) -> Result<bool, RebornUserIdentityLookupError>;
+
+    /// Whether the given IronClaw user has a provider binding whose provider
+    /// user id starts with `provider_user_id_prefix`. Channel connection state
+    /// uses this for installation-scoped providers such as Slack, where a user
+    /// bound in one Slack installation must not satisfy setup in another.
+    async fn user_has_provider_binding_with_provider_user_id_prefix(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        if provider_user_id_prefix.is_none() {
+            return self.user_has_provider_binding(provider, user_id).await;
+        }
+        Err(RebornUserIdentityLookupError::Backend(
+            "scoped provider binding lookup is unavailable".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]

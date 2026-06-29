@@ -151,6 +151,25 @@ function renderedNodeContainingComponent(rendered, component) {
   return undefined;
 }
 
+function renderedComponentCount(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return rendered === component ? 1 : 0;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.reduce(
+      (count, value) => count + renderedComponentCount(value, component),
+      0,
+    );
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.reduce(
+      (count, value) => count + renderedComponentCount(value, component),
+      0,
+    );
+  }
+  return 0;
+}
+
 test("isSlackPackage recognizes the Slack extension package", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
@@ -352,5 +371,52 @@ test("ChannelsTab renders generic connect controls under installed non-Slack cha
   assert.equal(
     renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
     true,
+  );
+});
+
+test("ChannelsTab does not render duplicate fallback pairing when connect action owns pairing", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [
+      {
+        package_ref: { id: "telegram" },
+        kind: "channel",
+        activation_status: "installed",
+        onboarding_state: "pairing_required",
+      },
+    ],
+    connectableChannels: [
+      {
+        channel: "telegram",
+        strategy: "inbound_proof_code",
+        action: { title: "Telegram account connection" },
+      },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
+    true,
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
+    1,
+    "the connect action still owns the pairing UI",
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.PairingSection),
+    0,
+    "the legacy fallback pairing section must not duplicate the connect action",
   );
 });

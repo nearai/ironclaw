@@ -63,9 +63,9 @@ use crate::slack_setup::{
 use super::{
     SlackHostBetaActorUserResolver, SlackHostBetaBuildError, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    SlackHostBetaRuntimeParts, build_slack_installation_record_with_resolvers,
-    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
-    slack_protocol_egress_from_parts,
+    SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
+    build_slack_installation_record_with_resolvers, build_triggered_run_delivery_hook_from_parts,
+    slack_bot_token_handle, slack_protocol_egress_from_parts,
 };
 
 pub(super) async fn build_runtime_mounts(
@@ -206,6 +206,10 @@ pub(super) async fn build_runtime_mounts(
         pairing.clone(),
         state.clone(),
     ));
+    let personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver> =
+        Arc::new(DynamicSlackPersonalConnectionScopeResolver {
+            setup_service: Arc::clone(&setup_service),
+        });
 
     Ok(SlackHostBetaMounts {
         events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
@@ -214,12 +218,39 @@ pub(super) async fn build_runtime_mounts(
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: None,
+        personal_connection_scope_resolver,
         user_identity_lookup,
         user_identity_delete_store,
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })
+}
+
+struct DynamicSlackPersonalConnectionScopeResolver {
+    setup_service: Arc<SlackSetupService>,
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalConnectionScopeResolver for DynamicSlackPersonalConnectionScopeResolver {
+    async fn resolve_personal_connection_scope(
+        &self,
+    ) -> Result<Option<SlackPersonalConnectionScope>, String> {
+        let Some(setup) = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let installation_id =
+            AdapterInstallationId::new(setup.installation_id).map_err(|error| error.to_string())?;
+        Ok(Some(SlackPersonalConnectionScope {
+            installation_id,
+            team_id: SlackTeamId::new(setup.team_id),
+        }))
+    }
 }
 
 fn slack_dynamic_outbound_delivery_target_provider_key(
@@ -1400,6 +1431,49 @@ mod tests {
         );
         assert!(binding_store.bindings.lock().unwrap().is_empty());
         assert!(route_store.routes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dynamic_personal_connection_scope_resolver_reads_current_setup() {
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::new(setup_record(7))),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+
+        let scope = resolver
+            .resolve_personal_connection_scope()
+            .await
+            .expect("scope resolves")
+            .expect("setup exists");
+
+        assert_eq!(scope.installation_id.as_str(), "install-a");
+        assert_eq!(scope.team_id.as_str(), "T123");
+    }
+
+    #[tokio::test]
+    async fn dynamic_personal_connection_scope_resolver_returns_none_without_setup() {
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::empty()),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+
+        assert!(
+            resolver
+                .resolve_personal_connection_scope()
+                .await
+                .expect("scope resolves")
+                .is_none()
+        );
     }
 
     fn setup_record(revision: u64) -> SlackInstallationSetup {

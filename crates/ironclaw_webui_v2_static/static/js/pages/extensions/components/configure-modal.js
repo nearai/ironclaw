@@ -50,10 +50,11 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   // pairing) here instead of credential/OAuth fields: redeem a proof code, then
   // best-effort activate so the channel goes live.
   const queryClient = useQueryClient();
-  const channelId =
+  const packageId =
     typeof extension?.packageRef === "string"
       ? extension.packageRef
       : extension?.packageRef?.id || "";
+  const channelId = extension?.channel || packageId;
   const isChannel = isChannelExtensionKind(extension?.kind);
   const channelPairingInstructions =
     channelId.toLowerCase() === "slack"
@@ -64,7 +65,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     mutationFn: async (code) => {
       const result = await redeemPairingCode(channelId, code);
       try {
-        await activateExtension({ id: channelId });
+        await activateExtension({ id: packageId || channelId });
       } catch (activationError) {
         console.error("channel activation after pairing failed:", activationError);
       }

@@ -332,3 +332,80 @@ test("notifyChannelConnected resumes every waiting thread when connection has no
     globalThis.sessionStorage = originalSessionStorage;
   }
 });
+
+test("notifyChannelConnected keeps unresumed waiters when continuation send fails", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const originalSessionStorage = globalThis.sessionStorage;
+  const originalConsoleError = console.error;
+  const storage = new Map();
+  const fetches = [];
+
+  console.error = () => {};
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    fetches.push({ path, options });
+    if (path.includes("thread-fails")) {
+      return new Response("boom", { status: 503, statusText: "Unavailable" });
+    }
+    return new Response(JSON.stringify({ run_id: "run-1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  try {
+    rememberChannelConnectionWaiter({
+      channel: "slack",
+      threadId: "thread-ok",
+      sourceMessageId: "tool-ok",
+    });
+    rememberChannelConnectionWaiter({
+      channel: "slack",
+      threadId: "thread-fails",
+      sourceMessageId: "tool-fails",
+    });
+    rememberChannelConnectionWaiter({
+      channel: "slack",
+      threadId: "thread-not-attempted",
+      sourceMessageId: "tool-not-attempted",
+    });
+
+    const result = await notifyChannelConnected({ channel: "slack", source: "extensions" });
+
+    assert.deepEqual(result, []);
+    assert.deepEqual(
+      fetches.map((fetchCall) => fetchCall.path),
+      [
+        "/api/webchat/v2/threads/thread-ok/messages",
+        "/api/webchat/v2/threads/thread-fails/messages",
+      ],
+    );
+    const remaining = JSON.parse(
+      storage.get("ironclaw:channel-connection:waiting:v1") || "[]",
+    );
+    assert.deepEqual(
+      remaining.map((waiter) => waiter.threadId),
+      ["thread-fails", "thread-not-attempted"],
+      "only successfully resumed waiters may be consumed",
+    );
+  } finally {
+    console.error = originalConsoleError;
+    globalThis.window = originalWindow;
+    globalThis.fetch = originalFetch;
+    globalThis.sessionStorage = originalSessionStorage;
+  }
+});

@@ -191,6 +191,8 @@ export function ChannelsTab({
             ${installedChannels.map(
               (ch) => {
                 const connectActions = connectActionsForPackage(connectableChannels, ch);
+                const pairingHandledByConnectAction =
+                  connectActions.some(isInboundProofCodeAction);
                 return html`
                   <div key=${packageId(ch)} className="flex flex-col gap-3">
                     <${ExtensionCard}
@@ -204,7 +206,8 @@ export function ChannelsTab({
                     html`<${ChannelConnectActionSections}
                       connectActions=${connectActions}
                     />`}
-                    ${(ch.onboarding_state === "pairing_required" ||
+                    ${!pairingHandledByConnectAction &&
+                    (ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
                     html` <${PairingSection}
                       channel=${packageId(ch)}

@@ -1323,7 +1323,7 @@ fn extension_search_has_installed_external_channel_result(
     extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
-            Some(LifecyclePhase::Configured | LifecyclePhase::Active)
+            Some(LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Active)
         ) && extension
             .summary
             .surface_kinds
@@ -1429,10 +1429,40 @@ mod tests {
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
+        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleProductAction,
+        LifecycleProductContext, LifecycleProductFacade, LifecycleProductSurfaceContext,
+        LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
+
+    #[test]
+    fn installed_external_channel_search_result_gets_activation_guidance() {
+        let payload = LifecycleProductPayload::ExtensionSearch {
+            extensions: vec![LifecycleSearchExtensionSummary {
+                summary: LifecycleExtensionSummary {
+                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+                        .expect("valid package ref"),
+                    name: "Slack".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Slack channel".to_string(),
+                    source: LifecycleExtensionSource::HostBundled,
+                    runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                    surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+                    visible_capability_ids: Vec::new(),
+                    visible_read_only_capability_ids: Vec::new(),
+                    credential_requirements: Vec::new(),
+                    onboarding: None,
+                },
+                installation_phase: Some(LifecyclePhase::Installed),
+            }],
+            count: 1,
+        };
+
+        assert!(extension_search_has_installed_external_channel_result(
+            Some(&payload)
+        ));
+        assert!(!extension_search_has_ready_result(Some(&payload)));
+    }
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {

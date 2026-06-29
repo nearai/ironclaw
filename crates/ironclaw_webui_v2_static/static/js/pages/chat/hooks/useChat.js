@@ -513,7 +513,18 @@ export function useChat(threadId) {
         });
       })
       .catch(() => {
-        // Best-effort affordance; chat stays usable if the lookup fails.
+        if (cancelled || pendingOnboardingRef.current) return;
+        setPendingOnboarding({
+          extensionName: requirement.extensionName,
+          state: "pairing_required",
+          threadId,
+          sourceMessageId: requirement.sourceMessageId,
+          strategy: requirement.strategy,
+          instructions: requirement.instructions,
+          inputPlaceholder: requirement.inputPlaceholder,
+          submitLabel: requirement.submitLabel,
+          errorMessage: requirement.errorMessage,
+        });
       });
     return () => {
       cancelled = true;
@@ -920,9 +931,6 @@ export function useChat(threadId) {
     async (onboarding, event = {}) => {
       const threadForResume = onboarding?.threadId || threadId || null;
       if (!threadForResume) return;
-      if (event.sourceThreadId && event.sourceThreadId === threadForResume) {
-        return;
-      }
       if (onboarding.sourceMessageId) {
         dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
         persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);

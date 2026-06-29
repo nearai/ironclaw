@@ -11,8 +11,8 @@ export function redeemSlackPairingCode(code, options = {}) {
   return apiFetch(SLACK_PAIRING_REDEEM_PATH, {
     method: "POST",
     body: JSON.stringify(body),
-  }).then((response) => {
-    notifyChannelConnected({
+  }).then(async (response) => {
+    await notifyChannelConnected({
       channel: "slack",
       provider: response.provider,
       providerUserId: response.provider_user_id,
