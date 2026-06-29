@@ -380,6 +380,12 @@ where
         self.security_audit_sink.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wasm_runtime_credential_provider_captured_for_test(&self) -> bool {
+        self.component_types
+            .wasm_runtime_credential_provider_captured
+    }
+
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
         let mut dispatcher = RuntimeDispatcher::from_shared_registry(

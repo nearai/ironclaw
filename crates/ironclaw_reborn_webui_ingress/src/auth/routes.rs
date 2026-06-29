@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
@@ -334,6 +334,7 @@ struct LoginParams {
 /// authorization URL.
 async fn login_handler(
     State(state): State<RouterStateHandle>,
+    headers: HeaderMap,
     Path(raw_provider): Path<String>,
     Query(params): Query<LoginParams>,
 ) -> Response {
@@ -356,6 +357,22 @@ async fn login_handler(
     };
 
     let redirect_after = sanitize_redirect(params.redirect_after);
+    if let Some(location) = canonical_login_location(
+        &state.base_url,
+        &headers,
+        provider.name(),
+        redirect_after.as_deref(),
+    ) {
+        tracing::warn!(
+            target = "ironclaw::reborn::webui_ingress::auth",
+            provider = %provider_name,
+            base_url = %state.base_url,
+            request_host = ?request_host(&headers),
+            "OAuth login requested on a non-canonical host; redirecting before state creation",
+        );
+        return Redirect::temporary(&location).into_response();
+    }
+
     let (csrf_state, flow) = state
         .pending
         .insert(provider.name().clone(), redirect_after);
@@ -621,6 +638,55 @@ fn error_code_for(err: &OAuthError) -> &'static str {
     }
 }
 
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::HOST)?.to_str().ok()
+}
+
+fn canonical_login_location(
+    base_url: &str,
+    headers: &HeaderMap,
+    provider_name: &OAuthProviderName,
+    redirect_after: Option<&str>,
+) -> Option<String> {
+    let request_host = request_host(headers)?;
+    let base = url::Url::parse(base_url).ok()?;
+    if request_host_matches_base(request_host, &base) {
+        return None;
+    }
+
+    let mut url = base;
+    url.set_path(&format!("/auth/login/{provider_name}"));
+    url.set_query(None);
+    if let Some(redirect_after) = redirect_after {
+        url.query_pairs_mut()
+            .append_pair("redirect_after", redirect_after);
+    }
+    Some(url.to_string())
+}
+
+fn request_host_matches_base(request_host: &str, base: &url::Url) -> bool {
+    let Ok(authority) = request_host.trim().parse::<axum::http::uri::Authority>() else {
+        return true;
+    };
+    let Some(base_host) = base.host_str() else {
+        return true;
+    };
+    if !authority.host().eq_ignore_ascii_case(base_host) {
+        return false;
+    }
+
+    let request_port = authority.port_u16().or_else(|| default_port(base.scheme()));
+    request_port == base.port_or_known_default()
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
 fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     // Provider error bodies and JWT decode details are operator-only
     // — never echoed back to the client. Logged at `warn!` so they
@@ -629,7 +695,16 @@ fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     tracing::warn!(
         target = "ironclaw::reborn::webui_ingress::auth",
         provider = %provider_name,
+        error_kind = error_kind_for(err),
         error = %err,
         "OAuth flow failed",
     );
+}
+
+fn error_kind_for(err: &OAuthError) -> &'static str {
+    match err {
+        OAuthError::CodeExchange(_) => "code_exchange",
+        OAuthError::ProfileFetch(_) => "profile_fetch",
+        OAuthError::Denied(_) => "denied",
+    }
 }

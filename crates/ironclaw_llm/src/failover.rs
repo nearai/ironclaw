@@ -425,6 +425,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 }))),
             }
         }
@@ -837,6 +838,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
 

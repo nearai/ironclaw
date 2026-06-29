@@ -97,10 +97,9 @@ impl Default for TokenStore {
 
 /// Generate a cryptographically random token (32 bytes, hex-encoded = 64 chars).
 fn generate_token() -> String {
-    use rand::RngCore;
-    use rand::rngs::OsRng;
+    use rand::RngExt as _;
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     // Hex-encode without pulling in a crate: fixed-size array, no allocation concern.
     bytes.iter().fold(String::with_capacity(64), |mut s, b| {
         use std::fmt::Write;
