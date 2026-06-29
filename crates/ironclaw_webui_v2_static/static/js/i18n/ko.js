@@ -190,7 +190,7 @@ registerPack("ko", {
   "settings.networking": "네트워크",
   "settings.tools": "도구",
   "settings.skills": "스킬",
-  "settings.traceCommons": "Trace Commons",
+  "settings.traceCommons": "트레이스 공유",
   "settings.users": "사용자",
   "settings.language": "언어",
   // Settings — Trace Commons credits (read-only)

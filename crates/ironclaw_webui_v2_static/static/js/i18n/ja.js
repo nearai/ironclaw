@@ -190,7 +190,7 @@ registerPack("ja", {
   "settings.networking": "ネットワーク",
   "settings.tools": "ツール",
   "settings.skills": "スキル",
-  "settings.traceCommons": "Trace Commons",
+  "settings.traceCommons": "トレース共有",
   "settings.users": "ユーザー",
   "settings.language": "言語",
   // Settings — Trace Commons credits (read-only)

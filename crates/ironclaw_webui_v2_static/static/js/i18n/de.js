@@ -190,7 +190,7 @@ registerPack("de", {
   "settings.networking": "Netzwerk",
   "settings.tools": "Tools",
   "settings.skills": "Fähigkeiten",
-  "settings.traceCommons": "Trace Commons",
+  "settings.traceCommons": "Trace-Freigabe",
   "settings.users": "Benutzer",
   "settings.language": "Sprache",
   // Settings — Trace Commons credits (read-only)

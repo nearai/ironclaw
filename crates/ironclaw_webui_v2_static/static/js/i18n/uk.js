@@ -190,7 +190,7 @@ registerPack("uk", {
   "settings.networking": "Мережа",
   "settings.tools": "Інструменти",
   "settings.skills": "Скіли",
-  "settings.traceCommons": "Trace Commons",
+  "settings.traceCommons": "Спільні трейси",
   "settings.users": "Користувачі",
   "settings.language": "Мова",
   // Settings — Trace Commons credits (read-only)

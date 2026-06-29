@@ -190,7 +190,7 @@ registerPack("ar", {
   "settings.networking": "الشبكات",
   "settings.tools": "الأدوات",
   "settings.skills": "المهارات",
-  "settings.traceCommons": "Trace Commons",
+  "settings.traceCommons": "مشاركة الآثار",
   "settings.users": "المستخدمون",
   "settings.language": "اللغة",
   // Settings — Trace Commons credits (read-only)
