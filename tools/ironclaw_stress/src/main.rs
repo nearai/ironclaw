@@ -154,6 +154,34 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 0)]
     pub(crate) model_latency_ms: u64,
 
+    /// Synthetic model latency profile for mixed-user-session operations.
+    #[arg(long, value_enum, default_value_t = ModelLatencyProfile::Fixed)]
+    pub(crate) model_latency_profile: ModelLatencyProfile,
+
+    /// Additional deterministic jitter ceiling for uniform model latency.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) model_latency_jitter_ms: u64,
+
+    /// Every Nth model wait uses the spike latency for tail-spike profile. Set to 0 to disable.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) model_latency_spike_every: usize,
+
+    /// Spike latency for tail-spike profile. Defaults to base latency when 0.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) model_latency_spike_ms: u64,
+
+    /// Minimum user message payload bytes written per turn. Set to 0 for compact default text.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) user_message_bytes: usize,
+
+    /// Minimum assistant message payload bytes written per turn. Set to 0 for compact default text.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) assistant_message_bytes: usize,
+
+    /// Messages requested during context-window loads.
+    #[arg(long, default_value_t = 20)]
+    pub(crate) context_max_messages: usize,
+
     /// Emit structured stderr spans for failed user-turn operations.
     #[arg(long, default_value_t = false)]
     pub(crate) span_log_failures: bool,
@@ -195,6 +223,24 @@ impl Backend {
         match self {
             Self::Libsql => "libsql",
             Self::Postgres => "postgres",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelLatencyProfile {
+    Fixed,
+    Uniform,
+    TailSpike,
+}
+
+impl ModelLatencyProfile {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Uniform => "uniform",
+            Self::TailSpike => "tail-spike",
         }
     }
 }
@@ -260,6 +306,14 @@ struct RunSummary {
     operations_per_thread: usize,
     users: usize,
     tenants: usize,
+    model_latency_ms: u64,
+    model_latency_profile: ModelLatencyProfile,
+    model_latency_jitter_ms: u64,
+    model_latency_spike_every: usize,
+    model_latency_spike_ms: u64,
+    user_message_bytes: usize,
+    assistant_message_bytes: usize,
+    context_max_messages: usize,
     attempted: u64,
     succeeded: u64,
     failed: u64,
@@ -389,6 +443,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.memory_bytes == 0 {
         return Err("--memory-bytes must be greater than 0".to_string());
     }
+    if args.context_max_messages == 0 {
+        return Err("--context-max-messages must be greater than 0".to_string());
+    }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
             "--scenario {} requires --processes 1",
@@ -462,6 +519,20 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.progress_interval_seconds.to_string())
             .arg("--model-latency-ms")
             .arg(args.model_latency_ms.to_string())
+            .arg("--model-latency-profile")
+            .arg(args.model_latency_profile.as_str())
+            .arg("--model-latency-jitter-ms")
+            .arg(args.model_latency_jitter_ms.to_string())
+            .arg("--model-latency-spike-every")
+            .arg(args.model_latency_spike_every.to_string())
+            .arg("--model-latency-spike-ms")
+            .arg(args.model_latency_spike_ms.to_string())
+            .arg("--user-message-bytes")
+            .arg(args.user_message_bytes.to_string())
+            .arg("--assistant-message-bytes")
+            .arg(args.assistant_message_bytes.to_string())
+            .arg("--context-max-messages")
+            .arg(args.context_max_messages.to_string())
             .arg("--slow-span-threshold-ms")
             .arg(args.slow_span_threshold_ms.to_string())
             .arg("--span-sample-limit")
@@ -850,6 +921,14 @@ fn summarize(
         operations_per_thread: args.operations,
         users: args.users,
         tenants: args.tenants,
+        model_latency_ms: args.model_latency_ms,
+        model_latency_profile: args.model_latency_profile,
+        model_latency_jitter_ms: args.model_latency_jitter_ms,
+        model_latency_spike_every: args.model_latency_spike_every,
+        model_latency_spike_ms: args.model_latency_spike_ms,
+        user_message_bytes: args.user_message_bytes,
+        assistant_message_bytes: args.assistant_message_bytes,
+        context_max_messages: args.context_max_messages,
         attempted,
         succeeded,
         failed,

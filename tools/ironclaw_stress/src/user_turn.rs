@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::{
-    Args, Backend, LatencySummary, Sample, Scenario,
+    Args, Backend, LatencySummary, ModelLatencyProfile, Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
     summary::FailureCause,
@@ -310,6 +310,14 @@ where
         let operation_ref = operation_ref(args, worker_index, operation_index);
         let source_binding = "ironclaw-stress-webchat";
         let reply_target = "ironclaw-stress-reply";
+        let user_message = stress_payload(
+            format!("stress message {operation_ref}"),
+            args.user_message_bytes,
+        );
+        let assistant_message = stress_payload(
+            format!("stress response {operation_ref}"),
+            args.assistant_message_bytes,
+        );
 
         let thread = time_stage(
             &mut stages.ensure_thread,
@@ -334,7 +342,7 @@ where
                     source_binding_id: Some(source_binding.to_string()),
                     reply_target_binding_id: Some(reply_target.to_string()),
                     external_event_id: Some(operation_ref.clone()),
-                    content: MessageContent::text(format!("stress message {operation_ref}")),
+                    content: MessageContent::text(user_message),
                 }),
         )
         .await
@@ -426,7 +434,7 @@ where
                     .load_context_window(LoadContextWindowRequest {
                         scope: context.thread_scope.clone(),
                         thread_id: thread.thread_id.clone(),
-                        max_messages: 20,
+                        max_messages: args.context_max_messages,
                     }),
             )
             .await
@@ -442,7 +450,11 @@ where
             .await?;
 
             let execution = async {
-                time_stage(&mut stages.model_wait, synthetic_model_wait(args)).await;
+                time_stage(
+                    &mut stages.model_wait,
+                    synthetic_model_wait(args, worker_index, operation_index),
+                )
+                .await;
 
                 let draft = time_stage(
                     &mut stages.append_assistant,
@@ -451,9 +463,7 @@ where
                             scope: context.thread_scope.clone(),
                             thread_id: thread.thread_id.clone(),
                             turn_run_id: claimed.state.run_id.to_string(),
-                            content: MessageContent::text(format!(
-                                "stress response {operation_ref}"
-                            )),
+                            content: MessageContent::text(assistant_message.clone()),
                         }),
                 )
                 .await
@@ -465,7 +475,7 @@ where
                         &context.thread_scope,
                         &thread.thread_id,
                         draft.message_id,
-                        MessageContent::text(format!("stress response {operation_ref}")),
+                        MessageContent::text(assistant_message.clone()),
                     ),
                 )
                 .await
@@ -511,7 +521,7 @@ where
                     scope: context.thread_scope.clone(),
                     thread_id: thread.thread_id.clone(),
                     turn_run_id: claimed.state.run_id.to_string(),
-                    content: MessageContent::text(format!("stress response {operation_ref}")),
+                    content: MessageContent::text(assistant_message.clone()),
                 }),
         )
         .await
@@ -523,7 +533,7 @@ where
                 &context.thread_scope,
                 &thread.thread_id,
                 draft.message_id,
-                MessageContent::text(format!("stress response {operation_ref}")),
+                MessageContent::text(assistant_message),
             ),
         )
         .await
@@ -546,7 +556,7 @@ where
                 .load_context_window(LoadContextWindowRequest {
                     scope: context.thread_scope,
                     thread_id: thread.thread_id,
-                    max_messages: 20,
+                    max_messages: args.context_max_messages,
                 }),
         )
         .await
@@ -666,10 +676,76 @@ async fn release_resources(
         .map_err(|error| resource_failure("resource_release", error))
 }
 
-async fn synthetic_model_wait(args: &Args) {
-    if args.model_latency_ms > 0 {
-        sleep(Duration::from_millis(args.model_latency_ms)).await;
+async fn synthetic_model_wait(args: &Args, worker_index: usize, operation_index: usize) {
+    let wait_ms = synthetic_model_wait_ms(args, worker_index, operation_index);
+    if wait_ms > 0 {
+        sleep(Duration::from_millis(wait_ms)).await;
     }
+}
+
+pub(crate) fn synthetic_model_wait_ms(
+    args: &Args,
+    worker_index: usize,
+    operation_index: usize,
+) -> u64 {
+    match args.model_latency_profile {
+        ModelLatencyProfile::Fixed => args.model_latency_ms,
+        ModelLatencyProfile::Uniform => {
+            args.model_latency_ms + deterministic_jitter_ms(args, worker_index, operation_index)
+        }
+        ModelLatencyProfile::TailSpike => {
+            let sequence = worker_index
+                .saturating_mul(args.operations)
+                .saturating_add(operation_index)
+                .saturating_add(1);
+            if args.model_latency_spike_every > 0
+                && sequence.is_multiple_of(args.model_latency_spike_every)
+            {
+                if args.model_latency_spike_ms > 0 {
+                    args.model_latency_spike_ms
+                } else {
+                    args.model_latency_ms
+                        + deterministic_jitter_ms(args, worker_index, operation_index)
+                }
+            } else {
+                args.model_latency_ms
+            }
+        }
+    }
+}
+
+fn deterministic_jitter_ms(args: &Args, worker_index: usize, operation_index: usize) -> u64 {
+    if args.model_latency_jitter_ms == 0 {
+        return 0;
+    }
+    let mut value = args
+        .run_id
+        .as_deref()
+        .unwrap_or("ironclaw-stress")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            hash ^ u64::from(byte).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    value ^= (worker_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value ^= (operation_index as u64).wrapping_mul(0xD6E8_FD9D_5A42_9A1D);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value % (args.model_latency_jitter_ms + 1)
+}
+
+fn stress_payload(mut base: String, minimum_bytes: usize) -> String {
+    if minimum_bytes == 0 || base.len() >= minimum_bytes {
+        return base;
+    }
+    base.push(' ');
+    let pattern = "0123456789abcdef";
+    while base.len() < minimum_bytes {
+        let remaining = minimum_bytes - base.len();
+        let take = remaining.min(pattern.len());
+        base.push_str(&pattern[..take]);
+    }
+    base
 }
 
 fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> String {

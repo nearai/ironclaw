@@ -25,6 +25,32 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             ),
             ("users", summary.users.to_string()),
             ("tenants", summary.tenants.to_string()),
+            ("model_latency_ms", summary.model_latency_ms.to_string()),
+            (
+                "model_latency_profile",
+                summary.model_latency_profile.as_str().to_string(),
+            ),
+            (
+                "model_latency_jitter_ms",
+                summary.model_latency_jitter_ms.to_string(),
+            ),
+            (
+                "model_latency_spike_every",
+                summary.model_latency_spike_every.to_string(),
+            ),
+            (
+                "model_latency_spike_ms",
+                summary.model_latency_spike_ms.to_string(),
+            ),
+            ("user_message_bytes", summary.user_message_bytes.to_string()),
+            (
+                "assistant_message_bytes",
+                summary.assistant_message_bytes.to_string(),
+            ),
+            (
+                "context_max_messages",
+                summary.context_max_messages.to_string(),
+            ),
             ("attempted", summary.attempted.to_string()),
             ("succeeded", summary.succeeded.to_string()),
             ("failed", summary.failed.to_string()),
@@ -82,6 +108,32 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             ("target", target.to_string()),
             ("processes", args.processes.to_string()),
             ("concurrency_per_process", args.concurrency.to_string()),
+            ("model_latency_ms", args.model_latency_ms.to_string()),
+            (
+                "model_latency_profile",
+                args.model_latency_profile.as_str().to_string(),
+            ),
+            (
+                "model_latency_jitter_ms",
+                args.model_latency_jitter_ms.to_string(),
+            ),
+            (
+                "model_latency_spike_every",
+                args.model_latency_spike_every.to_string(),
+            ),
+            (
+                "model_latency_spike_ms",
+                args.model_latency_spike_ms.to_string(),
+            ),
+            ("user_message_bytes", args.user_message_bytes.to_string()),
+            (
+                "assistant_message_bytes",
+                args.assistant_message_bytes.to_string(),
+            ),
+            (
+                "context_max_messages",
+                args.context_max_messages.to_string(),
+            ),
             ("attempted", attempted.to_string()),
             ("succeeded", succeeded.to_string()),
             ("failed", failed.to_string()),

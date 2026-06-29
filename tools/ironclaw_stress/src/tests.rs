@@ -131,6 +131,34 @@ fn process_pressure_memory_churn_generates_successful_samples() {
 }
 
 #[test]
+fn uniform_model_latency_is_deterministic_and_bounded() {
+    let mut args = test_args();
+    args.run_id = Some("latency-test".to_string());
+    args.model_latency_ms = 100;
+    args.model_latency_profile = ModelLatencyProfile::Uniform;
+    args.model_latency_jitter_ms = 50;
+
+    let first = user_turn::synthetic_model_wait_ms(&args, 2, 3);
+    let second = user_turn::synthetic_model_wait_ms(&args, 2, 3);
+
+    assert_eq!(first, second);
+    assert!((100..=150).contains(&first));
+}
+
+#[test]
+fn tail_spike_model_latency_spikes_every_nth_operation() {
+    let mut args = test_args();
+    args.operations = 10;
+    args.model_latency_ms = 100;
+    args.model_latency_profile = ModelLatencyProfile::TailSpike;
+    args.model_latency_spike_every = 3;
+    args.model_latency_spike_ms = 900;
+
+    assert_eq!(user_turn::synthetic_model_wait_ms(&args, 0, 1), 100);
+    assert_eq!(user_turn::synthetic_model_wait_ms(&args, 0, 2), 900);
+}
+
+#[test]
 fn failure_causes_are_grouped_by_bucket_and_stage() {
     let samples = vec![
         Sample {
@@ -192,6 +220,14 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         operations_per_thread: 1,
         users: 1,
         tenants: 1,
+        model_latency_ms: 0,
+        model_latency_profile: ModelLatencyProfile::Fixed,
+        model_latency_jitter_ms: 0,
+        model_latency_spike_every: 0,
+        model_latency_spike_ms: 0,
+        user_message_bytes: 0,
+        assistant_message_bytes: 0,
+        context_max_messages: 20,
         attempted: 1,
         succeeded: 0,
         failed: 1,
@@ -255,6 +291,13 @@ fn test_args() -> Args {
         max_rss_mb: None,
         max_cpu_ms: None,
         model_latency_ms: 0,
+        model_latency_profile: ModelLatencyProfile::Fixed,
+        model_latency_jitter_ms: 0,
+        model_latency_spike_every: 0,
+        model_latency_spike_ms: 0,
+        user_message_bytes: 0,
+        assistant_message_bytes: 0,
+        context_max_messages: 20,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,
