@@ -2270,6 +2270,7 @@ impl HostRuntimeCapabilityHarness {
             registry,
             Arc::clone(&first_party_egress),
             mcp_runtime,
+            provider_id,
         )?;
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
@@ -2285,7 +2286,13 @@ impl HostRuntimeCapabilityHarness {
             capability_ids: vec![CapabilityId::new(capability_id)?],
             runtime_kind: RuntimeKind::Mcp,
             effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
-            network_policy: NetworkPolicy::default(),
+            // The MCP capability declares `EffectKind::Network`, so authorization
+            // attaches an `ApplyNetworkPolicy` obligation that the host runtime
+            // rejects when `allowed_targets` is empty (a default `NetworkPolicy`).
+            // The mock server lives at `http://127.0.0.1:<port>/mcp`, so permit the
+            // loopback host (and disable the private-IP denial that would otherwise
+            // block 127.0.0.1) so the MCP egress reaches the loopback server.
+            network_policy: mcp_loopback_network_policy(),
             secrets: Vec::new(),
             provider_id: ExtensionId::new(provider_id)?,
             additional_provider_trust: Vec::new(),
@@ -2817,6 +2824,7 @@ fn local_dev_host_runtime_with_registry_egress_and_mcp(
     registry: ExtensionRegistry,
     first_party_egress: Arc<RecordingRuntimeHttpEgress>,
     mcp_runtime: Arc<LoopbackMcpRuntime>,
+    mcp_provider_id: &str,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -2832,7 +2840,7 @@ fn local_dev_host_runtime_with_registry_egress_and_mcp(
     ))?))
     .with_first_party_http_egress(first_party_egress)
     .with_mcp_runtime(mcp_runtime)
-    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
@@ -3106,6 +3114,42 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     )])?)
 }
 
+/// Trust policy for MCP integration tests: first-party builtins + user-trusted
+/// mock MCP provider.  The mock MCP provider is registered with root
+/// `/system/extensions/<provider_id>`, so its manifest path must match the
+/// `PackageSource::LocalManifest` key the host runtime derives at dispatch time.
+fn first_party_and_mcp_trust_policy(mcp_provider_id: &str) -> HarnessResult<HostTrustPolicy> {
+    Ok(HostTrustPolicy::new(vec![Box::new(
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::DeleteFilesystem,
+                    EffectKind::Network,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ExternalWrite,
+                ],
+                None,
+            ),
+            AdminEntry::for_local_manifest(
+                PackageId::new(mcp_provider_id)?,
+                format!("/system/extensions/{mcp_provider_id}/manifest.toml"),
+                None,
+                HostTrustAssignment::user_trusted(),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+                None,
+            ),
+        ]),
+    )])?)
+}
+
 fn github_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
         AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
@@ -3133,6 +3177,23 @@ fn http_test_policy() -> NetworkPolicy {
         }],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
+    }
+}
+
+/// Network policy for the slice-6 loopback mock MCP server. The mock binds to
+/// `http://127.0.0.1:<port>/mcp`, so the policy must permit the loopback host and
+/// must NOT deny private/loopback IP ranges (127.0.0.1 is loopback). An empty
+/// `allowed_targets` (the `NetworkPolicy::default()`) is rejected by the host
+/// runtime's network obligation, which is what previously blocked the MCP egress.
+fn mcp_loopback_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1_000_000),
     }
 }
 
@@ -3496,6 +3557,24 @@ struct LoopbackMcpRuntimeHttpEgress {
 
 impl LoopbackMcpRuntimeHttpEgress {
     fn new(mcp_url: &str) -> HarnessResult<Self> {
+        // Hermetic hardening: refuse any non-loopback host so a typo in the mock
+        // URL cannot silently turn this test egress into real external network
+        // I/O. Only 127.0.0.1 / ::1 / localhost are permitted.
+        let parsed = url::Url::parse(mcp_url)
+            .map_err(|e| format!("invalid mock MCP URL {mcp_url:?}: {e}"))?;
+        let is_loopback = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        if !is_loopback {
+            return Err(format!(
+                "mock MCP URL {mcp_url:?} host is not loopback (expected 127.0.0.1, ::1, or \
+                 localhost); refusing non-hermetic egress"
+            )
+            .into());
+        }
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()

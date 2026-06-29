@@ -410,9 +410,14 @@ async fn handle_mcp(
             .into_response();
     }
 
-    // Handle notifications (no id) silently.
+    // Handle notifications (no id) silently. Per the MCP Streamable HTTP spec,
+    // a request body consisting solely of JSON-RPC notifications MUST be answered
+    // with `202 Accepted` and no body — the real client (`send_planned_json_rpc`)
+    // only treats 202 as a valid empty-body ack and otherwise tries to parse the
+    // body as a JSON-RPC response, which fails on an empty 200 and aborts the
+    // handshake before `tools/call` is ever sent.
     if req.id.is_none() {
-        return StatusCode::OK.into_response();
+        return StatusCode::ACCEPTED.into_response();
     }
 
     let mut response_session_id: Option<String> = None;
