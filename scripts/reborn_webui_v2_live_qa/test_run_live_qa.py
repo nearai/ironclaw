@@ -300,6 +300,55 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["trigger_records_after"], 0)
         self.assertIn("did not add a trigger_record", result.details["error"])
 
+    def test_routine_creation_case_can_preinstall_extensions(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            extra_details = kwargs.get("extra_details") or {}
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "routine created",
+                    **extra_details,
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="original sheet prompt",
+                    marker=None,
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                    extensions=[
+                        {
+                            "package_id": "google-sheets",
+                            "display_name": "Google Sheets",
+                            "required_tools": ["google-sheets.append_values"],
+                        }
+                    ],
+                    extra_details={"fixture_ready": True},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["prompt"], "original sheet prompt")
+        self.assertEqual(captured["extensions"][0]["package_id"], "google-sheets")
+        self.assertTrue(result.details["fixture_ready"])
+
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
@@ -396,6 +445,86 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("must be a DM", str(result.details["error"]))
         self.assertEqual(result.details["slack_delivery_target_kind"], "non_dm")
+
+    def test_qa_7a_connect_capabilities_match_chat_connect_flow(self):
+        self.assertEqual(
+            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
+            [
+                run_live_qa.EXTENSION_SEARCH_CAPABILITY_ID,
+                run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID,
+                run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID,
+            ],
+        )
+        self.assertNotIn(
+            run_live_qa.OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
+        )
+
+    def test_qa_7c_prepares_bug_logging_sheet_before_sheet_prompt(self):
+        captured_fixture: dict[str, object] = {}
+        captured_routine: dict[str, object] = {}
+
+        async def fake_create_google_spreadsheet_fixture(**kwargs):
+            captured_fixture.update(kwargs)
+            return {
+                "spreadsheet_id": "sheet-123",
+                "spreadsheet_url": "https://docs.google.com/spreadsheets/d/sheet-123/edit",
+                "title": kwargs["title"],
+            }
+
+        async def fake_routine_creation_case(_ctx, **kwargs):
+            captured_routine.update(kwargs)
+            extra_details = kwargs.get("extra_details") or {}
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_7c_slack_bug_logger_routine",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": "routine bug created", **extra_details},
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_create_google_spreadsheet_fixture",
+                side_effect=fake_create_google_spreadsheet_fixture,
+            ),
+            patch.object(
+                run_live_qa,
+                "_routine_creation_case",
+                side_effect=fake_routine_creation_case,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_7c_slack_bug_logger_routine(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            captured_fixture["title"],
+            run_live_qa.QA_7C_BUG_LOGGING_SHEET_TITLE,
+        )
+        self.assertEqual(
+            captured_fixture["values"],
+            [["Summary", "Reporter", "Slack Timestamp", "Status", "QA Marker"]],
+        )
+        self.assertEqual(
+            captured_routine["prompt"],
+            run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+        )
+        package_ids = [
+            extension["package_id"] for extension in captured_routine["extensions"]
+        ]
+        self.assertEqual(package_ids, ["slack", "google-drive", "google-sheets"])
+        self.assertEqual(
+            captured_routine["extra_details"]["bug_log_sheet_fixture"]["spreadsheet_id"],
+            "sheet-123",
+        )
 
     def test_qa_7d_accepts_signed_slack_event_into_reborn_run(self):
         async def fake_post_signed_slack_dm_event(_ctx, **kwargs):

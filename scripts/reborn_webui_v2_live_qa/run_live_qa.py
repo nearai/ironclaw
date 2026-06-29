@@ -65,6 +65,7 @@ from scripts.reborn_webui_v2_live_qa.env_helpers import (  # noqa: E402
     _section_env_name,
 )
 from scripts.reborn_webui_v2_live_qa.google_api_helpers import (  # noqa: E402
+    _create_google_spreadsheet_fixture,
     _extract_google_document_id,
     _extract_google_spreadsheet_id,
     _gmail_delivery_target_email,
@@ -187,6 +188,12 @@ EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
+QA_7A_CHAT_CONNECT_CAPABILITY_IDS = [
+    EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_ACTIVATE_CAPABILITY_ID,
+]
+QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 
 
 class LiveQaContext:
@@ -2561,21 +2568,37 @@ async def _routine_creation_case(
     marker: str | None,
     routine_name: str,
     required_text: list[str],
+    extensions: list[dict[str, object]] | None = None,
+    extra_details: dict[str, object] | None = None,
 ) -> ProbeResult:
     count_name = routine_name if marker else None
     before_count = _trigger_record_count(ctx.reborn_home, count_name)
-    result = await _live_chat_case(
-        ctx,
-        case_name=case_name,
-        prompt=prompt,
-        marker=marker,
-        required_text=required_text,
-        timeout=180.0,
-        extra_details={
-            "routine_name": routine_name,
-            "trigger_records_before": before_count,
-        },
-    )
+    details = {
+        "routine_name": routine_name,
+        "trigger_records_before": before_count,
+        **(extra_details or {}),
+    }
+    if extensions:
+        result = await _live_chat_with_extensions_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=marker,
+            required_text=required_text,
+            extensions=extensions,
+            timeout=180.0,
+            extra_details=details,
+        )
+    else:
+        result = await _live_chat_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=marker,
+            required_text=required_text,
+            timeout=180.0,
+            extra_details=details,
+        )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
     if result.success and after_count <= before_count:
@@ -3108,15 +3131,60 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
 
 
 async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
     routine_name = "reborn-qa-7c-slack-bug-sheet"
-    return await _routine_creation_case(
-        ctx,
-        case_name="qa_7c_slack_bug_logger_routine",
-        routine_name=routine_name,
-        marker=None,
-        required_text=["routine", "bug"],
-        prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
-    )
+    try:
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        sheet_fixture = await _create_google_spreadsheet_fixture(
+            access_token=access_token,
+            title=QA_7C_BUG_LOGGING_SHEET_TITLE,
+            values=[
+                ["Summary", "Reporter", "Slack Timestamp", "Status", "QA Marker"],
+            ],
+        )
+        return await _routine_creation_case(
+            ctx,
+            case_name="qa_7c_slack_bug_logger_routine",
+            routine_name=routine_name,
+            marker=None,
+            required_text=["routine", "bug"],
+            prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+            extensions=[
+                {
+                    "package_id": "slack",
+                    "display_name": "Slack",
+                    "required_tools": [],
+                },
+                {
+                    "package_id": "google-drive",
+                    "display_name": "Google Drive",
+                    "required_tools": ["google-drive.list_files"],
+                },
+                {
+                    "package_id": "google-sheets",
+                    "display_name": "Google Sheets",
+                    "required_tools": [
+                        "google-sheets.read_values",
+                        "google-sheets.append_values",
+                    ],
+                },
+            ],
+            extra_details={
+                "google_token": token_meta,
+                "bug_log_sheet_fixture": sheet_fixture,
+            },
+        )
+    except Exception as exc:
+        return _result(
+            "qa_7c_slack_bug_logger_routine",
+            False,
+            started,
+            {"routine_name": routine_name, "error": str(exc)},
+        )
 
 
 async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeResult:
@@ -3166,12 +3234,7 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            capability_ids = [
-                EXTENSION_SEARCH_CAPABILITY_ID,
-                EXTENSION_INSTALL_CAPABILITY_ID,
-                EXTENSION_ACTIVATE_CAPABILITY_ID,
-                OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-            ]
+            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
             deadline = time.monotonic() + 180.0
             while time.monotonic() < deadline:
                 await _approve_visible_tool_gate(page)
