@@ -437,6 +437,9 @@ pub struct RebornServices {
         allow(dead_code)
     )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
@@ -782,6 +785,8 @@ impl RebornServices {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         }
@@ -1177,7 +1182,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
     services = attach_hosted_mcp_runtime(services)?;
-    services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
@@ -1216,13 +1220,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 // routes through `compose_product_auth_services`, which applies the same wrap.
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
-                    provider_client.clone(),
+                    Arc::clone(&provider_client),
                 )
-                .with_provider_client(provider_client)
+                .with_provider_client(Arc::clone(&provider_client))
                 .into_services(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                     Arc::clone(&secret_store),
                 )
+                .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
@@ -1268,6 +1273,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             product_auth.runtime_credential_account_refresh_service(),
         ),
     ));
+    services = attach_wasm_runtime(services)?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1376,6 +1382,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_wasm_runtime_credential_provider_captured =
+        services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
 
@@ -1393,6 +1402,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: None,
         secret_store,
+        #[cfg(any(test, feature = "test-support"))]
+        local_dev_wasm_runtime_credential_provider_captured,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
@@ -3850,7 +3861,6 @@ where
         services,
         production_wiring.runtime_process_binding,
     );
-    let services = attach_wasm_runtime(services)?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -3916,6 +3926,7 @@ where
             product_auth_services.runtime_credential_account_refresh_service(),
         ),
     ));
+    let services = attach_wasm_runtime(services)?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth_services.credential_account_service(),
@@ -3929,6 +3940,9 @@ where
     })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_wasm_runtime_credential_provider_captured =
+        services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
 
@@ -3944,6 +3958,8 @@ where
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
+        #[cfg(any(test, feature = "test-support"))]
+        local_dev_wasm_runtime_credential_provider_captured,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.

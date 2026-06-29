@@ -2,7 +2,7 @@
 name = "ironclaw_skill_learning"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Skill learning logic for IronClaw Reborn: distill reusable skills from completed runs (and, later, refine and maintain them)"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"

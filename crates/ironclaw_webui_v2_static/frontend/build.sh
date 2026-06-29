@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# One-shot refresh of every generated WebUI v2 frontend artifact.
-# Run after editing static/js/** or to upgrade pinned deps, then commit
-# the changed files under static/dist/ and static/vendor/.
+# One-shot refresh of WebUI v2 frontend artifacts for local inspection or
+# vendored dependency updates. Cargo builds the SPA bundle into OUT_DIR when
+# `webui-v2-beta` is enabled, so static/dist/ is ignored and must not be
+# committed. Only commit static/vendor/ changes when refreshing pinned vendor
+# assets.
 #
 #   ./build.sh           # vendor + npm ci + bundle
 #   ./build.sh --no-vendor   # skip re-downloading vendored CDN assets
