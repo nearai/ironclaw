@@ -233,20 +233,26 @@ export function ChatInput({
       const scopeUnchanged = authScope() === submittedScope;
       const draftKeyUnchanged = currentDraftKeyRef.current === submittedDraftKey;
       if (!scopeUnchanged) return;
-      if (draftKeyUnchanged && textRef.current === "") {
+      const shouldRestoreActiveText = draftKeyUnchanged && textRef.current === "";
+      if (shouldRestoreActiveText) {
         textRef.current = submittedText;
         setText(submittedText);
       }
-      setDraft(submittedDraftKey, submittedText);
-      if (
+      if (shouldRestoreActiveText || !draftKeyUnchanged) {
+        setDraft(submittedDraftKey, submittedText);
+      }
+      const shouldRestoreActiveAttachments =
         draftKeyUnchanged &&
         attachmentsRef.current.length === 0 &&
-        submittedAttachments.length > 0
-      ) {
+        submittedAttachments.length > 0;
+      if (shouldRestoreActiveAttachments) {
         setAttachments(submittedAttachments);
         attachmentsRef.current = submittedAttachments;
       }
-      if (submittedAttachments.length > 0) {
+      if (
+        (shouldRestoreActiveAttachments || !draftKeyUnchanged) &&
+        submittedAttachments.length > 0
+      ) {
         setStagedAttachments(submittedDraftKey, submittedAttachments);
       }
     };
