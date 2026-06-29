@@ -3326,6 +3326,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
     let error = model_port
         .stream_model(LoopModelRequest {
             messages,
+            inline_messages: Vec::new(),
             surface_version: None,
             model_preference: None,
             capability_view: None,
