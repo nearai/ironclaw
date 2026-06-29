@@ -1,6 +1,7 @@
 mod child_io;
 mod progress;
 mod redaction;
+mod resource_ops;
 mod summary;
 mod synthetic;
 #[cfg(test)]
@@ -37,20 +38,17 @@ use crate::{
 use clap::{Parser, ValueEnum};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceEstimate, ResourceUsage, TenantId,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
 };
 use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceError,
-    ResourceGovernor,
+    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
 };
-use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "ironclaw_storage_stress",
-    about = "Stress current filesystem-backed resource governor storage"
+    about = "Stress current filesystem-backed storage workloads"
 )]
 pub(crate) struct Args {
     #[arg(long, value_enum)]
@@ -100,11 +98,15 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 1)]
     pub(crate) progress_interval_seconds: u64,
 
-    /// Emit structured stderr spans for failed chat-turn operations.
+    /// Synthetic model latency for mixed-user-session operations.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) model_latency_ms: u64,
+
+    /// Emit structured stderr spans for failed user-turn operations.
     #[arg(long, default_value_t = false)]
     pub(crate) span_log_failures: bool,
 
-    /// Emit structured stderr spans for chat-turn operations at or above this latency.
+    /// Emit structured stderr spans for user-turn operations at or above this latency.
     /// Set to 0 to disable.
     #[arg(long, default_value_t = 0)]
     pub(crate) slow_span_threshold_ms: u64,
@@ -139,6 +141,7 @@ pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
     ChatTurn,
+    MixedUserSession,
 }
 
 impl Scenario {
@@ -147,11 +150,16 @@ impl Scenario {
             Self::ReserveRelease => "reserve-release",
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
+            Self::MixedUserSession => "mixed-user-session",
         }
     }
 
     pub(crate) fn is_resource_governor(self) -> bool {
         matches!(self, Self::ReserveRelease | Self::ReserveReconcile)
+    }
+
+    pub(crate) fn is_user_turn(self) -> bool {
+        matches!(self, Self::ChatTurn | Self::MixedUserSession)
     }
 }
 
@@ -262,8 +270,11 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
     }
-    if matches!(args.scenario, Scenario::ChatTurn) && args.processes > 1 {
-        return Err("--scenario chat-turn requires --processes 1".to_string());
+    if args.scenario.is_user_turn() && args.processes > 1 {
+        return Err(format!(
+            "--scenario {} requires --processes 1",
+            args.scenario.as_str()
+        ));
     }
     Ok(())
 }
@@ -330,6 +341,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
             .arg(args.progress_interval_seconds.to_string())
+            .arg("--model-latency-ms")
+            .arg(args.model_latency_ms.to_string())
             .arg("--slow-span-threshold-ms")
             .arg(args.slow_span_threshold_ms.to_string())
             .arg("--span-sample-limit")
@@ -594,25 +607,8 @@ fn run_one_operation(
     operation_index: usize,
 ) -> Sample {
     let scope = identities.scope(args, worker_index, operation_index);
-    let estimate = ResourceEstimate {
-        usd: Some(dec!(0.000001)),
-        input_tokens: Some(8),
-        output_tokens: Some(4),
-        wall_clock_ms: Some(1),
-        output_bytes: Some(16),
-        network_egress_bytes: Some(0),
-        process_count: Some(0),
-        concurrency_slots: Some(1),
-    };
-    let usage = ResourceUsage {
-        usd: dec!(0.000001),
-        input_tokens: 8,
-        output_tokens: 4,
-        wall_clock_ms: 1,
-        output_bytes: 16,
-        network_egress_bytes: 0,
-        process_count: 0,
-    };
+    let estimate = resource_ops::estimate();
+    let usage = resource_ops::usage();
 
     let started = Instant::now();
     let outcome = match args.scenario {
@@ -623,11 +619,14 @@ fn run_one_operation(
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
         Scenario::ChatTurn => unreachable!("chat-turn uses the async user-turn workload"),
+        Scenario::MixedUserSession => {
+            unreachable!("mixed-user-session uses the async user-turn workload")
+        }
     };
     let latency = started.elapsed();
     let failure = outcome
         .err()
-        .map(|error| resource_failure(args.scenario, error));
+        .map(|error| resource_ops::failure(args.scenario, error));
     let error = failure.as_ref().map(|cause| cause.bucket.clone());
     Sample {
         latency,
@@ -759,38 +758,6 @@ fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> 
     Ok(())
 }
 
-fn classify_error(error: &ResourceError) -> String {
-    match error {
-        ResourceError::Storage { reason } if reason.contains("cross-process CAS contention") => {
-            "storage_cross_process_cas_contention".to_string()
-        }
-        ResourceError::Storage { .. } => "storage".to_string(),
-        ResourceError::LimitExceeded { .. } => "limit_exceeded".to_string(),
-        ResourceError::RequiresApproval { .. } => "requires_approval".to_string(),
-        ResourceError::ReservationAlreadyExists { .. } => "reservation_already_exists".to_string(),
-        ResourceError::InvalidEstimate { .. } => "invalid_estimate".to_string(),
-        ResourceError::ReservationMismatch { .. } => "reservation_mismatch".to_string(),
-        ResourceError::UnknownReservation { .. } => "unknown_reservation".to_string(),
-        ResourceError::ReservationClosed { .. } => "reservation_closed".to_string(),
-    }
-}
-
-fn resource_failure(scenario: Scenario, error: ResourceError) -> FailureCause {
-    FailureCause::new(
-        classify_error(&error),
-        resource_failure_stage(scenario),
-        format!("{error:?}"),
-    )
-}
-
-fn resource_failure_stage(scenario: Scenario) -> &'static str {
-    match scenario {
-        Scenario::ReserveRelease => "reserve_release",
-        Scenario::ReserveReconcile => "reserve_reconcile",
-        Scenario::ChatTurn => "chat_turn",
-    }
-}
-
 pub(crate) fn log_prefix(args: &Args) -> String {
     match args.child_index {
         Some(child_index) => format!("[storage-stress child={child_index}]"),
@@ -876,7 +843,10 @@ async fn build_postgres_backend(_args: &Args, _run_id: &str) -> Result<BackendHa
     Err("binary was built without the postgres feature".to_string())
 }
 
-fn governor_from_root<F>(root: Arc<F>, run_id: &str) -> Result<Arc<dyn ResourceGovernor>, String>
+pub(crate) fn governor_from_root<F>(
+    root: Arc<F>,
+    run_id: &str,
+) -> Result<Arc<dyn ResourceGovernor>, String>
 where
     F: RootFilesystem + 'static,
 {

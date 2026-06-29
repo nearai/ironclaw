@@ -60,6 +60,17 @@ fn chat_turn_rejects_multi_process_runs() {
 }
 
 #[test]
+fn mixed_user_session_rejects_multi_process_runs() {
+    let mut args = test_args();
+    args.scenario = Scenario::MixedUserSession;
+    args.processes = 2;
+
+    let error = validate_args(&args).expect_err("mixed sessions are single-process only");
+
+    assert!(error.contains("--scenario mixed-user-session requires --processes 1"));
+}
+
+#[test]
 fn failure_causes_are_grouped_by_bucket_and_stage() {
     let samples = vec![
         Sample {
@@ -109,6 +120,7 @@ fn test_args() -> Args {
         postgres_url: None,
         postgres_pool_size: 4,
         progress_interval_seconds: 0,
+        model_latency_ms: 0,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,

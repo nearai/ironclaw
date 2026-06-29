@@ -10,8 +10,10 @@ use std::{
 use chrono::Utc;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceReservation,
+    ResourceReservationId, ResourceScope, VirtualPath,
 };
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent, SessionThreadError,
@@ -24,10 +26,12 @@ use ironclaw_turns::{
     runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 use crate::{
-    Args, Backend, LatencySummary, Sample,
+    Args, Backend, LatencySummary, Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
+    resource_ops,
     summary::FailureCause,
     synthetic::SyntheticIds,
 };
@@ -37,6 +41,7 @@ where
     F: RootFilesystem,
 {
     root: Arc<F>,
+    governor: Arc<dyn ResourceGovernor>,
     thread_service: Arc<FilesystemSessionThreadService<F>>,
     run_id: String,
     target: String,
@@ -67,6 +72,10 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) finalize_assistant: StageLatencySummary,
     pub(crate) complete_run: StageLatencySummary,
     pub(crate) load_context: StageLatencySummary,
+    pub(crate) resource_reserve: StageLatencySummary,
+    pub(crate) model_wait: StageLatencySummary,
+    pub(crate) resource_reconcile: StageLatencySummary,
+    pub(crate) resource_release: StageLatencySummary,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,6 +90,10 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) finalize_assistant: Option<Duration>,
     pub(crate) complete_run: Option<Duration>,
     pub(crate) load_context: Option<Duration>,
+    pub(crate) resource_reserve: Option<Duration>,
+    pub(crate) model_wait: Option<Duration>,
+    pub(crate) resource_reconcile: Option<Duration>,
+    pub(crate) resource_release: Option<Duration>,
 }
 
 pub(crate) async fn build_user_turn_workload(
@@ -101,7 +114,7 @@ async fn build_libsql_user_turn_workload(
     let (filesystem, target) = crate::build_libsql_root(args).await?;
     Ok(UserTurnWorkload::Libsql(user_turn_services_from_root(
         filesystem, run_id, target,
-    )))
+    )?))
 }
 
 #[cfg(not(feature = "libsql"))]
@@ -120,7 +133,7 @@ async fn build_postgres_user_turn_workload(
     let (filesystem, target) = crate::build_postgres_root(args).await?;
     Ok(UserTurnWorkload::Postgres(user_turn_services_from_root(
         filesystem, run_id, target,
-    )))
+    )?))
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -406,6 +419,91 @@ where
             )
         })?;
 
+        if matches!(args.scenario, Scenario::MixedUserSession) {
+            time_stage(
+                &mut stages.load_context,
+                self.thread_service
+                    .load_context_window(LoadContextWindowRequest {
+                        scope: context.thread_scope.clone(),
+                        thread_id: thread.thread_id.clone(),
+                        max_messages: 20,
+                    }),
+            )
+            .await
+            .map_err(|error| thread_failure("load_context", error))?;
+
+            let reservation = time_stage(
+                &mut stages.resource_reserve,
+                reserve_resources(
+                    Arc::clone(&self.governor),
+                    context.turn_scope.to_resource_scope(),
+                ),
+            )
+            .await?;
+
+            let execution = async {
+                time_stage(&mut stages.model_wait, synthetic_model_wait(args)).await;
+
+                let draft = time_stage(
+                    &mut stages.append_assistant,
+                    self.thread_service
+                        .append_assistant_draft(AppendAssistantDraftRequest {
+                            scope: context.thread_scope.clone(),
+                            thread_id: thread.thread_id.clone(),
+                            turn_run_id: claimed.state.run_id.to_string(),
+                            content: MessageContent::text(format!(
+                                "stress response {operation_ref}"
+                            )),
+                        }),
+                )
+                .await
+                .map_err(|error| thread_failure("append_assistant", error))?;
+
+                time_stage(
+                    &mut stages.finalize_assistant,
+                    self.thread_service.finalize_assistant_message(
+                        &context.thread_scope,
+                        &thread.thread_id,
+                        draft.message_id,
+                        MessageContent::text(format!("stress response {operation_ref}")),
+                    ),
+                )
+                .await
+                .map_err(|error| thread_failure("finalize_assistant", error))?;
+
+                time_stage(
+                    &mut stages.complete_run,
+                    turn_store.complete_run(CompleteRunRequest {
+                        run_id: claimed.state.run_id,
+                        runner_id: claimed.runner_id,
+                        lease_token: claimed.lease_token,
+                    }),
+                )
+                .await
+                .map_err(|error| turn_failure("complete_run", error))?;
+
+                Ok::<(), OperationFailure>(())
+            }
+            .await;
+
+            if let Err(error) = execution {
+                let _ = time_stage(
+                    &mut stages.resource_release,
+                    release_resources(Arc::clone(&self.governor), reservation.id),
+                )
+                .await;
+                return Err(error);
+            }
+
+            time_stage(
+                &mut stages.resource_reconcile,
+                reconcile_resources(Arc::clone(&self.governor), reservation.id),
+            )
+            .await?;
+
+            return Ok(());
+        }
+
         let draft = time_stage(
             &mut stages.append_assistant,
             self.thread_service
@@ -475,21 +573,23 @@ fn user_turn_services_from_root<F>(
     root: Arc<F>,
     run_id: &str,
     target: String,
-) -> UserTurnServices<F>
+) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
 {
     let run_id = run_id.to_string();
+    let governor = crate::governor_from_root(Arc::clone(&root), &run_id)?;
     let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&root), {
         let run_id = run_id.clone();
         move |scope| user_turn_mount_view(&run_id, scope)
     }));
-    UserTurnServices {
+    Ok(UserTurnServices {
         root,
+        governor,
         thread_service: Arc::new(FilesystemSessionThreadService::new(scoped)),
         run_id,
         target,
-    }
+    })
 }
 
 fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView, HostApiError> {
@@ -532,6 +632,44 @@ async fn time_stage<T>(slot: &mut Option<Duration>, future: impl Future<Output =
     let output = future.await;
     *slot = Some(started.elapsed());
     output
+}
+
+async fn reserve_resources(
+    governor: Arc<dyn ResourceGovernor>,
+    scope: ResourceScope,
+) -> Result<ResourceReservation, OperationFailure> {
+    tokio::task::spawn_blocking(move || governor.reserve(scope, resource_ops::estimate()))
+        .await
+        .map_err(|error| OperationFailure::new("resource_worker", "resource_reserve", error))?
+        .map_err(|error| resource_failure("resource_reserve", error))
+}
+
+async fn reconcile_resources(
+    governor: Arc<dyn ResourceGovernor>,
+    reservation_id: ResourceReservationId,
+) -> Result<(), OperationFailure> {
+    tokio::task::spawn_blocking(move || governor.reconcile(reservation_id, resource_ops::usage()))
+        .await
+        .map_err(|error| OperationFailure::new("resource_worker", "resource_reconcile", error))?
+        .map(|_| ())
+        .map_err(|error| resource_failure("resource_reconcile", error))
+}
+
+async fn release_resources(
+    governor: Arc<dyn ResourceGovernor>,
+    reservation_id: ResourceReservationId,
+) -> Result<(), OperationFailure> {
+    tokio::task::spawn_blocking(move || governor.release(reservation_id))
+        .await
+        .map_err(|error| OperationFailure::new("resource_worker", "resource_release", error))?
+        .map(|_| ())
+        .map_err(|error| resource_failure("resource_release", error))
+}
+
+async fn synthetic_model_wait(args: &Args) {
+    if args.model_latency_ms > 0 {
+        sleep(Duration::from_millis(args.model_latency_ms)).await;
+    }
 }
 
 fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> String {
@@ -592,6 +730,10 @@ fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
     insert_stage_latency(&mut output, "finalize_assistant", stages.finalize_assistant);
     insert_stage_latency(&mut output, "complete_run", stages.complete_run);
     insert_stage_latency(&mut output, "load_context", stages.load_context);
+    insert_stage_latency(&mut output, "resource_reserve", stages.resource_reserve);
+    insert_stage_latency(&mut output, "model_wait", stages.model_wait);
+    insert_stage_latency(&mut output, "resource_reconcile", stages.resource_reconcile);
+    insert_stage_latency(&mut output, "resource_release", stages.resource_release);
     serde_json::Value::Object(output)
 }
 
@@ -690,4 +832,10 @@ fn turn_failure(stage: impl Into<String>, error: TurnError) -> OperationFailure 
         TurnErrorCategory::CapacityExceeded => "turn_capacity_exceeded",
     };
     OperationFailure::new(bucket, stage, error)
+}
+
+fn resource_failure(stage: &'static str, error: ResourceError) -> OperationFailure {
+    OperationFailure {
+        cause: resource_ops::failure_for_stage(stage, error),
+    }
 }
