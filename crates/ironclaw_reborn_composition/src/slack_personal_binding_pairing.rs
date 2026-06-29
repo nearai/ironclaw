@@ -32,8 +32,18 @@ const SLACK_PAIRING_CODE_MIN_LEN: usize = 8;
 const SLACK_PAIRING_CODE_MAX_LEN: usize = 32;
 const SLACK_PAIRING_CHALLENGE_DEDUP_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SlackPersonalBindingPairingCode(String);
+
+impl std::fmt::Debug for SlackPersonalBindingPairingCode {
+    // security: never print the raw pairing code via `{:?}` (logs, error chains,
+    // assert output). The containing Issued/Notification types derive Debug and
+    // therefore inherit this redaction. `Display` still yields the code for the
+    // single place that needs it (the ephemeral Slack slash reply).
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SlackPersonalBindingPairingCode(<redacted>)")
+    }
+}
 
 impl SlackPersonalBindingPairingCode {
     pub fn new(value: impl Into<String>) -> Result<Self, SlackPersonalBindingPairingError> {
@@ -490,6 +500,25 @@ mod tests {
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
     };
     use crate::slack_serve::SlackInstallationSelector;
+
+    #[test]
+    fn pairing_code_debug_is_redacted() {
+        let secret = "ABC12345";
+        let pairing = code(secret);
+        assert!(
+            !format!("{pairing:?}").contains(secret),
+            "Debug leaked the raw pairing code",
+        );
+        // Display still yields the real code (the ephemeral slash reply needs it).
+        assert_eq!(pairing.to_string(), secret);
+        // Containing types inherit the redaction through their derived Debug.
+        let notification = SlackPersonalBindingPairingNotification {
+            installation_id: installation("install-a"),
+            slack_user_id: SlackUserId::new("U123"),
+            code: code(secret),
+        };
+        assert!(!format!("{notification:?}").contains(secret));
+    }
 
     #[tokio::test]
     async fn redeem_challenge_binds_authenticated_user_to_slack_actor() {

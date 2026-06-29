@@ -206,7 +206,10 @@ export function ChannelsTab({
                     />`}
                     ${(ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
-                    html` <${PairingSection} channel=${packageId(ch)} /> `}
+                    html` <${PairingSection}
+                      channel=${packageId(ch)}
+                      redeemFn=${redeemPairingCode}
+                    /> `}
                   </div>
                 `;
               }

@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.js";
+
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.js", import.meta.url), "utf8");
   const lines = [];
@@ -88,6 +90,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     clearThreadState: () => {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    channelConnectionDisplayName,
     setThreadState: () => {},
     useChat: () => hookState,
     useT: () => (key) => key,
@@ -372,7 +375,7 @@ test("Chat renders generic onboarding pairing and blocks composer sends", async 
   assert.equal(inputProps.sendDisabled, true);
   assert.equal(
     inputProps.statusText,
-    "Finish connecting telegram before sending another message.",
+    "Finish connecting Telegram before sending another message.",
   );
   const response = await inputProps.onSend("do not send while pairing");
   assert.equal(response, null);

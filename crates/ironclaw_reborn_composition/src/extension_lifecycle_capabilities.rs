@@ -212,7 +212,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         // surface it as a display preview so WebChat opens the in-chat pairing
         // panel from structured state (never by parsing the activation message).
         let connection_preview = channel_connection_display_preview(&response);
-        let output = serde_json::to_value(response)
+        let output = serde_json::to_value(without_model_visible_connection_chrome(response))
             .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
         Ok(
             FirstPartyCapabilityResult::new(output, resource_usage(started))
@@ -250,6 +250,23 @@ fn channel_connection_display_preview(
         subtitle: None,
         truncated: false,
     })
+}
+
+/// The structured connect requirement carries render chrome (input placeholder,
+/// button labels, error copy) for the in-chat pairing panel and rides the
+/// display-preview side channel only. Strip it from the model-visible tool output
+/// so the model sees just the activation prose, never the UI strings.
+fn without_model_visible_connection_chrome(
+    mut response: LifecycleProductResponse,
+) -> LifecycleProductResponse {
+    if let Some(LifecycleProductPayload::ExtensionActivate {
+        connection_required,
+        ..
+    }) = response.payload.as_mut()
+    {
+        *connection_required = None;
+    }
+    response
 }
 
 fn display_channel_name(channel: &str) -> String {
@@ -325,6 +342,53 @@ mod tests {
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
     use ironclaw_product_workflow::{ChannelConnectionRequirement, LifecyclePhase};
+
+    #[test]
+    fn model_visible_output_omits_connect_chrome_but_preview_keeps_it() {
+        // The connect requirement is render chrome (placeholder/labels/error copy)
+        // for the in-chat panel. It must ride the display-preview side channel, not
+        // the model-visible tool output.
+        let requirement = ChannelConnectionRequirement {
+            channel: "slack".to_string(),
+            strategy: "inbound_proof_code".to_string(),
+            instructions: "msg".to_string(),
+            input_placeholder: "Enter Slack pairing code".to_string(),
+            submit_label: "Connect".to_string(),
+            error_message: "Invalid or expired Slack pairing code.".to_string(),
+        };
+        let activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: Some(requirement.clone()),
+            }),
+        };
+
+        // The display preview keeps the full requirement...
+        let preview = channel_connection_display_preview(&activation)
+            .expect("inbound-channel activation carries the preview");
+        assert!(preview.output_preview.contains("Enter Slack pairing code"));
+
+        // ...but the model-visible output must not carry the render chrome.
+        let model = without_model_visible_connection_chrome(activation);
+        match &model.payload {
+            Some(LifecycleProductPayload::ExtensionActivate {
+                connection_required,
+                ..
+            }) => assert!(
+                connection_required.is_none(),
+                "connect chrome leaked into model-visible output",
+            ),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+        let serialized = serde_json::to_string(&model).unwrap();
+        assert!(!serialized.contains("Enter Slack pairing code"));
+        assert!(!serialized.contains("submit_label"));
+    }
 
     #[test]
     fn channel_connection_display_preview_marks_inbound_channel_activations() {

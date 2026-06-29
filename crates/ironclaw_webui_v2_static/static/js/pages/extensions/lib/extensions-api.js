@@ -4,7 +4,7 @@
 //   projection and maps those operations to the extension registry.
 
 import { apiFetch, setupExtension } from "../../../lib/api.js";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
+import { redeemPairingCode } from "./pairing-api.js";
 
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
@@ -54,26 +54,16 @@ export function startExtensionOauth(packageRef, secret) {
     }
   );
 }
+// Reborn v2 has no admin pending-pairing-request queue; a user redeems their own
+// code through the mounted v2 endpoint. These stay as thin shims over the v2
+// redeem so the pairing-request UI keeps compiling without ever calling the
+// legacy /api/pairing/* routes, which are not mounted in the reborn binary (404).
 export function fetchPairingRequests(channel) {
-  return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}`);
+  channelName(channel);
+  return Promise.resolve({ requests: [] });
 }
 export function approvePairingCode(channel, code, options = {}) {
-  const body = { code };
-  if (options.threadId) body.thread_id = options.threadId;
-  if (options.requestId) body.request_id = options.requestId;
-  return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}/approve`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  }).then((response) => {
-    if (response?.success !== false) {
-      notifyChannelConnected({
-        channel,
-        sourceThreadId: options.threadId || null,
-        source: options.source || "webui",
-      });
-    }
-    return response;
-  });
+  return redeemPairingCode(channelName(channel), code, options);
 }
 
 function channelName(channel) {

@@ -116,6 +116,43 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   assert.equal(consoleErrors.length, 1);
 });
 
+test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
+  // The cross-thread pairing-panel fix (useChat derive effect) depends on
+  // useHistory reporting which thread its `messages` represent, so a consumer can
+  // tell when `messages` still holds the previous thread's timeline during a
+  // navigation. Pin that the tag is set from the first render and after a load.
+  const threadId = "thread-tagged";
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => ({
+      messages: [{ message_id: "m1", kind: "user", status: "accepted", content: "hi" }],
+      next_cursor: null,
+    }),
+    globalThis: {},
+    messagesFromTimeline: () => [{ id: "msg-m1", role: "user", content: "hi" }],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+
+  // Set before any async load resolves: messages are never exposed without the
+  // thread they belong to.
+  assert.equal(history.messagesThreadId, threadId);
+
+  await flushMicrotasks();
+
+  const loaded = setCalls.at(-1);
+  assert.equal(loaded.messagesThreadId, threadId);
+  assert.deepEqual(
+    loaded.messages.map((message) => message.id),
+    ["msg-m1"],
+  );
+});
+
 test("useHistory full refresh preserves SSE-only activity messages", async () => {
   const threadId = "thread-activity";
   const runId = "run-activity";

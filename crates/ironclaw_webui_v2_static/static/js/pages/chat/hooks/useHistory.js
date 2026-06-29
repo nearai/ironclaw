@@ -49,6 +49,11 @@ export function useHistory(threadId, options = {}) {
   const cached = threadId ? historyCache.get(cacheKey(threadId)) : null;
   const [state, setState] = React.useState({
     messages: cached?.messages || [],
+    // The thread `messages` belong to. Set together with `messages` everywhere,
+    // so a consumer can tell when `messages` still holds the previous thread's
+    // timeline: it lags `threadId` by a render on a thread switch, until the
+    // thread-change effect below swaps it in.
+    messagesThreadId: threadId || null,
     nextCursor: cached?.nextCursor || null,
     isLoading: false,
     // Non-null when an initial or cursor-load failed. Reset to null on a
@@ -93,7 +98,13 @@ export function useHistory(threadId, options = {}) {
         finalReplyTimestampByRun = null,
       } = loadOptions;
       if (!threadId) {
-        setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
+        setState({
+          messages: [],
+          messagesThreadId: null,
+          nextCursor: null,
+          isLoading: false,
+          loadError: null,
+        });
         return;
       }
       if (loadingRef.current.has(threadId)) return;
@@ -154,6 +165,7 @@ export function useHistory(threadId, options = {}) {
           putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
+            messagesThreadId: threadId,
             nextCursor,
             isLoading: false,
             loadError: null,
@@ -186,6 +198,7 @@ export function useHistory(threadId, options = {}) {
     const entry = threadId ? historyCache.get(cacheKey(threadId)) : null;
     setState({
       messages: entry?.messages || [],
+      messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
       // Only show the loading state when nothing is cached to show;
       // otherwise render the cached thread immediately and refresh in
@@ -218,6 +231,7 @@ export function useHistory(threadId, options = {}) {
 
   return {
     messages: state.messages,
+    messagesThreadId: state.messagesThreadId,
     hasMore: Boolean(state.nextCursor),
     nextCursor: state.nextCursor,
     isLoading: state.isLoading,

@@ -1196,12 +1196,13 @@ fn activation_success_message(
     "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.".to_string()
 }
 
-// Build the structured connect requirement for an inbound channel. Slack carries
-// the exact copy the connectable-channels descriptor uses (so the in-chat panel
-// and the Settings panel read identically); any other inbound channel gets a
-// generic proof-code prompt. Kept beside `activation_success_message` so the two
-// channel branches stay in lockstep.
-fn channel_connection_requirement(
+// Build the structured connect requirement for an inbound channel. The Slack copy
+// is kept identical to the connectable-channels descriptor
+// (`slack_inbound_proof_code_connectable_channel`) so the in-chat panel and the
+// Settings panel read identically — enforced by the cross-check test
+// `slack_requirement_copy_matches_connectable_descriptor`, not just by convention.
+// Any other inbound channel gets a generic proof-code prompt.
+pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
 ) -> ChannelConnectionRequirement {
@@ -1210,7 +1211,7 @@ fn channel_connection_requirement(
             channel: "slack".to_string(),
             strategy: "inbound_proof_code".to_string(),
             instructions: "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.".to_string(),
-            input_placeholder: "Enter Slack pairing code".to_string(),
+            input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
             error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
         }
@@ -1607,7 +1608,7 @@ mod tests {
             .expect("slack channel activation must carry a structured connection requirement");
         assert_eq!(requirement.channel, "slack");
         assert_eq!(requirement.strategy, "inbound_proof_code");
-        assert_eq!(requirement.input_placeholder, "Enter Slack pairing code");
+        assert_eq!(requirement.input_placeholder, "Enter Slack pairing code...");
         assert!(
             requirement.error_message.contains("/pair"),
             "invalid-code copy must point the user at /pair: {}",

@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  approvePairingCode,
-  fetchPairingRequests,
-} from "./extensions-api.js";
+import { approvePairingCode, fetchPairingRequests } from "./extensions-api.js";
 
 function installFetch(t, handler) {
   const originalFetch = globalThis.fetch;
@@ -22,11 +19,11 @@ function installFetch(t, handler) {
   globalThis.fetch = handler;
 }
 
-test("fetchPairingRequests reads pending pairing requests for a channel", async (t) => {
-  const calls = [];
-  installFetch(t, async (path, options) => {
-    calls.push({ path, options });
-    return new Response(JSON.stringify({ requests: [{ code: "A1B2C3" }] }), {
+test("fetchPairingRequests returns no pending requests without calling a legacy route", async (t) => {
+  let called = false;
+  installFetch(t, async () => {
+    called = true;
+    return new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -34,49 +31,33 @@ test("fetchPairingRequests reads pending pairing requests for a channel", async 
 
   const response = await fetchPairingRequests("telegram");
 
-  assert.deepEqual(response, { requests: [{ code: "A1B2C3" }] });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/pairing/telegram");
-  assert.equal(calls[0].options.credentials, "same-origin");
-  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+  // Reborn v2 has no admin pending-request queue, and the old /api/pairing route
+  // is not mounted — so this resolves empty without any network call.
+  assert.deepEqual(response, { requests: [] });
+  assert.equal(called, false, "must not call the unmounted /api/pairing route");
 });
 
-test("approvePairingCode submits a pairing code for the authenticated user", async (t) => {
+test("approvePairingCode redeems through the mounted v2 endpoint", async (t) => {
   const calls = [];
   installFetch(t, async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ success: true, message: "Pairing approved." }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ provider: "slack", provider_user_id: "U1" }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
   });
 
-  const response = await approvePairingCode("telegram", "A1B2C3");
-
-  assert.deepEqual(response, { success: true, message: "Pairing approved." });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/pairing/telegram/approve");
-  assert.equal(calls[0].options.method, "POST");
-  assert.equal(calls[0].options.headers.get("Content-Type"), "application/json");
-  assert.deepEqual(JSON.parse(calls[0].options.body), { code: "A1B2C3" });
-});
-
-test("approvePairingCode includes chat continuation identifiers when supplied", async (t) => {
-  const calls = [];
-  installFetch(t, async (path, options) => {
-    calls.push({ path, options });
-    return new Response(JSON.stringify({ success: true }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  });
-
-  await approvePairingCode("telegram", "A1B2C3", {
+  const response = await approvePairingCode("telegram", "A1B2C3", {
     threadId: "thread-1",
     requestId: "pairing-gate-1",
   });
 
+  assert.equal(response.success, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/extensions/pairing/redeem");
+  assert.equal(calls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
+    channel: "telegram",
     code: "A1B2C3",
     thread_id: "thread-1",
     request_id: "pairing-gate-1",

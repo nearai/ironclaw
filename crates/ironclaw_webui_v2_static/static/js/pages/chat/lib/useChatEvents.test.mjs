@@ -340,7 +340,7 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].gateActivity, false);
 });
 
-test("useChatEvents: extension activation preview never opens a pairing panel", () => {
+test("useChatEvents: an extension activation preview becomes a tool card (the panel is decided by the derive path)", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
@@ -368,7 +368,10 @@ test("useChatEvents: extension activation preview never opens a pairing panel", 
     },
   });
 
-  assert.equal(harness.pendingOnboarding, null);
+  // The event stream only materializes the activation tool card; whether to open
+  // the in-chat pairing panel is decided by useChat's structured derive effect,
+  // not here. (Asserting harness.pendingOnboarding would be vacuous — this harness
+  // never wires setPendingOnboarding into useChatEvents.)
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].toolName, "extension_activate");
 });

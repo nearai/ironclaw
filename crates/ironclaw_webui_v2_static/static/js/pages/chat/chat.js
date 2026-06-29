@@ -19,6 +19,7 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
+import { channelConnectionDisplayName } from "../../lib/channel-connection-events.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 
@@ -36,10 +37,9 @@ import { buildRuntimeContext } from "./lib/runtime-context.js";
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 function pendingOnboardingLabel(onboarding) {
-  const raw = String(onboarding?.extensionName || "the extension").trim();
-  if (!raw) return "the extension";
-  if (raw.toLowerCase() === "slack") return "Slack";
-  return raw.replace(/[-_]+/g, " ");
+  // Single source of channel display names (lib/channel-connection-events.js) so
+  // the composer notice and the pairing-card title can't drift in casing.
+  return channelConnectionDisplayName(onboarding?.extensionName);
 }
 
 export function Chat({

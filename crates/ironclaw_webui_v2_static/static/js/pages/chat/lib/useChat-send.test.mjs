@@ -20,6 +20,7 @@ import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
   forgetChannelConnectionWaiter,
+  normalizeConnectionChannel,
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events.js";
@@ -54,6 +55,7 @@ function runUseChatSource(context) {
     channelConnectionContinuationMessage,
     connectionEventMatchesOnboarding,
     forgetChannelConnectionWaiter,
+    normalizeConnectionChannel,
     rememberChannelConnectionWaiter,
   });
   if (!context.subscribeChannelConnected) {
@@ -2832,7 +2834,7 @@ function channelConnectionRequiredCard(overrides = {}) {
   };
 }
 
-function channelConnectionContext({ threadId, messages, slackExtension, stateUpdates, storage }) {
+function channelConnectionContext({ threadId, messages, slackExtension, stateUpdates, storage, messagesThreadId }) {
   return {
     AbortController,
     Date,
@@ -2869,6 +2871,11 @@ function channelConnectionContext({ threadId, messages, slackExtension, stateUpd
     useChatEvents: () => () => {},
     useHistory: () => ({
       messages,
+      // The thread the loaded `messages` belong to. Real useHistory swaps this in
+      // step with `messages` (see useHistory.js); tests default it to the active
+      // thread, and override it to model the post-navigation render where
+      // `threadId` has advanced but `messages` is still the previous thread's.
+      messagesThreadId: messagesThreadId ?? threadId,
       hasMore: false,
       nextCursor: null,
       isLoading: false,
@@ -2969,6 +2976,42 @@ test("useChat: a dismissed channel-connection-required tool card stays closed", 
     stateUpdates.some((update) => update.value?.state === "pairing_required"),
     false,
     "a panel the user already dismissed must not re-derive from the durable card",
+  );
+});
+
+test("useChat: a connection-required card from another thread's still-loaded timeline must not open the panel here", async () => {
+  // Regression for the cross-thread "panel crosses over" bug. Repro: refresh on a
+  // chat that is requesting Slack, then navigate to a chat that does not need it.
+  // On the navigation render `threadId` advances to the new chat one render before
+  // useHistory swaps `messages` to the new thread's timeline, so the derive effect
+  // briefly sees the PREVIOUS thread's durable connection card. It must not stamp
+  // that card onto — and open the pairing panel for — the newly-viewed chat.
+  const threadId = "thread-no-slack";
+  const stateUpdates = [];
+  const context = channelConnectionContext({
+    threadId,
+    // A Slack card + an unconnected Slack account, so the ONLY thing that can keep
+    // the panel closed is the cross-thread guard — not the already-connected gate.
+    messages: [channelConnectionRequiredCard()],
+    messagesThreadId: "thread-needs-slack",
+    slackExtension: {
+      package_ref: { id: "slack", kind: "extension" },
+      kind: "channel",
+      authenticated: false,
+      needs_setup: true,
+      onboarding_state: "setup_required",
+    },
+    stateUpdates,
+  });
+
+  runUseChatSource(context);
+  context.globalThis.__testExports.useChat(threadId);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(
+    stateUpdates.some((update) => update.value?.state === "pairing_required"),
+    false,
+    "a connection card belonging to another thread must not open the pairing panel on this chat",
   );
 });
 
@@ -3074,6 +3117,127 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
     assert.ok(
       stateUpdates.some((update) => update.index === 5 && update.value === null),
       "the pairing panel clears when the channel connects elsewhere",
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persists the dismissal", async () => {
+  // Cancelling a run with an open pairing panel must (1) close the panel, (2)
+  // forget the channel-connection waiter so a later connect can't blast "Continue
+  // the previous request" into a chat the user explicitly cancelled, and (3)
+  // persist the dismissal so the durable activation card can't re-derive the panel.
+  const threadId = "thread-cancel-pairing";
+  const sourceMessageId = "tool-slack-cancel";
+  const stateUpdates = [];
+  const cancelCalls = [];
+  const store = new Map();
+  const localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+
+  const originalWindow = globalThis.window;
+  // The waiter registry reads window.localStorage; the dismissal store reads the
+  // vm context's globalThis.localStorage. Back both with the same map.
+  globalThis.window = {
+    localStorage,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  try {
+    const context = {
+      AbortController,
+      Date,
+      Error,
+      Map,
+      Math,
+      Set,
+      React: createReactStub({
+        runEffects: true,
+        setCalls: stateUpdates,
+        initialByIndex: new Map([
+          [2, { runId: "run-cancel", threadId, status: "running" }],
+          [
+            5,
+            { state: "pairing_required", extensionName: "slack", threadId, sourceMessageId },
+          ],
+        ]),
+      }),
+      addPending,
+      toRenderAttachment,
+      toWireAttachment,
+      cancelRunRequest: async (body) => {
+        cancelCalls.push(body);
+        return {};
+      },
+      clearInterval,
+      clearTimeout,
+      createThreadRequest: async () => {
+        throw new Error("thread should already exist");
+      },
+      fetchExtensions: async () => ({ extensions: [] }),
+      globalThis: { localStorage },
+      queryClient: {
+        fetchQuery: async ({ queryFn }) => queryFn(),
+        getQueryData: () => ({ threads: [{ thread_id: threadId, title: "Slack chat" }] }),
+        invalidateQueries: () => {},
+      },
+      recordAcceptedMessageRef,
+      redeemSlackPairingCode: async () => ({ success: true }),
+      removePending,
+      resolveGateRequest: async () => {},
+      sendMessage: async () => ({ run_id: "run-continue" }),
+      setInterval,
+      setTimeout,
+      submitManualToken: async () => {},
+      useChatEvents: () => () => {},
+      useHistory: () => ({
+        messages: [],
+        messagesThreadId: threadId,
+        hasMore: false,
+        nextCursor: null,
+        isLoading: false,
+        loadHistory: () => {},
+        seedThreadMessages: () => {},
+        setMessages: () => {},
+      }),
+      useSSE: () => ({ status: "idle" }),
+    };
+
+    runUseChatSource(context);
+    const chat = context.globalThis.__testExports.useChat(threadId);
+
+    // Showing the panel registered a waiter for this thread.
+    const beforeCancel = JSON.parse(
+      store.get("ironclaw:channel-connection:waiting:v1") || "[]",
+    );
+    assert.ok(
+      beforeCancel.some((w) => w.channel === "slack" && w.threadId === threadId),
+      "an open pairing panel registers a connection waiter",
+    );
+
+    await chat.cancelRun("user_requested");
+
+    assert.equal(cancelCalls.length, 1);
+    assert.equal(cancelCalls[0].runId, "run-cancel");
+    assert.ok(
+      stateUpdates.some((update) => update.index === 5 && update.value === null),
+      "cancel closes the pairing panel",
+    );
+    assert.deepEqual(
+      JSON.parse(store.get(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`)),
+      [sourceMessageId],
+      "cancel persists the dismissal so the durable card can't re-open the panel",
+    );
+    const afterCancel = JSON.parse(
+      store.get("ironclaw:channel-connection:waiting:v1") || "[]",
+    );
+    assert.ok(
+      !afterCancel.some((w) => w.channel === "slack" && w.threadId === threadId),
+      "cancel forgets the waiter so a later connect won't resume the cancelled chat",
     );
   } finally {
     globalThis.window = originalWindow;

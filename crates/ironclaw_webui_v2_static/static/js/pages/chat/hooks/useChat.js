@@ -10,15 +10,14 @@ import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
   forgetChannelConnectionWaiter,
+  normalizeConnectionChannel,
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
-import {
-  approvePairingCode,
-  fetchExtensions,
-} from "../../extensions/lib/extensions-api.js";
+import { fetchExtensions } from "../../extensions/lib/extensions-api.js";
+import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import {
   addPending,
@@ -158,6 +157,7 @@ function channelConnectionRequirementFromCard(card) {
   return {
     sourceMessageId: card.id || null,
     extensionName: channel,
+    strategy: typeof parsed.strategy === "string" ? parsed.strategy : null,
     instructions: typeof parsed.instructions === "string" ? parsed.instructions : null,
     inputPlaceholder:
       typeof parsed.input_placeholder === "string" ? parsed.input_placeholder : null,
@@ -186,12 +186,16 @@ function latestChannelConnectionRequirement(messages, dismissedIds) {
 // per-user extensions snapshot. The card is gated on this so a durable
 // activation card can never re-open the panel for an already-connected account.
 function channelConnectionIsSatisfied(extensions, channel) {
-  const expected = String(channel || "").toLowerCase();
+  // Normalize both operands the same way the waiter bus does
+  // (lib/channel-connection-events.js) so a multi-word channel id (e.g.
+  // `telegram_bot`) can't satisfy the gate here while the bus keys on a different
+  // normalized string — which would re-open the panel for a connected account.
+  const expected = normalizeConnectionChannel(channel);
   const extension = (extensions || []).find(
     (item) =>
-      String(
+      normalizeConnectionChannel(
         item?.package_ref?.id || item?.packageRef?.id || item?.id || "",
-      ).toLowerCase() === expected,
+      ) === expected,
   );
   if (!extension) return false;
   if (extension.authenticated === true && extension.needs_setup !== true) return true;
@@ -201,6 +205,10 @@ function channelConnectionIsSatisfied(extensions, channel) {
     extension.onboardingState ||
     extension.activation_status ||
     extension.activationStatus;
+  // Fail closed: an explicit backend connect card must not be suppressed by a
+  // missing or unrecognized onboarding state. Treat the account as connected only
+  // when it reports a state that is not a "needs connection" one.
+  if (typeof state !== "string" || !state) return false;
   return !["setup_required", "pairing_required", "pairing"].includes(state);
 }
 
@@ -293,6 +301,7 @@ export function useChat(threadId) {
 
   const {
     messages,
+    messagesThreadId,
     hasMore,
     nextCursor,
     isLoading: historyLoading,
@@ -470,6 +479,11 @@ export function useChat(threadId) {
   // never re-open the panel for an already-connected account.
   React.useEffect(() => {
     if (!threadId || pendingGate || pendingOnboardingRef.current) return;
+    // Only derive from messages that belong to the active thread. On a thread
+    // switch `threadId` advances a render before useHistory swaps `messages` to
+    // the new thread's timeline; without this guard the previous thread's durable
+    // connection card would open — and be stamped onto — the newly-viewed chat.
+    if (messagesThreadId && messagesThreadId !== threadId) return;
     const requirement = latestChannelConnectionRequirement(
       messages,
       dismissedOnboardingIdsRef.current,
@@ -491,6 +505,7 @@ export function useChat(threadId) {
           state: "pairing_required",
           threadId,
           sourceMessageId: requirement.sourceMessageId,
+          strategy: requirement.strategy,
           instructions: requirement.instructions,
           inputPlaceholder: requirement.inputPlaceholder,
           submitLabel: requirement.submitLabel,
@@ -503,7 +518,7 @@ export function useChat(threadId) {
     return () => {
       cancelled = true;
     };
-  }, [messages, threadId, pendingGate, setPendingOnboarding]);
+  }, [messages, messagesThreadId, threadId, pendingGate, setPendingOnboarding]);
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
@@ -1079,10 +1094,13 @@ export function useChat(threadId) {
         threadId: threadForResume,
         requestId: onboarding.requestId || null,
       };
+      // Every channel redeems through the same mounted v2 endpoint. The legacy
+      // /api/pairing/* approve route is not mounted in the reborn binary (404), so
+      // the in-chat and Settings paths must not diverge onto it.
       const isSlackPairing = isSlackPersonalPairing(onboarding.extensionName);
       const response = isSlackPairing
         ? await redeemSlackPairingCode(trimmed, options)
-        : await approvePairingCode(onboarding.extensionName, trimmed, options);
+        : await redeemPairingCode(onboarding.extensionName, trimmed, options);
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }

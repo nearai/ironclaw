@@ -298,6 +298,32 @@ mod tests {
     }
 
     #[test]
+    fn slack_requirement_copy_matches_connectable_descriptor() {
+        // The in-chat connect requirement (built in extension_lifecycle) and the
+        // Settings connectable-channels descriptor must read identically for Slack.
+        // Enforce that invariant here so the two copies can never silently drift.
+        let descriptor = slack_inbound_proof_code_connectable_channel();
+        let requirement =
+            crate::extension_lifecycle::channel_connection_requirement("slack", "Slack");
+
+        assert_eq!(requirement.channel, descriptor.channel);
+        assert_eq!(requirement.instructions, descriptor.action.instructions);
+        assert_eq!(
+            requirement.input_placeholder,
+            descriptor.action.input_placeholder
+        );
+        assert_eq!(requirement.submit_label, descriptor.action.submit_label);
+        assert_eq!(requirement.error_message, descriptor.action.error_message);
+        // The requirement's `strategy` string must be the descriptor strategy's
+        // wire value (what the Settings UI branches on).
+        let strategy_wire = serde_json::to_value(descriptor.strategy)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .expect("strategy serializes to a string");
+        assert_eq!(requirement.strategy, strategy_wire);
+    }
+
+    #[test]
     fn slack_inbound_proof_code_connectable_channel_matches_pairing_copy() {
         let channel = slack_inbound_proof_code_connectable_channel();
 

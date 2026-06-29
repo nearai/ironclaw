@@ -3,15 +3,20 @@ import { notifyChannelConnected } from "../../../lib/channel-connection-events.j
 
 export const PAIRING_REDEEM_PATH = "/api/webchat/v2/extensions/pairing/redeem";
 
-export function redeemPairingCode(channel, code) {
+export function redeemPairingCode(channel, code, options = {}) {
+  const body = { channel, code };
+  if (options.threadId) body.thread_id = options.threadId;
+  if (options.requestId) body.request_id = options.requestId;
   return apiFetch(PAIRING_REDEEM_PATH, {
     method: "POST",
-    body: JSON.stringify({ channel, code }),
+    body: JSON.stringify(body),
   }).then((response) => {
     notifyChannelConnected({
       channel,
       provider: response.provider,
       providerUserId: response.provider_user_id,
+      sourceThreadId: options.threadId || null,
+      source: options.source || "webui",
     });
     return {
       success: true,

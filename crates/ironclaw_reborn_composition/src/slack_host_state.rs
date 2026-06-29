@@ -1978,8 +1978,13 @@ fn map_binding_fs_error(error: FilesystemError) -> RebornUserIdentityBindingErro
     RebornUserIdentityBindingError::Backend(error.to_string())
 }
 
-fn map_pairing_fs_error(error: FilesystemError) -> SlackPersonalBindingPairingError {
-    SlackPersonalBindingPairingError::Backend(error.to_string())
+fn map_pairing_fs_error(_error: FilesystemError) -> SlackPersonalBindingPairingError {
+    // security: a pairing FilesystemError's Display embeds the record's scoped
+    // path, and a pairing *code* record lives at `pairing/<code>.json` — the path
+    // IS the pairing code. Never surface the path/reason and never log `%error`
+    // here; map to a static, code-free message (mirroring the mint site) so the
+    // code can never reach an error string, a client response, or a log line.
+    SlackPersonalBindingPairingError::Backend("Slack pairing storage operation failed".into())
 }
 
 fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
@@ -2030,6 +2035,23 @@ mod tests {
         RebornIdentityProviderId, RebornIdentityProviderUserId,
         RebornUserIdentityBindingDeleteStore,
     };
+
+    #[test]
+    fn map_pairing_fs_error_never_surfaces_the_pairing_code() {
+        // In production a pairing *code* record lives at `pairing/<code>.json`, so
+        // a FilesystemError for it embeds the code in its Display. The mapper must
+        // surface a fixed, code-free message regardless of its input, so the code
+        // can never reach an error string, a client response, or a log line. (The
+        // path below is a valid stand-in; the mapper ignores its input entirely.)
+        let error = FilesystemError::MountNotFound {
+            path: VirtualPath::new("/memory/pairing-code.json").unwrap(),
+        };
+        assert_eq!(
+            map_pairing_fs_error(error).to_string(),
+            "slack personal binding pairing backend unavailable: \
+             Slack pairing storage operation failed",
+        );
+    }
 
     #[tokio::test]
     async fn filesystem_slack_host_state_binds_and_resolves_identity() {

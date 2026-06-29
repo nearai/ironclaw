@@ -1,5 +1,16 @@
 import { React, html } from "../../../lib/html.js";
 import { Button } from "../../../design-system/button.js";
+import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.js";
+
+// Strategies whose in-chat affordance is "paste a code". Other strategies (OAuth,
+// QR, admin-managed channels) can't be completed from this inline panel, so the
+// user is pointed at the Extensions page rather than shown a code box they can't
+// use. An absent strategy defaults to the paste panel for backward compatibility.
+const PASTE_CODE_STRATEGIES = new Set(["inbound_proof_code", "web_generated_code"]);
+
+function acceptsPastedCode(strategy) {
+  return !strategy || PASTE_CODE_STRATEGIES.has(strategy);
+}
 
 export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
   const [code, setCode] = React.useState("");
@@ -21,6 +32,31 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
       setIsSubmitting(false);
     }
   };
+
+  // Non-paste strategy: this channel is connected from the Extensions page, not by
+  // pasting a code here. Render guidance instead of a code box that would submit a
+  // meaningless value.
+  if (!acceptsPastedCode(onboarding?.strategy)) {
+    return html`
+      <div
+        data-testid="onboarding-pairing-card"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      >
+        <h3 className="text-sm font-semibold text-iron-100">${copy.title}</h3>
+        <p className="mt-1 text-sm leading-6 text-iron-300">
+          Connect ${copy.displayName} from the Extensions page to continue.
+        </p>
+        ${onCancel &&
+        html`
+          <div className="mt-3">
+            <${Button} variant="ghost" className="h-9 px-3 text-xs" onClick=${onCancel}>
+              Dismiss
+            <//>
+          </div>
+        `}
+      </div>
+    `;
+  }
 
   return html`
     <div
@@ -70,8 +106,9 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
 }
 
 function pairingCardCopy(onboarding) {
-  const displayName = extensionDisplayName(onboarding?.extensionName);
+  const displayName = channelConnectionDisplayName(onboarding?.extensionName);
   return {
+    displayName,
     title: `Connect ${displayName}`,
     instructions:
       onboarding?.instructions ||
@@ -82,13 +119,4 @@ function pairingCardCopy(onboarding) {
     submittingLabel: onboarding?.submittingLabel || "Connecting...",
     errorMessage: onboarding?.errorMessage || "Pairing failed. Check the code and try again.",
   };
-}
-
-function extensionDisplayName(extensionName) {
-  const raw = String(extensionName || "extension").trim();
-  if (!raw) return "extension";
-  if (raw.toLowerCase() === "slack") return "Slack";
-  return raw
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
