@@ -228,8 +228,11 @@ pub struct ScriptedOAuthTokenEgress {
     /// `execute()` call.  While the queue is non-empty the front entry is
     /// popped and used instead of `(status, body)`.  Use `push_response` to
     /// stage per-call overrides after construction.
-    response_queue: Arc<Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>>,
+    response_queue: ScriptedResponseQueue,
 }
+
+/// FIFO queue of per-call `(status, body)` overrides for [`ScriptedOAuthTokenEgress`].
+type ScriptedResponseQueue = Arc<Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>>;
 
 impl ScriptedOAuthTokenEgress {
     fn build(status: u16, body: Vec<u8>) -> Self {
