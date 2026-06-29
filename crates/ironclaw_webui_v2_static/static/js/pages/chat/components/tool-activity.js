@@ -138,6 +138,7 @@ function ToolActivityCard({ activity, nested = false }) {
       onClick=${() => setExpanded((v) => !v)}
       aria-expanded=${expanded ? "true" : "false"}
       aria-controls=${controlsId}
+      data-testid="tool-activity-toggle"
       className="v2-button flex w-full items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
     >
       <span className=${["h-2 w-2 shrink-0 rounded-full", dotClass].join(" ")} />
@@ -163,7 +164,12 @@ function ToolActivityCard({ activity, nested = false }) {
   `;
 
   return html`
-    <div className=${nested ? "" : "flex gap-3"}>
+    <div
+      className=${nested ? "" : "flex gap-3"}
+      data-testid="tool-activity-card"
+      data-tool-name=${toolName || ""}
+      data-tool-status=${toolStatus || ""}
+    >
       ${!nested &&
       html`
         <div
@@ -238,6 +244,7 @@ function ToolDetailPanel({
   return html`
     <div
       id=${controlsId}
+      data-testid="tool-activity-detail"
       className="rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
     >
       <div className="flex items-center gap-1 border-b border-iron-700/40 px-2 pt-1.5">
