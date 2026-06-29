@@ -43,6 +43,8 @@ export function ChatInput({
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
   const sendBlocked = disabled || sendDisabled || isSending;
+  const submitDisabledRef = React.useRef(disabled || sendDisabled);
+  submitDisabledRef.current = disabled || sendDisabled;
   sendBlockedRef.current = sendBlocked;
   // Mirror of `attachments` plus a serial promise, so overlapping addFiles()
   // calls validate against the latest staged set rather than a stale snapshot
@@ -222,10 +224,18 @@ export function ChatInput({
     } catch {
       // The failed optimistic message renders retry details in the thread.
     } finally {
-      sendBlockedRef.current = disabled || sendDisabled;
+      sendBlockedRef.current = submitDisabledRef.current;
       setIsSending(false);
     }
-  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
+  }, [
+    text,
+    attachments,
+    onSend,
+    draftKey,
+    cancelPendingDraft,
+    disabled,
+    sendDisabled,
+  ]);
 
   const handleChange = React.useCallback(
     (e) => {
