@@ -278,8 +278,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
             lane="reborn-webui-v2-live-qa",
             provider="reborn-webui-v2",
             passed=1,
-            failed=1,
-            tests=2,
+            failed=2,
+            tests=3,
             duration_s=1.2,
             status="fail",
             reborn_qa_cases=[
@@ -312,6 +312,17 @@ class RebornQaSlackReportTests(unittest.TestCase):
                         )
                     ],
                 ),
+                notify.RebornQaCaseReport(
+                    rows=("2E",),
+                    case="qa_2e_calendar_prep_email_routine",
+                    feature="Scheduled meeting-prep email routine",
+                    success=False,
+                    latency_ms=0,
+                    message=(
+                        "assistant returned success but routine scope "
+                        "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record"
+                    ),
+                ),
             ],
         )
 
@@ -326,19 +337,27 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(len(qa_sections), 1)
         self.assertTrue(
             any(
-                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/2 passed"
+                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/3 passed"
                 in text
                 for text in section_texts
             )
         )
         qa_text = qa_sections[0]
-        self.assertIn("1/2 passed", qa_text)
+        self.assertIn("1/3 passed", qa_text)
         self.assertIn("\n*Cases:*", qa_text)
         self.assertIn("\n*Tools:*", qa_text)
         self.assertNotIn("\n*Tool I/O digests:*", qa_text)
         self.assertIn("`2A` Gmail connection flow", qa_text)
         self.assertIn("`2D` Calendar prep assistant using Google Docs and live news", qa_text)
-        self.assertIn("requires live Google runtime access", qa_text)
+        self.assertIn(
+            "*Failure `2D`:* requires live Google runtime access",
+            qa_text,
+        )
+        self.assertIn(
+            "*Failure `2E`:* assistant returned success but routine scope "
+            "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record",
+            qa_text,
+        )
         self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
         self.assertNotIn("in#1234567890", qa_text)
         self.assertNotIn("out#9876543210", qa_text)
