@@ -33,7 +33,7 @@ fn redacts_key_value_postgres_password() {
 
 #[test]
 fn redacts_libsql_absolute_path() {
-    let redacted = redact_libsql_path(Path::new("/tmp/ironclaw-storage-stress-secret.db"));
+    let redacted = redact_libsql_path(Path::new("/tmp/ironclaw-stress-secret.db"));
 
     assert_eq!(redacted, "libsql://<redacted-local-path>");
     assert!(!redacted.contains("/tmp"));
@@ -68,6 +68,36 @@ fn mixed_user_session_rejects_multi_process_runs() {
     let error = validate_args(&args).expect_err("mixed sessions are single-process only");
 
     assert!(error.contains("--scenario mixed-user-session requires --processes 1"));
+}
+
+#[test]
+fn sweep_concurrency_rejects_zero_values() {
+    let mut args = test_args();
+    args.sweep_concurrency = vec![1, 0, 2];
+
+    let error = validate_args(&args).expect_err("zero sweep concurrency is invalid");
+
+    assert!(error.contains("--sweep-concurrency values must be greater than 0"));
+}
+
+#[test]
+fn thresholds_report_violating_run_label() {
+    let mut args = test_args();
+    args.max_failure_rate = Some(0.1);
+    let metrics = sweep::RunMetrics {
+        attempted: 10,
+        failed: 2,
+        throughput_ops_sec: 100.0,
+        p95_us: 1_000,
+        p99_us: 1_000,
+        max_us: 1_000,
+    };
+
+    let error = sweep::enforce_thresholds(&args, &[("c2".to_string(), metrics)])
+        .expect_err("failure rate threshold should fail");
+
+    assert!(error.contains("c2"));
+    assert!(error.contains("failure_rate"));
 }
 
 #[test]
@@ -183,6 +213,14 @@ fn test_args() -> Args {
         postgres_pool_size: 4,
         progress_interval_seconds: 0,
         human_read: false,
+        sweep_concurrency: Vec::new(),
+        sweep_users: Vec::new(),
+        sweep_model_latency_ms: Vec::new(),
+        repetitions: 1,
+        output_jsonl: None,
+        max_failure_rate: None,
+        max_p95_ms: None,
+        min_throughput: None,
         model_latency_ms: 0,
         span_log_failures: false,
         slow_span_threshold_ms: 0,

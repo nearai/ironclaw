@@ -34,9 +34,9 @@ impl SyntheticIds {
                     .map_err(|error| format!("build synthetic user id: {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let agent_id = AgentId::new("storage-stress")
+        let agent_id = AgentId::new("ironclaw-stress")
             .map_err(|error| format!("build synthetic agent id: {error}"))?;
-        let project_id = ProjectId::new("storage-stress")
+        let project_id = ProjectId::new("ironclaw-stress")
             .map_err(|error| format!("build synthetic project id: {error}"))?;
         Ok(Self {
             tenants,

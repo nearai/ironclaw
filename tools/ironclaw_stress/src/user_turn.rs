@@ -308,8 +308,8 @@ where
         let turn_store = self.turn_store_for_context(&context)?;
         let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
         let operation_ref = operation_ref(args, worker_index, operation_index);
-        let source_binding = "storage-stress-webchat";
-        let reply_target = "storage-stress-reply";
+        let source_binding = "ironclaw-stress-webchat";
+        let reply_target = "ironclaw-stress-reply";
 
         let thread = time_stage(
             &mut stages.ensure_thread,
@@ -352,7 +352,7 @@ where
                 reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                     .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new(format!("storage-stress:{operation_ref}"))
+                idempotency_key: IdempotencyKey::new(format!("ironclaw-stress:{operation_ref}"))
                     .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 received_at: Utc::now(),
                 requested_run_id: None,
@@ -595,7 +595,7 @@ where
 fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView, HostApiError> {
     let tenant = scope.tenant_id.as_str();
     let user = scope.user_id.as_str();
-    let base = format!("/engine/storage-stress/{run_id}/tenants/{tenant}");
+    let base = format!("/engine/ironclaw-stress/{run_id}/tenants/{tenant}");
     let threads_target = format!("{base}/users/{user}/threads");
 
     let turns_target = match (scope.agent_id.as_ref(), scope.project_id.as_ref()) {
@@ -785,9 +785,9 @@ impl OperationFailure {
         let bucket = bucket.into();
         let stage = stage.into();
         let cause = FailureCause::new(bucket, stage, detail);
-        if std::env::var_os("IRONCLAW_STORAGE_STRESS_DEBUG_ERRORS").is_some() {
+        if std::env::var_os("IRONCLAW_STRESS_DEBUG_ERRORS").is_some() {
             eprintln!(
-                "[storage-stress] operation error bucket={} stage={}: {}",
+                "[ironclaw-stress] operation error bucket={} stage={}: {}",
                 cause.bucket, cause.stage, cause.detail
             );
         }

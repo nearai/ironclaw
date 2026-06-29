@@ -1,9 +1,9 @@
 [package]
-name = "ironclaw_storage_stress"
+name = "ironclaw_stress"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Stress harness for current IronClaw storage-backed infrastructure"
+description = "Stress suite for IronClaw infrastructure bottleneck discovery"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"

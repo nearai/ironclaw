@@ -45,7 +45,7 @@ pub(crate) fn spawn_progress_reporter(
     let total_operations = total_operations as u64;
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
-        .name("storage-stress-progress".to_string())
+        .name("ironclaw-stress-progress".to_string())
         .spawn(move || {
             let started = Instant::now();
             let mut last_attempted = 0;

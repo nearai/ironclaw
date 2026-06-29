@@ -1,9 +1,12 @@
+mod capture;
 mod child_io;
 mod human;
 mod progress;
 mod redaction;
+mod report;
 mod resource_ops;
 mod summary;
+mod sweep;
 mod synthetic;
 #[cfg(test)]
 mod tests;
@@ -23,6 +26,7 @@ use std::{
 };
 
 use crate::{
+    capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::{redact_libsql_path, redact_postgres_url},
@@ -48,8 +52,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "ironclaw_storage_stress",
-    about = "Stress current filesystem-backed storage workloads"
+    name = "ironclaw_stress",
+    about = "Stress IronClaw infrastructure workloads"
 )]
 pub(crate) struct Args {
     #[arg(long, value_enum)]
@@ -102,6 +106,38 @@ pub(crate) struct Args {
     /// Emit a human-readable summary table to stderr after the JSON summary.
     #[arg(long, default_value_t = false)]
     pub(crate) human_read: bool,
+
+    /// Comma-separated concurrency values to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_concurrency: Vec<usize>,
+
+    /// Comma-separated synthetic user counts to sweep.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_users: Vec<usize>,
+
+    /// Comma-separated model latency values to sweep for mixed-user-session.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) sweep_model_latency_ms: Vec<u64>,
+
+    /// Repetitions per sweep point.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) repetitions: usize,
+
+    /// Write one JSON object per sweep run to this file.
+    #[arg(long)]
+    pub(crate) output_jsonl: Option<PathBuf>,
+
+    /// Fail when any run's failure rate is above this value, e.g. 0.01.
+    #[arg(long)]
+    pub(crate) max_failure_rate: Option<f64>,
+
+    /// Fail when any run's p95 latency is above this many milliseconds.
+    #[arg(long)]
+    pub(crate) max_p95_ms: Option<u64>,
+
+    /// Fail when any run's throughput is below this operations/sec value.
+    #[arg(long)]
+    pub(crate) min_throughput: Option<f64>,
 
     /// Synthetic model latency for mixed-user-session operations.
     #[arg(long, default_value_t = 0)]
@@ -234,17 +270,18 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let result = if args.child_index.is_none() && args.processes > 1 {
-        match prewarm(&args, &run_id).await {
-            Ok(()) => run_child_processes(&args, &run_id)
-                .and_then(|summaries| print_parent_summary(&args, &run_id, &summaries)),
-            Err(error) => Err(error),
-        }
+    let result = if args.child_index.is_none() && sweep::is_enabled(&args) {
+        sweep::run(&args, &run_id).await
     } else {
-        match run_in_process(&args, &run_id).await {
-            Ok(summary) => print_run_summary(&args, &summary),
-            Err(error) => Err(error),
-        }
+        run_once(&args, &run_id)
+            .await
+            .and_then(|captured| {
+                report::print_captured_run(&args, &run_id, &captured).map(|_| captured)
+            })
+            .and_then(|captured| {
+                let metrics = captured.metrics();
+                sweep::enforce_thresholds(&args, &[("run".to_string(), metrics)])
+            })
     };
 
     if let Some(path) = generated_libsql_path {
@@ -254,13 +291,20 @@ async fn run() -> Result<(), String> {
     result
 }
 
-fn print_run_summary(args: &Args, summary: &RunSummary) -> Result<(), String> {
-    let encoded = serde_json::to_string_pretty(summary).map_err(display_err)?;
-    println!("{encoded}");
-    if args.human_read && args.child_index.is_none() {
-        eprint!("{}", human::render_run_summary(summary));
+pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, String> {
+    if args.child_index.is_none() && args.processes > 1 {
+        prewarm(args, run_id)
+            .await
+            .and_then(|_| run_child_processes(args, run_id))
+            .map(|summaries| CapturedRun::Parent {
+                aggregate: report::parent_summary_value(args, run_id, &summaries),
+                summaries,
+            })
+    } else {
+        run_in_process(args, run_id)
+            .await
+            .map(|summary| CapturedRun::Single(Box::new(summary)))
     }
-    Ok(())
 }
 
 fn validate_args(args: &Args) -> Result<(), String> {
@@ -281,6 +325,25 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
+    }
+    if args.repetitions == 0 {
+        return Err("--repetitions must be greater than 0".to_string());
+    }
+    if args.sweep_concurrency.contains(&0) {
+        return Err("--sweep-concurrency values must be greater than 0".to_string());
+    }
+    if args.sweep_users.contains(&0) {
+        return Err("--sweep-users values must be greater than 0".to_string());
+    }
+    if let Some(max_failure_rate) = args.max_failure_rate
+        && !(0.0..=1.0).contains(&max_failure_rate)
+    {
+        return Err("--max-failure-rate must be between 0.0 and 1.0".to_string());
+    }
+    if let Some(min_throughput) = args.min_throughput
+        && min_throughput < 0.0
+    {
+        return Err("--min-throughput must be greater than or equal to 0".to_string());
     }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
@@ -568,7 +631,7 @@ fn run_threads_inner(
         let progress = Arc::clone(progress);
         let args = args.clone();
         let handle = match thread::Builder::new()
-            .name(format!("storage-stress-{worker_index}"))
+            .name(format!("ironclaw-stress-{worker_index}"))
             .spawn(move || -> Result<(), String> {
                 let mut samples = Vec::with_capacity(args.operations);
                 for operation_index in 0..args.operations {
@@ -695,88 +758,10 @@ fn summarize(
     }
 }
 
-fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> Result<(), String> {
-    let attempted: u64 = summaries.iter().map(|summary| summary.attempted).sum();
-    let succeeded: u64 = summaries.iter().map(|summary| summary.succeeded).sum();
-    let failed: u64 = summaries.iter().map(|summary| summary.failed).sum();
-    let mut errors = BTreeMap::new();
-    for summary in summaries {
-        for (error, count) in &summary.errors {
-            *errors.entry(error.clone()).or_insert(0) += count;
-        }
-    }
-    let mut failure_causes = BTreeMap::new();
-    for summary in summaries {
-        for (bucket, cause) in &summary.failure_causes {
-            let aggregate =
-                failure_causes
-                    .entry(bucket.clone())
-                    .or_insert_with(|| FailureCauseSummary {
-                        count: 0,
-                        stages: BTreeMap::new(),
-                        sample_detail: cause.sample_detail.clone(),
-                    });
-            aggregate.count += cause.count;
-            for (stage, count) in &cause.stages {
-                *aggregate.stages.entry(stage.clone()).or_insert(0) += count;
-            }
-        }
-    }
-    let max_duration_ms = summaries
-        .iter()
-        .map(|summary| summary.duration_ms)
-        .max()
-        .unwrap_or(0);
-    let throughput_ops_sec = if max_duration_ms == 0 {
-        0.0
-    } else {
-        attempted as f64 / (max_duration_ms as f64 / 1000.0)
-    };
-    let p99_us = summaries
-        .iter()
-        .map(|summary| summary.latency.p99_us)
-        .max()
-        .unwrap_or(0);
-    let max_us = summaries
-        .iter()
-        .map(|summary| summary.latency.max_us)
-        .max()
-        .unwrap_or(0);
-    let target = summaries
-        .first()
-        .map(|summary| summary.target.as_str())
-        .unwrap_or("unknown");
-
-    let aggregate = serde_json::json!({
-        "backend": args.backend,
-        "scenario": args.scenario,
-        "run_id": run_id,
-        "target": target,
-        "processes": args.processes,
-        "concurrency_per_process": args.concurrency,
-        "attempted": attempted,
-        "succeeded": succeeded,
-        "failed": failed,
-        "max_duration_ms": max_duration_ms,
-        "throughput_ops_sec": throughput_ops_sec,
-        "worst_child_p99_us": p99_us,
-        "worst_child_max_us": max_us,
-        "errors": errors,
-        "failure_causes": failure_causes,
-        "children": summaries,
-    });
-    let encoded = serde_json::to_string_pretty(&aggregate).map_err(display_err)?;
-    println!("{encoded}");
-    if args.human_read {
-        eprint!("{}", human::render_parent_summary(args, run_id, summaries));
-    }
-    Ok(())
-}
-
 pub(crate) fn log_prefix(args: &Args) -> String {
     match args.child_index {
-        Some(child_index) => format!("[storage-stress child={child_index}]"),
-        None => "[storage-stress]".to_string(),
+        Some(child_index) => format!("[ironclaw-stress child={child_index}]"),
+        None => "[ironclaw-stress]".to_string(),
     }
 }
 
@@ -882,7 +867,7 @@ fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
 
 fn default_libsql_path() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "ironclaw-storage-stress-{}.db",
+        "ironclaw-stress-{}.db",
         uuid::Uuid::new_v4().simple()
     ))
 }

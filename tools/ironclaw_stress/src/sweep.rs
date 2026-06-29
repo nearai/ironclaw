@@ -1,0 +1,300 @@
+use std::{
+    fmt::Write as FmtWrite,
+    fs::File,
+    io::{BufWriter, Write as IoWrite},
+    time::Instant,
+};
+
+use serde::Serialize;
+use serde_json::json;
+
+use crate::{Args, run_once};
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct RunMetrics {
+    pub(crate) attempted: u64,
+    pub(crate) failed: u64,
+    pub(crate) throughput_ops_sec: f64,
+    pub(crate) p95_us: u128,
+    pub(crate) p99_us: u128,
+    pub(crate) max_us: u128,
+}
+
+impl RunMetrics {
+    fn failure_rate(self) -> f64 {
+        if self.attempted == 0 {
+            0.0
+        } else {
+            self.failed as f64 / self.attempted as f64
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SweepCase {
+    repetition: usize,
+    concurrency: usize,
+    users: usize,
+    model_latency_ms: u64,
+}
+
+#[derive(Debug)]
+struct SweepResult {
+    label: String,
+    run_id: String,
+    case: SweepCase,
+    metrics: RunMetrics,
+}
+
+pub(crate) fn is_enabled(args: &Args) -> bool {
+    !args.sweep_concurrency.is_empty()
+        || !args.sweep_users.is_empty()
+        || !args.sweep_model_latency_ms.is_empty()
+        || args.repetitions > 1
+        || args.output_jsonl.is_some()
+}
+
+pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
+    let cases = build_cases(args);
+    let mut jsonl = match &args.output_jsonl {
+        Some(path) => {
+            Some(BufWriter::new(File::create(path).map_err(|error| {
+                format!("create {}: {error}", path.display())
+            })?))
+        }
+        None => None,
+    };
+    let mut records = Vec::with_capacity(cases.len());
+    let mut results = Vec::with_capacity(cases.len());
+
+    eprintln!(
+        "{} starting sweep suite_run_id={} points={} repetitions={}",
+        crate::log_prefix(args),
+        suite_run_id,
+        cases.len(),
+        args.repetitions
+    );
+
+    for case in cases {
+        let run_id = format!(
+            "{suite_run_id}-r{}-c{}-u{}-m{}",
+            case.repetition, case.concurrency, case.users, case.model_latency_ms
+        );
+        let label = format!(
+            "r{} c{} u{} m{}",
+            case.repetition, case.concurrency, case.users, case.model_latency_ms
+        );
+        let mut case_args = args.clone();
+        case_args.concurrency = case.concurrency;
+        case_args.users = case.users;
+        case_args.model_latency_ms = case.model_latency_ms;
+        case_args.run_id = Some(run_id.clone());
+        case_args.repetitions = 1;
+        case_args.sweep_concurrency.clear();
+        case_args.sweep_users.clear();
+        case_args.sweep_model_latency_ms.clear();
+        case_args.output_jsonl = None;
+
+        eprintln!(
+            "{} sweep point label=\"{}\" backend={} scenario={}",
+            crate::log_prefix(args),
+            label,
+            case_args.backend.as_str(),
+            case_args.scenario.as_str()
+        );
+        let started = Instant::now();
+        let captured = run_once(&case_args, &run_id).await?;
+        let metrics = captured.metrics();
+        let summary = captured.summary_value();
+        let duration_ms = started.elapsed().as_millis();
+        let record = json!({
+            "suite_run_id": suite_run_id,
+            "run_id": run_id,
+            "label": label,
+            "backend": case_args.backend,
+            "scenario": case_args.scenario,
+            "processes": case_args.processes,
+            "concurrency": case.concurrency,
+            "users": case.users,
+            "tenants": case_args.tenants,
+            "operations_per_thread": case_args.operations,
+            "model_latency_ms": case.model_latency_ms,
+            "repetition": case.repetition,
+            "duration_ms": duration_ms,
+            "metrics": metrics,
+            "summary": summary,
+        });
+        if let Some(writer) = jsonl.as_mut() {
+            serde_json::to_writer(&mut *writer, &record).map_err(|error| error.to_string())?;
+            writer.write_all(b"\n").map_err(|error| error.to_string())?;
+        }
+        records.push(record);
+        results.push(SweepResult {
+            label,
+            run_id,
+            case,
+            metrics,
+        });
+    }
+
+    if let Some(mut writer) = jsonl {
+        writer.flush().map_err(|error| error.to_string())?;
+    }
+
+    let suite = json!({
+        "suite_run_id": suite_run_id,
+        "runs": records,
+    });
+    let encoded = serde_json::to_string_pretty(&suite).map_err(|error| error.to_string())?;
+    println!("{encoded}");
+
+    if args.human_read {
+        eprint!("{}", render_sweep_summary(&results));
+    }
+
+    let threshold_inputs = results
+        .iter()
+        .map(|result| (result.label.clone(), result.metrics))
+        .collect::<Vec<_>>();
+    enforce_thresholds(args, &threshold_inputs)
+}
+
+pub(crate) fn enforce_thresholds(args: &Args, runs: &[(String, RunMetrics)]) -> Result<(), String> {
+    let mut violations = Vec::new();
+    for (label, metrics) in runs {
+        if let Some(max_failure_rate) = args.max_failure_rate {
+            let failure_rate = metrics.failure_rate();
+            if failure_rate > max_failure_rate {
+                violations.push(format!(
+                    "{label}: failure_rate {:.4} > {:.4}",
+                    failure_rate, max_failure_rate
+                ));
+            }
+        }
+        if let Some(max_p95_ms) = args.max_p95_ms
+            && metrics.p95_us > u128::from(max_p95_ms) * 1_000
+        {
+            violations.push(format!(
+                "{label}: p95 {} > {max_p95_ms}ms",
+                format_latency_us(metrics.p95_us),
+            ));
+        }
+        if let Some(min_throughput) = args.min_throughput
+            && metrics.throughput_ops_sec < min_throughput
+        {
+            violations.push(format!(
+                "{label}: throughput {:.2} < {:.2}",
+                metrics.throughput_ops_sec, min_throughput
+            ));
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "stress threshold violation(s): {}",
+            violations.join("; ")
+        ))
+    }
+}
+
+fn build_cases(args: &Args) -> Vec<SweepCase> {
+    let concurrency_values = if args.sweep_concurrency.is_empty() {
+        vec![args.concurrency]
+    } else {
+        args.sweep_concurrency.clone()
+    };
+    let user_values = if args.sweep_users.is_empty() {
+        vec![args.users]
+    } else {
+        args.sweep_users.clone()
+    };
+    let model_latency_values = if args.sweep_model_latency_ms.is_empty() {
+        vec![args.model_latency_ms]
+    } else {
+        args.sweep_model_latency_ms.clone()
+    };
+
+    let mut cases = Vec::new();
+    for repetition in 1..=args.repetitions {
+        for concurrency in &concurrency_values {
+            for users in &user_values {
+                for model_latency_ms in &model_latency_values {
+                    cases.push(SweepCase {
+                        repetition,
+                        concurrency: *concurrency,
+                        users: *users,
+                        model_latency_ms: *model_latency_ms,
+                    });
+                }
+            }
+        }
+    }
+    cases
+}
+
+fn render_sweep_summary(results: &[SweepResult]) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "\nSweep summary");
+    let _ = writeln!(
+        output,
+        "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10}",
+        "label",
+        "run",
+        "conc",
+        "users",
+        "model",
+        "attempted",
+        "fail%",
+        "ops/sec",
+        "p95",
+        "p99",
+        "max"
+    );
+    let _ = writeln!(
+        output,
+        "{:-<18} {:-<8} {:->5} {:->6} {:->8} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10}",
+        "", "", "", "", "", "", "", "", "", "", ""
+    );
+    for result in results {
+        let short_run_id = result.run_id.chars().take(8).collect::<String>();
+        let _ = writeln!(
+            output,
+            "{:<18} {:<8} {:>5} {:>6} {:>8} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10}",
+            truncate(&result.label, 18),
+            short_run_id,
+            result.case.concurrency,
+            result.case.users,
+            result.case.model_latency_ms,
+            result.metrics.attempted,
+            result.metrics.failure_rate() * 100.0,
+            result.metrics.throughput_ops_sec,
+            format_latency_us(result.metrics.p95_us),
+            format_latency_us(result.metrics.p99_us),
+            format_latency_us(result.metrics.max_us),
+        );
+    }
+    output
+}
+
+fn format_latency_us(us: u128) -> String {
+    if us >= 1_000_000 {
+        format!("{:.2}s", us as f64 / 1_000_000.0)
+    } else if us >= 1_000 {
+        format!("{:.1}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{us}us")
+    }
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}

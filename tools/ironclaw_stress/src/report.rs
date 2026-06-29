@@ -1,0 +1,109 @@
+use std::collections::BTreeMap;
+
+use crate::{Args, RunSummary, capture::CapturedRun, human, summary::FailureCauseSummary};
+
+pub(crate) fn print_captured_run(
+    args: &Args,
+    run_id: &str,
+    captured: &CapturedRun,
+) -> Result<(), String> {
+    match captured {
+        CapturedRun::Single(summary) => print_run_summary(args, summary),
+        CapturedRun::Parent { summaries, .. } => print_parent_summary(args, run_id, summaries),
+    }
+}
+
+pub(crate) fn parent_summary_value(
+    args: &Args,
+    run_id: &str,
+    summaries: &[RunSummary],
+) -> serde_json::Value {
+    let attempted: u64 = summaries.iter().map(|summary| summary.attempted).sum();
+    let succeeded: u64 = summaries.iter().map(|summary| summary.succeeded).sum();
+    let failed: u64 = summaries.iter().map(|summary| summary.failed).sum();
+    let mut errors = BTreeMap::new();
+    for summary in summaries {
+        for (error, count) in &summary.errors {
+            *errors.entry(error.clone()).or_insert(0) += count;
+        }
+    }
+    let mut failure_causes = BTreeMap::new();
+    for summary in summaries {
+        for (bucket, cause) in &summary.failure_causes {
+            let aggregate =
+                failure_causes
+                    .entry(bucket.clone())
+                    .or_insert_with(|| FailureCauseSummary {
+                        count: 0,
+                        stages: BTreeMap::new(),
+                        sample_detail: cause.sample_detail.clone(),
+                    });
+            aggregate.count += cause.count;
+            for (stage, count) in &cause.stages {
+                *aggregate.stages.entry(stage.clone()).or_insert(0) += count;
+            }
+        }
+    }
+    let max_duration_ms = summaries
+        .iter()
+        .map(|summary| summary.duration_ms)
+        .max()
+        .unwrap_or(0);
+    let throughput_ops_sec = if max_duration_ms == 0 {
+        0.0
+    } else {
+        attempted as f64 / (max_duration_ms as f64 / 1000.0)
+    };
+    let p99_us = summaries
+        .iter()
+        .map(|summary| summary.latency.p99_us)
+        .max()
+        .unwrap_or(0);
+    let max_us = summaries
+        .iter()
+        .map(|summary| summary.latency.max_us)
+        .max()
+        .unwrap_or(0);
+    let target = summaries
+        .first()
+        .map(|summary| summary.target.as_str())
+        .unwrap_or("unknown");
+
+    serde_json::json!({
+        "backend": args.backend,
+        "scenario": args.scenario,
+        "run_id": run_id,
+        "target": target,
+        "processes": args.processes,
+        "concurrency_per_process": args.concurrency,
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "failed": failed,
+        "max_duration_ms": max_duration_ms,
+        "throughput_ops_sec": throughput_ops_sec,
+        "worst_child_p99_us": p99_us,
+        "worst_child_max_us": max_us,
+        "errors": errors,
+        "failure_causes": failure_causes,
+        "children": summaries,
+    })
+}
+
+fn print_run_summary(args: &Args, summary: &RunSummary) -> Result<(), String> {
+    let encoded = serde_json::to_string_pretty(summary).map_err(|error| error.to_string())?;
+    println!("{encoded}");
+    if args.human_read && args.child_index.is_none() {
+        eprint!("{}", human::render_run_summary(summary));
+    }
+    Ok(())
+}
+
+fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> Result<(), String> {
+    let aggregate = parent_summary_value(args, run_id, summaries);
+    let encoded = serde_json::to_string_pretty(&aggregate).map_err(|error| error.to_string())?;
+    println!("{encoded}");
+    if args.human_read {
+        eprint!("{}", human::render_parent_summary(args, run_id, summaries));
+    }
+    Ok(())
+}

@@ -10,7 +10,7 @@ pub(crate) fn spawn_child_stderr_reader(
     stderr: ChildStderr,
 ) -> Option<JoinHandle<()>> {
     thread::Builder::new()
-        .name(format!("storage-stress-child-{child_index}-stderr"))
+        .name(format!("ironclaw-stress-child-{child_index}-stderr"))
         .spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {

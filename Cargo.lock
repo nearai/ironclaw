@@ -5455,7 +5455,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_storage_stress"
+name = "ironclaw_stress"
 version = "0.1.0"
 dependencies = [
  "chrono",
