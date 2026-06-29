@@ -53,6 +53,13 @@ pub(super) struct TurnEventPayload {
 pub(crate) struct FailureExplanationInput {
     pub(crate) failure_category: String,
     pub(crate) fallback_summary: String,
+    /// Model-visible, secret-scrubbed raw cause carried from the failure
+    /// record (e.g. a provider HTTP status line or a missing schema-ref path).
+    /// Unlike `fallback_summary`, this is the original error text so the
+    /// explainer is given the real facts rather than only the coarse category.
+    /// Producers scrub secret VALUES before populating it; the prompt builder
+    /// re-runs [`sanitize_model_visible_text`] as defense in depth.
+    pub(crate) detail: Option<String>,
 }
 
 #[async_trait]
@@ -877,12 +884,19 @@ async fn failure_details_for_turn_event(
         return FailureProjectionDetails::default();
     };
     let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
+    // The model-visible raw cause for the failure travels on the failure
+    // record's detail channel. `TurnLifecycleEvent` does not yet carry a
+    // dedicated detail field distinct from `sanitized_reason`, so until the
+    // upstream runner contract exposes one, there is no detail value to pass
+    // here beyond the category itself. Plumb the channel through so the
+    // explainer is wired to receive it the moment a detail source lands.
+    let detail = detail_for_turn_event(event, &category);
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
     };
     let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
-        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary).await
+        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary, detail).await
     })
     .await;
     FailureProjectionDetails {
@@ -908,6 +922,7 @@ async fn failure_summary_for_turn_event(
     failure_explainer: &dyn FailureExplanationProvider,
     category: &str,
     fallback_summary: String,
+    detail: Option<String>,
 ) -> String {
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
@@ -916,9 +931,25 @@ async fn failure_summary_for_turn_event(
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
             fallback_summary: fallback_summary.clone(),
+            detail,
         })
         .await
         .unwrap_or(fallback_summary)
+}
+
+/// Resolve the model-visible detail to hand the failure explainer.
+///
+/// `TurnLifecycleEvent` currently exposes only `sanitized_reason`, which is
+/// already consumed as the `failure_category`; the runner contract does not yet
+/// carry a separate secret-scrubbed `detail` field (that field lives on
+/// `AgentLoopHostError`/`HostManagedModelError` upstream and is dropped at the
+/// `AgentLoopExecutorError`/`AgentLoopDriverError`/`TurnLifecycleEvent`
+/// boundaries, all of which live outside this crate). Returning `None` keeps
+/// the explainer prompt unchanged for now while leaving the channel wired, so a
+/// follow-up that surfaces a distinct detail on the event only needs to source
+/// it here.
+fn detail_for_turn_event(_event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
+    None
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -952,12 +983,23 @@ fn failure_explanation_system_prompt() -> &'static str {
     ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
-fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
-    format!(
+pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
+    let mut prompt = format!(
         "status: failed\nfailure_category: {}\nfallback_summary: {}\n",
         sanitize_model_visible_text(&input.failure_category),
         sanitize_model_visible_text(&input.fallback_summary),
-    )
+    );
+    // Give the explainer the real cause when one survived from the failure
+    // record. Re-run the value-scrubber as defense in depth even though the
+    // producer is expected to have scrubbed secret VALUES already; skip the
+    // line entirely when the detail is absent or scrubs to empty.
+    if let Some(detail) = input.detail.as_deref() {
+        let scrubbed = sanitize_model_visible_text(detail);
+        if !scrubbed.trim().is_empty() {
+            prompt.push_str(&format!("detail: {scrubbed}\n"));
+        }
+    }
+    prompt
 }
 
 pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
