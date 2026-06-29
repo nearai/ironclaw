@@ -7,6 +7,7 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgress, ProtocolHttpEgressError, RedactedString,
 };
 use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     ProductConversationSubjectRouteResolver, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
@@ -16,6 +17,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
+use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
 use crate::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
@@ -26,7 +28,8 @@ use crate::slack_actor_identity::{
 };
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
-    SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+    SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
+    SlackChannelSetupActivationError,
 };
 use crate::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack_host_state::FilesystemSlackHostState;
@@ -139,10 +142,15 @@ pub(super) async fn build_runtime_mounts(
         pairing.clone(),
         Arc::clone(&channel_route_store),
     );
-    let channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
+    let mut channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
     );
+    if let Some(extension_management) = &parts.local_runtime.extension_management {
+        channel_routes = channel_routes.with_setup_activation(Arc::new(
+            DynamicSlackChannelSetupActivation::new(Arc::clone(extension_management)),
+        ));
+    }
 
     let outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
         Arc::new(SlackDynamicOutboundTargetProvider::new(
@@ -225,6 +233,45 @@ pub(super) async fn build_runtime_mounts(
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })
+}
+
+struct DynamicSlackChannelSetupActivation {
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
+}
+
+impl DynamicSlackChannelSetupActivation {
+    fn new(extension_management: Arc<RebornLocalExtensionManagementPort>) -> Self {
+        Self {
+            extension_management,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
+    async fn activate_slack_channel_after_setup_save(
+        &self,
+    ) -> Result<(), SlackChannelSetupActivationError> {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .map_err(slack_setup_activation_error)?;
+        let projection = self
+            .extension_management
+            .project(package_ref.clone())
+            .await
+            .map_err(slack_setup_activation_error)?;
+        if projection.phase == LifecyclePhase::Discovered {
+            return Ok(());
+        }
+        self.extension_management
+            .activate(package_ref, ExtensionActivationMode::Static)
+            .await
+            .map_err(slack_setup_activation_error)?;
+        Ok(())
+    }
+}
+
+fn slack_setup_activation_error(error: impl std::fmt::Display) -> SlackChannelSetupActivationError {
+    SlackChannelSetupActivationError::new(error.to_string())
 }
 
 struct DynamicSlackPersonalConnectionScopeResolver {

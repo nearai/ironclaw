@@ -3615,7 +3615,6 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
     listConnectableChannels: async () => {
       throw new Error("ordinary prompts should not fetch connectable channels");
     },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -3625,7 +3624,6 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
@@ -3716,7 +3714,6 @@ test("useChat.send: clears local busy when run settles before send response", as
     listConnectableChannels: async () => {
       throw new Error("ordinary prompts should not fetch connectable channels");
     },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -3726,7 +3723,6 @@ test("useChat.send: clears local busy when run settles before send response", as
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
@@ -3812,7 +3808,6 @@ test("useChat.send: clears local admission when navigating away before settlemen
     listConnectableChannels: async () => {
       throw new Error("ordinary prompts should not fetch connectable channels");
     },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -3822,7 +3817,6 @@ test("useChat.send: clears local admission when navigating away before settlemen
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;

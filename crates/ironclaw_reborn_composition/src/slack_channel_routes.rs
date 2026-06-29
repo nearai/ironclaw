@@ -448,6 +448,7 @@ pub struct SlackChannelRouteAdminRouteConfig {
     scope: SlackChannelRouteAdminScope,
     store: Arc<dyn SlackChannelRouteStore>,
     safety_layer: Arc<SafetyLayer>,
+    setup_activation: Option<Arc<dyn SlackChannelSetupActivation>>,
 }
 
 #[derive(Clone)]
@@ -466,6 +467,27 @@ enum SlackChannelRouteAdminScope {
         operator_user_id: UserId,
         setup_service: Arc<SlackSetupService>,
     },
+}
+
+#[async_trait]
+pub(crate) trait SlackChannelSetupActivation: Send + Sync {
+    async fn activate_slack_channel_after_setup_save(
+        &self,
+    ) -> Result<(), SlackChannelSetupActivationError>;
+}
+
+#[derive(Debug, Error)]
+#[error("Slack channel setup activation failed: {reason}")]
+pub(crate) struct SlackChannelSetupActivationError {
+    reason: String,
+}
+
+impl SlackChannelSetupActivationError {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
 }
 
 impl SlackChannelRouteAdminRouteConfig {
@@ -497,6 +519,7 @@ impl SlackChannelRouteAdminRouteConfig {
                 max_output_length: 16 * 1024,
                 injection_check_enabled: true,
             })),
+            setup_activation: None,
         }
     }
 
@@ -517,7 +540,16 @@ impl SlackChannelRouteAdminRouteConfig {
                 max_output_length: 16 * 1024,
                 injection_check_enabled: true,
             })),
+            setup_activation: None,
         }
+    }
+
+    pub(crate) fn with_setup_activation(
+        mut self,
+        setup_activation: Arc<dyn SlackChannelSetupActivation>,
+    ) -> Self {
+        self.setup_activation = Some(setup_activation);
+        self
     }
 
     fn setup_service(&self) -> Result<Arc<SlackSetupService>, SlackRouteError> {
@@ -527,6 +559,15 @@ impl SlackChannelRouteAdminRouteConfig {
             }
             SlackChannelRouteAdminScope::Static { .. } => Err(SlackRouteError::NotFound),
         }
+    }
+
+    async fn activate_slack_channel_after_setup_save(&self) -> Result<(), SlackRouteError> {
+        if let Some(setup_activation) = &self.setup_activation {
+            setup_activation
+                .activate_slack_channel_after_setup_save()
+                .await?;
+        }
+        Ok(())
     }
 
     pub(crate) fn with_allowed_subject_user_ids(
@@ -971,6 +1012,12 @@ impl From<SlackSetupError> for SlackRouteError {
                 Self::Unavailable
             }
         }
+    }
+}
+
+impl From<SlackChannelSetupActivationError> for SlackRouteError {
+    fn from(_error: SlackChannelSetupActivationError) -> Self {
+        Self::Unavailable
     }
 }
 

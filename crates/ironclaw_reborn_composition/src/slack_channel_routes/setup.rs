@@ -101,5 +101,6 @@ async fn save_handler(
     }
     let setup_service = config.setup_service()?;
     setup_service.save(request.into_update()).await?;
+    config.activate_slack_channel_after_setup_save().await?;
     Ok(Json(setup_service.status().await?))
 }

@@ -2375,6 +2375,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_slack_setup_save_activates_installed_slack_channel_extension() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Visible,
+        )
+        .expect("webui bundle");
+        let caller = operator_caller();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("valid slack package ref");
+
+        bundle
+            .api
+            .install_extension(caller.clone(), package_ref)
+            .await
+            .expect("install Slack extension");
+
+        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
+        let response = route_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/webchat/v2/channels/slack/setup")
+                    .header("content-type", "application/json")
+                    .extension(caller.clone())
+                    .body(Body::from(
+                        r#"{
+                            "installation_id":"install_dynamic",
+                            "team_id":"T0DYNAMIC",
+                            "api_app_id":"A0DYNAMIC",
+                            "user_id":"user:slack-operator",
+                            "bot_token":"xoxb-secret",
+                            "signing_secret":"slack-signing-secret"
+                        }"#,
+                    ))
+                    .expect("setup request builds"),
+            )
+            .await
+            .expect("setup route responds");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let extensions = bundle
+            .api
+            .list_extensions(caller)
+            .await
+            .expect("list extensions after setup");
+        let slack = extensions
+            .extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .expect("Slack extension is listed");
+        assert!(
+            slack.active,
+            "saving valid dynamic Slack setup should activate an installed Slack channel"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
