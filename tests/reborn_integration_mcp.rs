@@ -45,6 +45,22 @@ async fn mcp_tool_call_reaches_mock_server() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked");
+    // Confirm the mock server actually received an HTTP request — this proves
+    // the MCP runtime made a real HTTP call to the loopback server, not just
+    // that the capability recorder fired before the egress (the M4 gap).
+    let recorded = server.recorded_requests();
+    assert!(
+        !recorded.is_empty(),
+        "mock MCP server received no HTTP request; MCP egress did not reach the server"
+    );
+    assert!(
+        recorded.iter().any(|r| r.method == "tools/call"),
+        "mock MCP server received requests but none was tools/call; saw: {:?}",
+        recorded
+            .iter()
+            .map(|r| r.method.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Guards `assert_mcp_tool_called` against vacuous pass: when no MCP tool ran
