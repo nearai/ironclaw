@@ -21,12 +21,15 @@ ignore = [
     "RUSTSEC-2026-0097",
     # wasmtime: WASI path_open(TRUNCATE) bypasses FilePerms::WRITE host restriction
     # (https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-2r75-cxrj-cmph).
+    # wasmtime-wasi: WASI hard links and renames bypass destination FilePerms
+    # (https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-4ch3-9j33-3pmj).
     # The IronClaw WASM sandbox does not grant guest modules WASI filesystem
     # capabilities backed by host-controlled FilePerms — guests communicate via
     # explicit host functions (see crates/ironclaw_engine and src/tools/wasm/host.rs),
-    # so the TRUNCATE bypass is not reachable from our guest surface. Remove once
-    # wasmtime is upgraded to a patched release.
+    # so these FilePerms bypasses are not reachable from our guest surface. Remove
+    # once wasmtime is upgraded to a patched release.
     "RUSTSEC-2026-0149",
+    "RUSTSEC-2026-0188",
 ]
 
 [licenses]
