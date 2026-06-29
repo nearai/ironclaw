@@ -79,7 +79,8 @@ fn run_one_operation(args: &Args, worker_index: usize, operation_index: usize) -
         Scenario::ReserveRelease
         | Scenario::ReserveReconcile
         | Scenario::ChatTurn
-        | Scenario::MixedUserSession => {
+        | Scenario::MixedUserSession
+        | Scenario::ContextGrowth => {
             unreachable!("process pressure only handles process-local scenarios")
         }
     }

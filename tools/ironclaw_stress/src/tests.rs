@@ -71,6 +71,27 @@ fn mixed_user_session_rejects_multi_process_runs() {
 }
 
 #[test]
+fn context_growth_rejects_multi_process_runs() {
+    let mut args = test_args();
+    args.scenario = Scenario::ContextGrowth;
+    args.processes = 2;
+
+    let error = validate_args(&args).expect_err("context-growth is single-process only");
+
+    assert!(error.contains("--scenario context-growth requires --processes 1"));
+}
+
+#[test]
+fn context_growth_rejects_zero_turns_per_operation() {
+    let mut args = test_args();
+    args.context_growth_turns_per_operation = 0;
+
+    let error = validate_args(&args).expect_err("zero context growth turns is invalid");
+
+    assert!(error.contains("--context-growth-turns-per-operation"));
+}
+
+#[test]
 fn sweep_concurrency_rejects_zero_values() {
     let mut args = test_args();
     args.sweep_concurrency = vec![1, 0, 2];
@@ -228,6 +249,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         user_message_bytes: 0,
         assistant_message_bytes: 0,
         context_max_messages: 20,
+        context_growth_turns_per_operation: 4,
         attempted: 1,
         succeeded: 0,
         failed: 1,
@@ -235,6 +257,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
         throughput_ops_sec: 1.0,
         latency: latency(1_000),
         process: ProcessMetrics::default(),
+        db_probe: Some(db_probe_summary()),
         stage_latency: Some(UserTurnStageLatencySummary {
             ensure_thread: empty_stage(),
             accept_inbound: empty_stage(),
@@ -261,6 +284,8 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
     assert!(rendered.contains("submit_turn"));
     assert!(rendered.contains("resource_reserve"));
     assert!(rendered.contains("model_wait"));
+    assert!(rendered.contains("DB probe"));
+    assert!(rendered.contains("libsql_file"));
     assert!(rendered.contains("Failure causes"));
     assert!(rendered.contains("turn_thread_busy"));
 }
@@ -298,6 +323,7 @@ fn test_args() -> Args {
         user_message_bytes: 0,
         assistant_message_bytes: 0,
         context_max_messages: 20,
+        context_growth_turns_per_operation: 4,
         span_log_failures: false,
         slow_span_threshold_ms: 0,
         span_sample_limit: 100,
@@ -305,6 +331,23 @@ fn test_args() -> Args {
         memory_bytes: 4096,
         memory_hold_ms: 0,
         child_index: None,
+    }
+}
+
+fn db_probe_summary() -> db_probe::DbProbeSummary {
+    db_probe::DbProbeSummary {
+        before: db_probe::DbProbeSnapshot {
+            libsql_file_bytes: Some(1024),
+            ..db_probe::DbProbeSnapshot::default()
+        },
+        after: db_probe::DbProbeSnapshot {
+            libsql_file_bytes: Some(2048),
+            ..db_probe::DbProbeSnapshot::default()
+        },
+        delta: db_probe::DbProbeDelta {
+            libsql_file_bytes: Some(1024),
+            ..db_probe::DbProbeDelta::default()
+        },
     }
 }
 

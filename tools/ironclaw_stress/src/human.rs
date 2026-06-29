@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use crate::{
     Args, RunSummary,
+    db_probe::{DbProbeSnapshot, DbProbeSummary},
     process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::{FailureCauseSummary, LatencySummary},
     user_turn::UserTurnStageLatencySummary,
@@ -51,6 +52,10 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
                 "context_max_messages",
                 summary.context_max_messages.to_string(),
             ),
+            (
+                "context_growth_turns_per_op",
+                summary.context_growth_turns_per_operation.to_string(),
+            ),
             ("attempted", summary.attempted.to_string()),
             ("succeeded", summary.succeeded.to_string()),
             ("failed", summary.failed.to_string()),
@@ -67,6 +72,9 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
         &[("operation", summary.attempted, &summary.latency)],
     );
     push_process_table(&mut output, &summary.process);
+    if let Some(db_probe) = &summary.db_probe {
+        push_db_probe_table(&mut output, db_probe);
+    }
     if let Some(stages) = &summary.stage_latency {
         push_stage_latency_table(&mut output, stages);
     }
@@ -133,6 +141,10 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             (
                 "context_max_messages",
                 args.context_max_messages.to_string(),
+            ),
+            (
+                "context_growth_turns_per_op",
+                args.context_growth_turns_per_operation.to_string(),
             ),
             ("attempted", attempted.to_string()),
             ("succeeded", succeeded.to_string()),
@@ -238,6 +250,108 @@ fn push_process_table(output: &mut String, process: &ProcessMetrics) {
         "peak_open_fds",
         format_optional(process.peak_open_fds),
     );
+}
+
+fn push_db_probe_table(output: &mut String, db_probe: &DbProbeSummary) {
+    let _ = writeln!(output, "\nDB probe");
+    let _ = writeln!(
+        output,
+        "{:<36} {:>12} {:>12} {:>12}",
+        "metric", "before", "after", "delta"
+    );
+    let _ = writeln!(output, "{:-<36} {:->12} {:->12} {:->12}", "", "", "", "");
+    push_db_size_metric(
+        output,
+        "libsql_file",
+        db_probe.before.libsql_file_bytes,
+        db_probe.after.libsql_file_bytes,
+        db_probe.delta.libsql_file_bytes,
+    );
+    push_db_size_metric(
+        output,
+        "libsql_wal",
+        db_probe.before.libsql_wal_bytes,
+        db_probe.after.libsql_wal_bytes,
+        db_probe.delta.libsql_wal_bytes,
+    );
+    push_db_size_metric(
+        output,
+        "libsql_shm",
+        db_probe.before.libsql_shm_bytes,
+        db_probe.after.libsql_shm_bytes,
+        db_probe.delta.libsql_shm_bytes,
+    );
+    push_db_size_metric(
+        output,
+        "postgres_database_size",
+        db_probe.before.postgres_database_size_bytes,
+        db_probe.after.postgres_database_size_bytes,
+        db_probe.delta.postgres_database_size_bytes,
+    );
+    push_db_count_metric(
+        output,
+        "postgres_active_connections",
+        db_probe.before.postgres_active_connections,
+        db_probe.after.postgres_active_connections,
+    );
+    push_db_count_metric(
+        output,
+        "postgres_idle_connections",
+        db_probe.before.postgres_idle_connections,
+        db_probe.after.postgres_idle_connections,
+    );
+    push_db_count_metric(
+        output,
+        "postgres_waiting_connections",
+        db_probe.before.postgres_waiting_connections,
+        db_probe.after.postgres_waiting_connections,
+    );
+    push_db_probe_error(output, "before_error", &db_probe.before);
+    push_db_probe_error(output, "after_error", &db_probe.after);
+}
+
+fn push_db_size_metric(
+    output: &mut String,
+    name: &str,
+    before: Option<u64>,
+    after: Option<u64>,
+    delta: Option<i128>,
+) {
+    if before.is_none() && after.is_none() && delta.is_none() {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "{name:<36} {:>12} {:>12} {:>12}",
+        format_optional_bytes(before),
+        format_optional_bytes(after),
+        format_optional_byte_delta(delta),
+    );
+}
+
+fn push_db_count_metric(output: &mut String, name: &str, before: Option<u64>, after: Option<u64>) {
+    if before.is_none() && after.is_none() {
+        return;
+    }
+    let _ = writeln!(
+        output,
+        "{name:<36} {:>12} {:>12} {:>12}",
+        format_optional(before),
+        format_optional(after),
+        "-"
+    );
+}
+
+fn push_db_probe_error(output: &mut String, name: &str, snapshot: &DbProbeSnapshot) {
+    if let Some(error) = &snapshot.error {
+        let _ = writeln!(
+            output,
+            "{name:<36} {:>12} {:>12} {:>12}",
+            "-",
+            truncate(error, 48),
+            "-"
+        );
+    }
 }
 
 fn push_metric(output: &mut String, name: &str, value: String) {
@@ -389,6 +503,38 @@ fn format_optional_kb(value: Option<u64>) -> String {
         Some(value) if value >= 1024 => format!("{:.1}MB", value as f64 / 1024.0),
         Some(value) => format!("{value}KB"),
         None => "-".to_string(),
+    }
+}
+
+fn format_optional_bytes(value: Option<u64>) -> String {
+    value.map(format_bytes).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_byte_delta(value: Option<i128>) -> String {
+    value
+        .map(|value| {
+            if value >= 0 {
+                format!("+{}", format_bytes_i128(value))
+            } else {
+                format!("-{}", format_bytes_i128(value.saturating_abs()))
+            }
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_bytes(value: u64) -> String {
+    format_bytes_i128(i128::from(value))
+}
+
+fn format_bytes_i128(value: i128) -> String {
+    if value >= 1024 * 1024 * 1024 {
+        format!("{:.2}GB", value as f64 / 1024.0 / 1024.0 / 1024.0)
+    } else if value >= 1024 * 1024 {
+        format!("{:.1}MB", value as f64 / 1024.0 / 1024.0)
+    } else if value >= 1024 {
+        format!("{:.1}KB", value as f64 / 1024.0)
+    } else {
+        format!("{value}B")
     }
 }
 

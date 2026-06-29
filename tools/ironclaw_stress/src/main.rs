@@ -1,5 +1,6 @@
 mod capture;
 mod child_io;
+mod db_probe;
 mod human;
 mod process_metrics;
 mod process_pressure;
@@ -30,6 +31,7 @@ use std::{
 use crate::{
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
+    db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::{redact_libsql_path, redact_postgres_url},
@@ -182,6 +184,10 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 20)]
     pub(crate) context_max_messages: usize,
 
+    /// Sequential chat turns written per context-growth operation.
+    #[arg(long, default_value_t = 4)]
+    pub(crate) context_growth_turns_per_operation: usize,
+
     /// Emit structured stderr spans for failed user-turn operations.
     #[arg(long, default_value_t = false)]
     pub(crate) span_log_failures: bool,
@@ -252,6 +258,7 @@ pub(crate) enum Scenario {
     ReserveReconcile,
     ChatTurn,
     MixedUserSession,
+    ContextGrowth,
     CpuBurn,
     MemoryChurn,
 }
@@ -263,6 +270,7 @@ impl Scenario {
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
             Self::MixedUserSession => "mixed-user-session",
+            Self::ContextGrowth => "context-growth",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
         }
@@ -273,7 +281,10 @@ impl Scenario {
     }
 
     pub(crate) fn is_user_turn(self) -> bool {
-        matches!(self, Self::ChatTurn | Self::MixedUserSession)
+        matches!(
+            self,
+            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth
+        )
     }
 
     pub(crate) fn is_process_local(self) -> bool {
@@ -314,6 +325,7 @@ struct RunSummary {
     user_message_bytes: usize,
     assistant_message_bytes: usize,
     context_max_messages: usize,
+    context_growth_turns_per_operation: usize,
     attempted: u64,
     succeeded: u64,
     failed: u64,
@@ -321,6 +333,8 @@ struct RunSummary {
     throughput_ops_sec: f64,
     latency: LatencySummary,
     process: ProcessMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_probe: Option<DbProbeSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
@@ -446,6 +460,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.context_max_messages == 0 {
         return Err("--context-max-messages must be greater than 0".to_string());
     }
+    if args.context_growth_turns_per_operation == 0 {
+        return Err("--context-growth-turns-per-operation must be greater than 0".to_string());
+    }
     if args.scenario.is_user_turn() && args.processes > 1 {
         return Err(format!(
             "--scenario {} requires --processes 1",
@@ -533,6 +550,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.assistant_message_bytes.to_string())
             .arg("--context-max-messages")
             .arg(args.context_max_messages.to_string())
+            .arg("--context-growth-turns-per-operation")
+            .arg(args.context_growth_turns_per_operation.to_string())
             .arg("--slow-span-threshold-ms")
             .arg(args.slow_span_threshold_ms.to_string())
             .arg("--span-sample-limit")
@@ -667,6 +686,7 @@ async fn run_process_pressure_in_process(
         elapsed,
         samples,
         process,
+        None,
     );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
@@ -699,6 +719,7 @@ async fn run_resource_governor_in_process(
         args.progress_interval_seconds
     );
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let db_probe_before = db_probe::capture(args).await;
     let started = Instant::now();
     let governor = Arc::clone(&backend.governor);
     let args_clone = args.clone();
@@ -716,7 +737,16 @@ async fn run_resource_governor_in_process(
             })??;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let summary = summarize(args, run_id, backend.target, elapsed, samples, process);
+    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let summary = summarize(
+        args,
+        run_id,
+        backend.target,
+        elapsed,
+        samples,
+        process,
+        Some(db_probe),
+    );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
         log_prefix(args),
@@ -748,12 +778,22 @@ async fn run_user_turn_in_process(
         args.progress_interval_seconds
     );
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let db_probe_before = db_probe::capture(args).await;
     let started = Instant::now();
     let target = workload.target().to_string();
     let samples = run_user_turn_tasks(workload, args, identities).await?;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let summary = summarize(args, run_id, target, elapsed, samples, process);
+    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let summary = summarize(
+        args,
+        run_id,
+        target,
+        elapsed,
+        samples,
+        process,
+        Some(db_probe),
+    );
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
         log_prefix(args),
@@ -864,7 +904,9 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
-        Scenario::ChatTurn => unreachable!("chat-turn uses the async user-turn workload"),
+        Scenario::ChatTurn | Scenario::ContextGrowth => {
+            unreachable!("user-turn scenarios use the async user-turn workload")
+        }
         Scenario::MixedUserSession => {
             unreachable!("mixed-user-session uses the async user-turn workload")
         }
@@ -892,6 +934,7 @@ fn summarize(
     elapsed: Duration,
     samples: Vec<Sample>,
     process: ProcessMetrics,
+    db_probe: Option<DbProbeSummary>,
 ) -> RunSummary {
     let mut errors = BTreeMap::new();
     let mut latencies: Vec<u128> = samples
@@ -929,6 +972,7 @@ fn summarize(
         user_message_bytes: args.user_message_bytes,
         assistant_message_bytes: args.assistant_message_bytes,
         context_max_messages: args.context_max_messages,
+        context_growth_turns_per_operation: args.context_growth_turns_per_operation,
         attempted,
         succeeded,
         failed,
@@ -936,6 +980,7 @@ fn summarize(
         throughput_ops_sec: attempted as f64 / elapsed_secs,
         latency: latency_summary(&latencies),
         process,
+        db_probe,
         stage_latency: summarize_user_turn_stages(&samples),
         errors,
         failure_causes: summarize_failure_causes(&samples),
@@ -1049,7 +1094,7 @@ fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
     .map_err(display_err)
 }
 
-fn default_libsql_path() -> PathBuf {
+pub(crate) fn default_libsql_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "ironclaw-stress-{}.db",
         uuid::Uuid::new_v4().simple()
@@ -1108,7 +1153,7 @@ fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
     "non-string panic payload".to_string()
 }
 
-fn resolve_postgres_url(args: &Args) -> Result<String, String> {
+pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     if let Some(url) = args.postgres_url.clone() {
         return Ok(url);
     }

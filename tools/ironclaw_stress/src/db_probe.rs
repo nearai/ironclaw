@@ -1,0 +1,180 @@
+use std::{io::ErrorKind, path::PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Args, Backend, redaction::redact_postgres_url};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct DbProbeSummary {
+    pub(crate) before: DbProbeSnapshot,
+    pub(crate) after: DbProbeSnapshot,
+    pub(crate) delta: DbProbeDelta,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct DbProbeSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_file_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_wal_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_shm_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) postgres_database_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) postgres_active_connections: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) postgres_idle_connections: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) postgres_waiting_connections: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct DbProbeDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_file_bytes: Option<i128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_wal_bytes: Option<i128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) libsql_shm_bytes: Option<i128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) postgres_database_size_bytes: Option<i128>,
+}
+
+pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
+    match args.backend {
+        Backend::Libsql => capture_libsql(args).await,
+        Backend::Postgres => capture_postgres(args).await,
+    }
+}
+
+pub(crate) fn summarize(before: DbProbeSnapshot, after: DbProbeSnapshot) -> DbProbeSummary {
+    let delta = DbProbeDelta {
+        libsql_file_bytes: delta(before.libsql_file_bytes, after.libsql_file_bytes),
+        libsql_wal_bytes: delta(before.libsql_wal_bytes, after.libsql_wal_bytes),
+        libsql_shm_bytes: delta(before.libsql_shm_bytes, after.libsql_shm_bytes),
+        postgres_database_size_bytes: delta(
+            before.postgres_database_size_bytes,
+            after.postgres_database_size_bytes,
+        ),
+    };
+    DbProbeSummary {
+        before,
+        after,
+        delta,
+    }
+}
+
+async fn capture_libsql(args: &Args) -> DbProbeSnapshot {
+    let path = args
+        .libsql_path
+        .clone()
+        .unwrap_or_else(crate::default_libsql_path);
+    match try_capture_libsql(path).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => DbProbeSnapshot {
+            error: Some(format!("libsql probe failed: {error}")),
+            ..DbProbeSnapshot::default()
+        },
+    }
+}
+
+async fn try_capture_libsql(path: PathBuf) -> Result<DbProbeSnapshot, std::io::Error> {
+    Ok(DbProbeSnapshot {
+        libsql_file_bytes: Some(file_size(&path).await?),
+        libsql_wal_bytes: Some(file_size(&sidecar_path(&path, "-wal")).await?),
+        libsql_shm_bytes: Some(file_size(&sidecar_path(&path, "-shm")).await?),
+        ..DbProbeSnapshot::default()
+    })
+}
+
+fn sidecar_path(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.to_path_buf();
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension(suffix.trim_start_matches('-'));
+    };
+    sidecar.set_file_name(format!("{}{}", file_name.to_string_lossy(), suffix));
+    sidecar
+}
+
+async fn file_size(path: &std::path::Path) -> Result<u64, std::io::Error> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn capture_postgres(args: &Args) -> DbProbeSnapshot {
+    match try_capture_postgres(args).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => DbProbeSnapshot {
+            error: Some(sanitize_postgres_error(args, error)),
+            ..DbProbeSnapshot::default()
+        },
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn try_capture_postgres(
+    args: &Args,
+) -> Result<DbProbeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let url = crate::resolve_postgres_url(args)?;
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    let connection_handle = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
+        }
+    });
+    let row = client
+        .query_one(
+            "SELECT \
+                pg_database_size(current_database())::bigint, \
+                COUNT(*)::bigint, \
+                COUNT(*) FILTER (WHERE state = 'idle')::bigint, \
+                COUNT(*) FILTER (WHERE wait_event_type IS NOT NULL)::bigint \
+             FROM pg_stat_activity \
+             WHERE datname = current_database()",
+            &[],
+        )
+        .await?;
+    drop(client);
+    let _ = connection_handle.await;
+
+    Ok(DbProbeSnapshot {
+        postgres_database_size_bytes: i64_to_u64(row.get(0)),
+        postgres_active_connections: i64_to_u64(row.get(1)),
+        postgres_idle_connections: i64_to_u64(row.get(2)),
+        postgres_waiting_connections: i64_to_u64(row.get(3)),
+        ..DbProbeSnapshot::default()
+    })
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn capture_postgres(_args: &Args) -> DbProbeSnapshot {
+    DbProbeSnapshot {
+        error: Some("binary was built without the postgres feature".to_string()),
+        ..DbProbeSnapshot::default()
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn sanitize_postgres_error(args: &Args, error: impl std::fmt::Display) -> String {
+    let mut message = format!("postgres probe failed: {error}");
+    if let Some(url) = &args.postgres_url {
+        message = message.replace(url, &redact_postgres_url(url));
+    }
+    message
+}
+
+#[cfg(feature = "postgres")]
+fn i64_to_u64(value: i64) -> Option<u64> {
+    u64::try_from(value).ok()
+}
+
+fn delta(before: Option<u64>, after: Option<u64>) -> Option<i128> {
+    Some(i128::from(after?) - i128::from(before?))
+}

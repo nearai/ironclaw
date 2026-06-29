@@ -11,7 +11,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceReservation,
-    ResourceReservationId, ResourceScope, VirtualPath,
+    ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
@@ -23,7 +23,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
     ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
     TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId,
-    runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort},
+    runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -307,17 +307,8 @@ where
             .map_err(|error| OperationFailure::invalid_request("build_context", error))?;
         let turn_store = self.turn_store_for_context(&context)?;
         let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
-        let operation_ref = operation_ref(args, worker_index, operation_index);
         let source_binding = "ironclaw-stress-webchat";
         let reply_target = "ironclaw-stress-reply";
-        let user_message = stress_payload(
-            format!("stress message {operation_ref}"),
-            args.user_message_bytes,
-        );
-        let assistant_message = stress_payload(
-            format!("stress response {operation_ref}"),
-            args.assistant_message_bytes,
-        );
 
         let thread = time_stage(
             &mut stages.ensure_thread,
@@ -332,194 +323,226 @@ where
         .await
         .map_err(|error| thread_failure("ensure_thread", error))?;
 
-        let accepted = time_stage(
-            &mut stages.accept_inbound,
-            self.thread_service
-                .accept_inbound_message(AcceptInboundMessageRequest {
-                    scope: context.thread_scope.clone(),
-                    thread_id: thread.thread_id.clone(),
-                    actor_id: context.user_id.as_str().to_string(),
-                    source_binding_id: Some(source_binding.to_string()),
-                    reply_target_binding_id: Some(reply_target.to_string()),
-                    external_event_id: Some(operation_ref.clone()),
-                    content: MessageContent::text(user_message),
-                }),
-        )
-        .await
-        .map_err(|error| thread_failure("accept_inbound", error))?;
-
-        let submit_result = time_stage(
-            &mut stages.submit_turn,
-            turn_coordinator.submit_turn(SubmitTurnRequest {
-                scope: context.turn_scope.clone(),
-                actor: TurnActor::new(context.user_id.clone()),
-                accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
-                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                source_binding_ref: SourceBindingRef::new(source_binding)
-                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
-                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new(format!("ironclaw-stress:{operation_ref}"))
-                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                received_at: Utc::now(),
-                requested_run_id: None,
-                parent_run_id: None,
-                subagent_depth: 0,
-                spawn_tree_root_run_id: None,
-                product_context: None,
-            }),
-        )
-        .await;
-
-        let submit_response = match submit_result {
-            Ok(response) => response,
-            Err(error @ TurnError::ThreadBusy(_)) => {
-                time_stage(
-                    &mut stages.mark_rejected_busy,
-                    self.thread_service.mark_message_rejected_busy(
-                        &context.thread_scope,
-                        &thread.thread_id,
-                        accepted.message_id,
-                    ),
-                )
-                .await
-                .map_err(|error| thread_failure("mark_rejected_busy", error))?;
-                return Err(turn_failure("submit_turn", error));
-            }
-            Err(error) => return Err(turn_failure("submit_turn", error)),
+        let turns_per_operation = if matches!(args.scenario, Scenario::ContextGrowth) {
+            args.context_growth_turns_per_operation
+        } else {
+            1
         };
 
-        let SubmitTurnResponse::Accepted {
-            turn_id, run_id, ..
-        } = submit_response;
+        for turn_index in 0..turns_per_operation {
+            let operation_ref = turn_operation_ref(
+                args,
+                worker_index,
+                operation_index,
+                turn_index,
+                turns_per_operation,
+            );
+            let user_message = stress_payload(
+                format!("stress message {operation_ref}"),
+                args.user_message_bytes,
+            );
+            let assistant_message = stress_payload(
+                format!("stress response {operation_ref}"),
+                args.assistant_message_bytes,
+            );
 
-        time_stage(
-            &mut stages.mark_submitted,
-            self.thread_service.mark_message_submitted(
-                &context.thread_scope,
-                &thread.thread_id,
-                accepted.message_id,
-                turn_id.to_string(),
-                run_id.to_string(),
-            ),
-        )
-        .await
-        .map_err(|error| thread_failure("mark_submitted", error))?;
-
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        let claimed = time_stage(
-            &mut stages.claim_run,
-            turn_store.claim_next_run(ClaimRunRequest {
-                runner_id,
-                lease_token,
-                scope_filter: Some(context.turn_scope.clone()),
-            }),
-        )
-        .await
-        .map_err(|error| turn_failure("claim_run", error))?
-        .ok_or_else(|| {
-            OperationFailure::new(
-                "turn_claim_miss",
-                "claim_run",
-                "submitted run was not claimable",
-            )
-        })?;
-
-        if matches!(args.scenario, Scenario::MixedUserSession) {
-            time_stage(
-                &mut stages.load_context,
+            let accepted = time_stage(
+                &mut stages.accept_inbound,
                 self.thread_service
-                    .load_context_window(LoadContextWindowRequest {
+                    .accept_inbound_message(AcceptInboundMessageRequest {
                         scope: context.thread_scope.clone(),
                         thread_id: thread.thread_id.clone(),
-                        max_messages: args.context_max_messages,
+                        actor_id: context.user_id.as_str().to_string(),
+                        source_binding_id: Some(source_binding.to_string()),
+                        reply_target_binding_id: Some(reply_target.to_string()),
+                        external_event_id: Some(operation_ref.clone()),
+                        content: MessageContent::text(user_message),
                     }),
             )
             .await
-            .map_err(|error| thread_failure("load_context", error))?;
+            .map_err(|error| thread_failure("accept_inbound", error))?;
 
-            let reservation = time_stage(
-                &mut stages.resource_reserve,
-                reserve_resources(
-                    Arc::clone(&self.governor),
-                    context.turn_scope.to_resource_scope(),
+            let submit_result = time_stage(
+                &mut stages.submit_turn,
+                turn_coordinator.submit_turn(SubmitTurnRequest {
+                    scope: context.turn_scope.clone(),
+                    actor: TurnActor::new(context.user_id.clone()),
+                    accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    source_binding_ref: SourceBindingRef::new(source_binding)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    requested_run_profile: None,
+                    idempotency_key: IdempotencyKey::new(format!(
+                        "ironclaw-stress:{operation_ref}"
+                    ))
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    received_at: Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                }),
+            )
+            .await;
+
+            let submit_response = match submit_result {
+                Ok(response) => response,
+                Err(error @ TurnError::ThreadBusy(_)) => {
+                    time_stage(
+                        &mut stages.mark_rejected_busy,
+                        self.thread_service.mark_message_rejected_busy(
+                            &context.thread_scope,
+                            &thread.thread_id,
+                            accepted.message_id,
+                        ),
+                    )
+                    .await
+                    .map_err(|error| thread_failure("mark_rejected_busy", error))?;
+                    return Err(turn_failure("submit_turn", error));
+                }
+                Err(error) => return Err(turn_failure("submit_turn", error)),
+            };
+
+            let SubmitTurnResponse::Accepted {
+                turn_id, run_id, ..
+            } = submit_response;
+
+            time_stage(
+                &mut stages.mark_submitted,
+                self.thread_service.mark_message_submitted(
+                    &context.thread_scope,
+                    &thread.thread_id,
+                    accepted.message_id,
+                    turn_id.to_string(),
+                    run_id.to_string(),
                 ),
             )
-            .await?;
+            .await
+            .map_err(|error| thread_failure("mark_submitted", error))?;
 
-            let execution = async {
-                time_stage(
-                    &mut stages.model_wait,
-                    synthetic_model_wait(args, worker_index, operation_index),
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            let claimed = time_stage(
+                &mut stages.claim_run,
+                turn_store.claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(context.turn_scope.clone()),
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("claim_run", error))?
+            .ok_or_else(|| {
+                OperationFailure::new(
+                    "turn_claim_miss",
+                    "claim_run",
+                    "submitted run was not claimable",
                 )
-                .await;
+            })?;
 
-                let draft = time_stage(
-                    &mut stages.append_assistant,
+            if matches!(args.scenario, Scenario::MixedUserSession) {
+                time_stage(
+                    &mut stages.load_context,
                     self.thread_service
-                        .append_assistant_draft(AppendAssistantDraftRequest {
+                        .load_context_window(LoadContextWindowRequest {
                             scope: context.thread_scope.clone(),
                             thread_id: thread.thread_id.clone(),
-                            turn_run_id: claimed.state.run_id.to_string(),
-                            content: MessageContent::text(assistant_message.clone()),
+                            max_messages: args.context_max_messages,
                         }),
                 )
                 .await
-                .map_err(|error| thread_failure("append_assistant", error))?;
+                .map_err(|error| thread_failure("load_context", error))?;
 
-                time_stage(
-                    &mut stages.finalize_assistant,
-                    self.thread_service.finalize_assistant_message(
-                        &context.thread_scope,
-                        &thread.thread_id,
-                        draft.message_id,
-                        MessageContent::text(assistant_message.clone()),
+                let reservation = time_stage(
+                    &mut stages.resource_reserve,
+                    reserve_resources(
+                        Arc::clone(&self.governor),
+                        context.turn_scope.to_resource_scope(),
                     ),
                 )
-                .await
-                .map_err(|error| thread_failure("finalize_assistant", error))?;
+                .await?;
+
+                let execution = async {
+                    time_stage(
+                        &mut stages.model_wait,
+                        synthetic_model_wait(args, worker_index, operation_index),
+                    )
+                    .await;
+
+                    self.write_assistant_turn(
+                        &context,
+                        &thread.thread_id,
+                        &turn_store,
+                        &claimed,
+                        assistant_message.clone(),
+                        stages,
+                    )
+                    .await?;
+
+                    Ok::<(), OperationFailure>(())
+                }
+                .await;
+
+                if let Err(error) = execution {
+                    let _ = time_stage(
+                        &mut stages.resource_release,
+                        release_resources(Arc::clone(&self.governor), reservation.id),
+                    )
+                    .await;
+                    return Err(error);
+                }
 
                 time_stage(
-                    &mut stages.complete_run,
-                    turn_store.complete_run(CompleteRunRequest {
-                        run_id: claimed.state.run_id,
-                        runner_id: claimed.runner_id,
-                        lease_token: claimed.lease_token,
-                    }),
+                    &mut stages.resource_reconcile,
+                    reconcile_resources(Arc::clone(&self.governor), reservation.id),
+                )
+                .await?;
+            } else {
+                self.write_assistant_turn(
+                    &context,
+                    &thread.thread_id,
+                    &turn_store,
+                    &claimed,
+                    assistant_message,
+                    stages,
+                )
+                .await?;
+
+                time_stage(
+                    &mut stages.load_context,
+                    self.thread_service
+                        .load_context_window(LoadContextWindowRequest {
+                            scope: context.thread_scope.clone(),
+                            thread_id: thread.thread_id.clone(),
+                            max_messages: args.context_max_messages,
+                        }),
                 )
                 .await
-                .map_err(|error| turn_failure("complete_run", error))?;
-
-                Ok::<(), OperationFailure>(())
+                .map_err(|error| thread_failure("load_context", error))?;
             }
-            .await;
-
-            if let Err(error) = execution {
-                let _ = time_stage(
-                    &mut stages.resource_release,
-                    release_resources(Arc::clone(&self.governor), reservation.id),
-                )
-                .await;
-                return Err(error);
-            }
-
-            time_stage(
-                &mut stages.resource_reconcile,
-                reconcile_resources(Arc::clone(&self.governor), reservation.id),
-            )
-            .await?;
-
-            return Ok(());
         }
 
+        Ok(())
+    }
+
+    async fn write_assistant_turn(
+        &self,
+        context: &crate::synthetic::UserTurnContext,
+        thread_id: &ThreadId,
+        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        claimed: &ClaimedTurnRun,
+        assistant_message: String,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
         let draft = time_stage(
             &mut stages.append_assistant,
             self.thread_service
                 .append_assistant_draft(AppendAssistantDraftRequest {
                     scope: context.thread_scope.clone(),
-                    thread_id: thread.thread_id.clone(),
+                    thread_id: thread_id.clone(),
                     turn_run_id: claimed.state.run_id.to_string(),
                     content: MessageContent::text(assistant_message.clone()),
                 }),
@@ -531,7 +554,7 @@ where
             &mut stages.finalize_assistant,
             self.thread_service.finalize_assistant_message(
                 &context.thread_scope,
-                &thread.thread_id,
+                thread_id,
                 draft.message_id,
                 MessageContent::text(assistant_message),
             ),
@@ -549,18 +572,6 @@ where
         )
         .await
         .map_err(|error| turn_failure("complete_run", error))?;
-
-        time_stage(
-            &mut stages.load_context,
-            self.thread_service
-                .load_context_window(LoadContextWindowRequest {
-                    scope: context.thread_scope,
-                    thread_id: thread.thread_id,
-                    max_messages: args.context_max_messages,
-                }),
-        )
-        .await
-        .map_err(|error| thread_failure("load_context", error))?;
 
         Ok(())
     }
@@ -640,7 +651,8 @@ fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView
 async fn time_stage<T>(slot: &mut Option<Duration>, future: impl Future<Output = T>) -> T {
     let started = Instant::now();
     let output = future.await;
-    *slot = Some(started.elapsed());
+    let elapsed = started.elapsed();
+    *slot = Some(slot.unwrap_or_default().saturating_add(elapsed));
     output
 }
 
@@ -754,6 +766,21 @@ fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> St
         args.run_id.as_deref().unwrap_or("unknown-run"),
         args.child_index.unwrap_or(0)
     )
+}
+
+fn turn_operation_ref(
+    args: &Args,
+    worker_index: usize,
+    operation_index: usize,
+    turn_index: usize,
+    turns_per_operation: usize,
+) -> String {
+    let operation_ref = operation_ref(args, worker_index, operation_index);
+    if turns_per_operation == 1 {
+        operation_ref
+    } else {
+        format!("{operation_ref}:turn-{turn_index}")
+    }
 }
 
 fn maybe_emit_operation_span(

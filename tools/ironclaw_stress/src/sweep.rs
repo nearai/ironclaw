@@ -128,6 +128,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "user_message_bytes": case_args.user_message_bytes,
             "assistant_message_bytes": case_args.assistant_message_bytes,
             "context_max_messages": case_args.context_max_messages,
+            "context_growth_turns_per_operation": case_args.context_growth_turns_per_operation,
             "repetition": case.repetition,
             "duration_ms": duration_ms,
             "metrics": metrics,
