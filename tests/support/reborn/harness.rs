@@ -1777,7 +1777,7 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
-    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+    pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<Self> {
         let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
         capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
         let mut harness = Self::new_with_options(
@@ -2481,13 +2481,13 @@ impl HostRuntimeCapabilityHarness {
     /// `.with_live_approvals()` path to gate the *run's own* scope (the auto-approve
     /// key is `(tenant_id, user_id)` only, so the constructor's product-scope disable
     /// does not cover an integration run under a different tenant).
-    async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
         self.disable_global_auto_approve(scope).await
     }
 
     /// Enable the `(tenant, user)` auto-approve toggle for `scope` (the no-gate
     /// setting-flip arm of the C1 approval-settings test).
-    async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
         self.enable_global_auto_approve(scope).await
     }
 

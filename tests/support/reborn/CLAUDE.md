@@ -207,6 +207,113 @@ Slice 8 ships **OAuth credential-refresh sweep + clock injection** (design spec 
   ahead → egress.captured_count() == 2) +
   `credential_refresh_sweep_skips_fresh_google_account` (guard: real clock → count stays 1).
 
+## Group tests
+
+`RebornIntegrationGroup` (in `group.rs`) owns shared storage and a shared
+capability backend once; each `.thread(conv_id)` builds a per-thread turn
+runtime over those shared pieces. Cross-thread persistence is real — thread A
+writes, thread B sees it. Single-shot `test_default()` is a degenerate
+one-thread group (its own storage, baseline = 0); all existing tests are
+byte-identical after this refactor.
+
+### When to use a group (vs a flat test)
+
+Use a group **only** when the scenario needs cross-thread persistence — e.g.,
+thread A submits a tool call that raises an approval gate; thread B resolves
+the gate; thread A resumes. A scenario that submits + asserts in one thread
+belongs in a flat `tests/reborn_integration_*.rs` test as always.
+
+### Group test binary layout
+
+Group tests live in subdirectories under `tests/`:
+
+```
+tests/reborn_group_approvals/
+    main.rs                              # one #[tokio::test], drives scenarios in order
+    scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
+    scenario_approve_always_persists.rs
+```
+
+Cargo discovers multi-file integration test binaries via `[[test]]` entries in
+`Cargo.toml`:
+
+```toml
+[[test]]
+name = "reborn_group_approvals"
+path = "tests/reborn_group_approvals/main.rs"
+```
+
+### `main.rs` boilerplate (required)
+
+```rust
+#[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
+#[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
+
+mod scenario_gate_then_resolve;
+mod scenario_approve_always_persists;
+
+use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::{HarnessResult, RebornIntegrationGroup, ScenarioReport};
+use reborn_support::reply::RebornScriptedReply;
+
+#[tokio::test]
+async fn approvals_group() {
+    let g = RebornIntegrationGroup::live_approvals().await.expect("group builds");
+    let mut report = ScenarioReport::new();
+    // dependent: must pass before subsequent scenarios consume its side-effect
+    scenario_gate_then_resolve::run(&g).await.expect("gate+resolve");
+    // independent: failure recorded, driver continues
+    report.record("approve_always_persists", scenario_approve_always_persists::run(&g).await);
+    report.assert_all_passed();
+}
+```
+
+Both `#[path]` declarations with `#[allow(dead_code)]` are mandatory — bare
+`mod support;` resolves relative to the source file, not `tests/`.
+
+### Scenario shape
+
+```rust
+// scenario_gate_then_resolve.rs
+use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::reborn_support::reply::RebornScriptedReply;
+
+pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let h = g.thread("conv-gate-resolve")
+        .script([RebornScriptedReply::tool_call("builtin.write_file", serde_json::json!({}))])
+        .build().await?;
+    let (run_id, gate_ref) = h.submit_turn_until_blocked("write something").await?;
+    h.approve_gate(run_id, &gate_ref).await?;
+    h.wait_for_status(run_id, ironclaw_turns::TurnStatus::Completed).await?;
+    Ok(())
+}
+```
+
+### Available constructors
+
+| Constructor | Capability | Auto-approve |
+|---|---|---|
+| `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
+| `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
+| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Key accessors on `RebornIntegrationGroup`
+
+- `turn_composite()` — the thread/turn `CompositeRootFilesystem`; use for
+  thread-history and turn-state read-back only.
+- `capability_harness()` — `Option<&Arc<HostRuntimeCapabilityHarness>>`; use
+  for capability stores (memory, projects, extensions, approval, auto-approve).
+  Returns `None` for the Echo backend.
+
+### Per-thread baseline (R2)
+
+Each `RebornIntegrationHarness` records `baseline_invocation_count`,
+`baseline_egress_count`, and `baseline_result_count` at construction from the
+shared recorder's current lengths. All assertion methods (`assert_tool_invoked`,
+`assert_egress_request_matching`, etc.) slice `[baseline..]` so a thread never
+spuriously passes on a prior thread's entries.
+
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::Postgres` (CI container lane); approval/install/skill/secret
 stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets capture wiring;

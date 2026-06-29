@@ -678,3 +678,35 @@ where
 {
     crate::factory::mount_local_dev_database_roots(root, database)
 }
+
+/// Test-only entry point for building a local-dev
+/// [`ironclaw_secrets::FilesystemSecretStore`] without going through the full
+/// Reborn runtime assembly.
+///
+/// Mirrors the production wiring in `build_local_runtime` where
+/// `build_local_dev_secret_store` is called with the scoped filesystem and a
+/// master key resolved from the environment or the root directory's cached key
+/// file. Tests that need a real `FilesystemSecretStore` — for example, to
+/// verify `put` + `lease_once` + `consume` round-trips against an in-process
+/// backend — can call this instead of wiring a full runtime.
+///
+/// The master key is resolved exactly as production does: from the
+/// `SECRETS_MASTER_KEY` env var when set, otherwise from (or generating to)
+/// the `.reborn-local-dev-secrets-master-key` file under `root`. Using the
+/// same `root` across two calls therefore yields the same key, so a second
+/// `FilesystemSecretStore` over the same scoped filesystem can consume a
+/// secret written by the first. For tests only — zero bytes shipped in
+/// production builds.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn build_local_dev_secret_store_for_test<F>(
+    root: &std::path::Path,
+    scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+) -> Result<
+    std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>,
+    crate::RebornBuildError,
+>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    crate::factory::build_local_dev_secret_store(root, scoped, None)
+}
