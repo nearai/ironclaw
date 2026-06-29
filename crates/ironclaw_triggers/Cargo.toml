@@ -2,7 +2,7 @@
 name = "ironclaw_triggers"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Scheduled trigger domain and source-provider contracts for IronClaw Reborn"
 publish = false
 
