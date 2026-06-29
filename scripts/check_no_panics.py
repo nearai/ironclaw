@@ -213,10 +213,21 @@ def is_test_only_path(path: str) -> bool:
     sub-modules, typically included behind ``#[cfg(test)]`` and never compiled
     in production. Top-level ``tests/*.rs`` integration test files are already
     outside ``src/`` / ``crates/`` and therefore never checked.
+
+    ``src/**/test_support.rs`` is the repo-wide convention for a
+    ``#[cfg(feature = "test-support")] pub mod test_support;`` module
+    (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
+    ``ironclaw_product_adapters``, ``ironclaw_product_workflow``,
+    ``ironclaw_reborn_composition``). The ``test-support`` feature is enabled
+    only via ``[dev-dependencies]``, so these modules ship zero bytes in
+    production binaries — the same "never compiled in production" rationale that
+    exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant
+    literals, so they are exempt by exact filename (a ``my_test_support.rs`` is
+    NOT exempt).
     """
     posix_path = pathlib.PurePosixPath(path)
     parts = posix_path.parts
-    return "tests" in parts or posix_path.name == "tests.rs"
+    return "tests" in parts or posix_path.name in ("tests.rs", "test_support.rs")
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -385,6 +396,12 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
+        # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
+        # gated, ships zero bytes in production. Exempt by exact filename only.
+        self.assertTrue(
+            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+        )
+        self.assertFalse(is_test_only_path("src/channels/web/my_test_support.rs"))
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
