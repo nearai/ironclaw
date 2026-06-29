@@ -3009,6 +3009,27 @@ test("useChat.send: addresses a second thread in parallel while viewing a runnin
   assert.ok(result, "send must resolve with a response, not null");
 });
 
+test("useChat.send: current thread send ignores processing from another active run", async () => {
+  // The component enables the composer when the hook is in a transient
+  // half-state: `isProcessing` is still true, but the remembered active run
+  // belongs to another thread. The hook must make the same admission decision
+  // so clicking send does not resolve to null after the UI allowed it.
+  const { context, sentBody } = createParallelSendContext({
+    threadId: "thread-a",
+    activeRun: { runId: "run-b", threadId: "thread-b", status: "running" },
+    isProcessing: true,
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-a");
+  const result = await chat.send("message for the viewed idle thread");
+
+  assert.ok(sentBody(), "the current-thread message must reach sendMessage");
+  assert.equal(sentBody().threadId, "thread-a");
+  assert.ok(result, "send must resolve with a response, not null");
+});
+
 test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {
   // The one case the gate must keep blocking: a second send into the SAME
   // thread that already has a run in flight (both activeRun and isProcessing

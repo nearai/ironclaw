@@ -423,7 +423,9 @@ export function useChat(threadId) {
       const processingBlocksSend =
         isProcessingRef.current &&
         Boolean(sendTargetThreadId) &&
-        sendTargetThreadId === threadId;
+        (!activeRunForSend?.threadId
+          ? sendTargetThreadId === threadId
+          : activeRunForSend.threadId === sendTargetThreadId);
       if (
         submitBusyRef.current ||
         processingBlocksSend ||
