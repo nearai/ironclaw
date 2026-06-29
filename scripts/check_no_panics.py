@@ -224,9 +224,12 @@ def is_test_only_path(path: str) -> bool:
     exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant
     literals, so they are exempt whether the module is a single
     ``src/test_support.rs`` file or a ``src/test_support/**`` directory module
-    (so growing test-support coverage needs no further changes here). A file
-    merely *containing* the substring, e.g. ``my_test_support.rs``, is NOT
-    exempt — the match is on the exact filename or an exact path component.
+    (so growing test-support coverage needs no further changes here). **The
+    ``src/`` path component is required**: a ``bin/test_support.rs`` or any
+    ``test_support`` outside ``src/`` would be compiled into production binaries
+    and must NOT be exempt. A file merely *containing* the substring, e.g.
+    ``my_test_support.rs``, is NOT exempt — the match is on the exact filename
+    or an exact path component.
 
     NOTE: the scanner only ever looks at ``src/`` and ``crates/`` (see
     ``changed_rust_files``). Top-level ``tests/**`` integration tests and their
@@ -234,11 +237,12 @@ def is_test_only_path(path: str) -> bool:
     """
     posix_path = pathlib.PurePosixPath(path)
     parts = posix_path.parts
-    return (
-        "tests" in parts
-        or "test_support" in parts
-        or posix_path.name in ("tests.rs", "test_support.rs")
-    )
+    if "tests" in parts or posix_path.name == "tests.rs":
+        return True
+    # test_support modules are exempt only under src/ (feature-gated, never in prod);
+    # a bin/ or other non-src test_support.rs would be real production code.
+    in_src = "src" in parts
+    return in_src and ("test_support" in parts or posix_path.name == "test_support.rs")
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -418,6 +422,10 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertTrue(is_test_only_path("crates/foo/src/test_support/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/my_test_support.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/test_supportish/x.rs"))
+        # test_support outside src/ (e.g. bin/) is NOT exempt — it is compiled
+        # into production binaries and must be checked for panics.
+        self.assertFalse(is_test_only_path("crates/foo/bin/test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/bin/test_support/x.rs"))
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
