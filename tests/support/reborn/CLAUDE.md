@@ -141,7 +141,7 @@ Slice 5 ships the **inert process port + `.with_live_shell()` opt-in** (design s
   method. **No production change was needed** (the injection seam was already public).
 - `SHELL_CAPABILITY_ID` added to `core_builtin_tools_from_runtime`'s `capability_ids`
   so scripted `builtin.shell` calls surface to the model.
-- `assert_shell_command_recorded(substr)` + `assert_no_real_process_executed()` on
+- `assert_shell_command_recorded(substr)` + `assert_shell_ran_through_inert_port()` on
   `RebornIntegrationHarness` (in `builder.rs`).
 - `.with_live_shell()` builder opt-in skips recording-port injection so the real
   `LocalHostProcessPort` executes instead (use only for hermetic commands).
