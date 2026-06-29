@@ -366,6 +366,7 @@ fn submit_event(request: &SubmitTurnRequest, response: &SubmitTurnResponse) -> T
         blocked_gate: None,
         sanitized_reason: None,
         retryable: None,
+        detail: None,
     }
 }
 
@@ -390,6 +391,7 @@ fn child_submit_event(
         blocked_gate: None,
         sanitized_reason: None,
         retryable: None,
+        detail: None,
     }
 }
 
@@ -405,6 +407,7 @@ fn resume_event(request: &ResumeTurnRequest, response: &ResumeTurnResponse) -> T
         blocked_gate: None,
         sanitized_reason: None,
         retryable: None,
+        detail: None,
     }
 }
 
@@ -420,6 +423,7 @@ fn retry_event(request: &RetryTurnRequest, response: &RetryTurnResponse) -> Turn
         blocked_gate: None,
         sanitized_reason: None,
         retryable: None,
+        detail: None,
     }
 }
 
@@ -449,6 +453,7 @@ fn cancel_event(
         blocked_gate: None,
         sanitized_reason: Some(request.reason.category().to_string()),
         retryable: None,
+        detail: None,
     })
 }
 

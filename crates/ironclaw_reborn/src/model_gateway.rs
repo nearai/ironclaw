@@ -1687,12 +1687,19 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    // Tier 2b: carry the provider's real message (status line + body snippet)
+    // on the model-visible detail channel so the failure explainer can describe
+    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
+    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
+    // summary stays a fixed host-authored category string.
+    let provider_detail = error.to_string();
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             MODEL_CREDITS_EXHAUSTED_SUMMARY,
         )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        .safe_with_detail(provider_detail.clone());
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -1714,6 +1721,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+    .safe_with_detail(provider_detail)
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {

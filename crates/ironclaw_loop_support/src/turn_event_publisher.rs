@@ -45,6 +45,14 @@ impl EventPublishingTurnRunTransitionPort {
             None
         };
         let retryable = (kind == TurnEventKind::Failed).then(|| state.checkpoint_id.is_some());
+        let detail = (kind == TurnEventKind::Failed)
+            .then(|| {
+                state
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| failure.detail().map(str::to_string))
+            })
+            .flatten();
         let event = TurnLifecycleEvent {
             cursor: state.event_cursor,
             scope: state.scope.clone(),
@@ -56,6 +64,7 @@ impl EventPublishingTurnRunTransitionPort {
             blocked_gate,
             sanitized_reason,
             retryable,
+            detail,
         };
         if let Err(error) = self.sink.publish(event).await {
             tracing::debug!(error = %error, "turn transition event sink publish failed");

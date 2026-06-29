@@ -315,6 +315,7 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             safe_summary,
             reason_kind,
             diagnostic_ref,
+            detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
@@ -327,8 +328,13 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             if let Some(category) =
                 model_stage_failure_category(stage == HostStage::Model, kind, reason_kind)
             {
+                // Prefer the secret-scrubbed model-visible detail; fall back to
+                // the bounded safe summary so the explainer still gets the real
+                // cause rather than only the category.
+                let detail = detail.or_else(|| Some(safe_summary.as_str().to_string()));
                 return AgentLoopDriverError::Failed {
                     reason_kind: category.to_string(),
+                    detail,
                 };
             }
             AgentLoopDriverError::Unavailable {
@@ -339,16 +345,19 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             tracing::warn!(detail = %detail, "planned driver planner contract failed");
             AgentLoopDriverError::Failed {
                 reason_kind: "driver_bug".to_string(),
+                detail: None,
             }
         }
         AgentLoopExecutorError::CheckpointFailed { stage } => {
             tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
             AgentLoopDriverError::Failed {
                 reason_kind: "checkpoint_rejected".to_string(),
+                detail: None,
             }
         }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
+            detail: None,
         },
     }
 }
@@ -368,6 +377,7 @@ fn checkpoint_unavailable_exit(
         LoopExitId::new(format!("exit:{run_id}-checkpoint-unavailable")).map_err(|_| {
             AgentLoopDriverError::Failed {
                 reason_kind: "driver_bug".to_string(),
+                detail: None,
             }
         })?;
     Ok(LoopExit::failed(
@@ -509,7 +519,8 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: "interrupted_unexpectedly".to_string()
+                reason_kind: "interrupted_unexpectedly".to_string(),
+                detail: None,
             }
         );
     }
@@ -522,12 +533,15 @@ mod tests {
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
+                // No upstream detail: the bounded safe summary is the fallback.
+                detail: Some("model credentials are unavailable".to_string()),
             }
         );
     }
@@ -541,14 +555,35 @@ mod tests {
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+                detail: Some("safe summary wording is display-only".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn executor_model_diagnostics_carry_detail_into_failed() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: Some("HTTP 404 model not found".to_string()),
+        });
+
+        match mapped {
+            AgentLoopDriverError::Failed { detail, .. } => {
+                assert_eq!(detail.as_deref(), Some("HTTP 404 model not found"));
+            }
+            other => panic!("expected Failed with detail, got {other:?}"),
+        }
     }
 
     #[test]
@@ -560,6 +595,7 @@ mod tests {
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
@@ -579,6 +615,7 @@ mod tests {
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(

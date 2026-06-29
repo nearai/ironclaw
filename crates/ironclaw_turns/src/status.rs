@@ -175,24 +175,48 @@ impl BlockedReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SanitizedFailure {
     category: String,
+    /// Secret-scrubbed, model-visible raw cause for this failure (e.g.
+    /// `"HTTP 404 model not found"`). Unlike `category`, this is free-form text
+    /// — the producer is responsible for scrubbing secret VALUES upstream (see
+    /// [`crate::run_profile::sanitize_model_visible_text`]). Optional and
+    /// serialized only when present so persisted pre-detail rows round-trip
+    /// without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 impl SanitizedFailure {
     pub fn new(category: impl Into<String>) -> Result<Self, String> {
         let category = category.into();
         validate_sanitized_category("failure_category", &category)?;
-        Ok(Self { category })
+        Ok(Self {
+            category,
+            detail: None,
+        })
     }
 
     pub(crate) fn from_trusted_static(category: &'static str) -> Self {
         debug_assert!(validate_sanitized_category("failure_category", category).is_ok());
         Self {
             category: category.to_string(),
+            detail: None,
         }
+    }
+
+    /// Attach a secret-scrubbed, model-visible detail string. The caller is
+    /// responsible for scrubbing secret VALUES before calling this (see
+    /// [`Self::detail`]).
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn category(&self) -> &str {
         &self.category
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     pub fn into_category(self) -> String {
@@ -208,6 +232,8 @@ impl<'de> Deserialize<'de> for SanitizedFailure {
         #[derive(Deserialize)]
         struct WireFailure {
             category: String,
+            #[serde(default)]
+            detail: Option<String>,
         }
 
         let wire = WireFailure::deserialize(deserializer)?;
@@ -228,7 +254,9 @@ impl<'de> Deserialize<'de> for SanitizedFailure {
             }
             _ => wire.category,
         };
-        Self::new(normalized).map_err(serde::de::Error::custom)
+        let mut failure = Self::new(normalized).map_err(serde::de::Error::custom)?;
+        failure.detail = wire.detail;
+        Ok(failure)
     }
 }
 
@@ -556,5 +584,32 @@ mod tests {
                 "malformed colon category {malformed:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn sanitized_failure_legacy_row_without_detail_round_trips() {
+        // Pre-detail persisted rows omit the field. `serde(default)` must
+        // rehydrate them as `detail == None`, and re-serializing must not
+        // re-introduce a `detail` key (`skip_serializing_if`).
+        let failure: SanitizedFailure = serde_json::from_str(r#"{"category":"model_unavailable"}"#)
+            .expect("legacy row without detail must deserialize");
+        assert_eq!(failure.category(), "model_unavailable");
+        assert_eq!(failure.detail(), None);
+
+        let reserialized = serde_json::to_string(&failure).expect("serialize");
+        assert_eq!(reserialized, r#"{"category":"model_unavailable"}"#);
+    }
+
+    #[test]
+    fn sanitized_failure_with_detail_round_trips() {
+        let failure = SanitizedFailure::new("model_unavailable")
+            .expect("category")
+            .with_detail("HTTP 404 model not found");
+        assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
+
+        let json = serde_json::to_string(&failure).expect("serialize");
+        let restored: SanitizedFailure = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, failure);
+        assert_eq!(restored.detail(), Some("HTTP 404 model not found"));
     }
 }

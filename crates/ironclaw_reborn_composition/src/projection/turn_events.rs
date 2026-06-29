@@ -882,11 +882,9 @@ async fn failure_details_for_turn_event(
     };
     let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
     // The model-visible raw cause for the failure travels on the failure
-    // record's detail channel. `TurnLifecycleEvent` does not yet carry a
-    // dedicated detail field distinct from `sanitized_reason`, so until the
-    // upstream runner contract exposes one, there is no detail value to pass
-    // here beyond the category itself. Plumb the channel through so the
-    // explainer is wired to receive it the moment a detail source lands.
+    // record's detail channel, surfaced on `TurnLifecycleEvent.detail` by the
+    // upstream runner. Source it here so the explainer (and model) get the real
+    // cause instead of only the bounded category.
     let detail = detail_for_turn_event(event, &category);
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
@@ -936,17 +934,15 @@ async fn failure_summary_for_turn_event(
 
 /// Resolve the model-visible detail to hand the failure explainer.
 ///
-/// `TurnLifecycleEvent` currently exposes only `sanitized_reason`, which is
-/// already consumed as the `failure_category`; the runner contract does not yet
-/// carry a separate secret-scrubbed `detail` field (that field lives on
-/// `AgentLoopHostError`/`HostManagedModelError` upstream and is dropped at the
-/// `AgentLoopExecutorError`/`AgentLoopDriverError`/`TurnLifecycleEvent`
-/// boundaries, all of which live outside this crate). Returning `None` keeps
-/// the explainer prompt unchanged for now while leaving the channel wired, so a
-/// follow-up that surfaces a distinct detail on the event only needs to source
-/// it here.
-fn detail_for_turn_event(_event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
-    None
+/// Sources the secret-scrubbed raw cause from `TurnLifecycleEvent.detail`, the
+/// dedicated channel distinct from `sanitized_reason` (which is consumed as the
+/// `failure_category`). The detail originates on
+/// `AgentLoopHostError`/`HostManagedModelError` upstream and is threaded through
+/// the executor/driver diagnostics into the failure record and onto the event.
+/// `None` when the failed run recorded no distinct cause, in which case the
+/// explainer falls back to the category summary.
+fn detail_for_turn_event(event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
+    event.detail.clone()
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
