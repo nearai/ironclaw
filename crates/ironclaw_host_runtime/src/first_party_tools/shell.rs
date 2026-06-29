@@ -311,7 +311,7 @@ mod tests {
 
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Executor));
         assert!(
-            error.safe_summary().as_deref().is_some_and(
+            error.safe_summary().is_some_and(
                 |summary| summary.contains("failed to spawn command: command not found")
             )
         );

@@ -125,6 +125,78 @@ fn validate_optional_display_text(
     Ok(())
 }
 
+/// Sensitive markers that must never appear in a boundary-facing safe summary.
+///
+/// Mirrors the forbidden-pattern set enforced by `validate_loop_safe_summary`
+/// in `ironclaw_turns`'s run-profile host, which is what produces
+/// `error_summary` upstream. The adapter re-applies the same strength so a
+/// producer regression (or a different producer that skips the upstream guard)
+/// cannot leak raw secrets, host paths, or backend detail to the browser.
+const SAFE_SUMMARY_FORBIDDEN_MARKERS: &[&str] = &[
+    "access token",
+    "api key",
+    "api_key",
+    "apikey",
+    "authorization:",
+    "bearer ",
+    "host path",
+    "invalid api key",
+    "invalid_api_key",
+    "password",
+    "passwd",
+    "provider error",
+    "raw runtime",
+    "secret",
+    "stack trace",
+    "tool input",
+    "tool_input",
+    "traceback",
+];
+
+/// Validate an optional boundary-facing safe summary (`error_summary`).
+///
+/// Beyond the length + control-character guard of [`validate_bounded_text`],
+/// this re-applies the upstream [`SAFE_SUMMARY_FORBIDDEN_MARKERS`] +
+/// payload/path-delimiter + API-key-token rejection so the adapter boundary is
+/// not a weaker gate than the upstream `validate_loop_safe_summary` producer.
+fn validate_optional_safe_summary(
+    kind: &'static str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<(), ProductAdapterError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_bounded_text(kind, value, max)?;
+    if value.chars().any(|character| {
+        matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )
+    }) {
+        return Err(invalid(
+            kind,
+            "must not contain raw payload or path delimiters",
+        ));
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in SAFE_SUMMARY_FORBIDDEN_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(invalid(
+                kind,
+                format!("must not contain sensitive marker `{forbidden}`"),
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err(invalid(kind, "must not contain API-key-like tokens"));
+    }
+    Ok(())
+}
+
 fn validate_display_preview(value: Option<&str>) -> Result<(), ProductAdapterError> {
     let Some(value) = value else {
         return Ok(());
@@ -317,7 +389,7 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
-        validate_optional_display_text(
+        validate_optional_safe_summary(
             "capability_activity_error_summary",
             self.error_summary.as_deref(),
             CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
@@ -2418,5 +2490,74 @@ mod tests {
         };
 
         assert!(serde_json::to_value(view).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_unsafe_error_summary() {
+        // The adapter boundary must re-apply the upstream
+        // `validate_loop_safe_summary` strength rather than trust the producer:
+        // path/payload delimiters, sensitive markers, and API-key-like tokens
+        // are all rejected even though they pass the weaker bounded-text guard.
+        for leak in [
+            "failed reading /tmp/private-host-path",
+            "missing api key for provider",
+            "rejected secret value",
+            "panicked: stack trace follows",
+            "authorization: Bearer abc",
+            "token sk-live-deadbeef rejected",
+            "payload {\"k\":\"v\"} was malformed",
+        ] {
+            let input = CapabilityActivityViewInput {
+                status: CapabilityActivityStatusView::Failed,
+                error_summary: Some(leak.to_string()),
+                ..capability_activity_view_input_for_detail_test()
+            };
+            assert!(
+                CapabilityActivityView::new(input).is_err(),
+                "error_summary leak should be rejected: {leak:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_unsafe_error_summary_on_deserialize() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-activity",
+            "capability_id": "nearai.web_search",
+            "status": "failed",
+            "provider": null,
+            "runtime": null,
+            "process_id": null,
+            "output_bytes": null,
+            "error_kind": null,
+            "error_summary": "leaked secret token sk-live-deadbeef",
+            "updated_at": Utc::now(),
+        });
+
+        assert!(serde_json::from_value::<CapabilityActivityView>(json).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_oversized_error_summary() {
+        let oversized = "a".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1);
+        let input = CapabilityActivityViewInput {
+            status: CapabilityActivityStatusView::Failed,
+            error_summary: Some(oversized),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(input).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_accepts_sanitized_error_summary() {
+        let input = CapabilityActivityViewInput {
+            status: CapabilityActivityStatusView::Failed,
+            error_kind: Some(CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND.to_string()),
+            error_summary: Some("the web search provider was temporarily unavailable".to_string()),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        let view = CapabilityActivityView::new(input).expect("sanitized summary is accepted");
+        assert!(serde_json::to_value(view).is_ok());
     }
 }

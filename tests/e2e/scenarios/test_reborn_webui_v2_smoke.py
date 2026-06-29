@@ -466,10 +466,12 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     ).to_be_visible(timeout=15000)
 
     await expect(composer).to_be_enabled()
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    # A busy run no longer gates the composer: sends are queued behind the
+    # active run rather than blocked, so the send affordance stays enabled.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     await composer.fill("draft while the reply is still running")
     await expect(composer).to_have_value("draft while the reply is still running")
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
 
     await composer.press("Enter")
 
