@@ -12,8 +12,6 @@ import {
   fetchExtensionSetup,
   submitExtensionSetup,
   startExtensionOauth,
-  fetchPairingRequests,
-  approvePairingCode,
 } from "../lib/extensions-api.js";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
@@ -324,30 +322,3 @@ export function useOauthSetup(packageRef) {
   });
 }
 
-export function usePairing(channel, options = {}) {
-  const query = useQuery({
-    queryKey: ["pairing", channel],
-    queryFn: () => fetchPairingRequests(channel),
-    enabled: Boolean(channel) && options.enabled !== false,
-    refetchInterval: 5000,
-  });
-
-  const queryClient = useQueryClient();
-
-  const approveMutation = useMutation({
-    mutationFn: ({ code }) => approvePairingCode(channel, code),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pairing", channel] });
-      queryClient.invalidateQueries({ queryKey: ["extensions"] });
-    },
-  });
-
-  return {
-    requests: query.data?.requests || [],
-    isLoading: query.isLoading,
-    approve: approveMutation.mutate,
-    isApproving: approveMutation.isPending,
-    result: approveMutation.isSuccess ? approveMutation.data : null,
-    error: approveMutation.isError ? approveMutation.error : null,
-  };
-}

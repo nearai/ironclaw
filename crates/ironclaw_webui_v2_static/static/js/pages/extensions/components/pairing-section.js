@@ -2,7 +2,6 @@ import { React, html } from "../../../lib/html.js";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button.js";
 import { useT } from "../../../lib/i18n.js";
-import { usePairing } from "../hooks/useExtensions.js";
 import { pairingErrorMessage } from "../lib/pairing-errors.js";
 
 const DEFAULT_PAIRING_I18N_KEYS = {
@@ -12,20 +11,19 @@ const DEFAULT_PAIRING_I18N_KEYS = {
   action: "pairing.approve",
   success: "pairing.success",
   error: "pairing.error",
-  empty: "pairing.none",
 };
 
+// Paste-a-code pairing for a connectable channel. Redemption always goes through
+// the caller-provided `redeemFn` (the mounted v2 redeem endpoint). Reborn v2 has
+// no admin pending-pairing-request queue, so there is no legacy approve path.
 export function PairingSection({
   channel,
   redeemFn,
   i18nKeys = DEFAULT_PAIRING_I18N_KEYS,
   queryKeys,
   copy,
-  showPendingRequests = true,
 }) {
   const t = useT();
-  const customRedeem = typeof redeemFn === "function";
-  const pairing = usePairing(channel, { enabled: !customRedeem });
   const queryClient = useQueryClient();
   const [manualCode, setManualCode] = React.useState("");
   const pairingCopy = resolvePairingCopy(t, i18nKeys, copy);
@@ -40,39 +38,15 @@ export function PairingSection({
     },
   });
 
-  const handleApprove = React.useCallback(
-    (code) => pairing.approve({ code }),
-    [pairing.approve]
-  );
-
   const handleManualSubmit = React.useCallback(() => {
     const trimmed = manualCode.trim();
     if (!trimmed) return;
-    if (customRedeem) {
-      redeemMutation.mutate({ code: trimmed });
-    } else {
-      pairing.approve({ code: trimmed });
-      setManualCode("");
-    }
-  }, [customRedeem, manualCode, pairing.approve, redeemMutation]);
+    redeemMutation.mutate({ code: trimmed });
+  }, [manualCode, redeemMutation]);
 
-  const requests = customRedeem ? [] : pairing.requests;
-  const isLoading = customRedeem ? false : pairing.isLoading;
-  const isApproving = customRedeem ? redeemMutation.isPending : pairing.isApproving;
-  const result = customRedeem
-    ? redeemMutation.isSuccess ? redeemMutation.data : null
-    : pairing.result;
-  const error = customRedeem
-    ? redeemMutation.isError ? redeemMutation.error : null
-    : pairing.error;
-
-  if (isLoading) {
-    return html`
-      <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-        <div className="v2-skeleton h-3 w-24 rounded" />
-      </div>
-    `;
-  }
+  const isApproving = redeemMutation.isPending;
+  const result = redeemMutation.isSuccess ? redeemMutation.data : null;
+  const error = redeemMutation.isError ? redeemMutation.error : null;
 
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
@@ -112,35 +86,6 @@ export function PairingSection({
       html`<p className="mb-3 text-xs text-red-300">
         ${pairingErrorMessage(error, pairingCopy.error)}
       </p>`}
-
-      ${showPendingRequests && requests.length > 0
-        ? html`
-            <div className="space-y-2">
-              ${requests.map((req) => html`
-                <div
-                  key=${req.code || req.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <span className="font-mono text-sm text-iron-200">${req.code || req.id}</span>
-                    ${req.label && html`
-                      <span className="ml-2 text-xs text-iron-300">${req.label}</span>
-                    `}
-                  </div>
-                  <${Button}
-                    variant="secondary"
-                    className="h-7 px-2.5 text-xs"
-                    onClick=${() => handleApprove(req.code || req.id)}
-                    disabled=${isApproving}
-                  >
-                    ${pairingCopy.action}
-                  <//>
-                </div>
-              `)}
-            </div>
-          `
-        : showPendingRequests &&
-          html`<p className="text-xs text-iron-300">${t(i18nKeys.empty)}</p>`}
     </div>
   `;
 }
