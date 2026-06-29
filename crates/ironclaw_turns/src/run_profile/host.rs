@@ -416,6 +416,10 @@ impl LoopSafeSummary {
         Self("the tool failure details were redacted".to_string())
     }
 
+    pub fn tool_input_could_not_be_encoded() -> Self {
+        Self("the tool input could not be encoded".to_string())
+    }
+
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
     }

@@ -8,7 +8,7 @@ use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ProviderToolName,
-    ResourceEstimate, RuntimeKind, sha256_digest_token,
+    ResourceEstimate, RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -2587,10 +2587,7 @@ fn runtime_terminal_milestone(
             })
         }
         RuntimeCapabilityOutcome::Failed(failure) => {
-            let safe_summary = failure
-                .message
-                .as_deref()
-                .map(LoopSafeSummary::capability_failure_summary);
+            let safe_summary = runtime_failure_loop_safe_summary(failure);
             Some(LoopHostMilestoneKind::CapabilityFailed {
                 activity_id,
                 capability_id: failure.capability_id.clone(),
@@ -2819,11 +2816,40 @@ fn runtime_failure_safe_summary(
     failure: &RuntimeCapabilityFailure,
     fallback: &'static str,
 ) -> String {
+    let fallback = runtime_failure_fallback_summary(failure.kind, fallback);
     failure
         .safe_summary()
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn runtime_failure_loop_safe_summary(
+    failure: &RuntimeCapabilityFailure,
+) -> Option<LoopSafeSummary> {
+    let summary = failure.safe_summary()?;
+    if let Ok(summary) = LoopSafeSummary::new(summary.clone()) {
+        return Some(summary);
+    }
+    if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
+        return Some(runtime_input_encode_summary());
+    }
+    Some(LoopSafeSummary::capability_failure_summary(summary))
+}
+
+fn runtime_failure_fallback_summary(
+    kind: RuntimeFailureKind,
+    fallback: &'static str,
+) -> &'static str {
+    if matches!(kind, RuntimeFailureKind::InvalidInput) {
+        RuntimeDispatchErrorKind::InputEncode.human_summary()
+    } else {
+        fallback
+    }
+}
+
+fn runtime_input_encode_summary() -> LoopSafeSummary {
+    LoopSafeSummary::tool_input_could_not_be_encoded()
 }
 
 fn loop_gate_ref(kind: &str, id: String) -> Result<LoopGateRef, AgentLoopHostError> {
@@ -3157,7 +3183,20 @@ mod tests {
             invalid_input,
             CapabilityOutcome::Failed(failure)
                 if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == "capability invocation failed"
+                    && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
+        ));
+
+        let unsafe_invalid_input = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::InvalidInput,
+            Some("invalid JSON: expected value near {invalid".to_string()),
+        ))
+        .expect("convert unsafe invalid input runtime summary");
+        assert!(matches!(
+            unsafe_invalid_input,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
         ));
 
         let issue =
@@ -4596,7 +4635,7 @@ mod tests {
                     detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
-                Some("the tool failure details were redacted"),
+                Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
