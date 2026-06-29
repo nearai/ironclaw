@@ -210,6 +210,28 @@ test("Tool rows localize built-in descriptions by capability id", () => {
   assert.ok(!scalars.includes("Echo a message"));
 });
 
+test("Tool rows localize descriptions when backend payload omits description", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  assert.ok(collectScalars(rendered).includes("回显一条消息"));
+});
+
 test("Tools tab search matches localized and raw tool descriptions", () => {
   const tools = [
     {
@@ -239,4 +261,27 @@ test("Tools tab search matches localized and raw tool descriptions", () => {
     findComponentNode(enRendered, exports.ToolRow),
     "raw backend description should still keep the tool visible"
   );
+});
+
+test("Tools tab search does not index locked tools as disabled unless disabled", () => {
+  const tools = [
+    {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: true,
+    },
+  ];
+  const { exports } = renderToolsModule({
+    tools,
+    translations: {
+      "tools.disabled": "disabled",
+    },
+  });
+
+  const rendered = exports.ToolsTab({ searchQuery: "disabled" });
+  assert.equal(findComponentNode(rendered, exports.ToolRow), null);
+  assert.ok(collectScalars(rendered).includes("tools.noMatch"));
 });

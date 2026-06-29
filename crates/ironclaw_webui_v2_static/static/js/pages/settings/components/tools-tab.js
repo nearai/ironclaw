@@ -9,10 +9,9 @@ import { matchesSearch } from "../lib/settings-search.js";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 
 function translatedToolDescription(t, tool) {
-  if (!tool.description) return "";
   const key = `tools.description.${tool.name}`;
   const translated = t(key);
-  return translated && translated !== key ? translated : tool.description;
+  return translated && translated !== key ? translated : tool.description || "";
 }
 
 function SavedIndicator({ visible }) {
@@ -237,7 +236,7 @@ export function ToolsTab({
       tool.state,
       tool.default_state,
       tool.effective_source,
-      tool.locked ? t("tools.disabled") : "",
+      tool.state === "disabled" ? t("tools.disabled") : "",
     ]);
   });
 

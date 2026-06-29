@@ -518,7 +518,7 @@ registerPack("hi", {
   "tools.description.builtin.trigger_create": "caller-scoped scheduled trigger बनाएं, one-time या recurring",
   "tools.description.builtin.trigger_list": "वर्तमान caller scope के scheduled triggers सूचीबद्ध करें",
   "tools.description.builtin.trigger_remove": "caller-scoped scheduled trigger हटाएं",
-  "tools.description.builtin.trigger_pause": "caller-scoped scheduled trigger pause करें ताकि वह محفوظ रहे लेकिन fire न हो",
+  "tools.description.builtin.trigger_pause": "caller-scoped scheduled trigger pause करें ताकि वह बना रहे लेकिन fire न हो",
   "tools.description.builtin.trigger_resume": "caller-scoped paused trigger resume करें ताकि वह saved schedule पर fire कर सके",
 
   // Settings — skills tab
