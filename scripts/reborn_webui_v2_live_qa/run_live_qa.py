@@ -186,6 +186,7 @@ HN_KEYWORD_SEARCH_URL = (
 EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
+OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
 
 
 class LiveQaContext:
@@ -1352,6 +1353,24 @@ async def _approve_slack_event_gates(
     }
 
 
+async def _wait_for_slack_event_run_id(
+    ctx: LiveQaContext,
+    *,
+    event_id: str,
+    timeout: float = 180.0,
+) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run_id = _slack_event_run_id_for_event(ctx.reborn_home, event_id)
+        if run_id:
+            return run_id
+        await asyncio.sleep(1.0)
+    raise AssertionError(
+        "Slack event was not accepted into a Reborn run before timeout. "
+        f"event_id={event_id!r}"
+    )
+
+
 async def _resolve_webui_approval_gate(
     ctx: LiveQaContext,
     *,
@@ -1436,6 +1455,10 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     target = str(payload.get("final_reply_target") or "")
     match = re.search(r"conversation:(\d+):([^;]+)", target)
     return match.group(2) if match else None
+
+
+def _slack_delivery_target_is_dm(channel_id: str | None) -> bool:
+    return bool(channel_id and channel_id.startswith("D"))
 
 
 async def _slack_history_contains_marker(
@@ -1728,8 +1751,13 @@ async def _extension_chat_connect_case(
         EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_ACTIVATE_CAPABILITY_ID,
     ]
-    expected_capabilities = [*setup_capabilities, *verification_capabilities]
     prompt = QA_SHEET_PROMPTS.get(case_name)
+    sheet_prompt = prompt is not None
+    expected_capabilities = (
+        setup_capabilities
+        if sheet_prompt
+        else [*setup_capabilities, *verification_capabilities]
+    )
     marker_to_wait_for: str | None = None
     if prompt is None:
         prompt = (
@@ -1752,6 +1780,8 @@ async def _extension_chat_connect_case(
             "chat_connect_flow": True,
             "package_id": package_id,
             "required_capabilities": expected_capabilities,
+            "verification_capabilities": verification_capabilities,
+            "verification_capabilities_required": not sheet_prompt,
         },
         forbidden_text=[
             "auth_denied",
@@ -1776,6 +1806,8 @@ async def _extension_chat_connect_case(
         "display_name": display_name,
         "required_tools": required_tools,
         "required_capabilities": expected_capabilities,
+        "verification_capabilities": verification_capabilities,
+        "verification_capabilities_required": not sheet_prompt,
     }
     try:
         statuses = _capability_run_statuses(ctx.reborn_home, expected_capabilities)
@@ -1980,6 +2012,13 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         marker=None,
         required_text=["routine", "email"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
+        clarification_reply=(
+            "For the routine I just requested: use UTC, use my connected Gmail "
+            "account as the email destination, and create it now. The routine "
+            "should every 30 minutes send me an email with a summary for my next "
+            "meeting, including info about the company I will meet, based on "
+            "Google Drive docs and the latest news."
+        ),
     )
 
 
@@ -2529,6 +2568,7 @@ async def _routine_creation_case(
     marker: str | None,
     routine_name: str,
     required_text: list[str],
+    clarification_reply: str | None = None,
 ) -> ProbeResult:
     count_name = routine_name if marker else None
     before_count = _trigger_record_count(ctx.reborn_home, count_name)
@@ -2546,6 +2586,36 @@ async def _routine_creation_case(
     )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
+    if result.success and after_count <= before_count and clarification_reply:
+        follow_up = await _live_chat_case(
+            ctx,
+            case_name=case_name,
+            prompt=clarification_reply,
+            marker=marker,
+            required_text=required_text,
+            timeout=180.0,
+            extra_details={
+                "routine_name": routine_name,
+                "trigger_records_before": after_count,
+                "clarification_follow_up": True,
+            },
+        )
+        follow_up_count = _trigger_record_count(ctx.reborn_home, count_name)
+        result.details["clarification_follow_up_prompt"] = clarification_reply
+        result.details["clarification_follow_up_result"] = follow_up.details
+        result.details["trigger_records_after_follow_up"] = follow_up_count
+        if follow_up.success:
+            result.details.update(
+                {
+                    "clarification_follow_up_latency_ms": follow_up.latency_ms,
+                    "clarification_follow_up_text_excerpt": follow_up.details.get(
+                        "text_excerpt"
+                    ),
+                }
+            )
+            result.success = follow_up_count > before_count
+            result.latency_ms += follow_up.latency_ms
+            after_count = follow_up_count
     if result.success and after_count <= before_count:
         result.success = False
         result.details["error"] = (
@@ -2925,35 +2995,29 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:
             raise AssertionError("Slack inbound test could not resolve a DM/channel id")
+        if not _slack_delivery_target_is_dm(channel_id):
+            raise AssertionError(
+                "Slack bug-message trigger test must inject into a DM target; "
+                f"got channel_id={channel_id!r}"
+            )
         slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
         text = f"bug: {_qa_sheet_prompt(case_name)}"
+        event_id = f"EvREBORNQA7D{suffix}"
         post_result = await _post_signed_slack_dm_event(
             ctx,
             channel_id=channel_id,
             user_id=slack_user_id,
             text=text,
-            event_id=f"EvREBORNQA7D{suffix}",
+            event_id=event_id,
         )
         observed["signed_event"] = post_result
-        deadline = time.monotonic() + 180.0
-        last_history: dict[str, object] | None = None
-        while time.monotonic() < deadline:
-            history = await _slack_history_contains_marker(
-                ctx,
-                channel_id=channel_id,
-                marker=marker,
-                oldest_epoch=wall_started,
-                required_text=["bug"],
-            )
-            last_history = history
-            if history.get("found"):
-                observed["slack_history"] = history
-                return _result(case_name, True, started, observed)
-            await asyncio.sleep(2.0)
-        raise AssertionError(
-            "Slack reply marker was not observed after signed bug: event. "
-            f"last_history={last_history!r}"
+        run_id = await _wait_for_slack_event_run_id(
+            ctx,
+            event_id=event_id,
+            timeout=180.0,
         )
+        observed["accepted_run_id"] = run_id
+        return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
 
@@ -3090,35 +3154,92 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
         marker=None,
         required_text=["routine", "bug"],
         prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+        clarification_reply=(
+            "For the routine I just requested: use the configured Slack DM source "
+            "for my account, and use an existing Google Sheet named ABC or create "
+            "a Google Sheet named Reborn QA Bug Logging if needed. Create the "
+            "routine now: whenever I send a Slack message starting with 'bug:', "
+            "add it as a row to that bug logging Google Sheet."
+        ),
     )
 
 
 async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeResult:
+    from playwright.async_api import expect
+
     started = time.monotonic()
-    observed: dict[str, object] = {}
+    case_name = "qa_7a_slack_product_channel_connect"
+    prompt = _qa_sheet_prompt(case_name)
+    observed: dict[str, object] = {"chat_connect_prompt": prompt}
     try:
         slack = _slack_preflight(ctx)
+        delivery_channel_id = _slack_delivery_channel_id(ctx)
+        route_discovery = slack.get("route_discovery")
+        route_discovery_details = route_discovery if isinstance(route_discovery, dict) else {}
         observed.update(
             {
                 "delivery_target_present": slack.get("delivery_target_present"),
                 "route_configured_from_env": slack.get("route_configured_from_env"),
+                "slack_dm_user_source": route_discovery_details.get("dm_user_source"),
+                "slack_dm_user_id_present": bool(route_discovery_details.get("dm_user_id")),
+                "slack_delivery_channel_id_present": bool(delivery_channel_id),
+                "slack_delivery_target_kind": (
+                    "dm" if _slack_delivery_target_is_dm(delivery_channel_id) else "non_dm"
+                ),
             }
         )
         if not slack.get("delivery_target_present"):
             raise AssertionError(
-                "Slack product-channel route is not configured for this WebUI user"
+                "Slack DM delivery target is not configured for this WebUI user"
             )
-        connect_result = await _slack_connect_case(
-            ctx,
-            case_name="qa_7a_slack_product_channel_connect",
-        )
-        observed.update(connect_result.details)
-        if not connect_result.success:
-            raise AssertionError(str(connect_result.details.get("error") or connect_result.details))
-        return _result("qa_7a_slack_product_channel_connect", True, started, observed)
+        if not _slack_delivery_target_is_dm(delivery_channel_id):
+            raise AssertionError(
+                "Slack live QA delivery target must be a DM to the user; "
+                f"got channel_id={delivery_channel_id!r}"
+            )
+
+        async def action(page: object) -> None:
+            await page.goto(
+                f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )  # type: ignore[attr-defined]
+            composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
+            await expect(composer).to_be_visible(timeout=15000)
+            await composer.fill(prompt)
+            await composer.press("Enter")
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
+            capability_ids = [
+                EXTENSION_SEARCH_CAPABILITY_ID,
+                EXTENSION_INSTALL_CAPABILITY_ID,
+                EXTENSION_ACTIVATE_CAPABILITY_ID,
+                OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+            ]
+            deadline = time.monotonic() + 180.0
+            while time.monotonic() < deadline:
+                await _approve_visible_tool_gate(page)
+                statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
+                observed["capability_statuses"] = statuses
+                missing = [
+                    capability_id
+                    for capability_id in capability_ids
+                    if "completed" not in statuses.get(capability_id, [])
+                ]
+                if not missing:
+                    return
+                await asyncio.sleep(1.0)
+            raise AssertionError(
+                "Slack DM connect prompt did not complete expected capabilities: "
+                f"{capability_ids!r}; observed statuses={observed.get('capability_statuses')!r}"
+            )
+
+        await _with_page(ctx.output_dir, case_name, action)
+        return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(
-            "qa_7a_slack_product_channel_connect",
+            case_name,
             False,
             started,
             {"error": str(exc), **observed},

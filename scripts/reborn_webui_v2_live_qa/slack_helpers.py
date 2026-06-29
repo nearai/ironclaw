@@ -192,13 +192,31 @@ def _discover_slack_dm_route_channel(
     token = _env_value(bot_env, extra_env)
     if not token:
         return {"checked": False, "ok": False, "error": "bot token env unavailable"}
+    configured_route_user_id = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+        "",
+    ).strip()
+    inbound_user_id = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
+        "",
+    ).strip()
+    if inbound_user_id == "U0REBORNQA":
+        inbound_user_id = ""
+    dm_user_id = configured_route_user_id or inbound_user_id
+    if not dm_user_id:
+        return {
+            "checked": True,
+            "ok": False,
+            "error": "slack_route_user_id_unavailable",
+            "needed": "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+        }
     try:
         import httpx
 
         response = httpx.post(
             "https://slack.com/api/conversations.open",
             headers={"Authorization": f"Bearer {token}"},
-            data={"users": "USLACKBOT"},
+            data={"users": dm_user_id},
             timeout=20.0,
         )
         payload = response.json()
@@ -212,6 +230,8 @@ def _discover_slack_dm_route_channel(
     result: dict[str, object] = {
         "checked": True,
         "ok": bool(payload.get("ok")),
+        "dm_user_id": dm_user_id,
+        "dm_user_source": "env",
     }
     channel = payload.get("channel")
     if isinstance(channel, dict):

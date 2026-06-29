@@ -17,6 +17,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -204,7 +205,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIn(run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID, required_capabilities)
             self.assertIn(run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID, required_capabilities)
             for capability_id in verification_caps:
-                self.assertIn(capability_id, required_capabilities)
+                self.assertNotIn(capability_id, required_capabilities)
+            self.assertEqual(
+                extra_details["verification_capabilities"],
+                verification_caps,
+            )
+            self.assertFalse(extra_details["verification_capabilities_required"])
             self.assertFalse(captured_registry[case_name]["ensure_installed"])
 
     def test_product_connect_case_fails_when_chat_does_not_use_extension_lifecycle(self):
@@ -252,6 +258,173 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "chat connect did not complete expected capabilities",
             str(result.details["error"]),
         )
+
+    def test_routine_creation_case_can_continue_after_clarification(self):
+        captured_prompts: list[str] = []
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured_prompts.append(kwargs["prompt"])
+            extra_details = kwargs.get("extra_details") or {}
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": "routine created", **extra_details},
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0, 1]),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="original sheet prompt",
+                    marker=None,
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                    clarification_reply="clarifying answer",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured_prompts, ["original sheet prompt", "clarifying answer"])
+        self.assertEqual(result.details["trigger_records_after"], 0)
+        self.assertEqual(result.details["trigger_records_after_follow_up"], 1)
+        self.assertTrue(result.details["clarification_follow_up_result"]["clarification_follow_up"])
+
+    def test_slack_delivery_target_dm_detection(self):
+        self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
+        self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
+        self.assertFalse(run_live_qa._slack_delivery_target_is_dm(None))
+
+    def test_slack_dm_route_discovery_prefers_configured_user(self):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def json(self):
+                return {
+                    "ok": True,
+                    "channel": {
+                        "id": "DQAUSER",
+                        "is_im": True,
+                    },
+                }
+
+        def fake_post(_url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(post=fake_post)
+        with (
+            patch.dict(
+                os.environ,
+                {"REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID": "UQAUSER"},
+                clear=True,
+            ),
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+        ):
+            result = run_live_qa._discover_slack_dm_route_channel(
+                "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
+                {"SLACK_BOT_TOKEN": "xoxb-test"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dm_user_id"], "UQAUSER")
+        self.assertEqual(result["dm_user_source"], "env")
+        self.assertEqual(captured["data"]["users"], "UQAUSER")
+
+    def test_slack_dm_route_discovery_rejects_synthetic_inbound_user(self):
+        def fail_post(_url, **_kwargs):
+            raise AssertionError("synthetic inbound user must not open a Slack DM")
+
+        fake_httpx = types.SimpleNamespace(post=fail_post)
+        with (
+            patch.dict(
+                os.environ,
+                {"REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID": "U0REBORNQA"},
+                clear=True,
+            ),
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+        ):
+            result = run_live_qa._discover_slack_dm_route_channel(
+                "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
+                {"SLACK_BOT_TOKEN": "xoxb-test"},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "slack_route_user_id_unavailable")
+        self.assertEqual(
+            result["needed"],
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+        )
+
+    def test_qa_7a_requires_dm_delivery_target(self):
+        with (
+            patch.object(
+                run_live_qa,
+                "_slack_preflight",
+                return_value={
+                    "delivery_target_present": True,
+                    "route_configured_from_env": True,
+                },
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="C12345"),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_7a_slack_product_channel_connect(self._dummy_ctx())
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("must be a DM", str(result.details["error"]))
+        self.assertEqual(result.details["slack_delivery_target_kind"], "non_dm")
+
+    def test_qa_7d_accepts_signed_slack_event_into_reborn_run(self):
+        async def fake_post_signed_slack_dm_event(_ctx, **kwargs):
+            return {
+                "status_code": 200,
+                "event_id": kwargs["event_id"],
+                "channel_id_present": True,
+            }
+
+        async def fake_wait_for_slack_event_run_id(_ctx, **kwargs):
+            return f"run-for-{kwargs['event_id']}"
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_slack_preflight",
+                return_value={
+                    "legacy_actor_configured": True,
+                    "legacy_actor_user_id": "U0REBORNQA",
+                    "delivery_target_present": True,
+                },
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D12345"),
+            patch.object(
+                run_live_qa,
+                "_post_signed_slack_dm_event",
+                side_effect=fake_post_signed_slack_dm_event,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_event_run_id",
+                side_effect=fake_wait_for_slack_event_run_id,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_7d_slack_bug_message_trigger(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.details["accepted_run_id"].startswith("run-for-"))
+        self.assertEqual(result.details["signed_event"]["status_code"], 200)
 
     def test_endpoint_status_routine_prompt_uses_real_endpoint(self):
         captured: dict[str, object] = {}
