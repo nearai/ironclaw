@@ -1216,6 +1216,35 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             self.assertIn(case_name, selected_cases)
 
+    def test_live_canary_workflow_shards_cover_non_telegram_qa_suite(self):
+        args = argparse.Namespace(
+            all_cases=False,
+            non_telegram_qa_cases=True,
+            case=[],
+        )
+        selected_cases = run_live_qa._selected_case_names(args)
+        workflow_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/live-canary.yml"
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^  reborn-webui-v2-live-qa:\n(?P<body>.*?)^  persona-rotating:",
+            workflow,
+        )
+        self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
+
+        shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
+        self.assertEqual(len(shard_case_lines), 7)
+        sharded_cases = [
+            case_name
+            for line in shard_case_lines
+            for case_name in line.split(",")
+            if case_name
+        ]
+
+        self.assertEqual(len(sharded_cases), len(set(sharded_cases)))
+        self.assertEqual(sharded_cases, selected_cases)
+
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
