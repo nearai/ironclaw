@@ -556,11 +556,15 @@ fn redacted_http_url_origin(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return "<invalid-url>".to_string();
     };
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|host| !host.is_empty())
-        .unwrap_or("<missing-host>");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if host.trim().is_empty() {
+        "<missing-host>"
+    } else {
+        host.trim()
+    };
     format!("{scheme}://{host}")
 }
 
@@ -698,6 +702,10 @@ mod tests {
         assert_eq!(
             redacted_http_url_origin("https://api.example.test/v1/messages?token=secret#frag"),
             "https://api.example.test"
+        );
+        assert_eq!(
+            redacted_http_url_origin("https://user:secret@example.com:8443/path"),
+            "https://example.com:8443"
         );
         assert_eq!(redacted_http_url_origin("not a url"), "<invalid-url>");
     }

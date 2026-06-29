@@ -608,16 +608,20 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
+    assert!(
+        accounts.has_pending_refresh_backend_failure_for_tests(account.id),
+        "test must start with a staged backend refresh failure"
+    );
     let secret_store = Arc::new(InMemorySecretStore::new());
     secret_store
         .put(
             scope.clone(),
             access_secret.clone(),
             ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
-            Some(Utc::now() + chrono::Duration::hours(1)),
+            None,
         )
         .await
-        .expect("seed fresh access-token metadata");
+        .expect("seed access-token metadata without expiry");
     let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 
     let resolved = resolver
@@ -633,6 +637,10 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
 
     assert_eq!(resolved.handle, access_secret);
     assert_eq!(resolved.scope, scope);
+    assert!(
+        !accounts.has_pending_refresh_backend_failure_for_tests(account.id),
+        "resolver must attempt refresh and consume the staged backend failure"
+    );
 }
 
 #[tokio::test]
