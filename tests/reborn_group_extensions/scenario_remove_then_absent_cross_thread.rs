@@ -62,7 +62,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_result_contains("\"installed\":true")
         .await?;
 
-    // ── Phase 2: remove "github" (DIFFERENT conversation, SAME shared store) ─
+    // ── Phase 2: remove "notion" (DIFFERENT conversation, SAME shared store) ─
     // A distinct conversation_id → distinct binding/thread scope, but the
     // same `HostRuntimeCapabilityHarness`, so the remover can see and delete
     // the installation that Phase 1 just wrote.
@@ -90,7 +90,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_result_contains("\"removed\":true")
         .await?;
 
-    // ── Phase 3: cross-thread search — "github" must NOT be installed ────────
+    // ── Phase 3: cross-thread search — "notion" must NOT be installed ───────
     // A DIFFERENT conversation_id produces a distinct binding and thread scope
     // but Arc-clones the same `HostRuntimeCapabilityHarness`, so the viewer
     // reads from the exact same extension-install store the remover just wrote to.
@@ -122,7 +122,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         );
     }
 
-    // Non-vacuity guard: "github" must still appear in the catalog search result
+    // Non-vacuity guard: "notion" must still appear in the catalog search result
     // (as an available-but-not-installed bundled extension), proving the search
     // actually ran and returned catalog entries. The absence of
     // `installation_phase` is therefore meaningful — not a symptom of an empty

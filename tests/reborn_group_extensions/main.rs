@@ -39,8 +39,9 @@ async fn extensions_group_e2e() {
 
     // Scenario 2: install + remove in thread A → search in thread B confirms
     // the extension is no longer installed over the shared store. Independent
-    // of Scenario 1 (different conversation IDs; the group's extension store
-    // is shared but both scenarios install their own copy of "github").
+    // of Scenario 1: Scenario 1 installs "github" and never removes it;
+    // Scenario 2 installs + removes "notion" so it is self-contained and does
+    // not depend on Scenario 1's shared-store state.
     report.record(
         "remove_then_absent_cross_thread",
         scenario_remove_then_absent_cross_thread::run(&g).await,
