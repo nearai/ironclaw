@@ -95,7 +95,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
 }
 
 #[tokio::test]
-async fn native_context_retrieve_filters_cross_scope_results_and_hashes_snippet_refs() {
+async fn native_context_retrieve_filters_cross_scope_results_and_returns_raw_components() {
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![
             search_result(
@@ -129,11 +129,15 @@ async fn native_context_retrieve_filters_cross_scope_results_and_hashes_snippet_
         .expect("context retrieval through IronClaw memory facade");
 
     assert_eq!(snippets.len(), 1);
-    assert_eq!(
-        snippets[0].safe_summary,
-        "Untrusted memory content: ordinary planning note"
-    );
-    assert_eq!(snippets[0].snippet_ref, "memory-snippet:cb96ed00b13e6ae4");
+    // The provider returns raw, in-scope candidates with the scope/path
+    // components the host needs to hash the reference; it no longer sanitizes,
+    // wraps, or hashes itself (that is now host-owned).
+    assert_eq!(snippets[0].text, "ordinary planning note");
+    assert_eq!(snippets[0].relative_path, "allowed.md");
+    assert_eq!(snippets[0].tenant_id, "tenant-native-memory");
+    assert_eq!(snippets[0].user_id, "user-native-memory");
+    assert_eq!(snippets[0].agent_id, None);
+    assert_eq!(snippets[0].project_id, None);
 }
 
 #[tokio::test]
@@ -207,10 +211,7 @@ async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_proj
 
     // Only the exactly-in-scope result survives the scope-isolation filter.
     assert_eq!(snippets.len(), 1);
-    assert_eq!(
-        snippets[0].safe_summary,
-        "Untrusted memory content: in scope planning note"
-    );
+    assert_eq!(snippets[0].text, "in scope planning note");
 }
 
 #[tokio::test]
@@ -261,14 +262,15 @@ async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
 
     // Only the result with a finite score survives.
     assert_eq!(snippets.len(), 1);
-    assert_eq!(
-        snippets[0].safe_summary,
-        "Untrusted memory content: finite score note"
-    );
+    assert_eq!(snippets[0].text, "finite score note");
 }
 
 #[tokio::test]
-async fn native_context_retrieve_drops_path_like_snippets() {
+async fn native_context_retrieve_returns_raw_content_for_host_sanitization() {
+    // Content safety (dropping path-like / secret / injection snippets) is
+    // host-owned post-lift. The provider returns the raw text unchanged; the host
+    // (`ironclaw_host_runtime::memory_context`) drops it during admission. This
+    // test pins that the provider does NOT pre-filter content.
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![search_result(
             "tenant-native-memory",
@@ -292,7 +294,11 @@ async fn native_context_retrieve_drops_path_like_snippets() {
         .await
         .expect("context retrieval through IronClaw memory facade");
 
-    assert!(snippets.is_empty());
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(
+        snippets[0].text,
+        "/etc/passwd should not enter model context"
+    );
 }
 
 #[tokio::test]
@@ -345,31 +351,20 @@ async fn native_context_retrieve_orders_score_desc_then_path_asc() {
 
     assert_eq!(snippets.len(), 3);
     // Highest score first.
-    assert_eq!(
-        snippets[0].safe_summary,
-        "Untrusted memory content: snippet m"
-    );
+    assert_eq!(snippets[0].text, "snippet m");
     // Tied scores (0.5): path ascending, so `a-note.md` precedes `z-note.md`.
-    assert_eq!(
-        snippets[1].safe_summary,
-        "Untrusted memory content: snippet a"
-    );
-    assert_eq!(
-        snippets[2].safe_summary,
-        "Untrusted memory content: snippet z"
-    );
+    assert_eq!(snippets[1].text, "snippet a");
+    assert_eq!(snippets[2].text, "snippet z");
 }
 
 #[tokio::test]
-async fn native_context_retrieve_caps_aggregate_safe_summary_bytes() {
-    // Aggregate-budget facade test, ported from the pre-lift
-    // `aggregate_safe_summary_bytes_are_bounded`. It drives `retrieve_context`,
-    // which calls `collect_context_snippets(.., MAX_TOTAL_SAFE_SUMMARY_BYTES)`.
-    // Twenty in-scope results each carry a long snippet (~512 bytes after the
-    // per-snippet cap), so the cumulative safe-summary bytes blow past the 4 KiB
-    // aggregate ceiling well before `max_snippets`. The aggregate cap — not
-    // `max_snippets` — must stop collection. If the byte budget were removed,
-    // all 20 would be returned and both assertions below would fail.
+async fn native_context_retrieve_returns_candidates_without_aggregate_byte_budget() {
+    // The per-snippet + aggregate model-visible byte budgets moved to the host
+    // post-lift. The provider returns every in-scope, ranked candidate up to
+    // `max_snippets` (the search limit) without sanitizing, truncating, or
+    // re-imposing a byte ceiling — the host
+    // (`ironclaw_host_runtime::memory_context`) enforces both budgets. This pins
+    // that the provider no longer caps bytes.
     let long_text = "b".repeat(1000);
     let results = (0..20)
         .map(|index| {
@@ -392,8 +387,6 @@ async fn native_context_retrieve_caps_aggregate_safe_summary_bytes() {
             invocation(),
             MemoryServiceContextRequest {
                 query: "budget".to_string(),
-                // High enough that the aggregate byte budget, not max_snippets,
-                // is what truncates the returned set.
                 max_snippets: 20,
                 context_profile_id: MemoryContextProfileId::new("default").unwrap(),
             },
@@ -401,19 +394,10 @@ async fn native_context_retrieve_caps_aggregate_safe_summary_bytes() {
         .await
         .expect("context retrieval through IronClaw memory facade");
 
-    let total_bytes: usize = snippets
-        .iter()
-        .map(|snippet| snippet.safe_summary.len())
-        .sum();
-    assert!(
-        total_bytes <= 4 * 1024,
-        "aggregate safe_summary bytes must stay within the 4 KiB ceiling, got {total_bytes}"
-    );
-    assert!(
-        snippets.len() < 20,
-        "aggregate byte budget must cap snippets before max_snippets, got {}",
-        snippets.len()
-    );
+    // All 20 in-scope candidates are returned raw and un-truncated; no provider
+    // byte budget trims them.
+    assert_eq!(snippets.len(), 20);
+    assert!(snippets.iter().all(|snippet| snippet.text == long_text));
 }
 
 #[tokio::test]

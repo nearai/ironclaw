@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/]",
+      "description": "Relative memory document path to read; must not be absolute (no leading '/'). The host filesystem additionally rejects '..' traversal and resolves the path within the scoped /memory mount."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}

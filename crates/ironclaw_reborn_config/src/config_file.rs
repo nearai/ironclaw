@@ -36,11 +36,13 @@ use std::borrow::Cow;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
+use crate::RebornProfile;
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
 
 /// API version stamp this crate understands. Mirrors
@@ -96,6 +98,62 @@ pub struct RebornConfigFile {
     /// Trigger poller lifecycle settings. All fields optional; absent section
     /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
+    /// Memory profile binding (issue #3537). Maps memory capability profiles to
+    /// the extensions that serve them; absent section means every required
+    /// memory profile defaults to the host-bundled native provider. The
+    /// `profile_id` semantics (valid profile ids, fail-closed resolution,
+    /// production rejection of disabled/unverified bindings) are enforced by the
+    /// host-runtime binding resolver, which owns the profile catalog; this
+    /// config layer only does deployment-agnostic structural validation.
+    pub memory: Option<MemorySection>,
+}
+
+/// `[memory]` config section (issue #3537).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySection {
+    /// `profile_id -> extension_id` bindings. An unlisted required profile
+    /// defaults to the native provider at resolution time.
+    #[serde(default)]
+    pub profile_bindings: Vec<MemoryProfileBinding>,
+    /// Admin overrides authorizing an otherwise-rejected production binding,
+    /// scoped to `(extension_id, profile_id, deployment_profile)`. Production
+    /// composition still applies the resolver's fail-closed policy.
+    #[serde(default)]
+    pub admin_overrides: Vec<MemoryAdminOverride>,
+    /// Connection base URL for a third-party memory provider that needs one,
+    /// used only when a binding selects that provider (issue #5264). For mem0 this
+    /// is the self-hosted mem0 OSS server URL (never the hosted cloud). There is
+    /// no default: mem0 stays off unless explicitly bound AND given a base URL
+    /// here or via the `MEMORY_MEM0_BASE_URL` env override; a bound-but-unset mem0
+    /// fails closed. An API key is OPTIONAL (a self-hosted server with
+    /// `AUTH_DISABLED=true` needs none); when required it is supplied via
+    /// `MEMORY_MEM0_API_KEY` (a secret — never the config file). Inert when no
+    /// third-party binding needs it.
+    #[serde(default)]
+    pub mem0_base_url: Option<String>,
+}
+
+/// One `profile_id -> extension_id` memory binding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProfileBinding {
+    /// Memory capability profile id, e.g. `memory.document_store.v1`.
+    pub profile_id: String,
+    /// `ironclaw.memory.native`, `memory.disabled`, or a third-party id.
+    pub extension_id: String,
+}
+
+/// One admin override authorizing a production memory binding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryAdminOverride {
+    /// Memory capability profile id the override applies to.
+    pub profile_id: String,
+    /// Extension id the override authorizes.
+    pub extension_id: String,
+    /// Deployment-profile wire name (e.g. `production`) or `*` for all.
+    pub deployment_profile: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -889,6 +947,55 @@ impl RebornConfigFile {
                 });
             }
         }
+        // Memory bindings (issue #3537). Structural + deployment-agnostic checks
+        // only: profile-id validity and fail-closed production policy are owned
+        // by the host-runtime binding resolver (it holds the profile catalog and
+        // knows the active deployment profile).
+        if let Some(memory) = &self.memory {
+            for (idx, binding) in memory.profile_bindings.iter().enumerate() {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.profile_bindings[{idx}].profile_id")),
+                    &binding.profile_id,
+                )?;
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.profile_bindings[{idx}].extension_id")),
+                    &binding.extension_id,
+                )?;
+            }
+            for (idx, over) in memory.admin_overrides.iter().enumerate() {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].profile_id")),
+                    &over.profile_id,
+                )?;
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].extension_id")),
+                    &over.extension_id,
+                )?;
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].deployment_profile")),
+                    &over.deployment_profile,
+                )?;
+                if !is_valid_memory_deployment_profile(&over.deployment_profile) {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: format!("memory.admin_overrides[{idx}].deployment_profile"),
+                        reason: "must be a deployment profile name (local-dev, \
+                                 local-dev-yolo, hosted-single-tenant, production, \
+                                 migration-dry-run) or '*'"
+                            .to_string(),
+                    });
+                }
+            }
+            // The mem0 base URL is operator-pasteable; run the same inline-secret
+            // guard as the sibling fields (a credentialed URL is rejected at
+            // transport construction, but a pasted secret must be caught here too),
+            // plus non-empty + trimmed: a blank (`"   "`) or whitespace-padded
+            // (`" https://h "`) value otherwise parses here and only fails later,
+            // opaquely, at transport construction during startup.
+            if let Some(base_url) = memory.mem0_base_url.as_deref() {
+                check_non_empty_trimmed(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
+            }
+        }
         Ok(())
     }
 
@@ -1041,6 +1148,14 @@ fn write_edit_document(
             source: error.error,
         })?;
     Ok(())
+}
+
+/// Valid `deployment_profile` values for a memory admin override: a
+/// `RebornProfile` wire name, or `*` (all deployments). Delegates to
+/// [`RebornProfile`]'s `FromStr` so the accepted set stays the single
+/// source of truth in `profile.rs` rather than a duplicated literal list.
+fn is_valid_memory_deployment_profile(value: &str) -> bool {
+    value == "*" || RebornProfile::from_str(value).is_ok()
 }
 
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
@@ -1862,6 +1977,143 @@ tick_jitter_max_secs = 5
         assert_eq!(tp.max_concurrent_fires_per_trigger, Some(3));
         assert_eq!(tp.startup_jitter_max_secs, Some(10));
         assert_eq!(tp.tick_jitter_max_secs, Some(5));
+    }
+
+    #[test]
+    fn memory_section_parses_bindings_and_overrides() {
+        let toml = r#"
+[[memory.profile_bindings]]
+profile_id = "memory.document_store.v1"
+extension_id = "ironclaw.memory.native"
+
+[[memory.admin_overrides]]
+profile_id = "memory.context_retrieval.v1"
+extension_id = "acme.honcho"
+deployment_profile = "production"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("memory section parses");
+        let memory = cfg.memory.as_ref().expect("memory section present");
+        assert_eq!(memory.profile_bindings.len(), 1);
+        assert_eq!(
+            memory.profile_bindings[0].profile_id,
+            "memory.document_store.v1"
+        );
+        assert_eq!(
+            memory.profile_bindings[0].extension_id,
+            "ironclaw.memory.native"
+        );
+        assert_eq!(memory.admin_overrides.len(), 1);
+        assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
+    }
+
+    #[test]
+    fn memory_absent_section_is_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty config parses");
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_rejects_empty_extension_id() {
+        let toml = r#"
+[[memory.profile_bindings]]
+profile_id = "memory.document_store.v1"
+extension_id = ""
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty extension_id must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_invalid_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+profile_id = "memory.document_store.v1"
+extension_id = "acme.honcho"
+deployment_profile = "prod"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("invalid deployment_profile must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(err.to_string().contains("deployment_profile"));
+    }
+
+    #[test]
+    fn memory_accepts_wildcard_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+profile_id = "memory.document_store.v1"
+extension_id = "acme.honcho"
+deployment_profile = "*"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("wildcard deployment_profile accepted");
+        assert_eq!(
+            cfg.memory.unwrap().admin_overrides[0].deployment_profile,
+            "*"
+        );
+    }
+
+    #[test]
+    fn memory_rejects_inline_secret_in_mem0_base_url() {
+        // The mem0 base URL runs the same inline-secret guard as the sibling
+        // memory fields: a pasted API key (here an `sk-` token embedded in the
+        // URL) must be rejected rather than round-tripped through config/git.
+        let toml = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com/?key=sk-proj-1234567890abcdef12345678"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("an inline secret in mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_blank_or_untrimmed_mem0_base_url() {
+        // A whitespace-only base URL must be rejected as empty at parse time, not
+        // round-tripped and deferred to an opaque transport-construction failure.
+        let blank = r#"
+[memory]
+mem0_base_url = "   "
+"#;
+        let err = RebornConfigFile::parse_text(blank, &attributed())
+            .expect_err("a whitespace-only mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A URL padded with leading/trailing whitespace is rejected too: the pad
+        // would silently break URL parsing later.
+        let padded = r#"
+[memory]
+mem0_base_url = " https://mem0.example.com "
+"#;
+        let err = RebornConfigFile::parse_text(padded, &attributed())
+            .expect_err("an untrimmed mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A clean, trimmed, secret-free URL still parses.
+        let ok = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com"
+"#;
+        let cfg = RebornConfigFile::parse_text(ok, &attributed())
+            .expect("a clean mem0_base_url must parse");
+        assert_eq!(
+            cfg.memory.and_then(|m| m.mem0_base_url).as_deref(),
+            Some("https://mem0.example.com")
+        );
+    }
+
+    #[test]
+    fn memory_rejects_unknown_binding_key() {
+        let toml = r#"
+[[memory.profile_bindings]]
+profile_id = "memory.document_store.v1"
+extension_id = "ironclaw.memory.native"
+typo = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [[memory.profile_bindings]]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 
     #[test]

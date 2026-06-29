@@ -27,6 +27,12 @@ ignore = [
     # so the TRUNCATE bypass is not reachable from our guest surface. Remove once
     # wasmtime is upgraded to a patched release.
     "RUSTSEC-2026-0149",
+    # lopdf stack overflow on deeply-nested PDF objects, reached via pdf-extract
+    # in ironclaw_extractors (PDF attachment text extraction). New advisory with
+    # no patched lopdf release in our semver range yet. Bounded DoS only — a crash
+    # of the extraction task on a hostile user-supplied PDF, not RCE and not the
+    # whole process. Remove once lopdf / pdf-extract ship a fixed release.
+    "RUSTSEC-2026-0187",
 ]
 
 [licenses]

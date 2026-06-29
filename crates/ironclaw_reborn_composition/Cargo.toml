@@ -22,6 +22,13 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+# Compile the mem0 third-party memory provider into the composed runtime.
+# Off by default (productionization, #5264) so default builds carry no mem0
+# code or its `reqwest`/`rustls` transport deps; an operator who binds memory
+# to mem0 builds with `--features memory-mem0`. mem0 stays runtime-off too
+# (the binding policy defaults to native). Mirrors `root-llm-provider`'s
+# optional-dep shape.
+memory-mem0 = ["dep:ironclaw_memory_mem0"]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
@@ -114,6 +121,14 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
+# Memory contract + provider crates. Composition is the layer that wires the
+# configured memory provider (issue #3537 / #5264): like `ironclaw_embeddings`'s
+# provider factory it may depend on every concrete provider crate — the native
+# (filesystem) provider and the mem0 (REST) provider — and builds whichever the
+# `[memory]` binding selects.
+ironclaw_memory = { path = "../ironclaw_memory" }
+ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", optional = true }
+ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
@@ -183,6 +198,9 @@ http-body-util = "0.1"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+# mem0 provider with its mock transport: the provider-swap integration test
+# drives the config-driven factory over the in-memory `MockMem0Transport`.
+ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", features = ["test-support"] }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }

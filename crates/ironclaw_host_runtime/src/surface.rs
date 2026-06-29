@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
     capability_catalog::read_json_ref,
-    first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
+    first_party_tools::{
+        BUILTIN_FIRST_PARTY_PROVIDER, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+        resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+    },
     plan_capability,
 };
 
@@ -238,6 +241,26 @@ impl<'a> CapabilityCatalog<'a> {
                 .ok_or_else(|| {
                     HostRuntimeError::invalid_request(format!(
                         "built-in capability {} references unknown input schema {}",
+                        descriptor.id, reference
+                    ))
+                })?;
+            return Ok(descriptor);
+        }
+
+        // Native memory rides the same always-on inline-schema lane as builtin,
+        // under its own provider id, so its model-facing tools resolve without
+        // any asset materialization.
+        if descriptor.provider.as_str() == NATIVE_MEMORY_FIRST_PARTY_PROVIDER {
+            let Some(reference) = reference else {
+                return Err(HostRuntimeError::invalid_request(format!(
+                    "native memory capability {} must publish from an input schema ref",
+                    descriptor.id
+                )));
+            };
+            descriptor.parameters_schema = resolve_native_memory_input_schema_ref(&reference)
+                .ok_or_else(|| {
+                    HostRuntimeError::invalid_request(format!(
+                        "native memory capability {} references unknown input schema {}",
                         descriptor.id, reference
                     ))
                 })?;

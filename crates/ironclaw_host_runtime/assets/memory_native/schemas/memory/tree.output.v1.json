@@ -1,0 +1,5 @@
+{
+  "type": "array",
+  "description": "Compact tree of memory documents and directories",
+  "items": {}
+}

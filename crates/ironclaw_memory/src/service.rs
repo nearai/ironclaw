@@ -71,17 +71,29 @@ pub struct MemoryServiceWriteRequest {
 
 impl MemoryServiceWriteRequest {
     pub fn from_tool_input(input: &Value) -> Result<Self, MemoryServiceError> {
-        // Lenient parsing matching the pre-lift host `parse_write_command`:
-        // a present-but-wrong-typed `target` is rejected, but every other
-        // present-but-wrong-typed optional field coerces to its default rather
-        // than failing (exact original behavior). `new_string`/`timezone` are
-        // only consulted by the native write path when relevant (patch /
-        // daily_log), preserving origin semantics.
+        // Lenient parsing matching the pre-lift host `parse_write_command`: an
+        // explicit JSON `null` target is treated as omitted (defaults to the
+        // daily log), but any other present-but-wrong-typed `target` (number,
+        // bool, object, array) is rejected. Every other present-but-wrong-typed
+        // optional field coerces to its default rather than failing (exact
+        // original behavior). `new_string`/`timezone` are only consulted by the
+        // native write path when relevant (patch / daily_log), preserving origin
+        // semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
+            Some(Value::Null) | None => "daily_log".to_string(),
             Some(_) => return Err(MemoryServiceError::input()),
-            None => "daily_log".to_string(),
         };
+        // Provider-neutral containment: reject a target that would escape the
+        // scoped memory mount before it reaches any provider. The model-facing
+        // `document-write` input schema advertises the same `not` pattern, but
+        // that schema is only surfaced to the model — it is not host-validated
+        // against the actual tool arguments — and a swapped provider may use the
+        // target verbatim (the mem0 adapter stores it as a memory metadata tag).
+        // The native filesystem provider keeps its own stricter
+        // `reject_local_or_traversal_path` as defense in depth; enforcing here
+        // closes the tool-surface path for every bound provider.
+        reject_out_of_scope_target(&target)?;
         let content = input
             .get("content")
             .and_then(Value::as_str)
@@ -233,6 +245,18 @@ pub struct MemoryServiceProfileSetResponse {
     pub status: MemoryProfileSetStatus,
 }
 
+/// Response for a provider-neutral profile-document read.
+///
+/// The provider resolves the profile document's scope/path (keyed to the human
+/// user at `agent=None, project=None`) and reads its raw bytes. The host parses,
+/// size-caps, and validates them; the provider does not interpret the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryServiceProfileReadResponse {
+    /// Raw profile-document bytes for the run owner, or `None` if no profile
+    /// document exists.
+    pub document: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryServiceContextRequest {
     pub query: String,
@@ -320,11 +344,29 @@ impl From<MemoryContextProfileId> for String {
 // Deliberately no `Deref<Target = str>` — auto-deref would let `&id` silently
 // coerce to `&str`, the implicit-conversion pattern this rule prevents.
 
+/// A raw memory-context candidate returned by a [`MemoryService`] provider.
+///
+/// The provider returns the *unsanitized* snippet body plus the resolved
+/// scope/path components the host needs to build the model-visible reference.
+/// The host — not the provider — sanitizes the text, wraps it in the
+/// untrusted-memory envelope, hashes the `memory-snippet:*` reference, and
+/// enforces every model-visible budget. A provider therefore cannot bypass host
+/// prompt safety by pre-sanitizing, pre-wrapping, or forging a reference: the
+/// host is the sole constructor of admitted loop-context snippets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryServiceContextSnippet {
-    pub snippet_ref: String,
-    pub safe_summary: String,
-    pub model_content: String,
+    /// Resolved memory scope/path components. The host hashes
+    /// `[tenant_id, user_id, agent_id?, project_id?, relative_path]` into the
+    /// stable `memory-snippet:*` display reference.
+    pub tenant_id: String,
+    pub user_id: String,
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub relative_path: String,
+    /// Raw, unsanitized snippet body. The host strips control characters,
+    /// truncates, wraps it in the untrusted envelope, and runs the prompt-safety
+    /// denylist before it can enter model context.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +504,18 @@ pub trait MemoryService: Send + Sync {
         Err(MemoryServiceError::unavailable())
     }
 
+    /// Read the run owner's profile document. Provider-neutral counterpart of
+    /// [`profile_set`](MemoryService::profile_set): the provider owns the
+    /// scope/path resolution (single home shared with the write path) and returns
+    /// raw bytes; the host parses + size-caps them.
+    async fn profile_read(
+        &self,
+        invocation: MemoryInvocation,
+    ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
+        let _ = invocation;
+        Err(MemoryServiceError::unavailable())
+    }
+
     async fn retrieve_context(
         &self,
         invocation: MemoryInvocation,
@@ -494,6 +548,19 @@ fn required_str<'a>(input: &'a Value, key: &'static str) -> Result<&'a str, Memo
 
 fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
     input.get(key).and_then(Value::as_u64)
+}
+
+/// Reject a write `target` that would escape the scoped memory mount. Mirrors the
+/// fail-closed `not` pattern the model-facing `document-write` input schema
+/// advertises — `(^/)|(\.\.)|(\\)`: an absolute path (leading `/`), any `..`
+/// traversal, or a backslash separator. Reserved names (`daily_log`, `memory`,
+/// `heartbeat`, `bootstrap`) and ordinary relative document paths (`notes/x.md`)
+/// pass unchanged.
+fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
+    if target.starts_with('/') || target.contains("..") || target.contains('\\') {
+        return Err(MemoryServiceError::input());
+    }
+    Ok(())
 }
 
 fn validated_profile_fields(input: &Value) -> Result<Map<String, Value>, MemoryServiceError> {
@@ -541,4 +608,51 @@ fn validate_locale(value: &str) -> Result<(), MemoryServiceError> {
         return Err(MemoryServiceError::input());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_request_rejects_out_of_scope_targets() {
+        // A traversal-shaped target must be rejected at the contract layer, ahead
+        // of provider dispatch — the model-facing schema is not host-enforced, and
+        // a swapped provider (e.g. mem0) would otherwise use the target verbatim.
+        for target in ["/abs", "../escape", "notes/../secrets", "notes\\evil"] {
+            let input = json!({ "target": target, "content": "x" });
+            let result = MemoryServiceWriteRequest::from_tool_input(&input);
+            assert!(
+                result.is_err_and(|error| error.kind() == MemoryServiceErrorKind::Input),
+                "target {target:?} must be rejected as out-of-scope"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_accepts_reserved_names_and_relative_paths() {
+        // Reserved names and ordinary relative document paths are unaffected.
+        for target in [
+            "daily_log",
+            "memory",
+            "heartbeat",
+            "bootstrap",
+            "notes/sub.md",
+        ] {
+            let input = json!({ "target": target, "content": "x" });
+            assert!(
+                MemoryServiceWriteRequest::from_tool_input(&input).is_ok(),
+                "target {target:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_default_daily_log_target_is_accepted() {
+        // The defaulted target (no `target` field) must also pass the guard.
+        let input = json!({ "content": "x" });
+        let request =
+            MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
+        assert_eq!(request.target, "daily_log");
+    }
 }

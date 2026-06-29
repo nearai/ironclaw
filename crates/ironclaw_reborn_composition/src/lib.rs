@@ -67,6 +67,8 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
+mod memory_binding;
+mod memory_provider_factory;
 mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
@@ -225,6 +227,11 @@ pub use local_runtime_profile::{
     hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
+};
+pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+pub use memory_provider_factory::{
+    Mem0ConnectionConfig, MemoryProviderDeps, build_memory_service_resolver,
+    create_document_store_provider,
 };
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
