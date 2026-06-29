@@ -92,3 +92,44 @@ async fn egress_assertions_discriminate_on_mismatch() {
             .is_err()
     );
 }
+
+const CAP_URL: &str = "https://api.example.test/v1/cap-keyed";
+
+/// Capability-keyed matcher: two responses scripted for the SAME URL but with
+/// DIFFERENT `with_capability` keys. The first entry is keyed to a capability
+/// that `builtin.http` does NOT carry, so the request falls through to the
+/// second entry (keyed to `"builtin.http"`), which is the fallback that actually
+/// matches. Proves first-match-wins fallthrough on a capability mismatch.
+#[tokio::test]
+async fn capability_keyed_response_matches_and_mismatch_falls_through_to_second_entry() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([
+            // First entry: same URL, capability "builtin.http.wrong" — does NOT match
+            // a request whose capability_id is "builtin.http".
+            ScriptedHttpResponse::for_url(CAP_URL, br#"{"marker":"wrong-cap-body"}"#)
+                .with_capability("builtin.http.wrong"),
+            // Second entry: same URL, capability "builtin.http" — the fallback that
+            // matches after the first entry fails the capability check.
+            ScriptedHttpResponse::for_url(CAP_URL, br#"{"marker":"http-cap-body"}"#)
+                .with_capability("builtin.http"),
+        ])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": CAP_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch").await.expect("turn completes");
+    // The builtin.http call fell through the wrong-cap entry and matched the http-cap entry.
+    h.assert_tool_result_contains("http-cap-body")
+        .await
+        .expect("capability-matched body returned after fallthrough");
+    // The wrong-cap entry was NOT matched — its body never surfaced.
+    assert!(
+        h.assert_tool_result_contains("wrong-cap-body")
+            .await
+            .is_err(),
+        "wrong-capability entry must not match a builtin.http call"
+    );
+}
