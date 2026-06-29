@@ -746,16 +746,6 @@ fn find_local_tool_source_in(
     None
 }
 
-#[derive(serde::Deserialize)]
-struct CargoTomlPackageName {
-    package: Option<CargoTomlPackage>,
-}
-
-#[derive(serde::Deserialize)]
-struct CargoTomlPackage {
-    name: Option<String>,
-}
-
 /// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
 /// `Ok(None)` if the manifest is valid but lacks a package name, allowing
 /// callers to fall back to the extension name in that case.
@@ -763,37 +753,23 @@ fn read_crate_name_from_cargo_toml(
     source_dir: &std::path::Path,
 ) -> Result<Option<String>, ExtensionError> {
     let manifest_path = source_dir.join("Cargo.toml");
-    let contents = read_cargo_toml_manifest(&manifest_path)?;
-    let manifest = parse_cargo_toml_manifest(&manifest_path, &contents)?;
-    Ok(manifest.package.and_then(|package| package.name))
-}
-
-fn read_cargo_toml_manifest(manifest_path: &std::path::Path) -> Result<String, ExtensionError> {
-    match std::fs::read_to_string(manifest_path) {
-        Ok(contents) => Ok(contents),
-        Err(error) => Err(cargo_toml_install_error("read", manifest_path, error)),
-    }
-}
-
-fn parse_cargo_toml_manifest(
-    manifest_path: &std::path::Path,
-    contents: &str,
-) -> Result<CargoTomlPackageName, ExtensionError> {
-    match toml::from_str(contents) {
-        Ok(manifest) => Ok(manifest),
-        Err(error) => Err(cargo_toml_install_error("parse", manifest_path, error)),
-    }
-}
-
-fn cargo_toml_install_error(
-    operation: &str,
-    manifest_path: &std::path::Path,
-    source: impl std::fmt::Display,
-) -> ExtensionError {
-    ExtensionError::InstallFailed(format!(
-        "failed to {operation} Cargo.toml at {}: {source}",
-        manifest_path.display()
-    ))
+    let contents = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        ExtensionError::InstallFailed(format!(
+            "failed to read Cargo.toml at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: toml::Value = toml::from_str(&contents).map_err(|error| {
+        ExtensionError::InstallFailed(format!(
+            "failed to parse Cargo.toml at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    Ok(manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(|name| name.as_str())
+        .map(str::to_owned))
 }
 
 impl ExtensionManager {
