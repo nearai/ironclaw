@@ -12,6 +12,10 @@ use super::{
 pub(crate) struct StageContext<'a> {
     pub(crate) planner: &'a dyn AgentLoopPlannerInternal,
     pub(crate) host: &'a (dyn AgentLoopDriverHost + Send + Sync),
+    /// When this turn's loop started, for the wall-clock budget check in
+    /// `BudgetStage`. Process-local (not checkpointed) — a resumed turn starts
+    /// a fresh clock, which is what the external turn-timeout race cares about.
+    pub(crate) started_at: std::time::Instant,
 }
 
 #[async_trait]

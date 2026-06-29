@@ -39,9 +39,28 @@ pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
     0x2f, 0xf6, 0x85, 0xd9, 0x43, 0x27, 0x25, 0x37, 0xe8, 0x38, 0x7c, 0xe6, 0xd1, 0xe5, 0xe7, 0x25,
 ]);
 
+/// Optional wall-clock cap for the loop, read from env. When set, the executor
+/// gracefully ends the turn (final-answer nudge → partial answer) once elapsed
+/// time crosses this, instead of running until an EXTERNAL turn-timeout kills it
+/// mid-iteration with no output. Tune just below the harness turn-timeout.
+///
+/// (Env seam mirrors `IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT`; a proper
+/// PR would thread this through the planned-runtime config like the iteration
+/// limit rather than read env in the framework crate.)
+fn wall_clock_limit_from_env() -> Option<std::time::Duration> {
+    std::env::var("IRONCLAW_REBORN_WALL_CLOCK_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(std::time::Duration::from_secs)
+}
+
 /// The default loop family: the text-tool-use baseline.
 pub fn default() -> LoopFamily {
-    let planner = DefaultPlanner::compose_default();
+    let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
+        iteration_limit: DefaultBudgetStrategy::default().iteration_limit,
+        wall_clock_limit: wall_clock_limit_from_env(),
+    }));
     let id = planner.id().clone();
     let version = planner.version().clone();
 
@@ -55,7 +74,7 @@ pub fn default() -> LoopFamily {
 pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
     let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
         iteration_limit,
-        wall_clock_limit: None,
+        wall_clock_limit: wall_clock_limit_from_env(),
     }));
     let id = planner.id().clone();
     let version = planner.version().clone();

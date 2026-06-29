@@ -35,7 +35,20 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
     ) -> Result<BudgetStep, AgentLoopExecutorError> {
         let mut pending_input_ack = input.pending_input_ack;
         let mut state = input.state;
-        if state.iteration < ctx.planner.budget().iteration_limit(&state) {
+        // Two hard caps end the loop: iteration count and (when configured)
+        // elapsed wall-clock. The wall-clock cap exists so a SLOW turn (slow
+        // model / provider-retry backoff) ends GRACEFULLY with a final-answer
+        // nudge — a real partial answer — instead of running until the harness's
+        // external turn-timeout kills it mid-iteration with empty output (the
+        // wedge-at-init 0.00 the bench saw). Both caps share the graceful exit
+        // path below.
+        let over_iteration = state.iteration >= ctx.planner.budget().iteration_limit(&state);
+        let over_wall_clock = ctx
+            .planner
+            .budget()
+            .wall_clock_limit(&state)
+            .is_some_and(|limit| ctx.started_at.elapsed() >= limit);
+        if !over_iteration && !over_wall_clock {
             return Ok(BudgetStep::Continue {
                 state: Box::new(state),
                 pending_input_ack,

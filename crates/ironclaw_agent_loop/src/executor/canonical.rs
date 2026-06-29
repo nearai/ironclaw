@@ -23,7 +23,11 @@ impl DefaultExecutorPipeline {
         mut state: LoopExecutionState,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         let planner = family.planner();
-        let ctx = StageContext { planner, host };
+        let ctx = StageContext {
+            planner,
+            host,
+            started_at: std::time::Instant::now(),
+        };
         let mut pending_input_ack = PendingInputAck::default();
 
         loop {
