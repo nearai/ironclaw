@@ -2012,13 +2012,6 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         marker=None,
         required_text=["routine", "email"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
-        clarification_reply=(
-            "For the routine I just requested: use UTC, use my connected Gmail "
-            "account as the email destination, and create it now. The routine "
-            "should every 30 minutes send me an email with a summary for my next "
-            "meeting, including info about the company I will meet, based on "
-            "Google Drive docs and the latest news."
-        ),
     )
 
 
@@ -2448,13 +2441,6 @@ async def case_qa_6d_gmail_to_sheet_routine(ctx: LiveQaContext) -> ProbeResult:
         marker=None,
         required_text=["routine", "Gmail"],
         prompt=_qa_sheet_prompt("qa_6d_gmail_to_sheet_routine"),
-        clarification_reply=(
-            "For the routine I just requested: use an existing Google Sheet named "
-            "ABC or create one named ABC if needed. Add columns for sender, "
-            "subject, received date, and body preview. Skip duplicate emails that "
-            "were already added, use UTC, and create the routine now to check "
-            "every 30 minutes for new emails from near.ai addresses."
-        ),
     )
 
 
@@ -2575,7 +2561,6 @@ async def _routine_creation_case(
     marker: str | None,
     routine_name: str,
     required_text: list[str],
-    clarification_reply: str | None = None,
 ) -> ProbeResult:
     count_name = routine_name if marker else None
     before_count = _trigger_record_count(ctx.reborn_home, count_name)
@@ -2593,36 +2578,6 @@ async def _routine_creation_case(
     )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
-    if after_count <= before_count and clarification_reply:
-        follow_up = await _live_chat_case(
-            ctx,
-            case_name=case_name,
-            prompt=clarification_reply,
-            marker=marker,
-            required_text=required_text,
-            timeout=180.0,
-            extra_details={
-                "routine_name": routine_name,
-                "trigger_records_before": after_count,
-                "clarification_follow_up": True,
-            },
-        )
-        follow_up_count = _trigger_record_count(ctx.reborn_home, count_name)
-        result.details["clarification_follow_up_prompt"] = clarification_reply
-        result.details["clarification_follow_up_result"] = follow_up.details
-        result.details["trigger_records_after_follow_up"] = follow_up_count
-        if follow_up.success:
-            result.details.update(
-                {
-                    "clarification_follow_up_latency_ms": follow_up.latency_ms,
-                    "clarification_follow_up_text_excerpt": follow_up.details.get(
-                        "text_excerpt"
-                    ),
-                }
-            )
-            result.success = follow_up_count > before_count
-            result.latency_ms += follow_up.latency_ms
-            after_count = follow_up_count
     if result.success and after_count <= before_count:
         result.success = False
         result.details["error"] = (
@@ -3161,13 +3116,6 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
         marker=None,
         required_text=["routine", "bug"],
         prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
-        clarification_reply=(
-            "For the routine I just requested: use the configured Slack DM source "
-            "for my account, and use an existing Google Sheet named ABC or create "
-            "a Google Sheet named Reborn QA Bug Logging if needed. Create the "
-            "routine now: whenever I send a Slack message starting with 'bug:', "
-            "add it as a row to that bug logging Google Sheet."
-        ),
     )
 
 

@@ -259,27 +259,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             str(result.details["error"]),
         )
 
-    def test_routine_creation_case_can_continue_after_clarification(self):
+    def test_routine_creation_case_fails_when_no_trigger_is_created(self):
         captured_prompts: list[str] = []
-        first = True
 
         async def fake_live_chat_case(_ctx, **kwargs):
-            nonlocal first
             captured_prompts.append(kwargs["prompt"])
             extra_details = kwargs.get("extra_details") or {}
-            success = not first
-            first = False
             return run_live_qa.ProbeResult(
                 provider="test",
                 mode=f"live:{kwargs['case_name']}",
-                success=success,
+                success=True,
                 latency_ms=1,
                 details={
-                    "text_excerpt": (
-                        "Which sheet should I use?"
-                        if not success
-                        else "routine created"
-                    ),
+                    "text_excerpt": "routine created",
                     **extra_details,
                 },
             )
@@ -290,7 +282,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0, 1]),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0]),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -300,15 +292,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     marker=None,
                     routine_name="qa-test-routine",
                     required_text=["routine"],
-                    clarification_reply="clarifying answer",
                 )
             )
 
-        self.assertTrue(result.success)
-        self.assertEqual(captured_prompts, ["original sheet prompt", "clarifying answer"])
+        self.assertFalse(result.success)
+        self.assertEqual(captured_prompts, ["original sheet prompt"])
         self.assertEqual(result.details["trigger_records_after"], 0)
-        self.assertEqual(result.details["trigger_records_after_follow_up"], 1)
-        self.assertTrue(result.details["clarification_follow_up_result"]["clarification_follow_up"])
+        self.assertIn("did not add a trigger_record", result.details["error"])
 
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))

@@ -1733,6 +1733,27 @@ mod tests {
     }
 
     #[test]
+    fn bundled_google_sheet_queries_discover_drive_lookup_tool() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for query in ["google sheets", "google sheet", "spreadsheet"] {
+            let ids = catalog
+                .search(query)
+                .map(|package| package.package_ref.id.as_str())
+                .collect::<BTreeSet<_>>();
+
+            assert!(
+                ids.contains("google-drive"),
+                "{query} should discover Google Drive for spreadsheet-name lookup; got {ids:?}"
+            );
+            assert!(
+                ids.contains("google-sheets"),
+                "{query} should still discover Google Sheets; got {ids:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_github_read_only_capabilities_default_allow_without_relaxing_writes() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
