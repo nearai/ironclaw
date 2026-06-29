@@ -224,12 +224,26 @@ pub(crate) async fn prepare_trace_outputs(args: &Args) -> Result<(), String> {
 }
 
 pub(crate) fn child_trace_path(path: &Path, child_index: usize) -> PathBuf {
+    labeled_trace_path(path, &format!("child-{child_index}"))
+}
+
+pub(crate) fn labeled_trace_path(path: &Path, label: &str) -> PathBuf {
     let mut child_path = path.to_path_buf();
     let file_name = path
         .file_name()
         .map(|file_name| file_name.to_string_lossy().to_string())
         .unwrap_or_else(|| "trace.jsonl".to_string());
-    child_path.set_file_name(format!("{file_name}.child-{child_index}.jsonl"));
+    let label = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    child_path.set_file_name(format!("{file_name}.{label}.jsonl"));
     child_path
 }
 

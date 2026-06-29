@@ -6,6 +6,7 @@ mod human;
 mod process_metrics;
 mod process_pressure;
 mod progress;
+mod ramp;
 mod redaction;
 mod report;
 mod resource_ops;
@@ -126,6 +127,18 @@ pub(crate) struct Args {
     /// Emit a heuristic bottleneck report to stderr after the JSON summary.
     #[arg(long, default_value_t = false)]
     pub(crate) bottleneck_report: bool,
+
+    /// Ramp --concurrency from the current value to this maximum, stopping at the first threshold breach.
+    #[arg(long)]
+    pub(crate) ramp_concurrency: Option<usize>,
+
+    /// Ramp --users from the current value to this maximum, stopping at the first threshold breach.
+    #[arg(long)]
+    pub(crate) ramp_users: Option<usize>,
+
+    /// Multiplier between ramp points.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) ramp_factor: usize,
 
     /// Comma-separated concurrency values to sweep.
     #[arg(long, value_delimiter = ',')]
@@ -493,7 +506,9 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let result = if args.child_index.is_none() && sweep::is_enabled(&args) {
+    let result = if args.child_index.is_none() && ramp::is_enabled(&args) {
+        ramp::run(&args, &run_id).await
+    } else if args.child_index.is_none() && sweep::is_enabled(&args) {
         trace::prepare_trace_outputs(&args).await?;
         sweep::run(&args, &run_id).await
     } else {
@@ -556,6 +571,40 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.repetitions == 0 {
         return Err("--repetitions must be greater than 0".to_string());
+    }
+    if args.ramp_concurrency.is_some() && args.ramp_users.is_some() {
+        return Err("use only one of --ramp-concurrency or --ramp-users".to_string());
+    }
+    if args.ramp_factor < 2 {
+        return Err("--ramp-factor must be greater than 1".to_string());
+    }
+    if let Some(max_concurrency) = args.ramp_concurrency {
+        if max_concurrency == 0 {
+            return Err("--ramp-concurrency must be greater than 0".to_string());
+        }
+        if max_concurrency < args.concurrency {
+            return Err(
+                "--ramp-concurrency must be greater than or equal to --concurrency".to_string(),
+            );
+        }
+    }
+    if let Some(max_users) = args.ramp_users {
+        if max_users == 0 {
+            return Err("--ramp-users must be greater than 0".to_string());
+        }
+        if max_users < args.users {
+            return Err("--ramp-users must be greater than or equal to --users".to_string());
+        }
+    }
+    if ramp::is_enabled(args)
+        && (!args.sweep_concurrency.is_empty()
+            || !args.sweep_users.is_empty()
+            || !args.sweep_model_latency_ms.is_empty()
+            || args.repetitions > 1)
+    {
+        return Err(
+            "ramp mode cannot be combined with sweep flags or --repetitions > 1".to_string(),
+        );
     }
     if args.sweep_concurrency.contains(&0) {
         return Err("--sweep-concurrency values must be greater than 0".to_string());

@@ -156,6 +156,45 @@ fn sweep_concurrency_rejects_zero_values() {
 }
 
 #[test]
+fn ramp_builds_bounded_geometric_values() {
+    assert_eq!(ramp::build_values(3, 20, 2), vec![3, 6, 12, 20]);
+    assert_eq!(ramp::build_values(4, 4, 2), vec![4]);
+}
+
+#[test]
+fn ramp_rejects_multiple_axes() {
+    let mut args = test_args();
+    args.ramp_concurrency = Some(8);
+    args.ramp_users = Some(100);
+
+    let error = validate_args(&args).expect_err("multiple ramp axes are invalid");
+
+    assert!(error.contains("use only one of --ramp-concurrency or --ramp-users"));
+}
+
+#[test]
+fn ramp_rejects_sweep_flags() {
+    let mut args = test_args();
+    args.ramp_concurrency = Some(8);
+    args.sweep_users = vec![10, 20];
+
+    let error = validate_args(&args).expect_err("ramp and sweep cannot combine");
+
+    assert!(error.contains("ramp mode cannot be combined with sweep flags"));
+}
+
+#[test]
+fn ramp_rejects_factor_one() {
+    let mut args = test_args();
+    args.ramp_concurrency = Some(8);
+    args.ramp_factor = 1;
+
+    let error = validate_args(&args).expect_err("ramp factor one is invalid");
+
+    assert!(error.contains("--ramp-factor must be greater than 1"));
+}
+
+#[test]
 fn thresholds_report_violating_run_label() {
     let mut args = test_args();
     args.max_failure_rate = Some(0.1);
@@ -184,6 +223,17 @@ fn trace_child_path_keeps_parent_trace_name() {
     assert_eq!(
         child_path,
         Path::new("/tmp/ironclaw-trace.jsonl.child-3.jsonl")
+    );
+}
+
+#[test]
+fn trace_labeled_path_sanitizes_label() {
+    let trace_path =
+        trace::labeled_trace_path(Path::new("/tmp/ironclaw-trace.jsonl"), "ramp concurrency/8");
+
+    assert_eq!(
+        trace_path,
+        Path::new("/tmp/ironclaw-trace.jsonl.ramp_concurrency_8.jsonl")
     );
 }
 
@@ -441,6 +491,9 @@ fn test_args() -> Args {
         progress_interval_seconds: 0,
         human_read: false,
         bottleneck_report: false,
+        ramp_concurrency: None,
+        ramp_users: None,
+        ramp_factor: 2,
         sweep_concurrency: Vec::new(),
         sweep_users: Vec::new(),
         sweep_model_latency_ms: Vec::new(),
