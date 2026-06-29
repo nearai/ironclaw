@@ -1718,6 +1718,13 @@ pub struct HostManagedModelError {
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub gate_ref: Option<LoopGateRef>,
+    /// Model-visible, secret-scrubbed raw cause (status line, provider body
+    /// snippet). Unlike `safe_summary`, this carries the original message so the
+    /// failure explainer can describe the real fault. Secret VALUES must be
+    /// redacted by the producer via
+    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`]; the
+    /// summary word/delimiter ban is NOT applied here.
+    pub detail: Option<String>,
 }
 
 impl HostManagedModelError {
@@ -1727,6 +1734,7 @@ impl HostManagedModelError {
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
             gate_ref: None,
+            detail: None,
         }
     }
 
@@ -1736,7 +1744,25 @@ impl HostManagedModelError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
+            detail: None,
         }
+    }
+
+    /// Attach a secret-scrubbed model-visible detail. The caller is responsible
+    /// for scrubbing secret VALUES first (see [`Self::detail`]).
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Attach a model-visible detail, scrubbing credential-looking tokens via
+    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`] before it is
+    /// stored. Use when the raw cause has not already been sanitized.
+    pub fn safe_with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+            detail.into(),
+        ));
+        self
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
@@ -2051,6 +2077,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
+    if let Some(detail) = error.detail {
+        host_error = host_error.with_detail(detail);
+    }
     host_error
 }
 
@@ -2089,6 +2118,48 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_gateway_error_threads_detail_into_host_error() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+        .with_detail("HTTP 404 model not found");
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(
+            host_error.detail.as_deref(),
+            Some("HTTP 404 model not found")
+        );
+    }
+
+    #[test]
+    fn safe_with_detail_scrubs_credential_tokens() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+        .safe_with_detail("provider rejected api_key=sk-secretvalue for HTTP 401");
+
+        let detail = error.detail.expect("detail present");
+        assert!(!detail.contains("sk-secretvalue"));
+        assert!(detail.contains("[redacted]"));
+        assert!(detail.contains("HTTP 401"));
+    }
+
+    #[test]
+    fn model_gateway_error_without_detail_leaves_host_detail_none() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        );
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(host_error.detail, None);
+    }
 
     #[test]
     fn model_gateway_error_sanitizes_raw_detail_without_losing_budget_gate() {

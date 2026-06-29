@@ -129,6 +129,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
                     let Some(class) = model_error_class(&error) else {
+                        let detail = error.detail.clone();
                         return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
                             stage: HostStage::Model,
                             kind: error.kind,
@@ -136,6 +137,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
                             reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
+                            detail,
                         });
                     };
                     if !recorded_failure {

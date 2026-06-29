@@ -79,6 +79,18 @@ use run_status_cell::{RunStatusCell, StatusTransition};
 mod concurrency_limiter;
 use concurrency_limiter::{ConcurrencyLimiter, ConcurrencyLimits, OriginClass, RunSlotInfo};
 
+/// Resolve the secret-scrubbed, model-visible detail to attach to a lifecycle
+/// event. Only `Failed` events carry the failure record's detail; every other
+/// event kind has no failure cause and yields `None`.
+fn failure_detail_for_event(
+    kind: &TurnEventKind,
+    failure: Option<&SanitizedFailure>,
+) -> Option<String> {
+    (*kind == TurnEventKind::Failed)
+        .then(|| failure.and_then(|failure| failure.detail().map(str::to_string)))
+        .flatten()
+}
+
 fn holds_running_slot(status: TurnStatus) -> bool {
     matches!(status, TurnStatus::Running | TurnStatus::CancelRequested)
 }
@@ -996,7 +1008,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         );
         inner.queued_runs.push_back(run_id);
         inner.records.insert(run_id, record.clone());
-        inner.push_event(&record, TurnEventKind::Submitted, None);
+        inner.push_event(&record, TurnEventKind::Submitted, None, None);
 
         let response = Ok(SubmitTurnResponse::Accepted {
             turn_id,
@@ -1435,7 +1447,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         );
         inner.queued_runs.push_back(run_id);
         inner.records.insert(run_id, record.clone());
-        inner.push_event(&record, TurnEventKind::Submitted, None);
+        inner.push_event(&record, TurnEventKind::Submitted, None, None);
 
         let response = Ok(SubmitTurnResponse::Accepted {
             turn_id,
@@ -1621,7 +1633,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             runner_id: request.runner_id,
             lease_token: request.lease_token,
         };
-        inner.push_event(&record, TurnEventKind::RunnerClaimed, None);
+        inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
         inner.records.insert(run_id, record);
         Ok(Some(claimed))
     }
@@ -1642,7 +1654,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             record.lease_expires_at = Some(inner.next_lease_expiry(now));
             record.event_cursor = inner.next_cursor();
             inner.touch_active_lock(&record, now);
-            inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None);
+            inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
             Ok(record.event_cursor)
         })();
         inner.records.insert(record.run_id, record);
@@ -1735,7 +1747,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                 );
                 inner.update_active_lock(&record, now);
                 let state = record.state();
-                inner.push_event(&record, TurnEventKind::Blocked, None);
+                inner.push_event(&record, TurnEventKind::Blocked, None, None);
                 Ok(state)
             })();
             inner.records.insert(record.run_id, record);
@@ -2117,6 +2129,7 @@ impl Inner {
         record: &RunRecord,
         kind: TurnEventKind,
         sanitized_reason: Option<String>,
+        detail: Option<String>,
     ) {
         let blocked_gate = if kind == TurnEventKind::Blocked {
             record.gate_ref.clone().and_then(|gate_ref| {
@@ -2147,6 +2160,7 @@ impl Inner {
             blocked_gate,
             sanitized_reason,
             retryable,
+            detail,
         });
         if self.events.len() > self.limits.max_events {
             let excess = self.events.len() - self.limits.max_events;
@@ -2272,7 +2286,14 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, outcome.event_kind, outcome.event_detail);
+            let event_detail =
+                failure_detail_for_event(&outcome.event_kind, record.failure.as_ref());
+            self.push_event(
+                &record,
+                outcome.event_kind,
+                outcome.event_detail,
+                event_detail,
+            );
             self.mark_terminal(record.run_id);
             recovered.push(state);
             self.records.insert(run_id, record);
@@ -2499,7 +2520,7 @@ impl Inner {
                 status: record.status.get(),
                 event_cursor: record.event_cursor,
             };
-            self.push_event(&record, TurnEventKind::Resumed, None);
+            self.push_event(&record, TurnEventKind::Resumed, None, None);
             Ok(response)
         })();
         self.records.insert(record.run_id, record);
@@ -2628,7 +2649,7 @@ impl Inner {
         );
         self.queued_runs.push_back(new_run_id);
         self.records.insert(new_run_id, record.clone());
-        self.push_event(&record, TurnEventKind::Resumed, None);
+        self.push_event(&record, TurnEventKind::Resumed, None, None);
         Ok(RetryTurnResponse {
             run_id: new_run_id,
             status: TurnStatus::Queued,
@@ -2700,6 +2721,7 @@ impl Inner {
                 &record,
                 event_kind,
                 Some(request.reason.category().to_string()),
+                None,
             );
             if record.status.get().is_terminal() {
                 self.mark_terminal(record.run_id);
@@ -2738,7 +2760,7 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, TurnEventKind::Cancelled, None);
+            self.push_event(&record, TurnEventKind::Cancelled, None, None);
             self.mark_terminal(record.run_id);
             Ok(state)
         })();
@@ -2793,7 +2815,13 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, kind, failure.map(SanitizedFailure::into_category));
+            let event_detail = failure_detail_for_event(&kind, failure.as_ref());
+            self.push_event(
+                &record,
+                kind,
+                failure.map(SanitizedFailure::into_category),
+                event_detail,
+            );
             self.mark_terminal(record.run_id);
             Ok(state)
         })();
@@ -2894,7 +2922,7 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Completed, None);
+        self.push_event(&record, TurnEventKind::Completed, None, None);
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
@@ -2926,7 +2954,7 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Cancelled, None);
+        self.push_event(&record, TurnEventKind::Cancelled, None, None);
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
@@ -2974,7 +3002,7 @@ impl Inner {
         );
         self.update_active_lock(&record, now);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Blocked, None);
+        self.push_event(&record, TurnEventKind::Blocked, None, None);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
             state: Box::new(state),
@@ -3011,10 +3039,12 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
+        let event_detail = failure.detail().map(str::to_string);
         self.push_event(
             &record,
             TurnEventKind::Failed,
             Some(failure.into_category()),
+            event_detail,
         );
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
@@ -3115,7 +3145,7 @@ impl Inner {
                 self.remove_queued_run(record.run_id);
             }
             let state = record.state();
-            self.push_event(&record, event_kind, None);
+            self.push_event(&record, event_kind, None, None);
             if !requeue {
                 self.mark_terminal(record.run_id);
             }

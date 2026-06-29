@@ -2608,6 +2608,7 @@ impl AgentLoopDriver for ReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let message_ref = host
@@ -2681,6 +2682,7 @@ impl AgentLoopDriver for CapabilityDriver {
         let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "expected_approval".to_string(),
+                detail: None,
             });
         };
         let state_ref = LoopCheckpointStateRef::new("checkpoint:approval-state").unwrap();
@@ -3337,6 +3339,7 @@ fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoo
 fn driver_error(error: AgentLoopHostError) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: error.kind.as_str().to_string(),
+        detail: error.detail,
     }
 }
 

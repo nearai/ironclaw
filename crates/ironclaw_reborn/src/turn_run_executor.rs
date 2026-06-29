@@ -161,7 +161,8 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 let sanitized = match &err {
                     DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
                         reason_kind,
-                    }) => sanitized_driver_failure(reason_kind),
+                        detail,
+                    }) => sanitized_driver_failure(reason_kind, detail.as_deref()),
                     DriverInvocationError::DriverNotFound { .. } => {
                         sanitized_failure("driver_not_found")
                     }
@@ -184,6 +185,15 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // guard that is never reached in practice.
                 let failure =
                     sanitized.unwrap_or_else(|| unknown_failure_error().failure().clone());
+                // NOTE: `TurnRunExecutorError` (in `ironclaw_host_runtime`) only
+                // exposes a category-string constructor, so the scrubbed
+                // `failure.detail()` computed above is dropped here at the
+                // host-runtime boundary. The scheduler records
+                // `executor_error.failure()`, so until `TurnRunExecutorError`
+                // gains a `from_failure(SanitizedFailure)` constructor that
+                // preserves detail, the detail surfaced through this Err path
+                // does not reach `TurnLifecycleEvent.detail`. (The
+                // `record_runner_failure` / `fail_run` store paths DO carry it.)
                 let error = TurnRunExecutorError::new(failure.category())
                     .unwrap_or_else(|_| unknown_failure_error().clone());
                 trace_executor_latency_error("execute_claimed_run", &claimed, started_at, &error);

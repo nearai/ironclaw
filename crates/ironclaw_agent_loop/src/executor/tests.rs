@@ -1093,6 +1093,7 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
             safe_summary: LoopSafeSummary::new("budget approval required").expect("safe"),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         }
     );
     assert_eq!(host.model_requests().len(), 1);
@@ -2785,8 +2786,34 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
+            detail: None,
         }
     );
+}
+
+#[tokio::test]
+async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CredentialUnavailable,
+            "model credentials are unavailable",
+        )
+        .with_detail("HTTP 404 model not found"),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("unrecoverable model errors stop before a loop exit");
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics { detail, .. } => {
+            assert_eq!(detail.as_deref(), Some("HTTP 404 model not found"));
+        }
+        other => panic!("expected HostUnavailableWithDiagnostics, got {other:?}"),
+    }
 }
 
 #[tokio::test]

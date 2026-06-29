@@ -260,6 +260,7 @@ pub(super) fn blocked_event_with(
         }),
         sanitized_reason: Some("approval_required".to_string()),
         retryable: None,
+        detail: None,
     }
 }
 
@@ -281,6 +282,7 @@ pub(super) fn lifecycle_event(
         blocked_gate: None,
         sanitized_reason: None,
         retryable: None,
+        detail: None,
     }
 }
 

@@ -109,6 +109,10 @@ pub enum AgentLoopExecutorError {
         safe_summary: LoopSafeSummary,
         reason_kind: Option<AgentLoopHostErrorReasonKind>,
         diagnostic_ref: Option<LoopDiagnosticRef>,
+        /// Secret-scrubbed model-visible raw cause carried from the host error
+        /// so the runner/explainer can surface the real fault instead of a
+        /// generic category. See [`AgentLoopHostError::detail`].
+        detail: Option<String>,
     },
     #[error("planner returned a contract violation: {detail}")]
     PlannerContract { detail: &'static str },
