@@ -137,10 +137,7 @@ fn validate_loop_safe_identifier(
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err(format!("{label} must not contain API-key-like tokens"));
     }
     Ok(value)
@@ -186,13 +183,38 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err("loop safe summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(is_secret_like_token)
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
 macro_rules! bounded_loop_ref {
@@ -2392,5 +2414,23 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn capability_failure_summary_redacts_secret_like_tokens() {
+        for raw_summary in [
+            "provider returned AKIAIOSFODNN7EXAMPLE",
+            "provider returned gcp-live-secret",
+            "provider returned sk-ant-live-secret",
+            "provider returned ghp_live_secret",
+            "provider returned github_pat_live_secret",
+        ] {
+            let summary = LoopSafeSummary::capability_failure_summary(raw_summary);
+            assert_eq!(
+                summary.as_str(),
+                "the tool failure details were redacted",
+                "summary must be redacted: {raw_summary}"
+            );
+        }
     }
 }

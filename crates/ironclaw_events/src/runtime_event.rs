@@ -974,9 +974,35 @@ fn is_safe_error_summary(value: &str, lower: &str) -> bool {
             return false;
         }
     }
-    !lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
+    !contains_secret_like_token(lower)
+}
+
+fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(is_secret_like_token)
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
 fn truncate_error_summary(value: &str) -> String {
@@ -1185,6 +1211,33 @@ mod tests {
             decoded.error_summary.as_deref(),
             Some(REDACTED_ERROR_SUMMARY)
         );
+
+        for secret_like_summary in [
+            "provider returned AKIAIOSFODNN7EXAMPLE",
+            "provider returned ASIAIOSFODNN7EXAMPLE",
+            "provider returned gcp-live-secret",
+            "provider returned sk-ant-live-secret",
+            "provider returned ghp_live_secret",
+            "provider returned github_pat_live_secret",
+            "provider returned ya29.live-secret",
+        ] {
+            let event = RuntimeEvent::capability_activity_failed(
+                scope(),
+                capability(),
+                None,
+                None,
+                "operation_failed",
+            )
+            .with_error_summary(secret_like_summary);
+            let wire = serde_json::to_string(&event).expect("serialize runtime event");
+            let decoded: RuntimeEvent =
+                serde_json::from_str(&wire).expect("deserialize runtime event");
+            assert_eq!(
+                decoded.error_summary.as_deref(),
+                Some(REDACTED_ERROR_SUMMARY),
+                "summary must be redacted: {secret_like_summary}"
+            );
+        }
     }
 
     #[test]
