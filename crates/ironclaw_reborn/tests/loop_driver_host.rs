@@ -2142,7 +2142,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 
     assert_eq!(
         failed.failure.expect("failure").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_checkpoint"
     );
     assert!(
         fixture.gateway.requests().is_empty(),
@@ -2209,7 +2209,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
 
     assert_eq!(
         failed.failure.as_ref().expect("failure").category(),
-        "model_error"
+        "model_unavailable"
     );
     assert_driver_public_outputs_hide_raw_payloads(&failed);
     let model_requests = fixture.gateway.requests();

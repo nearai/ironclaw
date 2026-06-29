@@ -782,6 +782,15 @@ impl TurnCoordinator for StaticTurnCoordinator {
         })
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         if request.run_id == self.state.run_id && request.scope == self.state.scope {
             Ok(self.state.clone())
