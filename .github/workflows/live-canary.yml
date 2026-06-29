@@ -402,7 +402,7 @@ jobs:
     name: Deterministic Replay
     if: >
       github.event_name == 'workflow_dispatch' &&
-      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
+      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
