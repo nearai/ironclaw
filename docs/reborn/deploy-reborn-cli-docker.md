@@ -152,7 +152,9 @@ start, the entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`;
 later starts preserve the existing home config.
 
 For public WebUI Google login, use the Reborn WebUI SSO variables and an HTTPS
-base URL that matches the deployed Railway domain:
+base URL that matches the deployed Railway domain users will open. If Railway
+exposes more than one domain for the same service, choose one canonical domain
+for `IRONCLAW_REBORN_WEBUI_BASE_URL` and register that same domain in Google:
 
 ```bash
 IRONCLAW_REBORN_WEBUI_BASE_URL=https://<railway-domain>
