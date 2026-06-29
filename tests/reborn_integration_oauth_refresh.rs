@@ -117,7 +117,24 @@ async fn connect_google_account(
 }
 
 /// Positive test: a sweep with a frozen clock 3 days ahead (past the 2-day
-/// idle threshold) triggers a token-refresh HTTP call for the idle account.
+/// idle threshold) triggers a token-refresh HTTP call for the idle account AND
+/// commits the rotated credential to the durable store.
+///
+/// The egress count alone only proves the refresh HTTP call *fired*; it would
+/// still pass if the refresh made the call but silently dropped the account
+/// write.  To close that gap we also re-read the account through the durable
+/// `CredentialAccountService` and assert the persisted access-token handle was
+/// rewritten to the refresh-path handle.  On a successful refresh,
+/// `ProviderBackedCredentialAccountService::refresh_account` persists
+/// `HostOAuthProviderClient::store_refreshed_tokens`'s output via
+/// `create_or_update_account`; that handle (`…-oauth-refresh-access-<account_id>`)
+/// is produced *only* by the refresh write-back path and differs from the
+/// connect-exchange handle (`…-oauth-access-<flow_id>-<invocation_id>`).  A
+/// dropped account write would leave the original connect handle in place, so
+/// the handle assertions fail in that case.  Because `store_refreshed_tokens`
+/// returns the handle only after `put`-ing the new token material, the rotated
+/// handle on the account also transitively proves the refreshed material was
+/// persisted to the secret store.
 #[tokio::test]
 async fn credential_refresh_sweep_refreshes_idle_google_account() {
     let bundle = build_google_oauth_product_auth_for_test();
@@ -125,7 +142,15 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
 
     // Step 1 — run the OAuth connect flow to create a Google credential account.
     // After this, egress.captured_count() == 1 (initial token exchange).
+    // Capture the account id (Copy) and the connect-exchange access handle
+    // before `account` is moved into the sweep candidate list, so the post-sweep
+    // read-back can prove the handle was rewritten by the refresh.
     let account = connect_google_account(&bundle, &scope, 0xaa).await;
+    let account_id = account.id;
+    let connect_access_handle = account
+        .access_secret
+        .clone()
+        .expect("connect flow must persist an access-token handle");
 
     // Step 2 — freeze the clock 3 days ahead.  The account was just created
     // (updated_at ≈ Utc::now()), so idle_cutoff = frozen_now − 2 days is
@@ -148,6 +173,45 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
         2,
         "sweep must trigger exactly one refresh HTTP call for the idle account \
          (total egress count: initial exchange + refresh)"
+    );
+
+    // Step 5 — re-read the account through the durable account service and prove
+    // the refresh COMMITTED the rotated credential (guards the "HTTP fired but
+    // the account write was dropped" failure mode).  This reads the REAL
+    // persisted record, not the in-test `account` variable.
+    let refreshed = bundle
+        .services
+        .credential_account_service()
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account_id,
+        ))
+        .await
+        .expect("get_account must not error after the refresh sweep")
+        .expect("account must still be persisted after a successful refresh");
+    let refreshed_access_handle = refreshed
+        .access_secret
+        .expect("refreshed account must still carry an access-token handle");
+
+    // The persisted handle must have been rewritten away from the connect
+    // handle …
+    assert_ne!(
+        refreshed_access_handle.as_str(),
+        connect_access_handle.as_str(),
+        "refresh must rewrite the persisted access-token handle; the original \
+         connect-exchange handle still being present means the account write was \
+         dropped"
+    );
+    // … and must be the refresh-path handle specifically, proving it was the
+    // refresh write-back (not some unrelated mutation) that committed it.
+    assert!(
+        refreshed_access_handle
+            .as_str()
+            .contains("oauth-refresh-access"),
+        "persisted access-token handle must be the refresh-path handle \
+         (`…-oauth-refresh-access-<account_id>`), proving the refresh write-back \
+         committed; got: {}",
+        refreshed_access_handle.as_str()
     );
 }
 
