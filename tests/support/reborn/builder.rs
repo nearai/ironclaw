@@ -24,12 +24,14 @@
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_filesystem::{CompositeRootFilesystem, InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
@@ -252,7 +254,8 @@ impl RebornIntegrationHarnessBuilder {
         // composite (thread history + turn state), not just turns. The libSQL
         // `.db` file lives in this directory; InMemory ignores the path.
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let composite = build_storage_composite(self.storage, turn_root.path()).await?;
+        let (composite, libsql_db_path) =
+            build_storage_composite(self.storage, turn_root.path()).await?;
 
         let thread_harness = RebornThreadHarness::filesystem_shared_composite(
             thread_scope.clone(),
@@ -410,6 +413,7 @@ impl RebornIntegrationHarnessBuilder {
             capability_recorder,
             _product_harness: product_harness,
             _turn_root: turn_root,
+            libsql_db_path,
         })
     }
 }
@@ -433,6 +437,12 @@ pub struct RebornIntegrationHarness {
     /// history + turn state). For `StorageMode::LibSql`, the SQLite file lives
     /// here; for `StorageMode::InMemory`, only the LLM session cache does.
     _turn_root: Arc<tempfile::TempDir>,
+    /// Path to the on-disk SQLite file when `StorageMode::LibSql` was selected.
+    /// `None` for `StorageMode::InMemory` (no file on disk). Used by
+    /// `assert_reply_persists_after_reopen` to open a genuinely fresh database
+    /// connection so only data committed to disk is visible — the live
+    /// `CompositeRootFilesystem` Arc is deliberately NOT reused.
+    libsql_db_path: Option<PathBuf>,
 }
 
 impl RebornIntegrationHarness {
@@ -489,19 +499,59 @@ impl RebornIntegrationHarness {
     /// Assert the finalized reply survives a close-and-reopen of the thread
     /// service (design §3.8 durability guardrail).
     ///
-    /// Reconstructs a fresh `FilesystemSessionThreadService` over the same
-    /// `CompositeRootFilesystem` backend — for `StorageMode::LibSql` this
-    /// creates a new read path over the same SQLite file on disk, proving
-    /// the reply was serialized rather than cached in process. For
-    /// `StorageMode::InMemory` the backend is still in memory; this asserts
-    /// only that the service can be re-instantiated (the durability assertion
-    /// is inherently `LibSql`-only).
+    /// For `StorageMode::LibSql`: opens a **genuinely fresh** `libsql::Database`
+    /// connection to the on-disk `.db` file — the live `CompositeRootFilesystem`
+    /// Arc is deliberately NOT reused. Only data that was actually serialized and
+    /// committed to disk is visible through the new handle, so this assertion
+    /// proves real on-disk durability, not an in-process cache.
+    ///
+    /// For `StorageMode::InMemory`: re-instantiates the
+    /// `FilesystemSessionThreadService` over the same in-process handle (no disk
+    /// involved). This asserts service re-instantiation but cannot prove durability
+    /// — there is nothing on disk to read back. Use `StorageMode::LibSql` for the
+    /// durability guarantee.
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
-        let reopened = self.thread_harness.reopened()?;
-        reopened
-            .assert_final_reply(self.binding.thread_id.clone(), text)
-            .await
-            .map_err(Into::into)
+        if let Some(db_path) = &self.libsql_db_path {
+            // Open a fresh libsql connection — independent of the live composite.
+            // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
+            // under the M1 mutation (LibSql → InMemory) the file does not exist and
+            // the fresh db is empty, so `list_thread_history` returns no messages and
+            // `assert_final_reply` returns `Err(MissingFinalReply)`.
+            let db = Arc::new(
+                libsql::Builder::new_local(db_path)
+                    .build()
+                    .await
+                    .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
+            );
+            let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+            // Migrations are idempotent — the schema already exists from `build()`.
+            fresh_fs
+                .run_migrations()
+                .await
+                .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
+            let mut fresh_composite = CompositeRootFilesystem::new();
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut fresh_composite,
+                fresh_fs,
+            )?;
+            let fresh_composite = Arc::new(fresh_composite);
+            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+                self.thread_harness.scope.clone(),
+                fresh_composite,
+                Arc::clone(&self._turn_root),
+            )?;
+            fresh_harness
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into)
+        } else {
+            // InMemory: re-instantiate the service over the same in-process handle.
+            let reopened = self.thread_harness.reopened()?;
+            reopened
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into)
+        }
     }
 
     /// Assert the named capability was invoked through the real capability path
@@ -642,17 +692,24 @@ impl Drop for RebornIntegrationHarness {
 /// backend by `mode`. The `dir` argument is used only for `LibSql` (the SQLite
 /// file is created there by the production `build_default_local_dev_database_roots`
 /// sequence); `InMemory` ignores it.
+///
+/// Returns the composite alongside the path to the on-disk SQLite file for
+/// `LibSql` (`None` for `InMemory`). The path is stored on
+/// `RebornIntegrationHarness` so `assert_reply_persists_after_reopen` can open
+/// a genuinely fresh database connection — independent of the live
+/// `CompositeRootFilesystem` Arc — and confirm real on-disk durability.
 async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,
-) -> HarnessResult<Arc<CompositeRootFilesystem>> {
+) -> HarnessResult<(Arc<CompositeRootFilesystem>, Option<PathBuf>)> {
     let mut composite = CompositeRootFilesystem::new();
-    match mode {
+    let db_path = match mode {
         StorageMode::InMemory => {
             ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
+            None
         }
         StorageMode::LibSql => {
             ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
@@ -660,9 +717,12 @@ async fn build_storage_composite(
                 &mut composite,
             )
             .await?;
+            // The production factory creates the db at this fixed filename within
+            // `dir` (see `build_default_local_dev_database_roots` in factory.rs).
+            Some(dir.join("reborn-local-dev.db"))
         }
-    }
-    Ok(Arc::new(composite))
+    };
+    Ok((Arc::new(composite), db_path))
 }
 
 /// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
