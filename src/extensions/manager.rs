@@ -790,9 +790,15 @@ fn cargo_toml_install_error(
     manifest_path: &std::path::Path,
     source: impl std::fmt::Display,
 ) -> ExtensionError {
+    let source = source.to_string();
+    tracing::debug!(
+        operation,
+        manifest_path = %manifest_path.display(),
+        error = %source,
+        "Failed to load local extension Cargo.toml"
+    );
     ExtensionError::InstallFailed(format!(
-        "failed to {operation} Cargo.toml at {}: {source}",
-        manifest_path.display()
+        "failed to {operation} Cargo.toml for local extension: {source}"
     ))
 }
 
@@ -14811,35 +14817,62 @@ mod tests {
                     msg.contains("failed to parse Cargo.toml"),
                     "error should explain manifest parse failure: {msg}"
                 );
+                assert!(
+                    !msg.contains(&dir.path().display().to_string()),
+                    "user-facing error should not expose local source path: {msg}"
+                );
             }
             other => panic!("expected InstallFailed, got {other:?}"),
         }
     }
 
-    #[tokio::test]
-    async fn install_from_local_source_rejects_malformed_cargo_toml() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let tools_dir = dir.path().join("tools");
-        let channels_dir = dir.path().join("channels");
-        let source_dir = stage_buildable_source(dir.path(), "portfolio");
-        std::fs::write(
-            source_dir.join("Cargo.toml"),
-            "[package\nname = \"broken\"\n",
-        )
-        .expect("write malformed Cargo.toml");
+    #[test]
+    fn read_crate_name_from_cargo_toml_fails_on_invalid_package_name_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = 42\n").unwrap();
 
-        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
-
-        let err = manager
-            .install_from_local_source("portfolio", &source_dir, None)
-            .await
-            .expect_err("malformed Cargo.toml must not fall back to extension name");
+        let err = read_crate_name_from_cargo_toml(dir.path()).expect_err("invalid package.name");
 
         match err {
             ExtensionError::InstallFailed(msg) => {
                 assert!(
                     msg.contains("failed to parse Cargo.toml"),
                     "error should explain manifest parse failure: {msg}"
+                );
+                assert!(
+                    !msg.contains(&dir.path().display().to_string()),
+                    "user-facing error should not expose local source path: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_from_local_source_rejects_invalid_package_name_shape() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+        std::fs::write(source_dir.join("Cargo.toml"), "[package]\nname = 42\n")
+            .expect("write invalid Cargo.toml");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install_from_local_source("portfolio", &source_dir, None)
+            .await
+            .expect_err("invalid package.name must not fall back to extension name");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("failed to parse Cargo.toml"),
+                    "error should explain manifest parse failure: {msg}"
+                );
+                assert!(
+                    !msg.contains(&source_dir.display().to_string()),
+                    "user-facing error should not expose local source path: {msg}"
                 );
             }
             other => panic!("expected InstallFailed, got {other:?}"),
