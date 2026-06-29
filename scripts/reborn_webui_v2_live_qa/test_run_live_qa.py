@@ -191,10 +191,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(set(captured_registry), set(cases))
         for case_name, (_case_fn, package_id, verification_caps) in cases.items():
             prompt = str(captured_chat[case_name]["prompt"])
-            self.assertIn("from this chat", prompt)
-            self.assertIn("extension_search", prompt)
-            self.assertIn(f"`{package_id}`", prompt)
+            self.assertEqual(prompt, run_live_qa.QA_SHEET_PROMPTS[case_name])
+            self.assertNotIn("extension_search", prompt)
+            self.assertNotIn(f"`{package_id}`", prompt)
             self.assertNotIn("/v2/extensions/registry", prompt)
+            self.assertIsNone(captured_chat[case_name]["marker"])
             extra_details = captured_chat[case_name]["extra_details"]
             self.assertIsInstance(extra_details, dict)
             self.assertTrue(extra_details["chat_connect_flow"])
