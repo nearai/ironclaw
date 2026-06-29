@@ -10,9 +10,12 @@
 //! retry/routing/circuit/cache decorators for real.
 //!
 //! Slice 1 scope: InMemory storage, single text reply, `build → submit_turn →
-//! assert_reply_contains`. A future `StorageMode::LibSql` variant is a
-//! non-breaking addition (the builder defaults to InMemory directly today rather
-//! than introducing a one-variant enum).
+//! assert_reply_contains`.
+//! Slice 3: `StorageMode { InMemory, LibSql }` — the builder defaults to
+//! `InMemory`; `.storage(StorageMode::LibSql)` selects a real SQLite file in a
+//! per-`build()` `TempDir`. Both modes ride **one** `CompositeRootFilesystem`
+//! at `/tenants/...` so thread history and turn state share the same backend
+//! and the same production path layout.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module — `support_unit_tests.rs` mounts
@@ -21,11 +24,17 @@
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{
+    CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
+};
+use ironclaw_host_api::{
+    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
@@ -57,12 +66,12 @@ use ironclaw_turns::{
     LoopCheckpointStore, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::filesystem::BlockingTurnStatePutFilesystem;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
-    HarnessTurnBackend, HarnessTurnStorageBackend, HostRuntimeCapabilityHarness,
-    RecordingTestCapabilityPort, scoped_turns_fs, test_product_scope,
+    HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordedCapabilityResult,
+    RecordingTestCapabilityPort, test_product_scope,
 };
+use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use super::session_thread::RebornThreadHarness;
@@ -76,6 +85,33 @@ const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
+/// Selects the durable storage backend mounted into the integration harness's
+/// `CompositeRootFilesystem` (design spec §3.2, §3.8).
+///
+/// Both modes ride **one** composite at the production path layout
+/// `/tenants/<tenant>/users/<user>/...` — the only difference is which
+/// `RootFilesystem` is mounted under `/tenants`, `/memory`, and `/events`.
+///
+/// `InMemory` is the default: it's fast, needs no filesystem, and covers
+/// all assertion cases that don't require on-disk durability.
+/// `LibSql` creates a real SQLite file in a per-`build()` `TempDir`, runs
+/// the full libSQL migration suite, and lets `assert_reply_persists_after_reopen`
+/// verify that data survived serialization to disk (design §3.8 guardrail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageMode {
+    /// In-memory backend: fast, no filesystem I/O, default.
+    #[default]
+    InMemory,
+    /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
+    /// Enables `assert_reply_persists_after_reopen`.
+    LibSql,
+}
+
+/// Provider id prefix used by every mock-MCP test capability and assertion.
+/// One owner for the string — the `MockMcp` variant and `assert_mcp_tool_called`
+/// both derive their ids from this constant.
+const MOCK_MCP_PROVIDER_ID: &str = "mock-mcp";
+
 /// Selects the capability backend the integration harness wires.
 enum RebornCapabilityBackend {
     /// Echo recorder: records capability invocations, executes nothing. Default —
@@ -84,6 +120,10 @@ enum RebornCapabilityBackend {
     /// Real first-party tool runtime (`builtin.http` + friends) with the recording
     /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
     BuiltinHttpTools,
+    /// Real MCP runtime wired to a loopback mock MCP server (slice 6 §3.6).
+    /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
+    /// the mock server; no real credentials or network policy are required.
+    MockMcp { mcp_url: String },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -93,6 +133,11 @@ pub struct RebornIntegrationHarnessBuilder {
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
     capability: RebornCapabilityBackend,
+    keyed_http_responses: Vec<ScriptedHttpResponse>,
+    storage: StorageMode,
+    /// Slice 5: when `true`, the `BuiltinHttpTools` backend uses the real
+    /// `LocalHostProcessPort` instead of the inert `RecordingProcessPort`.
+    live_shell: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -102,11 +147,67 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Select the durable storage backend for this harness.
+    ///
+    /// Defaults to [`StorageMode::InMemory`]. Pass [`StorageMode::LibSql`] to
+    /// test on-disk durability via `assert_reply_persists_after_reopen`.
+    pub fn storage(mut self, mode: StorageMode) -> Self {
+        self.storage = mode;
+        self
+    }
+
     /// Use the real first-party tool runtime so scripted tool calls execute through
     /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Opt-in to real shell execution for this harness (slice 5). By default the
+    /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
+    /// `builtin.shell` turns record the command without spawning any OS process.
+    ///
+    /// Call `.with_live_shell()` only when the test genuinely needs to observe the
+    /// output of a real command (e.g. `echo hello`). The command must be hermetic —
+    /// no network, no external state, reproducible on any developer machine.
+    ///
+    /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_live_shell(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.live_shell = true;
+        self
+    }
+
+    /// Install URL/method/capability-keyed scripted HTTP responses over the
+    /// recording `RuntimeHttpEgress` (§3.6 P1 ergonomics) and switch on the real
+    /// first-party tool runtime. For multi-step tool-HTTP flows where each
+    /// `builtin.http` call to a different URL must get a different scripted body;
+    /// requests that match no scripted response fall back to the default body.
+    /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_keyed_http_responses(
+        mut self,
+        responses: impl IntoIterator<Item = ScriptedHttpResponse>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.keyed_http_responses = responses.into_iter().collect();
+        self
+    }
+
+    /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
+    ///
+    /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
+    /// harness registers a single MCP capability `"<provider>.search"` (where
+    /// provider = `"mock-mcp"`) and wires it via `LoopbackMcpRuntimeHttpEgress`
+    /// — real HTTP connections to the mock server on a loopback port, with an
+    /// injected Bearer token so the mock's OAuth gate passes.
+    ///
+    /// Script the model with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
+    /// Assert via `assert_mcp_tool_called("search")`.
+    pub fn with_mock_mcp(mut self, mcp_url: impl Into<String>) -> Self {
+        self.capability = RebornCapabilityBackend::MockMcp {
+            mcp_url: mcp_url.into(),
+        };
         self
     }
 
@@ -147,14 +248,25 @@ impl RebornIntegrationHarnessBuilder {
             binding.subject_user_id.clone(),
         );
 
-        // --- durable stores (InMemory) --------------------------------------
-        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope.clone())?;
+        // --- one composite for threads + turns (slice 3) -------------------
+        // `_turn_root` keeps the TempDir alive for the harness's lifetime.
+        // Post-migration: this TempDir is the durable root for the whole
+        // composite (thread history + turn state), not just turns. The libSQL
+        // `.db` file lives in this directory; InMemory ignores the path.
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let turn_backend: Arc<HarnessTurnStorageBackend> =
-            Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new()));
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(scoped_turns_fs(turn_backend, &binding)?),
-        );
+        let (composite, libsql_db_path) =
+            build_storage_composite(self.storage, turn_root.path()).await?;
+
+        let thread_harness = RebornThreadHarness::filesystem_shared_composite(
+            thread_scope.clone(),
+            Arc::clone(&composite),
+            Arc::clone(&turn_root),
+        )?;
+        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
+            Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+                Arc::clone(&composite),
+                &binding,
+            )?));
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
@@ -186,9 +298,27 @@ impl RebornIntegrationHarnessBuilder {
             RebornCapabilityBackend::Echo => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
-            RebornCapabilityBackend::BuiltinHttpTools => HarnessCapabilityMode::HostRuntime(
-                Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?),
-            ),
+            RebornCapabilityBackend::BuiltinHttpTools => {
+                // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
+                // the default recording path uses the inert RecordingProcessPort.
+                let host_runtime = if self.live_shell {
+                    HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
+                } else {
+                    HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                };
+                host_runtime.install_http_responses(self.keyed_http_responses)?;
+                HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::MockMcp { mcp_url } => {
+                // Slice 6: wire the real MCP runtime backed by the loopback mock server.
+                let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
+                    &mcp_url,
+                    MOCK_MCP_PROVIDER_ID,
+                    &format!("{MOCK_MCP_PROVIDER_ID}.search"),
+                )
+                .await?;
+                HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
+            }
         };
         let (
             capability_factory,
@@ -283,6 +413,7 @@ impl RebornIntegrationHarnessBuilder {
             capability_recorder,
             _product_harness: product_harness,
             _turn_root: turn_root,
+            libsql_db_path,
         })
     }
 }
@@ -296,12 +427,22 @@ pub struct RebornIntegrationHarness {
     binding: ResolvedBinding,
     turn_scope: TurnScope,
     turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
-    thread_harness: RebornThreadHarness,
+    thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     scheduler_handle: Option<ironclaw_host_runtime::TurnRunSchedulerHandle>,
     event_seq: AtomicU64,
     capability_recorder: HarnessCapabilityRecorder,
     _product_harness: super::product_workflow::RebornProductWorkflowHarness,
+    /// Keeps the per-`build()` TempDir alive for the harness's lifetime.
+    /// This directory is the durable root for the whole composite (thread
+    /// history + turn state). For `StorageMode::LibSql`, the SQLite file lives
+    /// here; for `StorageMode::InMemory`, only the LLM session cache does.
     _turn_root: Arc<tempfile::TempDir>,
+    /// Path to the on-disk SQLite file when `StorageMode::LibSql` was selected.
+    /// `None` for `StorageMode::InMemory` (no file on disk). Used by
+    /// `assert_reply_persists_after_reopen` to open a genuinely fresh database
+    /// connection so only data committed to disk is visible — the live
+    /// `CompositeRootFilesystem` Arc is deliberately NOT reused.
+    libsql_db_path: Option<PathBuf>,
 }
 
 impl RebornIntegrationHarness {
@@ -316,6 +457,9 @@ impl RebornIntegrationHarness {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
             capability: RebornCapabilityBackend::Echo,
+            keyed_http_responses: Vec::new(),
+            storage: StorageMode::default(),
+            live_shell: false,
         }
     }
 
@@ -350,6 +494,64 @@ impl RebornIntegrationHarness {
             .assert_final_reply(self.binding.thread_id.clone(), text)
             .await
             .map_err(Into::into)
+    }
+
+    /// Assert the finalized reply survives a close-and-reopen of the thread
+    /// service (design §3.8 durability guardrail).
+    ///
+    /// For `StorageMode::LibSql`: opens a **genuinely fresh** `libsql::Database`
+    /// connection to the on-disk `.db` file — the live `CompositeRootFilesystem`
+    /// Arc is deliberately NOT reused. Only data that was actually serialized and
+    /// committed to disk is visible through the new handle, so this assertion
+    /// proves real on-disk durability, not an in-process cache.
+    ///
+    /// For `StorageMode::InMemory`: re-instantiates the
+    /// `FilesystemSessionThreadService` over the same in-process handle (no disk
+    /// involved). This asserts service re-instantiation but cannot prove durability
+    /// — there is nothing on disk to read back. Use `StorageMode::LibSql` for the
+    /// durability guarantee.
+    pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
+        if let Some(db_path) = &self.libsql_db_path {
+            // Open a fresh libsql connection — independent of the live composite.
+            // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
+            // under the M1 mutation (LibSql → InMemory) the file does not exist and
+            // the fresh db is empty, so `list_thread_history` returns no messages and
+            // `assert_final_reply` returns `Err(MissingFinalReply)`.
+            let db = Arc::new(
+                libsql::Builder::new_local(db_path)
+                    .build()
+                    .await
+                    .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
+            );
+            let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+            // Migrations are idempotent — the schema already exists from `build()`.
+            fresh_fs
+                .run_migrations()
+                .await
+                .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
+            let mut fresh_composite = CompositeRootFilesystem::new();
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut fresh_composite,
+                fresh_fs,
+            )?;
+            let fresh_composite = Arc::new(fresh_composite);
+            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+                self.thread_harness.scope.clone(),
+                fresh_composite,
+                Arc::clone(&self._turn_root),
+            )?;
+            fresh_harness
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into)
+        } else {
+            // InMemory: re-instantiate the service over the same in-process handle.
+            let reopened = self.thread_harness.reopened()?;
+            reopened
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into)
+        }
     }
 
     /// Assert the named capability was invoked through the real capability path
@@ -387,6 +589,59 @@ impl RebornIntegrationHarness {
             "no captured runtime HTTP egress request matching {url_substr:?}; saw {seen:?}"
         )
         .into())
+    }
+
+    /// Snapshot of the captured Tier-2 runtime HTTP egress requests, in call
+    /// order. Read by the egress assertions in `assertions.rs` (the canonical
+    /// egress-assertion API — method/URL/body/count/order).
+    pub(super) fn captured_egress_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.capability_recorder.runtime_http_requests()
+    }
+
+    /// Assert that a `builtin.shell` command was recorded by the inert process
+    /// port and that the recorded command string contains `substr`. This proves
+    /// the shell tool call was dispatched through the process port without
+    /// spawning a real OS process (slice 5 safety invariant).
+    pub async fn assert_shell_command_recorded(&self, substr: &str) -> HarnessResult<()> {
+        let commands = self.capability_recorder.recorded_process_commands();
+        if commands.iter().any(|cmd| cmd.contains(substr)) {
+            return Ok(());
+        }
+        let seen: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
+        Err(format!("no recorded shell command containing {substr:?}; saw {seen:?}").into())
+    }
+
+    /// Asserts ≥1 shell command was dispatched through the inert recording
+    /// process port, proving no real OS process was spawned. Passes when
+    /// `recorded_process_commands()` is non-empty (the harness used the
+    /// recording path, not the live-shell opt-in).
+    pub async fn assert_shell_ran_through_inert_port(&self) -> HarnessResult<()> {
+        let commands = self.capability_recorder.recorded_process_commands();
+        if !commands.is_empty() {
+            return Ok(());
+        }
+        Err(
+            "no shell commands were recorded by the inert process port; either no \
+             builtin.shell turn ran or the harness is using the live-shell path"
+                .into(),
+        )
+    }
+
+    /// Assert that the MCP tool named `tool_name` (the name on the mock server,
+    /// e.g. `"search"`) was invoked via the real MCP runtime (slice 6).
+    ///
+    /// Internally maps `tool_name` → capability id `"mock-mcp.{tool_name}"` and
+    /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
+    /// fixed provider id set by `with_mock_mcp`.
+    pub async fn assert_mcp_tool_called(&self, tool_name: &str) -> HarnessResult<()> {
+        self.assert_tool_invoked(&format!("{MOCK_MCP_PROVIDER_ID}.{tool_name}"))
+            .await
+    }
+
+    /// Snapshot of the recorded capability results (tool outputs), in execution
+    /// order. Read by `assert_tool_result_contains` in `assertions.rs`.
+    pub(super) fn captured_capability_results(&self) -> Vec<RecordedCapabilityResult> {
+        self.capability_recorder.capability_results()
     }
 
     async fn wait_for_completion(&self, run_id: TurnRunId) -> HarnessResult<()> {
@@ -428,6 +683,73 @@ impl Drop for RebornIntegrationHarness {
         let _ = self.scheduler_handle.take();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
+
+/// Build the one `CompositeRootFilesystem` for a harness, selecting the durable
+/// backend by `mode`. The `dir` argument is used only for `LibSql` (the SQLite
+/// file is created there by the production `build_default_local_dev_database_roots`
+/// sequence); `InMemory` ignores it.
+///
+/// Returns the composite alongside the path to the on-disk SQLite file for
+/// `LibSql` (`None` for `InMemory`). The path is stored on
+/// `RebornIntegrationHarness` so `assert_reply_persists_after_reopen` can open
+/// a genuinely fresh database connection — independent of the live
+/// `CompositeRootFilesystem` Arc — and confirm real on-disk durability.
+async fn build_storage_composite(
+    mode: StorageMode,
+    dir: &Path,
+) -> HarnessResult<(Arc<CompositeRootFilesystem>, Option<PathBuf>)> {
+    let mut composite = CompositeRootFilesystem::new();
+    let db_path = match mode {
+        StorageMode::InMemory => {
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut composite,
+                Arc::new(InMemoryBackend::new()),
+            )?;
+            None
+        }
+        StorageMode::LibSql => {
+            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+                dir,
+                &mut composite,
+            )
+            .await?;
+            // The canonical filename is the production constant — one source of truth.
+            Some(dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME))
+        }
+    };
+    Ok((Arc::new(composite), db_path))
+}
+
+/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
+/// `binding` inside the production composite.
+///
+/// Uses the production path prefix `""` (no `/engine` prefix) so turn state
+/// lands under `/tenants/...` inside the composite, where the database backend
+/// is mounted. The 4-arm match lives in `filesystem::turns_scope_path`; the
+/// binary-E2E tier reuses it via `scoped_turns_fs` in `harness.rs` with the
+/// `/engine` prefix.
+pub(super) fn scoped_turns_fs_composite(
+    composite: Arc<CompositeRootFilesystem>,
+    binding: &ResolvedBinding,
+) -> HarnessResult<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+    let target = super::filesystem::turns_scope_path("", binding);
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").expect("valid turns alias"),
+        VirtualPath::new(target).expect("valid turns target"),
+        MountPermissions::read_write_list_delete(),
+    )])?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        composite, mounts,
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Hermetic env and private helpers
+// ---------------------------------------------------------------------------
 
 /// Hermetic env baked unconditionally so every test form inherits it and a
 /// developer `.env` can never reach a vendor (design §2/§4.1). The chain itself

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CompositeRootFilesystem, LocalFilesystem, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
 };
@@ -26,47 +28,51 @@ pub enum RebornThreadHarnessError {
     MissingFinalReply(String),
 }
 
-pub struct RebornThreadHarness {
+/// Thin harness over a `FilesystemSessionThreadService<F>` for asserting thread
+/// history in integration and binary-E2E tests.
+///
+/// The type parameter `F` defaults to `LocalFilesystem` so that all existing
+/// binary-tier callers that write `RebornThreadHarness` (no type parameter) continue
+/// to compile as `RebornThreadHarness<LocalFilesystem>` without modification.
+///
+/// The integration tier uses `RebornThreadHarness<CompositeRootFilesystem>` via
+/// `filesystem_shared_composite`, mounting the thread service directly on the
+/// per-`build()` production-path composite (threads at `/tenants/{t}/users/{u}/threads`).
+pub struct RebornThreadHarness<F = LocalFilesystem>
+where
+    F: RootFilesystem,
+{
     pub scope: ThreadScope,
-    pub service: Arc<FilesystemSessionThreadService<LocalFilesystem>>,
-    backend: Arc<LocalFilesystem>,
+    pub service: Arc<FilesystemSessionThreadService<F>>,
+    backend: Arc<F>,
     root: Arc<tempfile::TempDir>,
+    /// Path prefix inserted before `/tenants/...` when constructing the thread
+    /// scoped filesystem. Binary-tier instances use `"/engine"` (preserving the
+    /// `/engine/tenants/...` layout); integration-tier instances use `""` so
+    /// threads land at `/tenants/...` inside the production composite.
+    root_prefix: String,
 }
 
-impl RebornThreadHarness {
-    pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
-        let root = Arc::new(tempfile::tempdir()?);
-        let backend = Arc::new(local_filesystem(root.path())?);
-        Self::filesystem_shared_backend(scope, backend, root)
-    }
-
-    pub fn filesystem_shared_backend(
-        scope: ThreadScope,
-        backend: Arc<LocalFilesystem>,
-        root: Arc<tempfile::TempDir>,
-    ) -> Result<Self, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at(Arc::clone(&backend), &scope)?;
+/// Shared methods: work for any `F: RootFilesystem`.
+impl<F: RootFilesystem> RebornThreadHarness<F> {
+    pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
+        let scoped =
+            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
-            scope,
+            scope: self.scope.clone(),
             service,
-            backend,
-            root,
+            backend: Arc::clone(&self.backend),
+            root: Arc::clone(&self.root),
+            root_prefix: self.root_prefix.clone(),
         })
-    }
-
-    pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
-        Self::filesystem_shared_backend(
-            self.scope.clone(),
-            Arc::clone(&self.backend),
-            Arc::clone(&self.root),
-        )
     }
 
     pub fn service_instance(
         &self,
-    ) -> Result<FilesystemSessionThreadService<LocalFilesystem>, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at(Arc::clone(&self.backend), &self.scope)?;
+    ) -> Result<FilesystemSessionThreadService<F>, RebornThreadHarnessError> {
+        let scoped =
+            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
         Ok(FilesystemSessionThreadService::new(scoped))
     }
 
@@ -113,7 +119,70 @@ impl RebornThreadHarness {
     }
 }
 
+/// `LocalFilesystem`-specific constructors (binary-E2E tier).
+impl RebornThreadHarness<LocalFilesystem> {
+    /// Create a harness with a private per-call `TempDir` and a fresh
+    /// `LocalFilesystem` mounted under `/engine`. Used by the binary-E2E tier.
+    pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
+        let root = Arc::new(tempfile::tempdir()?);
+        let backend = Arc::new(local_filesystem(root.path())?);
+        Self::filesystem_shared_backend(scope, backend, root)
+    }
+
+    /// Create a harness sharing an already-constructed `LocalFilesystem` backend.
+    /// `root` keeps the backing `TempDir` alive for the harness's lifetime.
+    /// Uses the `/engine/tenants/...` path layout (binary-E2E convention).
+    pub fn filesystem_shared_backend(
+        scope: ThreadScope,
+        backend: Arc<LocalFilesystem>,
+        root: Arc<tempfile::TempDir>,
+    ) -> Result<Self, RebornThreadHarnessError> {
+        let scoped = scoped_threads_fs_at("/engine", Arc::clone(&backend), &scope)?;
+        let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+        Ok(Self {
+            scope,
+            service,
+            backend,
+            root,
+            root_prefix: "/engine".to_string(),
+        })
+    }
+}
+
+/// `CompositeRootFilesystem`-specific constructor (integration tier).
+impl RebornThreadHarness<CompositeRootFilesystem> {
+    /// Create a harness backed by a shared production-path composite.
+    ///
+    /// Threads land at `/tenants/{tenant}/users/{user}/threads` inside the
+    /// composite (no `/engine` prefix), so they are visible through the
+    /// `/tenants` mount that `mount_local_dev_database_roots` installs.
+    /// `root` keeps the composite's `TempDir` alive; the same `Arc` is also
+    /// held by `RebornIntegrationHarness::_turn_root` so `reopened()` can
+    /// reuse the live SQLite file on disk.
+    pub fn filesystem_shared_composite(
+        scope: ThreadScope,
+        backend: Arc<CompositeRootFilesystem>,
+        root: Arc<tempfile::TempDir>,
+    ) -> Result<Self, RebornThreadHarnessError> {
+        let scoped = scoped_threads_fs_at("", Arc::clone(&backend), &scope)?;
+        let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+        Ok(Self {
+            scope,
+            service,
+            backend,
+            root,
+            root_prefix: String::new(),
+        })
+    }
+}
+
+/// Build the scoped thread filesystem for `scope`.
+///
+/// `root_prefix` is prepended before `/tenants/...`:
+/// - Binary-E2E tier: `"/engine"` → `/engine/tenants/{t}/users/{u}/threads`
+/// - Integration tier: `""` → `/tenants/{t}/users/{u}/threads`
 fn scoped_threads_fs_at<F>(
+    root_prefix: &str,
     backend: Arc<F>,
     scope: &ThreadScope,
 ) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
@@ -125,7 +194,7 @@ where
         .as_ref()
         .map_or("_system", |user_id| user_id.as_str());
     let target = format!(
-        "/engine/tenants/{}/users/{}/threads",
+        "{root_prefix}/tenants/{}/users/{}/threads",
         scope.tenant_id, user_id
     );
     let mounts = MountView::new(vec![MountGrant::new(
