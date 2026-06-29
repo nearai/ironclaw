@@ -155,7 +155,7 @@ libc = "0.2"
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
+tower-http = { version = "0.7", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.18", optional = true }
 fs4 = "1.1"
 hex = "0.4.3"
