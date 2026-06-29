@@ -261,16 +261,22 @@ impl FakeReissueStore {
         let serial = self.next.fetch_add(1, Ordering::SeqCst);
         let code = SlackPersonalBindingPairingCode::new(format!("PAIRCODE{serial:04}"))?;
         let issued = IssuedSlackPersonalBindingPairingChallenge { code, challenge };
-        *self.live.lock().expect("reissue store mutex not poisoned") = Some(issued.clone());
+        *self.live_guard() = Some(issued.clone());
         Ok(issued)
     }
 
     fn is_live(&self, code: &str) -> bool {
-        self.live
-            .lock()
-            .expect("reissue store mutex not poisoned")
+        self.live_guard()
             .as_ref()
             .is_some_and(|issued| issued.code.as_str() == code)
+    }
+
+    fn live_guard(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<IssuedSlackPersonalBindingPairingChallenge>> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -287,7 +293,7 @@ impl SlackPersonalBindingPairingChallengeStore for FakeReissueStore {
         &self,
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
-        let live = self.live.lock().expect("reissue store mutex not poisoned");
+        let live = self.live_guard();
         match live.as_ref() {
             Some(issued) if &issued.code == code => Ok(issued.challenge.clone()),
             _ => Err(SlackPersonalBindingPairingError::ChallengeNotFound),
@@ -298,7 +304,7 @@ impl SlackPersonalBindingPairingChallengeStore for FakeReissueStore {
         &self,
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
-        let mut live = self.live.lock().expect("reissue store mutex not poisoned");
+        let mut live = self.live_guard();
         match live.take() {
             Some(issued) if &issued.code == code => Ok(issued.challenge),
             other => {
