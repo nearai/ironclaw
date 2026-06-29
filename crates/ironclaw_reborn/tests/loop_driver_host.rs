@@ -1351,7 +1351,7 @@ async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcr
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "model_error"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "model_error"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -1377,7 +1377,7 @@ async fn text_only_model_reply_driver_rejects_capability_calls_without_dispatchi
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "invalid_model_output"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "invalid_model_output"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -8060,6 +8060,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let CapabilityOutcome::Completed(completed) = capability else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "script_capability_did_not_complete".to_string(),
+                detail: None,
             });
         };
         let prompt_bundle = host
@@ -8087,6 +8088,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8212,6 +8214,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8251,6 +8254,7 @@ fn driver_host_error(
 ) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: format!("{:?}", error.kind),
+        detail: error.detail,
     }
 }
 
