@@ -162,7 +162,8 @@ pub fn raw_agent_loop_host_error(
     raw_detail: impl std::fmt::Display,
 ) -> AgentLoopHostError {
     let safe_summary = safe_summary.into();
-    tracing::warn!(
+    let raw_detail = raw_detail.to_string();
+    tracing::debug!(
         component,
         operation,
         kind = ?kind,
@@ -170,7 +171,15 @@ pub fn raw_agent_loop_host_error(
         raw_detail = %raw_detail,
         "agent loop host error mapped to safe summary"
     );
-    AgentLoopHostError::new(kind, safe_summary)
+    // Carry the raw cause to the model as a secret-scrubbed diagnostic. Only
+    // secret VALUES are redacted; paths/codes/raw error text reach the model so
+    // it can retry or explain. The word/delimiter ban is NOT applied here.
+    let mut error = AgentLoopHostError::new(kind, safe_summary);
+    let scrubbed = sanitize_model_visible_text(raw_detail);
+    if !scrubbed.trim().is_empty() {
+        error = error.with_detail(scrubbed);
+    }
+    error
 }
 
 pub fn raw_host_managed_model_error(

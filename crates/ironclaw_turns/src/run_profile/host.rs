@@ -160,6 +160,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     }
 
     let lower = value.to_ascii_lowercase();
+    // Only credential markers are banned; descriptive error vocabulary
+    // ("provider error", "stack trace", "tool input", …) is allowed because
+    // the raw cause now rides the dedicated model-visible detail channel.
     for forbidden in [
         "access token",
         "api key",
@@ -167,18 +170,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
         "apikey",
         "authorization:",
         "bearer ",
-        "host path",
-        "invalid api key",
-        "invalid_api_key",
         "password",
         "passwd",
-        "provider error",
-        "raw runtime",
         "secret",
-        "stack trace",
-        "tool input",
-        "tool_input",
-        "traceback",
     ] {
         if lower.contains(forbidden) {
             return Err(format!(
@@ -696,6 +690,12 @@ pub struct AgentLoopHostError {
     pub gate_ref: Option<LoopGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
+    /// carries the original error text (paths, codes, schema refs) so the model
+    /// can retry or explain. Secret VALUES are redacted by the producer via
+    /// [`sanitize_model_visible_text`]; the word/delimiter ban is NOT applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl AgentLoopHostError {
@@ -706,7 +706,13 @@ impl AgentLoopHostError {
             reason_kind: None,
             gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
@@ -2385,5 +2391,55 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        // Words that used to be banned outright are ordinary error vocabulary,
+        // not secrets, and must now be accepted.
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            validate_loop_safe_summary(accepted.to_string())
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn safe_summary_still_rejects_secret_markers_and_delimiters() {
+        // Credential markers must still be rejected.
+        for rejected in [
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+        ] {
+            validate_loop_safe_summary(rejected.to_string())
+                .expect_err(&format!("`{rejected}` must still be rejected"));
+        }
+
+        // Path / payload delimiters must still be rejected.
+        validate_loop_safe_summary("missing schema at /system/extensions".to_string())
+            .expect_err("path delimiter `/` must still be rejected");
+    }
+
+    #[test]
+    fn agent_loop_host_error_carries_optional_detail() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/list_calendars.input.v1.json";
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "host runtime rejected capability request",
+        )
+        .with_detail(path);
+        assert_eq!(error.detail.as_deref(), Some(path));
+
+        let plain = AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "boom");
+        assert_eq!(plain.detail, None);
     }
 }
