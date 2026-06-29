@@ -43,6 +43,16 @@ if [ -z "${OWNER_TOKEN}" ]; then
   echo "ERROR: no owner bearer; set IRONCLAW_REBORN_WEBUI_TOKEN or put it in .env" >&2
   exit 2
 fi
+# Enabling an SSO provider (for the S6 mocked-SSO checks) makes
+# IRONCLAW_REBORN_WEBUI_TOKEN double as the stateless SSO session-signing HMAC
+# key, which the serve requires to be >=32 bytes. If the resolved owner token is
+# shorter (e.g. a short local-dev token), pin a test signing key for THIS run so
+# the serve boots and the forged-SSO bearers verify against the same key. serve +
+# validator + forge all use this same value, so the owner identity stays aligned.
+if [ "${#OWNER_TOKEN}" -lt 32 ]; then
+  echo "  (owner token <32B; pinning a test SSO session-signing key for this run)"
+  OWNER_TOKEN="ironclaw-reborn-xyzorg-e2e-sso-session-signing-key"
+fi
 
 echo "repo:        ${REPO_ROOT}"
 echo "reborn home: ${REBORN_HOME}"
@@ -64,6 +74,10 @@ SERVE_LOG="$(mktemp -t xyzorg-serve.XXXXXX.log)"
   IRONCLAW_REBORN_WEBUI_TOKEN="${OWNER_TOKEN}" \
   IRONCLAW_REBORN_WEBUI_USER_ID="${OWNER_USER_ID}" \
   RUST_LOG="${RUST_LOG:-ironclaw_reborn=debug}" \
+  IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID="${IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID:-dummy-sso-client-id}" \
+  IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET="${IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET:-dummy-sso-client-secret}" \
+  IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS="${IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS:-xyzorg.com,example.com}" \
+  IRONCLAW_REBORN_WEBUI_SSO_EMAIL_KEYED="${IRONCLAW_REBORN_WEBUI_SSO_EMAIL_KEYED:-1}" \
     cargo run -p ironclaw_reborn_cli \
       --features webui-v2-beta,capability-policy \
       -- serve --host 127.0.0.1 --port "${PORT}"

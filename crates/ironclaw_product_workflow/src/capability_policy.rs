@@ -74,9 +74,11 @@ pub const ESSENTIAL_MEMBER_CAPABILITIES: &[&str] = &[
 pub struct UserDirectoryRecord {
     pub user_id: UserId,
     pub role: UserRole,
-    /// `sha256(login_token)` hex. The raw token is returned once at creation
-    /// and never stored.
-    pub token_hash: String,
+    /// `sha256(login_token)` hex for a directory-token user; `None` for an SSO
+    /// user (token-less — they authenticate via their SSO session, not a minted
+    /// login bearer). The raw token is returned once at creation, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_hash: Option<String>,
     /// Per-user capability availability deltas over the role default.
     #[serde(default)]
     pub grants: BTreeMap<String, CapabilityAvailability>,
@@ -217,11 +219,33 @@ pub fn hash_login_token(token: &str) -> String {
     sha256_digest_token(token.as_bytes())
 }
 
+/// Derive a stable, valid `UserId` for an SSO user from their email. Emails are
+/// not valid user ids (no `@`/`.`), so SSO users are keyed by
+/// `sso-<sha256(lowercased email)[..20]>` — deterministic (the same email always
+/// resolves to the same record, so admins can manage by email) and
+/// collision-resistant.
+pub fn sso_user_id_from_email(email: &str) -> Result<UserId, ironclaw_host_api::HostApiError> {
+    // `sha256_digest_token` returns `sha256:<lower-hex>`. Take the BARE hex (after
+    // the prefix) — a `UserId` allows no `:`, and the memory path validator
+    // reserves `:` for owner-key encoding, so a colon in the id breaks every
+    // memory operation for the user.
+    let digest = sha256_digest_token(email.trim().to_ascii_lowercase().as_bytes());
+    let hex = digest.rsplit(':').next().unwrap_or(digest.as_str());
+    UserId::new(format!("sso-{}", &hex[..hex.len().min(20)]))
+}
+
 // ---- admin REST DTOs -------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminCreateUserRequest {
-    pub user_id: String,
+    /// Directory-token user identity. Mutually exclusive with `email`. Optional
+    /// so SSO callers omit it; the facade requires exactly one of user_id/email.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// SSO user identity: provision (token-less) BY EMAIL. The user id is
+    /// derived deterministically via `sso_user_id_from_email`.
+    #[serde(default)]
+    pub email: Option<String>,
     pub role: UserRole,
 }
 
@@ -268,6 +292,42 @@ mod tests {
         assert!(!UserRole::Member.is_admin());
         assert!(UserRole::Owner.is_owner());
         assert!(!UserRole::Admin.is_owner());
+    }
+
+    #[test]
+    fn sso_user_id_from_email_has_no_reserved_chars_and_is_deterministic() {
+        // Regression: the derived id must contain no char that breaks a downstream
+        // scope — notably ':' (the memory path validator RESERVES it; a colon in
+        // the id made every memory op fail with invalid_input) or a path
+        // separator. `sha256_digest_token` returns `sha256:<hex>`, so a naive
+        // slice would have kept the colon.
+        for email in [
+            "User.Name@example.com",
+            "user@example.com",
+            "a.b+c@xyzorg.com",
+        ] {
+            let id = sso_user_id_from_email(email).expect("derive id");
+            let s = id.as_str();
+            assert!(s.starts_with("sso-"), "id must be sso-prefixed: {s}");
+            assert!(
+                !s.contains(':'),
+                "id must not contain ':' (memory-reserved): {s}"
+            );
+            assert!(
+                !s.contains('/') && !s.contains('\\'),
+                "id must not contain path separators: {s}"
+            );
+            assert_eq!(
+                id,
+                sso_user_id_from_email(email).expect("again"),
+                "must be deterministic"
+            );
+        }
+        // Email match is case-insensitive (verified emails are lowercased).
+        assert_eq!(
+            sso_user_id_from_email("User.Name@example.com").expect("id"),
+            sso_user_id_from_email("user.name@example.com").expect("id"),
+        );
     }
 
     #[test]

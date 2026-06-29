@@ -502,6 +502,102 @@ async def _walk_member_memory_files(client, token, base, *, max_depth: int = 6, 
     return found
 
 
+# ---------------------------------------------------------------------------
+# SECTION 6 helpers — mocked SSO login (forged session) + email provisioning.
+# ---------------------------------------------------------------------------
+
+# Two SSO identities, keyed by email (token-less — they authenticate via Google,
+# not a minted bearer): a new admin, and carl, who has moved to SSO.
+# SSO test emails are ENV-DRIVEN so no real address is committed. Defaults use the
+# fictional test org (xyzorg.com); set SSO_ADMIN_EMAIL / SSO_MEMBER_EMAIL to your
+# own Google accounts for a real-Google manual run.
+SSO_ADMIN_EMAIL = os.environ.get("SSO_ADMIN_EMAIL", "product@xyzorg.com")  # NEW SSO admin
+SSO_MEMBER_EMAIL = os.environ.get("SSO_MEMBER_EMAIL", "carl@xyzorg.com")  # carl, now an SSO member
+# Distinct SSO identity for the memory-write check so it never collides (409)
+# with the member-surface check that already provisions SSO_MEMBER_EMAIL.
+SSO_MEMORY_EMAIL = os.environ.get("SSO_MEMORY_EMAIL", "ssomem@xyzorg.com")
+SSO_TENANT = "reborn-cli"  # local-dev tenant the SSO session token binds to
+
+
+def _mint_sso_bearer(secret, tenant, user, *, lifetime_s=3600):
+    """Mock an SSO session bearer: the stateless HMAC-signed token a Google login
+    WOULD mint (SignedTokenSessionStore). Lets the validator authenticate as an
+    SSO user with no Google/browser. `secret` is the serve's SSO signing key,
+    which is IRONCLAW_REBORN_WEBUI_TOKEN. The close-to-life upgrade is a
+    mock-Google token endpoint driving /auth/callback; this forge is the
+    deterministic stand-in over the SAME SessionAuthenticator. (Real SSO assigns
+    a UUID user_id; the validator keys the SSO user by email to match the
+    email-based provisioning.)"""
+    import base64 as _b64
+    import hashlib
+    import hmac
+    import json as _json
+    import struct
+    import time
+
+    key = hashlib.sha256(
+        b"ironclaw-reborn-webui-session-v1::"
+        + struct.pack("<Q", len(tenant.encode()))
+        + tenant.encode()
+        + b"::"
+        + secret.encode()
+    ).digest()
+    now = int(time.time())
+    payload = {
+        "sid": str(uuid.uuid4()),
+        "tenant": tenant,
+        "user": user,
+        "iat": now,
+        "exp": now + lifetime_s,
+    }
+
+    def enc(raw):
+        return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    payload_b64 = enc(_json.dumps(payload, separators=(",", ":")).encode())
+    sig = enc(hmac.new(key, payload_b64.encode(), hashlib.sha256).digest())
+    return f"{payload_b64}.{sig}"
+
+
+async def _provision_sso_user(client, admin_token, email, role):
+    """Designate an SSO user BY EMAIL via the admin REST (the email surface):
+    token-less + role-bearing. The email-based endpoint is NOT built yet, so the
+    caller treats any non-2xx as 'not wired' and Skips."""
+    return await client.post(
+        f"{API}/admin/users",
+        headers=_bearer(admin_token),
+        json={"email": email, "role": role, "sso": True},
+        timeout=15,
+    )
+
+
+async def _sso_login_or_skip(client, owner, email, role):
+    """Provision an SSO user by email, then mock-login (forged bearer). Raises
+    Skip until BOTH the email-provisioning endpoint and SSO session auth are
+    wired — so SECTION 6 stays inert (skipped, not red) until the backend lands:
+    change A (role-derived admin) + the admin email surface + a configured SSO
+    provider (so SessionAuthenticator is active)."""
+    resp = await _provision_sso_user(client, owner, email, role)
+    if resp.status_code not in (200, 201):
+        raise Skip(
+            f"email-based SSO provisioning not wired ({resp.status_code} for {email}); "
+            "needs the admin REST email surface"
+        )
+    # The backend derives a valid user_id from the email (emails aren't valid
+    # user ids); forge the SSO session with THAT id so it matches the record.
+    user_id = (resp.json() or {}).get("user_id")
+    if not user_id:
+        raise Skip(f"SSO provisioning returned no user_id for {email}: {resp.text}")
+    bearer = _mint_sso_bearer(owner, SSO_TENANT, user_id)
+    probe = await client.get(f"{API}/session", headers=_bearer(bearer), timeout=10)
+    if probe.status_code in (401, 403):
+        raise Skip(
+            f"forged SSO bearer rejected ({probe.status_code}); SSO session auth not wired "
+            "(serve needs an SSO provider configured to activate SessionAuthenticator)"
+        )
+    return bearer
+
+
 def _offered_provider_tools_from_log(thread_id):
     """Read the OFFERED model surface for `thread_id` from SERVE_LOG.
 
@@ -880,6 +976,76 @@ async def check_section5_member_memory_isolation(client, state):
         )
 
 
+async def check_section6_sso_admin_parity(client, state):
+    """SECTION 6 (SSO ADMIN = SSO_ADMIN_EMAIL): an SSO admin must do
+    everything a token (non-SSO) admin can — reach the admin command plane
+    (manage members over REST) AND get the full tool surface. Mocked SSO login.
+    SKIPs until the SSO backend lands; FAILs if an SSO admin authenticates but is
+    denied the command plane — exactly the gap change A (role-derived operator
+    capability) closes."""
+    bearer = await _sso_login_or_skip(client, state["owner"], SSO_ADMIN_EMAIL, "admin")
+    # 1) Command plane: list users + change a member's capability, like a token admin.
+    listing = await client.get(f"{API}/admin/users", headers=_bearer(bearer), timeout=15)
+    assert listing.status_code == 200, (
+        f"SSO admin must reach the admin command plane (GET /admin/users), got "
+        f"{listing.status_code} — role-derived operator capability (change A) is missing"
+    )
+    grant = await client.put(
+        f"{API}/admin/users/alice/capabilities/{SHELL_CAP_ID}",
+        headers=_bearer(bearer),
+        json={"availability": "available"},
+        timeout=15,
+    )
+    assert grant.status_code == 200, (
+        f"SSO admin must manage members like a token admin, got {grant.status_code} {grant.text}"
+    )
+    # 2) Full tool surface (token-admin parity: shell present, ~full builtin set).
+    builtins, count, _, _ = await _offered_builtins(client, bearer)
+    assert SHELL_TOOL in builtins, f"SSO admin must get the full surface (shell); got {sorted(builtins)}"
+    assert (count or 0) >= 30, f"SSO admin must see the full builtin surface (~35), got count={count}"
+
+
+async def check_section6_sso_carl_still_member(client, state):
+    """SECTION 6 (carl, SSO MEMBER = SSO_MEMBER_EMAIL): carl moved to SSO but
+    still does what carl does — EXACTLY the essential baseline, graceful, no
+    leaked builtin, no approval gate. Mocked SSO login. SKIPs until the SSO
+    backend lands."""
+    bearer = await _sso_login_or_skip(client, state["owner"], SSO_MEMBER_EMAIL, "member")
+    builtins, count, _, items = await _offered_builtins(client, bearer)
+    assert builtins == ESSENTIAL_BUILTINS, (
+        f"SSO carl must be exactly the essential baseline, got {sorted(builtins)} "
+        f"(count={count}); diff={sorted(builtins ^ ESSENTIAL_BUILTINS)}"
+    )
+    status = _items_run_status(items)
+    assert status != "failed", f"SSO carl must answer gracefully, not a terminal failure; run_status={status}"
+    assert not _items_have_approval_gate(items), "SSO carl must not park on an approval gate"
+
+
+async def check_section6_sso_memory_write_persists(client, state):
+    """SECTION 6: an SSO user can actually WRITE persistent memory — the exact
+    path the `sso-<id>` colon bug broke (memory failed with invalid_input for SSO
+    users while token users were fine, because the derived user_id had a reserved
+    ':' segment). Drive a real memory_write turn as the SSO member, then confirm
+    the doc landed by reading the member's OWN confined memory back via /fs.
+    SKIPs until SSO is wired; FAILS if the write doesn't persist."""
+    bearer = await _sso_login_or_skip(client, state["owner"], SSO_MEMORY_EMAIL, "member")
+    thread_id = await _create_thread(client, bearer)
+    await _post_message(
+        client,
+        thread_id,
+        bearer,
+        "Save a short note to your long-term memory now, using your memory_write "
+        "tool, so you can recall it later.",
+    )
+    files = await _poll_member_memory_files(client, bearer, "")
+    assert files, (
+        "SSO user's memory_write did not persist: after asking to save a note, the "
+        "user's own memory is still empty. This is the SSO-scoped memory break "
+        "(e.g. a reserved ':' in the derived user_id segment) — token users are "
+        "unaffected, so it only surfaces for an SSO identity."
+    )
+
+
 CHECKS = [
     ("S1 accounts + roles", check_section1_accounts),
     ("S2 allow-list grants", check_section2_grants),
@@ -897,6 +1063,9 @@ CHECKS = [
     ("S4.16 approval pref on available cap", check_section4_step16_approval_pref_available),
     ("S4.16 approval pref on unavailable cap", check_section4_step16_approval_pref_unavailable),
     ("S5 memory isolation: bob hidden from alice + admin + owner", check_section5_member_memory_isolation),
+    ("S6 SSO admin parity (SSO_ADMIN_EMAIL)", check_section6_sso_admin_parity),
+    ("S6 SSO carl still member (SSO_MEMBER_EMAIL)", check_section6_sso_carl_still_member),
+    ("S6 SSO memory_write persists (real turn)", check_section6_sso_memory_write_persists),
 ]
 
 

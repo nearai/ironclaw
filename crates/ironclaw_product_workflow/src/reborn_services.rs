@@ -2815,8 +2815,27 @@ impl RebornServicesApi for RebornServices {
         if request.role.is_owner() {
             return Err(capability_policy_forbidden());
         }
-        let target = UserId::new(request.user_id.clone())
-            .map_err(|_| capability_policy_invalid_request())?;
+        // Identity + token policy: an SSO user is provisioned BY EMAIL
+        // (token-less — they authenticate via their SSO session, not a minted
+        // login bearer) with a derived id; a directory-token user is provisioned
+        // by user_id and gets a one-time login bearer. Exactly one is required.
+        let (target, token, token_hash) =
+            match (request.email.as_deref(), request.user_id.as_deref()) {
+                (Some(email), _) => (
+                    crate::capability_policy::sso_user_id_from_email(email)
+                        .map_err(|_| capability_policy_invalid_request())?,
+                    None,
+                    None,
+                ),
+                (None, Some(user_id)) => {
+                    let id = UserId::new(user_id.to_string())
+                        .map_err(|_| capability_policy_invalid_request())?;
+                    let token = generate_login_token();
+                    let hash = hash_login_token(&token);
+                    (id, Some(token), Some(hash))
+                }
+                (None, None) => return Err(capability_policy_invalid_request()),
+            };
         let owner_id = self.capability_policy_owner_or_unavailable()?;
         if &target == owner_id {
             // The env owner id is reserved and is never a directory row.
@@ -2827,12 +2846,12 @@ impl RebornServicesApi for RebornServices {
             ));
         }
         let directory = self.user_directory_or_unavailable()?;
-        let token = generate_login_token();
         let now = Utc::now();
+        let response_user_id = target.as_str().to_string();
         let record = UserDirectoryRecord {
             user_id: target,
             role: request.role,
-            token_hash: hash_login_token(&token),
+            token_hash,
             grants: BTreeMap::new(),
             created_at: now,
             updated_at: now,
@@ -2842,9 +2861,9 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_user_directory_error)?;
         Ok(AdminUserResponse {
-            user_id: request.user_id,
+            user_id: response_user_id,
             role: request.role,
-            token: Some(token),
+            token,
         })
     }
 

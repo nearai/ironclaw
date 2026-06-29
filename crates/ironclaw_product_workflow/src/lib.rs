@@ -90,6 +90,7 @@ pub use capability_policy::{
     AdminUserResponse, AdminUserSummary, CapabilityAvailability, ESSENTIAL_MEMBER_CAPABILITIES,
     UserDirectoryError, UserDirectoryRecord, UserDirectoryStore, UserRole, capability_available,
     generate_login_token, hash_login_token, is_valid_capability_id, member_allowed_capability_ids,
+    sso_user_id_from_email,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,

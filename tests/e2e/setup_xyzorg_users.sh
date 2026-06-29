@@ -162,6 +162,24 @@ grant_capability() {
   return 1
 }
 
+# create_sso_user <admin> <email> <role> — provision an SSO user BY EMAIL
+# (token-less: the user logs in via Google SSO, so no bearer is minted). The
+# email-based admin endpoint is NOT built yet, so this call is expected to fail
+# (400/404/422) until the admin email surface lands; we log the code and keep
+# going so the rest of setup still runs.
+create_sso_user() {
+  admin="$1"; email="$2"; role="$3"
+  body="$(curl -sS -m 15 -w $'\n%{http_code}' -X POST "${API}/admin/users" \
+    -H "Authorization: Bearer ${admin}" -H "Content-Type: application/json" \
+    -d "{\"email\":\"${email}\",\"role\":\"${role}\",\"sso\":true}")"
+  code="$(printf '%s' "$body" | tail -n1)"
+  if [ "$code" = "200" ] || [ "$code" = "201" ]; then
+    printf '  ✓ SSO %-24s role=%-7s (token-less)\n' "$email" "$role" >&2
+  else
+    printf '  … SSO %-24s role=%-7s -> HTTP %s (email endpoint not wired yet)\n' "$email" "$role" "$code" >&2
+  fi
+}
+
 # --- create users + roles --------------------------------------------------
 echo "Target:   ${BASE_URL}"
 echo "Owner:    director (env bearer from ${ENV_FILE##*/}; not created via REST)"
@@ -199,6 +217,21 @@ for member in alice bob carl; do
   done
   printf '  %-6s grant=[%s] granted=%d\n' "$member" "$allow" "$granted"
 done
+
+# --- SSO users (email-keyed, token-less) -----------------------------------
+# Two accounts that authenticate via Google SSO (mocked in the e2e validator;
+# real Google for manual local verification): a NEW admin, and carl — who has
+# moved from a directory token to SSO. Created BY EMAIL through the admin REST;
+# no login token is minted (they log in via SSO). The email-based endpoint is
+# NOT built yet, so these calls log + continue (see create_sso_user).
+echo
+# Emails are env-driven so no real address is committed; defaults use the
+# fictional test org. Set SSO_ADMIN_EMAIL / SSO_MEMBER_EMAIL to real accounts.
+SSO_ADMIN_EMAIL="${SSO_ADMIN_EMAIL:-product@xyzorg.com}"
+SSO_MEMBER_EMAIL="${SSO_MEMBER_EMAIL:-carl@xyzorg.com}"
+echo "[+] Provisioning SSO users by email (admin + carl; override via SSO_ADMIN_EMAIL/SSO_MEMBER_EMAIL)..."
+create_sso_user "${admin_bearer}" "${SSO_ADMIN_EMAIL}" admin
+create_sso_user "${admin_bearer}" "${SSO_MEMBER_EMAIL}" member
 
 # --- login tokens ----------------------------------------------------------
 echo

@@ -140,7 +140,7 @@ where
             .await?
             .users
             .into_values()
-            .find(|record| record.token_hash == token_hash))
+            .find(|record| record.token_hash.as_deref() == Some(token_hash)))
     }
 
     async fn insert(&self, record: UserDirectoryRecord) -> Result<(), UserDirectoryError> {
@@ -279,10 +279,26 @@ impl DirectoryAuthenticator {
 #[async_trait]
 impl WebuiAuthenticator for DirectoryAuthenticator {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
-        // THE owner (env bearer) wins; it is never a directory row.
+        // Inner authenticator (env owner bearer + SSO session) is tried first.
         if let Some(authentication) = self.env.authenticate(token).await {
+            // The env owner is already operator. An SSO/session user is `::user`
+            // even when their directory role is admin — the session layer has no
+            // notion of the capability-policy role. Derive operator FROM THE ROLE
+            // here so an SSO admin reaches the operator command plane exactly like
+            // a token admin. The directory IS the real admin authorization
+            // boundary, so this is auth-method-agnostic, not an SSO bypass.
+            if authentication.capabilities.operator_webui_config {
+                return Some(authentication);
+            }
+            if let Ok(Some(record)) = self.directory.get(&authentication.user_id).await
+                && record.role.is_admin()
+            {
+                return Some(WebuiAuthentication::operator(record.user_id));
+            }
             return Some(authentication);
         }
+        // No inner match: a directory-token user's minted login bearer, matched
+        // by sha256(token). (SSO users are token-less, so they never reach here.)
         let token_hash = hash_login_token(token);
         let record = self
             .directory
@@ -414,7 +430,7 @@ mod tests {
         UserDirectoryRecord {
             user_id: UserId::new(user_id).expect("valid test user id"),
             role,
-            token_hash: "hash".to_string(),
+            token_hash: Some("hash".to_string()),
             grants: grants
                 .iter()
                 .map(|(cap, availability)| ((*cap).to_string(), *availability))
