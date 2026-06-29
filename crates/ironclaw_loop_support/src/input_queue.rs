@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
-use ironclaw_threads::{SessionThreadError, SessionThreadService, ThreadMessageId, ThreadScope};
+use ironclaw_threads::{SessionThreadService, ThreadMessageId, ThreadScope};
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{LoopInput, LoopInputAckToken, LoopInputCursorToken},
@@ -74,11 +74,6 @@ pub enum HostInputQueueError {
     Unavailable { reason: String },
     #[error("cursor invalid for run: {reason}")]
     InvalidCursor { reason: String },
-    #[error("failed to update queued message status: {source}")]
-    ThreadStatusUpdate {
-        #[source]
-        source: SessionThreadError,
-    },
     #[error("input queue internal error")]
     Internal,
 }
@@ -330,8 +325,18 @@ impl HostInputQueue for InMemoryHostInputQueue {
             }
             (tokens_to_ack, updates)
         };
+        // The queued-message status flip (`Queued` → `Submitted`) is best-effort
+        // bookkeeping for the transcript badge, NOT part of consuming the input.
+        // The input has already been drained and delivered to the model by the
+        // time we ack; failing the ack here would map to a terminal
+        // `HostUnavailable` and kill the whole run for a cosmetic status write
+        // (see `.claude/rules/agent-loop-capabilities.md`, Invariant 1). So a
+        // status-update failure is logged with its cause and swallowed — the ack
+        // still advances so the input is never redelivered. A stale "queued"
+        // badge is reconcilable; a dead run is not.
         for update in updates {
-            self.thread_service
+            if let Err(source) = self
+                .thread_service
                 .mark_message_submitted(
                     &update.scope,
                     &update.thread_id,
@@ -340,8 +345,18 @@ impl HostInputQueue for InMemoryHostInputQueue {
                     run_id.to_string(),
                 )
                 .await
-                .map_err(|source| HostInputQueueError::ThreadStatusUpdate { source })?;
+            {
+                tracing::warn!(
+                    component = "host_input_queue",
+                    operation = "mark_message_submitted",
+                    %run_id,
+                    error = %source,
+                    "queued-message status flip failed after the input was consumed; \
+                     acking anyway so the run continues (transcript badge may lag)"
+                );
+            }
         }
+        let acked_now: HashSet<LoopInputAckToken> = tokens_to_ack.iter().cloned().collect();
         let mut state = self
             .state
             .lock()
@@ -350,11 +365,25 @@ impl HostInputQueue for InMemoryHostInputQueue {
         for token in tokens_to_ack {
             queue.acked.insert(token);
         }
+        // Drop the consumed entries' payloads (`LoopInput` + `ThreadScope`
+        // binding) to bound per-run memory over a long-lived run. The ack token
+        // stays in `acked` so a duplicate/redelivered ack is still skipped
+        // idempotently by the guard above; `next_sequence` is a separate
+        // high-water mark, so removing entries never lets a stale cursor look
+        // "ahead of the queue".
+        queue
+            .entries
+            .retain(|entry| !acked_now.contains(&entry.envelope.ack_token));
         Ok(())
     }
 }
 
-fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostInputQueueError> {
+// The cursor/ack token helpers below are shared with the durable queue
+// (`durable_input_queue.rs`) so both backends speak the identical
+// `input-cursor:{n}` / `input-ack:{n}` token wire format. A durable queue
+// rehydrated after restart must mint the same tokens the loop's persisted
+// input cursor already references, so this format is the single source of truth.
+pub(crate) fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostInputQueueError> {
     if token.is_origin() {
         return Ok(0);
     }
@@ -367,12 +396,22 @@ fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostInputQueueEr
         })
 }
 
-fn cursor_token(sequence: u64) -> Result<LoopInputCursorToken, HostInputQueueError> {
+pub(crate) fn cursor_token(sequence: u64) -> Result<LoopInputCursorToken, HostInputQueueError> {
     LoopInputCursorToken::new(format!("input-cursor:{sequence}"))
         .map_err(|_| HostInputQueueError::Internal)
 }
 
-fn ack_token(sequence: u64) -> Result<LoopInputAckToken, HostInputQueueError> {
+pub(crate) fn ack_token(sequence: u64) -> Result<LoopInputAckToken, HostInputQueueError> {
     LoopInputAckToken::new(format!("input-ack:{sequence}"))
         .map_err(|_| HostInputQueueError::Internal)
+}
+
+pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQueueError> {
+    token
+        .as_str()
+        .strip_prefix("input-ack:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| HostInputQueueError::InvalidCursor {
+            reason: "input ack token is malformed".to_string(),
+        })
 }

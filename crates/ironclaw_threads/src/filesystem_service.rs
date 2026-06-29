@@ -1337,6 +1337,18 @@ where
             _ => None,
         };
         self.apply_message_update(scope, thread_id, message_id, |message| {
+            // Idempotent re-submit: if this exact run already submitted the
+            // message, a redelivered/duplicate ack is a no-op rather than an
+            // `InvalidMessageTransition`. The queued-message consumer
+            // (`InMemoryHostInputQueue::ack_consumed`) drives this transition on
+            // an at-least-once ack path, so the same run can legitimately ack
+            // twice. The terminal-state guard is preserved: a *different* run,
+            // or a `RejectedBusy` row, still fails through `ensure_user_accepted`.
+            if message.status == MessageStatus::Submitted
+                && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+            {
+                return Ok(());
+            }
             ensure_user_accepted(message, "mark_message_submitted")?;
             if message.status == MessageStatus::Queued
                 && let Some(sequence) = queued_sequence

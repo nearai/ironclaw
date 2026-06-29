@@ -3089,13 +3089,52 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
-    let host_input_queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
-        Arc::clone(&thread_service),
-    ));
-    let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
-        host_input_queue.clone();
-    let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =
-        host_input_queue.clone();
+    // Steering/followup input queue. When a durable run-scoped filesystem is
+    // available (local-dev/libSQL/Postgres), use the durable
+    // `FilesystemHostInputQueue` so a message queued while a run is busy
+    // survives a daemon restart — the scheduler re-claims the run from its
+    // checkpoint and drains the persisted input. The in-memory queue is the
+    // fallback only where no durable filesystem is wired (pure in-memory
+    // profiles), and matches the prior behavior there. Mirrors the
+    // `Some(local_runtime) => durable / None => fallback` shape used for the
+    // identity/profile sources below.
+    let (host_input_queue_reader, host_input_enqueue): (
+        Arc<dyn ironclaw_loop_support::HostInputQueue>,
+        Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
+    ) = {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(local_runtime) = local_runtime {
+                let owner_scope = ResourceScope {
+                    tenant_id: thread_scope.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                    agent_id: Some(thread_scope.agent_id.clone()),
+                    project_id: thread_scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                let durable = Arc::new(ironclaw_loop_support::FilesystemHostInputQueue::new(
+                    Arc::clone(&local_runtime.subagent_goal_filesystem),
+                    owner_scope,
+                    Arc::clone(&thread_service),
+                ));
+                (durable.clone(), durable)
+            } else {
+                let queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+                    Arc::clone(&thread_service),
+                ));
+                (queue.clone(), queue)
+            }
+        }
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        {
+            let queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+                Arc::clone(&thread_service),
+            ));
+            (queue.clone(), queue)
+        }
+    };
 
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),

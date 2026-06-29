@@ -1073,6 +1073,89 @@ async fn rejected_busy_cannot_be_marked_submitted_is_terminal() {
 }
 
 #[tokio::test]
+async fn mark_message_submitted_is_idempotent_for_same_run() {
+    // The queued-message consumer (`InMemoryHostInputQueue::ack_consumed`) drives
+    // `mark_message_submitted` on an at-least-once ack path, so the SAME run may
+    // submit a message twice. A redelivered submit for the same run is an
+    // idempotent no-op; a DIFFERENT run is still rejected as an invalid
+    // transition (a message belongs to the run that first consumed it).
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("idempotent submit"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-1".into(),
+            "run-1".into(),
+        )
+        .await
+        .expect("first submit");
+
+    // Same run re-submits (redelivered ack): must be an idempotent no-op.
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-1".into(),
+            "run-1".into(),
+        )
+        .await
+        .expect("idempotent re-submit for the same run must succeed");
+
+    // A different run must NOT be able to claim an already-submitted message.
+    let foreign = service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-2".into(),
+            "run-2".into(),
+        )
+        .await;
+    assert!(
+        matches!(
+            foreign,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "a different run must not re-submit an already-submitted message, got {foreign:?}"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
+}
+
+#[tokio::test]
 async fn assistant_streaming_updates_one_draft_and_finalizes_one_canonical_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service

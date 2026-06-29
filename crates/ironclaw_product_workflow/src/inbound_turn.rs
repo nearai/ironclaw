@@ -874,6 +874,21 @@ impl AcceptedProductInboundTurn {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                // Mark the message `Queued` BEFORE the steering input becomes
+                // drainable so the loop's consumer always observes a `Queued`
+                // row (deterministic `Queued` → `Submitted`), instead of racing
+                // a post-enqueue status write. If the enqueue then fails, roll
+                // the row back to `RejectedBusy`. (`mark_message_queued_or_consumed`
+                // is lenient — a fast loop that consumed the input first leaves
+                // the row `Submitted`, which it accepts.)
+                mark_message_queued_or_consumed(
+                    thread_service,
+                    &thread_scope,
+                    &binding.thread_id,
+                    message_id,
+                    busy.active_run_id,
+                )
+                .await?;
                 match crate::steering::enqueue_busy_steering(
                     turn_coordinator,
                     input_enqueue,
@@ -886,25 +901,16 @@ impl AcceptedProductInboundTurn {
                 )
                 .await
                 {
-                    Ok(()) => {
-                        mark_message_queued_or_consumed(
-                            thread_service,
-                            &thread_scope,
-                            &binding.thread_id,
-                            message_id,
-                            busy.active_run_id,
-                        )
-                        .await?;
-                        Ok(InboundTurnOutcome::DeferredBusy {
-                            accepted_message_ref,
-                            active_run_id: busy.active_run_id,
-                            binding,
-                        })
-                    }
+                    Ok(()) => Ok(InboundTurnOutcome::DeferredBusy {
+                        accepted_message_ref,
+                        active_run_id: busy.active_run_id,
+                        binding,
+                    }),
                     // No input queue wired for this runtime: queueing is
                     // disabled, so reject the message as busy instead of
                     // deferring it. Single mapped fallback for the "no steering"
-                    // mode (see RejectingInputEnqueue).
+                    // mode (see RejectingInputEnqueue). This also rolls the
+                    // `Queued` row written above back to `RejectedBusy`.
                     Err(crate::steering::SteeringEnqueueError::Enqueue(
                         HostInputQueueError::Unavailable { .. },
                     )) => {
@@ -924,18 +930,38 @@ impl AcceptedProductInboundTurn {
                             binding,
                         })
                     }
-                    Err(crate::steering::SteeringEnqueueError::InvalidMessageRef(reason)) => {
-                        Err(ProductWorkflowError::TurnSubmissionRejected {
-                            reason: format!("invalid steering message ref: {reason}"),
-                        })
-                    }
-                    Err(crate::steering::SteeringEnqueueError::RunState(error)) => {
-                        Err(ProductWorkflowError::TurnSubmissionFailed { error })
-                    }
-                    Err(crate::steering::SteeringEnqueueError::Enqueue(error)) => {
-                        Err(ProductWorkflowError::Transient {
-                            reason: format!("failed to enqueue steering input: {error}"),
-                        })
+                    // Any other enqueue failure leaves the `Queued` row with no
+                    // drainable input. Best-effort roll it back to `RejectedBusy`
+                    // (preserving the original error) before surfacing it.
+                    Err(other) => {
+                        if let Err(rollback) = thread_service
+                            .mark_message_rejected_busy(
+                                &thread_scope,
+                                &binding.thread_id,
+                                message_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %rollback,
+                                "failed to roll back queued message to rejected-busy after steering enqueue failure"
+                            );
+                        }
+                        match other {
+                            crate::steering::SteeringEnqueueError::InvalidMessageRef(reason) => {
+                                Err(ProductWorkflowError::TurnSubmissionRejected {
+                                    reason: format!("invalid steering message ref: {reason}"),
+                                })
+                            }
+                            crate::steering::SteeringEnqueueError::RunState(error) => {
+                                Err(ProductWorkflowError::TurnSubmissionFailed { error })
+                            }
+                            crate::steering::SteeringEnqueueError::Enqueue(error) => {
+                                Err(ProductWorkflowError::Transient {
+                                    reason: format!("failed to enqueue steering input: {error}"),
+                                })
+                            }
+                        }
                     }
                 }
             }

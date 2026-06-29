@@ -3226,6 +3226,22 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
+                // Mark the message `Queued` BEFORE the steering input becomes
+                // drainable, so the loop's consumer always observes a `Queued`
+                // row and performs a deterministic `Queued` → `Submitted`
+                // transition. Enqueuing first leaves a window where the run can
+                // drain + submit the input while the transcript still reads
+                // `Accepted`, producing an out-of-order status write. If the
+                // enqueue then fails, roll the row back to `RejectedBusy` so it
+                // never sticks in `Queued` with no backing input.
+                mark_message_queued_or_replay(
+                    &*self.thread_service,
+                    &thread_scope,
+                    &handoff,
+                    &client_action_id,
+                    busy.active_run_id.to_string(),
+                )
+                .await?;
                 match crate::steering::enqueue_busy_steering(
                     &*self.turn_coordinator,
                     self.input_enqueue.as_ref(),
@@ -3239,14 +3255,6 @@ impl RebornServicesApi for RebornServices {
                 .await
                 {
                     Ok(()) => {
-                        mark_message_queued_or_replay(
-                            &*self.thread_service,
-                            &thread_scope,
-                            &handoff,
-                            &client_action_id,
-                            busy.active_run_id.to_string(),
-                        )
-                        .await?;
                         let notice = rejected_busy_notice(busy.status);
                         Ok(RebornSubmitTurnResponse::DeferredBusy {
                             thread_id: handoff.thread_id,
@@ -3260,7 +3268,9 @@ impl RebornServicesApi for RebornServices {
                     // No input queue wired for this runtime: queueing is
                     // disabled, so reject the message as busy instead of
                     // deferring it. This is the single mapped fallback for the
-                    // "no steering" mode (see RejectingInputEnqueue).
+                    // "no steering" mode (see RejectingInputEnqueue). The
+                    // rejected-busy mark also rolls the `Queued` row written
+                    // above back to its terminal `RejectedBusy` state.
                     Err(crate::steering::SteeringEnqueueError::Enqueue(
                         HostInputQueueError::Unavailable { .. },
                     )) => {
@@ -3281,17 +3291,42 @@ impl RebornServicesApi for RebornServices {
                             notice,
                         })
                     }
-                    Err(crate::steering::SteeringEnqueueError::InvalidMessageRef(_)) => {
-                        Err(RebornServicesError::internal_invariant())
-                    }
-                    Err(crate::steering::SteeringEnqueueError::RunState(error)) => {
-                        Err(map_turn_error(error))
-                    }
-                    Err(crate::steering::SteeringEnqueueError::Enqueue(error)) => {
-                        // Carry the cause to the server log; the user-facing
-                        // surface stays the sanitized 503 (error-handling.md).
-                        tracing::warn!(%error, "failed to enqueue steering input for busy run");
-                        Err(RebornServicesError::service_unavailable(false))
+                    // Any other enqueue failure leaves the `Queued` row above
+                    // with no drainable input. Best-effort roll it back to
+                    // `RejectedBusy` (preserving the original error), then
+                    // surface the sanitized failure.
+                    Err(other) => {
+                        if let Err(rollback) = mark_message_rejected_busy_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %rollback,
+                                "failed to roll back queued message to rejected-busy after steering enqueue failure"
+                            );
+                        }
+                        match other {
+                            crate::steering::SteeringEnqueueError::InvalidMessageRef(_) => {
+                                Err(RebornServicesError::internal_invariant())
+                            }
+                            crate::steering::SteeringEnqueueError::RunState(error) => {
+                                Err(map_turn_error(error))
+                            }
+                            crate::steering::SteeringEnqueueError::Enqueue(error) => {
+                                // Carry the cause to the server log; the
+                                // user-facing surface stays the sanitized 503
+                                // (error-handling.md).
+                                tracing::warn!(
+                                    %error,
+                                    "failed to enqueue steering input for busy run"
+                                );
+                                Err(RebornServicesError::service_unavailable(false))
+                            }
+                        }
                     }
                 }
             }

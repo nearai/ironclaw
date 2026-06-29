@@ -1284,6 +1284,143 @@ async fn busy_thread_queue_submit_tolerates_input_ack_before_queued_mark() {
 }
 
 #[tokio::test]
+async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
+    // Regression for the "The run could not start the agent runtime."
+    // (driver_unavailable) run-kill: a queued message's status flip
+    // (`Queued` → `Submitted`) failing inside `ack_consumed` used to surface as
+    // `ThreadStatusUpdate` → `AgentLoopHostErrorKind::Unavailable` → a terminal
+    // `HostUnavailable` that killed the whole run — even though the input had
+    // already been drained and delivered to the model. The status write is
+    // best-effort bookkeeping; its failure must be swallowed and the ack must
+    // still advance.
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue = InMemoryHostInputQueue::new(thread_service);
+    let run_id = TurnRunId::new();
+
+    // Enqueue a queued message whose backing thread/message does not exist, so
+    // the in-queue `mark_message_submitted` is guaranteed to fail.
+    let envelope = queue
+        .enqueue_queued_message(ironclaw_loop_support::EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ThreadScope {
+                tenant_id: TenantId::new("ghost-tenant").unwrap(),
+                agent_id: AgentId::new("ghost-agent").unwrap(),
+                project_id: None,
+                owner_user_id: None,
+                mission_id: None,
+            },
+            thread_id: ThreadId::new("ghost-thread").unwrap(),
+            message_id: ironclaw_threads::ThreadMessageId::new(),
+            input: LoopInput::Steering {
+                message_ref: ironclaw_turns::LoopMessageRef::new("msg:ghost").unwrap(),
+            },
+        })
+        .await
+        .expect("enqueue");
+
+    // The status flip fails internally, but the ack itself must succeed...
+    queue
+        .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+        .await
+        .expect("ack_consumed must not fail when the queued-message status flip fails");
+
+    // ...and the token must be recorded as consumed so the input is not
+    // redelivered (which would loop the model on the same steering input).
+    let batch = queue
+        .next_after(
+            run_id,
+            LoopInputCursorToken::new("input-cursor:origin".to_string()).unwrap(),
+            8,
+        )
+        .await
+        .expect("next_after");
+    assert!(
+        batch.inputs.is_empty(),
+        "acked input must not be redelivered after a swallowed status-update failure"
+    );
+}
+
+/// Records the transcript status of the queued message at the moment its
+/// steering input becomes drainable (i.e. when `enqueue_queued_message` runs).
+struct StatusObservingInputEnqueue {
+    inner: InMemoryHostInputQueue,
+    thread_service: Arc<dyn SessionThreadService>,
+    observed_status: Arc<Mutex<Option<MessageStatus>>>,
+}
+
+impl StatusObservingInputEnqueue {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner: InMemoryHostInputQueue::new(thread_service.clone()),
+            thread_service,
+            observed_status: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputEnqueuePort for StatusObservingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_support::EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope.clone(),
+                thread_id: request.thread_id.clone(),
+            })
+            .await
+            .expect("history at enqueue time");
+        let status = history
+            .messages
+            .iter()
+            .find(|message| message.message_id == request.message_id)
+            .map(|message| message.status);
+        *self.observed_status.lock().unwrap() = status;
+        self.inner.enqueue_queued_message(request).await
+    }
+}
+
+#[tokio::test]
+async fn busy_submit_marks_message_queued_before_input_is_drainable() {
+    // Layer 2 ordering guard: the busy-submit path must mark the message
+    // `Queued` BEFORE the steering input is enqueued (and thus drainable), so a
+    // fast loop never observes the message in `Accepted` while draining it. With
+    // the previous enqueue-first ordering the observed status here was
+    // `Accepted`.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let enqueue = Arc::new(StatusObservingInputEnqueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let observed = enqueue.observed_status.clone();
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = enqueue;
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_input_enqueue(input_enqueue);
+
+    let first = sample_user_message_envelope("queue-order1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-order2", "ordered second");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    assert!(matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }));
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        Some(MessageStatus::Queued),
+        "message must be Queued before the steering input becomes drainable"
+    );
+}
+
+#[tokio::test]
 async fn retry_validates_live_binding_before_accepted_message_replay() {
     let binding_service = FakeConversationBindingService::new();
     let binding_handle = binding_service.clone();

@@ -23,6 +23,7 @@ mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
 mod context_window_cache;
+mod durable_input_queue;
 mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -69,6 +70,7 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
+pub use durable_input_queue::FilesystemHostInputQueue;
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{

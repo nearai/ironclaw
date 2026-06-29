@@ -246,6 +246,19 @@ impl SessionThreadService for InMemorySessionThreadService {
             .iter()
             .position(|message| message.message_id == message_id)
             .ok_or(SessionThreadError::UnknownMessage { message_id })?;
+        // Idempotent re-submit: if this exact run already submitted the message,
+        // a redelivered/duplicate ack is a no-op rather than an
+        // `InvalidMessageTransition`. Mirrors the filesystem backend so the
+        // queued-message consumer's at-least-once ack path is tolerant on both
+        // stores. A *different* run, or a `RejectedBusy` row, still fails below.
+        {
+            let message = &thread.messages[message_index];
+            if message.status == MessageStatus::Submitted
+                && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+            {
+                return Ok(message.clone());
+            }
+        }
         let was_queued = {
             let message = &thread.messages[message_index];
             ensure_user_accepted(message, "mark_message_submitted")?;
