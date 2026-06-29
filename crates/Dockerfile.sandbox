@@ -29,7 +29,7 @@
 # We compile against the same Rust toolchain the host uses. Pinning to a
 # minor version keeps build-cache hit rates stable across reproducible
 # builds. Override at build time with `--build-arg RUST_VERSION=<v>`.
-ARG RUST_VERSION=1.92
+ARG RUST_VERSION=1.96
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 WORKDIR /build

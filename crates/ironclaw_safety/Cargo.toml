@@ -2,7 +2,7 @@
 name = "ironclaw_safety"
 version = "0.2.2"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.96"
 description = "Prompt injection defense, input validation, secret leak detection, and safety policy enforcement"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"

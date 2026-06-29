@@ -2,7 +2,7 @@
 name = "ironclaw_reborn_identity"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.96"
 description = "Canonical Reborn identity resolver: maps OAuth and external-channel actors to stable UserIds"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"

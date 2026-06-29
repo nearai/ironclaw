@@ -9,7 +9,7 @@
 #   docker run --rm -p 3005:3003 ironclaw-test
 
 # Stage 1: Build (libsql only — no PostgreSQL dependency)
-FROM rust:1.92-slim-bookworm AS builder
+FROM rust:1.96-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ \

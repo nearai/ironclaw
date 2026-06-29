@@ -14,7 +14,7 @@
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
 # Stage 1: Install cargo-chef
-FROM rust:1.92-bookworm AS chef
+FROM rust:1.96-bookworm AS chef
 
 RUN rustup target add wasm32-wasip2 \
     && cargo install --locked cargo-chef@0.1.77 wasm-tools@1.246.1

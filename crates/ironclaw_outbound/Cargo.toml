@@ -2,7 +2,7 @@
 name = "ironclaw_outbound"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.96"
 description = "Outbound egress and projection subscription policy storage for IronClaw Reborn"
 publish = false
 

@@ -2,7 +2,7 @@
 name = "ironclaw_slack_v2_adapter"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.96"
 description = "Slack v2 ProductAdapter for IronClaw Reborn (#3857 tracer-bullet)"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
