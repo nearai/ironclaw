@@ -599,14 +599,14 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    // TEMP(disable-spawn-subagents): explicit composition decision to remove the
-    // spawn_subagent capability from the model-facing surface across all
-    // profiles. Applied as the OUTERMOST decorator so it strips the capability
+    // Strip any capability in DISABLED_CAPABILITY_IDS from the model-facing
+    // surface, applied as the OUTERMOST decorator so it strips a capability
     // whether it was surfaced by `spawn_decorator` (the rich flavor-aware tool)
     // or by the host-runtime first-party manifest (the bare authorization stub).
     // This is a deny list — it takes effect regardless of the resolved profile
     // allow-set (which is `All` for top-level runs, making a profile allow-set
-    // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
+    // narrowing a no-op). The list is currently empty, so no capability is
+    // stripped and the decorator is skipped entirely.
     let disabled = DISABLED_CAPABILITY_IDS
         .iter()
         .map(|id| CapabilityId::new(*id))
@@ -708,11 +708,12 @@ where
 /// Outermost decorator that strips a caller-supplied deny list from every loop
 /// capability surface (tool definitions, visible descriptors, and invocation),
 /// regardless of the resolved profile allow-set.
-/// Capabilities temporarily removed from the model-facing surface as an
-/// explicit composition decision. Applied via an outermost
-/// [`CapabilitySurfaceDenyFilter`]. Empty this slice to re-enable everything.
-const DISABLED_CAPABILITY_IDS: &[&str] =
-    &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
+/// Capability ids removed from the model-facing surface as an explicit
+/// composition decision, applied via an outermost
+/// [`CapabilitySurfaceDenyFilter`]. Currently empty — add an id here to deny a
+/// capability across every surface path (tool definitions, visible descriptors,
+/// validate, register, invoke) regardless of the resolved profile allow-set.
+const DISABLED_CAPABILITY_IDS: &[&str] = &[];
 
 struct DisabledCapabilitiesDecorator {
     denied_capability_ids: Vec<CapabilityId>,
