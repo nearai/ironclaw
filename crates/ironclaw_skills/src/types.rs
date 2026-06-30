@@ -494,7 +494,7 @@ activation:
   patterns: ["(?i)\\b(write|draft)\\b.*\\b(email|letter)\\b"]
   max_context_tokens: 2000
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         assert_eq!(manifest.name, "writing-assistant");
         assert_eq!(manifest.activation.keywords.len(), 3);
     }
@@ -509,7 +509,7 @@ requires:
   config: ["/etc/vale.ini"]
   skills: ["commitment-triage", "commitment-digest"]
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         assert_eq!(manifest.requires.bins, vec!["vale"]);
         assert_eq!(manifest.requires.env, vec!["VALE_CONFIG"]);
         assert_eq!(manifest.requires.config, vec!["/etc/vale.ini"]);
@@ -564,7 +564,7 @@ credentials:
       scopes: ["https://www.googleapis.com/auth/gmail.modify"]
       test_url: "https://www.googleapis.com/oauth2/v1/userinfo"
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         assert_eq!(manifest.credentials.len(), 1);
         let cred = &manifest.credentials[0];
         assert_eq!(cred.name, "google_oauth_token");
@@ -597,7 +597,7 @@ credentials:
       prefix: "Token"
     hosts: ["api.custom.com"]
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let cred = &manifest.credentials[0];
         match &cred.location {
             SkillCredentialLocation::Header { name, prefix } => {
@@ -620,7 +620,7 @@ credentials:
       name: access_token
     hosts: ["api.legacy.com"]
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let cred = &manifest.credentials[0];
         match &cred.location {
             SkillCredentialLocation::QueryParam { name } => {
@@ -642,7 +642,7 @@ credentials:
       username: admin
     hosts: ["api.example.com"]
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let cred = &manifest.credentials[0];
         match &cred.location {
             SkillCredentialLocation::BasicAuth { username } => {
@@ -672,7 +672,7 @@ credentials:
         extra_params:
           grant_type: refresh_token
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let oauth = manifest.credentials[0].oauth.as_ref().unwrap();
         match &oauth.refresh {
             ProviderRefreshStrategy::Custom {
@@ -702,7 +702,7 @@ credentials:
       refresh:
         strategy: reauthorize_only
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let oauth = manifest.credentials[0].oauth.as_ref().unwrap();
         assert!(matches!(
             oauth.refresh,
@@ -716,7 +716,7 @@ credentials:
 name: simple-skill
 description: No credentials needed
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         assert!(manifest.credentials.is_empty());
     }
 
@@ -761,7 +761,7 @@ credentials:
         access_type: offline
         prompt: consent
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
         let oauth = manifest.credentials[0].oauth.as_ref().unwrap();
         assert!(oauth.use_pkce);
         assert_eq!(oauth.extra_params.get("access_type").unwrap(), "offline");

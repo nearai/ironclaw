@@ -1302,7 +1302,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
     let body = after_first_line.get(body_start..)?.trim_start_matches('\n');
 
     // Parse YAML frontmatter
-    let yaml: serde_json::Value = serde_yml::from_str(yaml_str).ok()?;
+    let yaml: serde_json::Value = serde_norway::from_str(yaml_str).ok()?;
 
     let id_str = yaml.get("id")?.as_str()?;
     let id = uuid::Uuid::parse_str(id_str).ok()?;

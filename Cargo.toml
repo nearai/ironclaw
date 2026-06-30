@@ -158,7 +158,7 @@ regex = "1"
 aho-corasick = "1"
 
 # YAML parsing for SKILL.md frontmatter
-serde_yml = "0.0.12"
+serde_norway = "0.9"
 
 # Filesystem paths
 dirs = "6"
