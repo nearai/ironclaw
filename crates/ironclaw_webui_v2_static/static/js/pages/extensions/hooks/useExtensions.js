@@ -2,6 +2,7 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import { useT } from "../../../lib/i18n.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
   fetchExtensions,
@@ -39,6 +40,7 @@ function catalogSort(a, b) {
 }
 
 export function useExtensions() {
+  const t = useT();
   const queryClient = useQueryClient();
 
   const statusQuery = useQuery({
@@ -82,13 +84,15 @@ export function useExtensions() {
           message:
             res.message ||
             res.instructions ||
-            `${displayName || "Extension"} installed`,
+            t("extensions.installedSuccess", {
+              name: displayName || t("extensions.defaultName"),
+            }),
         });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
       } else {
-        setActionResult({ type: "error", message: res.message || "Install failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.installFailed") });
       }
       invalidate();
     },
@@ -107,18 +111,20 @@ export function useExtensions() {
           message:
             res.message ||
             res.instructions ||
-            `${displayName || "Extension"} activated`,
+            t("extensions.activatedSuccess", {
+              name: displayName || t("extensions.defaultName"),
+            }),
         });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
       } else if (res.auth_url) {
         window.open(res.auth_url, "_blank", "noopener,noreferrer");
-        setActionResult({ type: "info", message: "Opening authentication…" });
+        setActionResult({ type: "info", message: t("extensions.openingAuth") });
       } else if (res.awaiting_token) {
-        setActionResult({ type: "info", message: "Configuration required" });
+        setActionResult({ type: "info", message: t("extensions.configurationRequired") });
       } else {
-        setActionResult({ type: "error", message: res.message || "Activation failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.activationFailed") });
       }
       invalidate();
     },
@@ -131,9 +137,14 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => removeExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} removed` });
+        setActionResult({
+          type: "success",
+          message: t("extensions.removedSuccess", {
+            name: displayName || t("extensions.defaultName"),
+          }),
+        });
       } else {
-        setActionResult({ type: "error", message: res.message || "Remove failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.removeFailed") });
       }
       invalidate();
     },

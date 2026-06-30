@@ -54,6 +54,20 @@ function presentationFor(state) {
   return state ? STATE_PRESENTATION[state] || null : null;
 }
 
+function stateFromThreadSummary(thread) {
+  const raw = String(thread?.state || "").toLowerCase();
+  if (raw === "processing" || raw === "running") return THREAD_STATE.RUNNING;
+  if (
+    raw === "needs_attention" ||
+    raw === "awaitingapproval" ||
+    raw === "awaiting_approval"
+  ) {
+    return THREAD_STATE.NEEDS_ATTENTION;
+  }
+  if (raw === "failed" || raw === "interrupted") return THREAD_STATE.FAILED;
+  return null;
+}
+
 function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDelete }) {
   const t = useT();
   const activityIso = threadActivityIso(thread);
@@ -168,7 +182,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
             thread=${thread}
             isActive=${thread.id === activeThreadId}
             isPinned=${pinnedIds.has(thread.id)}
-            presentation=${presentationFor(states.get(thread.id))}
+            presentation=${presentationFor(states.get(thread.id) || stateFromThreadSummary(thread))}
             onSelect=${onSelect}
             onDelete=${onDelete}
           />

@@ -686,6 +686,106 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   assert.equal(sendCalls, 0);
 });
 
+test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryable", async () => {
+  const threadId = "thread-1";
+  const failedMessage = {
+    id: "failed-1",
+    role: "user",
+    content: "retry me",
+    retryContent: "retry me",
+    status: "error",
+  };
+  const pendingGate = {
+    runId: "run-gated",
+    gateRef: "gate-shell",
+    kind: "gate",
+    toolName: "builtin.shell",
+  };
+  let renderedMessages = [failedMessage];
+  let seededMessages = null;
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [4, false],
+        [5, pendingGate],
+      ]),
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("approval gate should block before channel discovery");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("approval gate should block before channel discovery");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (_threadId, updater) => {
+        seededMessages =
+          typeof updater === "function"
+            ? updater(seededMessages ?? renderedMessages)
+            : updater;
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.retryMessage(failedMessage);
+
+  assert.equal(sendCalls, 0);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].id, failedMessage.id);
+  assert.equal(renderedMessages[0].content, failedMessage.content);
+  assert.equal(renderedMessages[0].retryContent, failedMessage.retryContent);
+  assert.equal(renderedMessages[0].status, failedMessage.status);
+  assert.equal(seededMessages.length, 1);
+  assert.equal(seededMessages[0].id, failedMessage.id);
+  assert.equal(seededMessages[0].content, failedMessage.content);
+  assert.equal(seededMessages[0].retryContent, failedMessage.retryContent);
+  assert.equal(seededMessages[0].status, failedMessage.status);
+});
+
 test("useChat.send: accepted send does not clear a gate received while in flight", async () => {
   const threadId = "thread-1";
   const replacementGate = {
