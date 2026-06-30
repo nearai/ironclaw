@@ -1536,7 +1536,17 @@ async fn mark_successful_fire_result(
         let Some(current) = fetch_record(conn, update.tenant_id, update.trigger_id).await? else {
             return Ok(None);
         };
+        if current.active_fire_slot != Some(update.fire_slot) {
+            return Ok(None);
+        }
+        if let Some(active_run_ref) = current.active_run_ref {
+            reject_run_ref_rewrite(active_run_ref, update.run_id)?;
+            return Ok(Some(current));
+        }
         let next_run_at = current.schedule.next_slot_after(update.fire_slot)?;
+        if let Some(nra) = next_run_at {
+            reject_non_future_next_run_at(update.fire_slot, nra)?;
+        }
         let mut rows = match next_run_at {
             Some(next) => {
                 let next_run_at_text = fmt_ts(&next);
@@ -1551,9 +1561,6 @@ async fn mark_successful_fire_result(
                              active_run_ref = ?7
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
-                           AND active_fire_slot = ?4
-                           AND active_run_ref IS NULL
-                           AND ?6 > ?4
                          RETURNING {TRIGGER_COLUMNS}"
                     ),
                     libsql::params_from_iter([
@@ -1582,8 +1589,6 @@ async fn mark_successful_fire_result(
                              active_run_ref = ?6
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
-                           AND active_fire_slot = ?4
-                           AND active_run_ref IS NULL
                          RETURNING {TRIGGER_COLUMNS}"
                     ),
                     libsql::params_from_iter([

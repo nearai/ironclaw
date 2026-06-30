@@ -14,7 +14,7 @@
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
 # Stage 1: Install cargo-chef
-FROM rust:1.92-bookworm AS chef
+FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS chef
 
 RUN rustup target add wasm32-wasip2 \
     && cargo install --locked cargo-chef@0.1.77 wasm-tools@1.246.1
@@ -76,7 +76,7 @@ RUN cargo build --profile dist --bin ironclaw
 # src/ edit. The extensions are standalone crates with their own lockfiles.
 FROM chef AS wasm-builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
 
 COPY tools-src/ tools-src/
 COPY channels-src/ channels-src/
@@ -123,8 +123,8 @@ RUN set -eux; \
 # Stage 5a: Shared runtime base
 FROM debian:bookworm-slim AS runtime-base
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw

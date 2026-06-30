@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProviderToolName,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
     ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -689,6 +689,9 @@ pub struct AgentLoopHostError {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -698,12 +701,18 @@ impl AgentLoopHostError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -1282,6 +1291,22 @@ pub struct ProviderToolCallReplay {
     pub signature: Option<String>,
 }
 
+impl ProviderToolCallReplay {
+    pub fn from_tool_call(tool_call: ProviderToolCall, provider_turn_id: String) -> Self {
+        Self {
+            provider_id: tool_call.provider_id,
+            provider_model_id: tool_call.provider_model_id,
+            provider_turn_id,
+            provider_call_id: tool_call.id,
+            provider_tool_name: tool_call.name,
+            arguments: tool_call.arguments,
+            response_reasoning: tool_call.response_reasoning,
+            reasoning: tool_call.reasoning,
+            signature: tool_call.signature,
+        }
+    }
+}
+
 #[async_trait]
 pub trait LoopModelPort: Send + Sync {
     async fn stream_model(
@@ -1341,6 +1366,44 @@ pub struct ProviderToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+impl ProviderToolDefinition {
+    pub fn from_parts(
+        capability_id: CapabilityId,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        let name = ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?;
+        Ok(Self::from_typed_parts(
+            capability_id,
+            name,
+            description,
+            parameters,
+        ))
+    }
+
+    /// Builds a definition from a provider-safe name that has already passed
+    /// [`ProviderToolName`] validation. Use [`Self::from_parts`] for raw
+    /// provider names that still need validation.
+    pub fn from_typed_parts(
+        capability_id: CapabilityId,
+        name: ProviderToolName,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            capability_id,
+            name,
+            description: description.into(),
+            parameters,
+        }
+    }
+
+    pub fn validate_name(name: &str) -> Result<ProviderToolName, AgentLoopHostError> {
+        ProviderToolName::new(name).map_err(provider_tool_name_error)
+    }
+}
+
 /// Tool call emitted by a provider-backed model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderToolCall {
@@ -1366,6 +1429,40 @@ pub struct ProviderToolCall {
     /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl ProviderToolCall {
+    pub fn from_parts(
+        provider_id: impl Into<String>,
+        provider_model_id: impl Into<String>,
+        turn_id: Option<String>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            provider_model_id: provider_model_id.into(),
+            turn_id,
+            id: id.into(),
+            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        })
+    }
+}
+
+fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
+    let detail = match error {
+        HostApiError::InvalidId { reason, .. } => reason,
+        other => other.to_string(),
+    };
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("tool name cannot be represented as a provider tool name: {detail}"),
+    )
 }
 
 /// Durable reference to provider tool-call metadata for tool-result replay.

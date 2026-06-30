@@ -11,17 +11,6 @@ on:
         required: false
         type: boolean
         default: true
-  pull_request:
-    branches:
-      - main
-  merge_group:
-    branches:
-      - main
-    types:
-      - checks_requested
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -36,8 +25,6 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
-  CARGO_HTTP_MULTIPLEXING: "false"
-  CARGO_NET_RETRY: "10"
 
 jobs:
   changes:
@@ -60,15 +47,10 @@ jobs:
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_core_code=true" >> "$GITHUB_OUTPUT"
           echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "workflow_call" ]; then
-            echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
           # Keep deterministic full browser E2E in its own scheduled/manual
-          # workflow. The merge queue runs only smoke coverage for web-risk
-          # changes so queued merges remain fast.
+          # workflow.
           echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
@@ -186,9 +168,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM artifacts for integration tests
@@ -234,9 +216,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: secret-store-contract
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run secret store contract
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -264,9 +246,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -302,9 +284,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: telegram-integration-${{ matrix.partition }}
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Install cargo-nextest
@@ -368,9 +350,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: telegram-tests
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -398,9 +380,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: slack-integration
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          # Keep saves to protected-branch runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary branches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build Slack WASM channel
         run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
       - name: Run Slack integration tests

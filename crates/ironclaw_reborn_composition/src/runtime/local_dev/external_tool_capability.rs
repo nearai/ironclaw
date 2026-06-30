@@ -27,7 +27,6 @@ use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKin
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
@@ -36,6 +35,7 @@ use ironclaw_turns::run_profile::{
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
 };
+use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 
 /// Wrap `inner` so the per-run external tools in `catalog` are offered to the
@@ -92,12 +92,12 @@ impl ToolSpec {
     }
 
     fn tool_definition(&self, capability_id: &CapabilityId) -> ProviderToolDefinition {
-        ProviderToolDefinition {
-            capability_id: capability_id.clone(),
-            name: self.tool_name.clone(),
-            description: self.description.clone(),
-            parameters: self.parameters_schema.clone(),
-        }
+        ProviderToolDefinition::from_typed_parts(
+            capability_id.clone(),
+            self.tool_name.clone(),
+            self.description.clone(),
+            self.parameters_schema.clone(),
+        )
     }
 }
 
@@ -111,20 +111,12 @@ struct ExternalToolCapabilityPort {
     surface: StdMutex<Option<ResolvedSurface>>,
 }
 
-/// Synthetic capability id for an external tool. Sanitizes the client tool name
-/// into a valid id under the `external_tool.` namespace.
-fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoopHostError> {
-    let sanitized: String = tool_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    CapabilityId::new(format!("external_tool.{sanitized}")).map_err(|_| {
+/// Synthetic capability id for an external tool under the `external_tool.`
+/// namespace.
+fn external_tool_capability_id(
+    provider_tool_name: &ProviderToolName,
+) -> Result<CapabilityId, AgentLoopHostError> {
+    CapabilityId::new(format!("external_tool.{}", provider_tool_name.as_str())).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "external tool name cannot be represented as a capability id",
@@ -135,10 +127,14 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
 fn provider_tool_name_for_external_tool(
     tool_name: &str,
 ) -> Result<ProviderToolName, AgentLoopHostError> {
-    ProviderToolName::new(tool_name).map_err(|_| {
+    let provider_tool_name = tool_name.to_ascii_lowercase();
+    ProviderToolDefinition::validate_name(&provider_tool_name).map_err(|error| {
         AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "external tool name cannot be represented as a provider tool name",
+            error.kind,
+            format!(
+                "external tool name cannot be represented as a provider tool name: {}",
+                error.safe_summary
+            ),
         )
     })
 }
@@ -201,7 +197,7 @@ impl ExternalToolCapabilityPort {
         // writing the output as the capability result (no host-side execution).
         if let Some(output) = self
             .catalog
-            .take_output_for_input_ref(self.run_id, &input_ref)
+            .output_for_input_ref(self.run_id, &input_ref)
             .await
             .map_err(catalog_error)?
         {
@@ -216,6 +212,12 @@ impl ExternalToolCapabilityPort {
                     display_preview: None,
                 })
                 .await?;
+            // The parked call is resolved: drop its pending-call record so a run
+            // that parks again on a later call does not re-surface this one.
+            self.catalog
+                .complete_call_for_input_ref(self.run_id, &input_ref)
+                .await
+                .map_err(catalog_error)?;
             return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: write.result_ref,
                 safe_summary: "external tool output".to_string(),
@@ -317,23 +319,32 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             )
             .await
             .map_err(catalog_error)?;
+        // Record the call (name/arguments/call_id) so a parked
+        // `BlockedExternalTool` run can render it as a `function_call` output
+        // item — the loop checkpoint that also holds this data has no external
+        // read path. Cleared in `complete_or_park` once the client output is
+        // consumed on resume.
+        self.catalog
+            .record_pending_call(
+                self.run_id,
+                PendingExternalCall::new(
+                    tool_call.id.clone(),
+                    tool_call.name.as_str().to_string(),
+                    tool_call.arguments.clone(),
+                ),
+            )
+            .await
+            .map_err(catalog_error)?;
         Ok(CapabilityCallCandidate {
             activity_id: activity_id.unwrap_or_default(),
             surface_version: self.surface_version()?,
             capability_id: capability_id.clone(),
             input_ref,
             effective_capability_ids: vec![capability_id],
-            provider_replay: Some(ProviderToolCallReplay {
-                provider_id: tool_call.provider_id,
-                provider_model_id: tool_call.provider_model_id,
+            provider_replay: Some(ProviderToolCallReplay::from_tool_call(
+                tool_call,
                 provider_turn_id,
-                provider_call_id: tool_call.id,
-                provider_tool_name: tool_call.name,
-                arguments: tool_call.arguments,
-                response_reasoning: tool_call.response_reasoning,
-                reasoning: tool_call.reasoning,
-                signature: tool_call.signature,
-            }),
+            )),
         })
     }
 
@@ -352,19 +363,19 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let mut capability_ids_by_tool_name = HashMap::new();
         let mut descriptors = Vec::new();
         for spec in specs {
+            let provider_tool_name = provider_tool_name_for_external_tool(spec.name())?;
             // Reject a client tool that shadows a host capability on the surface.
             if surface
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.safe_name == spec.name())
+                .any(|descriptor| descriptor.safe_name == provider_tool_name.as_str())
             {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     "external tool name shadows a host capability",
                 ));
             }
-            let tool_name = provider_tool_name_for_external_tool(spec.name())?;
-            let capability_id = external_tool_capability_id(spec.name())?;
+            let capability_id = external_tool_capability_id(&provider_tool_name)?;
             if surface
                 .descriptors
                 .iter()
@@ -376,9 +387,9 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool conflicts with another capability id",
                 ));
             }
-            capability_ids_by_tool_name.insert(tool_name.clone(), capability_id.clone());
+            capability_ids_by_tool_name.insert(provider_tool_name.clone(), capability_id.clone());
             let tool_spec = ToolSpec {
-                tool_name,
+                tool_name: provider_tool_name,
                 description: spec.description().to_string(),
                 parameters_schema: spec.parameters_schema().clone(),
             };
@@ -415,8 +426,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         for invocation in request.invocations {
             let outcome = self.invoke_capability(invocation).await?;
             let is_suspension = outcome.is_suspension();
+            let is_external_tool_pending =
+                matches!(&outcome, CapabilityOutcome::ExternalToolPending { .. });
             outcomes.push(outcome);
-            if request.stop_on_first_suspension && is_suspension {
+            if is_suspension && (request.stop_on_first_suspension || is_external_tool_pending) {
                 stopped_on_suspension = true;
                 break;
             }
@@ -450,11 +463,30 @@ fn surface_lock_error() -> AgentLoopHostError {
     )
 }
 
-fn catalog_error(_error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::Unavailable,
-        "external tool catalog is unavailable",
-    )
+fn catalog_error(error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+    tracing::debug!(?error, "external tool catalog operation failed");
+    match error {
+        ironclaw_turns::ExternalToolCatalogError::Unavailable => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "external tool catalog is unavailable",
+        ),
+        ironclaw_turns::ExternalToolCatalogError::InvalidRegistration { reason } => {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                format!("external tool registration is invalid: {reason}"),
+            )
+        }
+        ironclaw_turns::ExternalToolCatalogError::CallNotPending => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool call is not pending",
+        ),
+        ironclaw_turns::ExternalToolCatalogError::OutputAlreadySubmitted => {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "external tool output was already submitted",
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -464,8 +496,8 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_loop_support::CapabilityWriteResult;
     use ironclaw_turns::{
-        ExternalToolSpec, InMemoryExternalToolCatalog, RunProfileResolutionRequest,
-        RunProfileResolver, TurnId, TurnScope,
+        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
+        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,
         run_profile::{CapabilityInputRef, InMemoryRunProfileResolver},
     };
 
@@ -518,6 +550,19 @@ mod tests {
                 "test input resolver does not resolve inputs",
             ))
         }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            CapabilityInputRef::new(format!("input:{}", tool_call.id)).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "test provider tool-call input ref is invalid",
+                )
+            })
+        }
     }
 
     struct TestResultWriter;
@@ -532,6 +577,222 @@ mod tests {
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test result writer does not write results",
             ))
+        }
+    }
+
+    struct FailingExternalToolCatalog {
+        error: ExternalToolCatalogError,
+    }
+
+    #[async_trait]
+    impl ExternalToolCatalog for FailingExternalToolCatalog {
+        async fn register(
+            &self,
+            _run_id: TurnRunId,
+            _specs: Vec<ExternalToolSpec>,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn specs(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ExternalToolSpec>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn bind_call(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: String,
+            _call_id: String,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn call_id_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<Option<String>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn submit_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn submit_output_for_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn take_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn complete_call_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn record_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call: PendingExternalCall,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn pending_calls(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn clear_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+    }
+
+    struct BindFailingExternalToolCatalog {
+        error: ExternalToolCatalogError,
+    }
+
+    #[async_trait]
+    impl ExternalToolCatalog for BindFailingExternalToolCatalog {
+        async fn register(
+            &self,
+            _run_id: TurnRunId,
+            _specs: Vec<ExternalToolSpec>,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn specs(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ExternalToolSpec>, ExternalToolCatalogError> {
+            Ok(vec![external_tool_spec("ClientTool")])
+        }
+
+        async fn bind_call(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: String,
+            _call_id: String,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn call_id_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<Option<String>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
+        async fn submit_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn submit_output_for_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
+        async fn take_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
+        async fn complete_call_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn record_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call: PendingExternalCall,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn pending_calls(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError> {
+            Ok(Vec::new())
+        }
+
+        async fn clear_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
         }
     }
 
@@ -584,6 +845,22 @@ mod tests {
         )
     }
 
+    async fn wrapped_port_with_catalog(
+        catalog: Arc<dyn ExternalToolCatalog>,
+    ) -> (Arc<dyn LoopCapabilityPort>, LoopRunContext) {
+        let run_context = run_context().await;
+        (
+            wrap_local_dev_external_tools(
+                Arc::new(EmptyInnerPort),
+                run_context.clone(),
+                Arc::new(TestInputResolver),
+                Arc::new(TestResultWriter),
+                catalog,
+            ),
+            run_context,
+        )
+    }
+
     #[tokio::test]
     async fn external_tool_surface_maps_provider_name_to_capability_id() {
         let (port, _run_context) =
@@ -624,18 +901,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_tool_surface_rejects_names_that_are_not_provider_safe() {
+    async fn invalid_catalog_registration_surfaces_as_invalid_invocation() {
         let (port, _run_context) =
-            wrapped_port_with_specs(vec![external_tool_spec("client.tool")]).await;
+            wrapped_port_with_catalog(Arc::new(FailingExternalToolCatalog {
+                error: ExternalToolCatalogError::InvalidRegistration {
+                    reason: "duplicate external tool name",
+                },
+            }))
+            .await;
 
         let error = port
             .visible_capabilities(VisibleCapabilityRequest)
             .await
-            .expect_err("invalid external tool name should fail closed");
+            .expect_err("invalid catalog registration should fail visible capabilities");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("duplicate external tool name"));
+    }
+
+    #[tokio::test]
+    async fn invalid_catalog_bind_surfaces_as_invalid_invocation() {
+        let (port, _run_context) =
+            wrapped_port_with_catalog(Arc::new(BindFailingExternalToolCatalog {
+                error: ExternalToolCatalogError::InvalidRegistration {
+                    reason: "bind rejected external tool call",
+                },
+            }))
+            .await;
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+
+        let error = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: ProviderToolName::new("clienttool").expect("provider tool name"),
+                arguments: serde_json::json!({}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .expect_err("invalid bind registration should fail provider tool-call registration");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error
+                .safe_summary
+                .contains("bind rejected external tool call")
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_catalog_surfaces_as_unavailable() {
+        let (port, _run_context) =
+            wrapped_port_with_catalog(Arc::new(FailingExternalToolCatalog {
+                error: ExternalToolCatalogError::Unavailable,
+            }))
+            .await;
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect_err("unavailable catalog should fail visible capabilities");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "external tool catalog is unavailable");
+    }
+
+    #[tokio::test]
+    async fn external_tool_output_survives_result_write_failure() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, vec![external_tool_spec("get_weather")])
+            .await
+            .expect("register external tool");
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context.clone(),
+            Arc::new(TestInputResolver),
+            Arc::new(TestResultWriter),
+            catalog.clone(),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: ProviderToolName::new("get_weather").expect("provider tool name"),
+                arguments: serde_json::json!({"city": "Boston"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .expect("register provider tool call");
+        catalog
+            .submit_output_for_pending_call(
+                run_context.run_id,
+                "call-1".to_string(),
+                serde_json::json!("72F"),
+            )
+            .await
+            .expect("submit output");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect_err("writer failure should propagate");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert_eq!(
-            error.safe_summary,
-            "external tool name cannot be represented as a provider tool name"
+            catalog
+                .output(run_context.run_id, "call-1")
+                .await
+                .expect("output"),
+            Some(serde_json::json!("72F"))
+        );
+        assert_eq!(
+            catalog
+                .pending_calls(run_context.run_id)
+                .await
+                .expect("pending")
+                .len(),
+            1
         );
     }
 }

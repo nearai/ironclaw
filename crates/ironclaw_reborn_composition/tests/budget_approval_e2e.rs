@@ -26,7 +26,7 @@ use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    build_reborn_runtime,
+    RebornTurnDriveOutcome, build_reborn_runtime,
 };
 use ironclaw_resources::{
     BudgetGateOutcome, BudgetGateStatus, BudgetPeriod, BudgetThresholds, ResourceAccount,
@@ -67,6 +67,36 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::ScrubbedEnv,
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn assert_budget_blocked_outcome(
+    outcome: RebornTurnDriveOutcome,
+) -> ironclaw_resources::BudgetGateId {
+    match outcome {
+        RebornTurnDriveOutcome::BlockedOnGate {
+            status,
+            gate_ref,
+            partial_text,
+            ..
+        } => {
+            assert_eq!(
+                status,
+                ironclaw_turns::TurnStatus::BlockedResource,
+                "unexpected budget approval status"
+            );
+            assert_eq!(partial_text, None);
+            let raw_id = gate_ref
+                .as_str()
+                .strip_prefix("gate:budget-")
+                .expect("budget approval should block on a budget gate ref");
+            ironclaw_resources::BudgetGateId::from_uuid(
+                uuid::Uuid::parse_str(raw_id).expect("budget gate ref should contain a UUID"),
+            )
+        }
+        RebornTurnDriveOutcome::Terminal(reply) => {
+            panic!("budget approval should block instead of terminal reply: {reply:?}");
+        }
     }
 }
 
@@ -146,13 +176,14 @@ async fn pump_until_pending_gate(
 ) {
     let conversation = runtime.new_conversation().await.expect("conversation");
     let scope = runtime.budget_gate_scope_for_conversation(&conversation);
-    let outcome = tokio::time::timeout(
+    let reply = tokio::time::timeout(
         Duration::from_secs(3),
-        runtime.send_user_message(&conversation, "first try"),
+        runtime.send_user_message_until_gate(&conversation, "first try"),
     )
     .await
-    .expect("send finishes");
-    let _ = outcome; // we don't care about Err vs non-Completed shape here
+    .expect("send finishes")
+    .expect("budget approval should return a blocked gate outcome");
+    let blocked_gate_id = assert_budget_blocked_outcome(reply);
     assert_eq!(
         gateway.call_count(),
         0,
@@ -167,6 +198,10 @@ async fn pump_until_pending_gate(
         "exactly one pending gate expected after pause",
     )
     .await;
+    assert_eq!(
+        pending[0].id, blocked_gate_id,
+        "blocked outcome should cite the pending budget gate"
+    );
     (pending[0].id, scope)
 }
 
@@ -261,12 +296,14 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
 
     // Retry — the same pause threshold fires, gateway still untouched.
     let conversation = runtime.new_conversation().await.expect("conversation");
-    let _ = tokio::time::timeout(
+    let retry = tokio::time::timeout(
         Duration::from_secs(3),
-        runtime.send_user_message(&conversation, "retry after cancel"),
+        runtime.send_user_message_until_gate(&conversation, "retry after cancel"),
     )
     .await
-    .expect("retry send finishes");
+    .expect("retry send finishes")
+    .expect("retry should return blocked gate outcome");
+    assert_budget_blocked_outcome(retry);
     assert_eq!(
         gateway.call_count(),
         0,
@@ -310,12 +347,14 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
 
     // Retry — same as cancel, the budget is still tight.
     let conversation = runtime.new_conversation().await.expect("conversation");
-    let _ = tokio::time::timeout(
+    let retry = tokio::time::timeout(
         Duration::from_secs(3),
-        runtime.send_user_message(&conversation, "retry after expiry"),
+        runtime.send_user_message_until_gate(&conversation, "retry after expiry"),
     )
     .await
-    .expect("retry send finishes");
+    .expect("retry send finishes")
+    .expect("retry should return blocked gate outcome");
+    assert_budget_blocked_outcome(retry);
     assert_eq!(
         gateway.call_count(),
         0,
@@ -396,12 +435,14 @@ async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
 
     // Second send (fresh conversation, fresh run) → second gate.
     let conversation = runtime.new_conversation().await.expect("conversation");
-    let _ = tokio::time::timeout(
+    let second = tokio::time::timeout(
         Duration::from_secs(3),
-        runtime.send_user_message(&conversation, "second"),
+        runtime.send_user_message_until_gate(&conversation, "second"),
     )
     .await
-    .expect("send finishes");
+    .expect("send finishes")
+    .expect("second send should return blocked gate outcome");
+    assert_budget_blocked_outcome(second);
 
     let store = runtime.budget_gate_store().expect("gate store");
     let pending = wait_for_pending_gate_count(

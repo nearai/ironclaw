@@ -71,8 +71,12 @@ impl SecretsCrypto {
     }
 
     pub fn generate_salt() -> Vec<u8> {
+        use rand::{RngExt as _, TryRng as _};
+
         let mut salt = vec![0u8; SALT_SIZE];
-        rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
+        if rand::rngs::SysRng.try_fill_bytes(&mut salt).is_err() {
+            rand::rng().fill(&mut salt);
+        }
         salt
     }
 
