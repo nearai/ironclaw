@@ -354,6 +354,14 @@ pub struct AppendAssistantDraftRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendFinalizedAssistantMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub content: MessageContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendToolResultReferenceRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,

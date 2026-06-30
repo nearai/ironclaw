@@ -1,7 +1,7 @@
 //! Contract tests for [`FilesystemTurnStateStore`] against a
 //! [`ScopedFilesystem`] over a CAS-capable filesystem backend. The persistent
-//! shape is a lower-churn `/turns/state.json` snapshot plus per-run lease
-//! sidecars keyed by the [`MountView`] target.
+//! shape is a lower-churn `/turns/state.json` snapshot; active runner leases
+//! are memory-backed and fall back to the snapshot after restart.
 
 use std::{
     sync::{
@@ -366,25 +366,6 @@ impl<F> VersionMismatchFilesystem<F> {
     }
 }
 
-struct OneShotRunnerLeaseVersionMismatchFilesystem<F> {
-    inner: F,
-    reject_next_runner_lease_put: AtomicBool,
-}
-
-impl<F> OneShotRunnerLeaseVersionMismatchFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            reject_next_runner_lease_put: AtomicBool::new(false),
-        }
-    }
-
-    fn reject_next_runner_lease_put(&self) {
-        self.reject_next_runner_lease_put
-            .store(true, Ordering::SeqCst);
-    }
-}
-
 struct RejectingPutFilesystem<F> {
     inner: F,
     put_calls: AtomicUsize,
@@ -467,55 +448,6 @@ where
             expected,
             found: None,
         })
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
-impl<F> RootFilesystem for OneShotRunnerLeaseVersionMismatchFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        if path.as_str().contains("/turns/runner-leases/")
-            && self
-                .reject_next_runner_lease_put
-                .swap(false, Ordering::SeqCst)
-        {
-            return Err(FilesystemError::VersionMismatch {
-                path: path.clone(),
-                expected: match cas {
-                    CasExpectation::Any | CasExpectation::Absent => None,
-                    CasExpectation::Version(version) => Some(version),
-                },
-                found: None,
-            });
-        }
-        self.inner.put(path, entry, cas).await
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
@@ -805,8 +737,8 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-sidecar"),
-        "idem-fs-heartbeat-sidecar",
+        turn_scope("thread-fs-heartbeat-memory"),
+        "idem-fs-heartbeat-memory",
     );
     let response = store
         .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
@@ -872,24 +804,32 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
             .last_heartbeat_at
             .expect("heartbeat timestamp")
             > first_heartbeat_at,
-        "heartbeat read model should expose the refreshed sidecar timestamp"
+        "heartbeat read model should expose the refreshed memory lease timestamp"
     );
     assert!(
         heartbeat_run.lease_expires_at.expect("lease expiry") > first_expiry,
-        "heartbeat read model should expose the refreshed sidecar expiry"
+        "heartbeat read model should expose the refreshed memory lease expiry"
+    );
+    assert!(
+        backend
+            .get(&runner_lease_virtual_path(run_id))
+            .await
+            .unwrap()
+            .is_none(),
+        "runner leases are memory-backed and must not materialize durable sidecar records"
     );
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_sidecar() {
+async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_after_reopen() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-sidecar-backfill"),
-        "idem-fs-heartbeat-sidecar-backfill",
+        turn_scope("thread-fs-heartbeat-memory-backfill"),
+        "idem-fs-heartbeat-memory-backfill",
     );
     let response = store
         .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
@@ -915,21 +855,18 @@ async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_si
         .and_then(|record| record.last_heartbeat_at)
         .expect("claimed heartbeat timestamp");
 
-    backend
-        .delete(&runner_lease_virtual_path(run_id))
-        .await
-        .unwrap();
+    let reopened = FilesystemTurnStateStore::new(scoped);
     tokio::time::sleep(Duration::from_millis(5)).await;
-    store
+    reopened
         .heartbeat(HeartbeatRequest {
             run_id,
             runner_id,
             lease_token,
         })
         .await
-        .expect("heartbeat should lazily seed a missing sidecar from state.json");
+        .expect("heartbeat should lazily seed a missing memory lease from state.json");
 
-    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_snapshot = reopened.persistence_snapshot().await.unwrap();
     let heartbeat_run = heartbeat_snapshot
         .runs
         .iter()
@@ -940,20 +877,20 @@ async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_si
             .last_heartbeat_at
             .expect("heartbeat timestamp")
             > first_heartbeat_at,
-        "lazy sidecar backfill must still expose the refreshed heartbeat"
+        "lazy memory lease backfill must still expose the refreshed heartbeat"
     );
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_sidecar() {
+async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = FilesystemTurnStateStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-recover-sidecar"),
-        "idem-fs-recover-sidecar",
+        turn_scope("thread-fs-recover-memory-lease"),
+        "idem-fs-recover-memory-lease",
     );
     let response = store
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
@@ -1006,7 +943,7 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_si
         .unwrap();
     assert!(
         not_yet_recovered.recovered.is_empty(),
-        "recovery must use sidecar expiry instead of stale state.json expiry"
+        "recovery must use memory lease expiry instead of stale state.json expiry"
     );
 
     let recovered = store
@@ -1022,15 +959,15 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_si
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_complete_run_uses_runner_lease_sidecar() {
+async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = FilesystemTurnStateStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-complete-sidecar"),
-        "idem-fs-complete-sidecar",
+        turn_scope("thread-fs-complete-memory-lease"),
+        "idem-fs-complete-memory-lease",
     );
     let response = store
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
@@ -1068,22 +1005,20 @@ async fn filesystem_turn_state_store_complete_run_uses_runner_lease_sidecar() {
             lease_token,
         })
         .await
-        .expect("terminal transition must validate against sidecar lease metadata");
+        .expect("terminal transition must validate against memory lease metadata");
     assert_eq!(completed.status, TurnStatus::Completed);
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas() {
-    let backend = Arc::new(OneShotRunnerLeaseVersionMismatchFilesystem::new(
-        engine_filesystem(),
-    ));
+async fn filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidecar() {
+    let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = FilesystemTurnStateStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-sidecar-cas"),
-        "idem-fs-heartbeat-sidecar-cas",
+        turn_scope("thread-fs-heartbeat-memory-no-sidecar"),
+        "idem-fs-heartbeat-memory-no-sidecar",
     );
     let response = store
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
@@ -1109,7 +1044,6 @@ async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas(
         .and_then(|record| record.last_heartbeat_at)
         .expect("claimed heartbeat timestamp");
 
-    backend.reject_next_runner_lease_put();
     tokio::time::sleep(Duration::from_millis(5)).await;
     store
         .heartbeat(HeartbeatRequest {
@@ -1118,7 +1052,7 @@ async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas(
             lease_token,
         })
         .await
-        .expect("heartbeat should retry sidecar CAS version mismatch");
+        .expect("heartbeat should update the memory-backed runner lease");
 
     let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
     let heartbeat_at = heartbeat_snapshot
@@ -1128,6 +1062,14 @@ async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas(
         .and_then(|record| record.last_heartbeat_at)
         .expect("heartbeat timestamp");
     assert!(heartbeat_at > first_heartbeat_at);
+    assert!(
+        backend
+            .get(&runner_lease_virtual_path(run_id))
+            .await
+            .unwrap()
+            .is_none(),
+        "memory-backed heartbeat must not write a durable runner lease sidecar"
+    );
 }
 
 #[tokio::test]
@@ -1140,8 +1082,8 @@ async fn filesystem_turn_state_store_heartbeat_does_not_read_snapshot() {
     let response = store
         .submit_turn(
             submit_request_for(
-                turn_scope("thread-fs-heartbeat-sidecar-only"),
-                "idem-fs-heartbeat-sidecar-only",
+                turn_scope("thread-fs-heartbeat-memory-only"),
+                "idem-fs-heartbeat-memory-only",
             ),
             &AllowAllTurnAdmissionPolicy,
             &resolver,
@@ -1170,19 +1112,19 @@ async fn filesystem_turn_state_store_heartbeat_does_not_read_snapshot() {
             lease_token,
         })
         .await
-        .expect("heartbeat must use only the runner lease sidecar");
+        .expect("heartbeat must use only the memory runner lease");
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_sidecar_status() {
+async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_lease_status() {
     let backend = Arc::new(RejectSnapshotGetFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = FilesystemTurnStateStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-cancel-sidecar"),
-        "idem-fs-heartbeat-cancel-sidecar",
+        turn_scope("thread-fs-heartbeat-cancel-memory"),
+        "idem-fs-heartbeat-cancel-memory",
     );
     let response = store
         .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
