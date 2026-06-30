@@ -4,6 +4,7 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { authScope } from "../../../lib/auth-scope.js";
 import { stageFiles } from "../lib/attachments.js";
+import { ATTACHMENTS_ONLY_CONTENT } from "../lib/attachment-sentinel.js";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig.js";
 import {
   NEW_DRAFT_KEY,
@@ -29,6 +30,7 @@ export function ChatInput({
   statusText = "",
 }) {
   const t = useT();
+  const storageScope = authScope();
   const isHero = variant === "hero";
   const limits = useAttachmentConfig();
   const [text, setText] = React.useState(() => getDraft(draftKey));
@@ -52,6 +54,8 @@ export function ChatInput({
   // files past the per-message budget).
   const attachmentsRef = React.useRef([]);
   const stagingQueueRef = React.useRef(Promise.resolve());
+  const activeDraftContextRef = React.useRef({ draftKey, storageScope });
+  activeDraftContextRef.current = { draftKey, storageScope };
   React.useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
@@ -105,9 +109,11 @@ export function ChatInput({
   React.useEffect(() => {
     setText(getDraft(draftKey));
     // Flush any queued write (for the previous key) before this key changes
-    // or the composer unmounts, so a debounced draft is never lost.
+    // or the composer unmounts, so a debounced draft is never lost. The
+    // authenticated scope is part of the dependency list because the same
+    // composer can stay mounted across a token/session switch.
     return () => flushDraft();
-  }, [draftKey, flushDraft]);
+  }, [draftKey, storageScope, flushDraft]);
 
   // Keep the in-memory staged-attachment store in sync so files survive
   // navigating away from (and back to) this composer, the same way the text
@@ -116,17 +122,22 @@ export function ChatInput({
   // key, so persisting it here would leak the previous conversation's files
   // into the new one.
   const stagedDraftKeyRef = React.useRef(draftKey);
+  const stagedDraftScopeRef = React.useRef(storageScope);
   React.useEffect(() => {
-    if (stagedDraftKeyRef.current !== draftKey) {
+    if (
+      stagedDraftKeyRef.current !== draftKey ||
+      stagedDraftScopeRef.current !== storageScope
+    ) {
       stagedDraftKeyRef.current = draftKey;
+      stagedDraftScopeRef.current = storageScope;
       setAttachments(getStagedAttachments(draftKey));
       // The composer stays mounted across conversation switches, so a stale
-      // staging error would otherwise persist into every other thread.
+      // staging error would otherwise persist into every other thread or user.
       setAttachmentError("");
       return;
     }
     setStagedAttachments(draftKey, attachments);
-  }, [draftKey, attachments]);
+  }, [draftKey, storageScope, attachments]);
 
   React.useEffect(() => {
     if (!initialText) return;
@@ -150,6 +161,8 @@ export function ChatInput({
     (files) => {
       // Paste/drop can call this while the composer is disabled; don't stage then.
       if (disabled || !files || files.length === 0) return;
+      const expectedDraftKey = draftKey;
+      const expectedStorageScope = storageScope;
       // Chain on the staging queue so calls run one-at-a-time and each sees the
       // attachments admitted by the previous one (via attachmentsRef). The
       // `.catch` guarantees the shared queue promise always resolves — an
@@ -162,12 +175,19 @@ export function ChatInput({
             existing: attachmentsRef.current,
             t,
           });
+          const current = activeDraftContextRef.current;
+          if (
+            current.draftKey !== expectedDraftKey ||
+            current.storageScope !== expectedStorageScope ||
+            authScope() !== expectedStorageScope
+          ) {
+            return;
+          }
           if (staged.length > 0) {
-            setAttachments((prev) => {
-              const next = [...prev, ...staged];
-              attachmentsRef.current = next;
-              return next;
-            });
+            const next = [...attachmentsRef.current, ...staged];
+            attachmentsRef.current = next;
+            setStagedAttachments(expectedDraftKey, next);
+            setAttachments(next);
           }
           setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
         })
@@ -175,19 +195,18 @@ export function ChatInput({
           setAttachmentError(t("chat.attachmentStagingFailed"));
         });
     },
-    [disabled, limits, t]
+    [disabled, draftKey, limits, storageScope, t]
   );
 
   const removeAttachment = React.useCallback((id) => {
-    setAttachments((prev) => {
-      const next = prev.filter((att) => att.id !== id);
-      // Keep the ref in lockstep so a same-tick add validates against the
-      // post-removal set, not a stale snapshot (the effect sync is async).
-      attachmentsRef.current = next;
-      return next;
-    });
+    const next = attachmentsRef.current.filter((att) => att.id !== id);
+    // Keep both the ref and draft store in lockstep so a same-tick add or
+    // composer remount observes the post-removal set.
+    attachmentsRef.current = next;
+    setStagedAttachments(draftKey, next);
+    setAttachments(next);
     setAttachmentError("");
-  }, []);
+  }, [draftKey]);
 
   const openFilePicker = React.useCallback(() => {
     if (disabled) return;
@@ -205,13 +224,17 @@ export function ChatInput({
   );
 
   const handleSend = React.useCallback(async () => {
-    // The v2 send contract requires non-empty content, so attachments
-    // ride along with text rather than sending on their own.
-    if (!text.trim() || sendBlockedRef.current) return;
+    const trimmed = text.trim();
+    const hasAttachments = attachments.length > 0;
+    const sendContent = trimmed || (hasAttachments ? ATTACHMENTS_ONLY_CONTENT : "");
+    if (!sendContent || sendBlockedRef.current) return;
     sendBlockedRef.current = true;
     setIsSending(true);
     try {
-      const response = await onSend(text.trim(), { attachments });
+      const response = await onSend(sendContent, {
+        attachments,
+        displayContent: trimmed,
+      });
       if (response === null) return;
       setText("");
       setAttachments([]);
@@ -308,7 +331,7 @@ export function ChatInput({
     setDragOver(false);
   }, []);
 
-  const hasPayload = text.trim();
+  const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
   const placeholder = isHero
     ? t("chat.heroPlaceholder")

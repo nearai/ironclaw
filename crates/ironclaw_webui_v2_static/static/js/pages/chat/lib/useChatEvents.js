@@ -489,18 +489,23 @@ function applyProjectionItems({
     if (item.text) {
       // ProductProjectionItem::Text { id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
-      // Dedup by item id so repeated snapshots don't duplicate the
-      // same bubble. Text can arrive in the same projection snapshot
-      // as a still-blocked gate, so run_status remains the source of
-      // truth for clearing pendingGate.
+      // Dedup by item id and by the matching durable timeline message id so a
+      // late projection cannot duplicate a reply already rendered from
+      // history. Text can arrive in the same projection snapshot as a
+      // still-blocked gate, so run_status remains the source of truth for
+      // clearing pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
-        const existing = prev.findIndex((m) => m.id === messageId);
+        const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
+        const existing = prev.findIndex(
+          (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
+        );
         const next = {
+          ...(existing >= 0 ? prev[existing] : {}),
           id: messageId,
           role: "assistant",
           content: item.text.body || "",
-          timestamp: new Date().toISOString(),
+          timestamp: prev[existing]?.timestamp || new Date().toISOString(),
           isFinalReply: true,
         };
         if (existing >= 0) {
@@ -666,7 +671,6 @@ function appendRunFailureMessage(
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
   // the same terminal status) collapse to one bubble instead of stacking.
   const messageId = `err-${runId || "unknown"}`;
-  const turnRunId = typeof runId === "string" && runId ? runId : null;
   setMessages((prev) => {
     const existing = prev.findIndex((m) => m.id === messageId);
     const content = failureMessageForRunStatus({
@@ -675,18 +679,12 @@ function appendRunFailureMessage(
       failureSummary,
     });
     if (existing >= 0) {
-      const contentChanged = Boolean(
-        failureSummary && prev[existing].content !== content,
-      );
-      const runAnchorChanged = Boolean(
-        turnRunId && prev[existing].turnRunId !== turnRunId,
-      );
-      if (!contentChanged && !runAnchorChanged) return prev;
+      const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
+      if (!hasUsefulUpdate || prev[existing].content === content) return prev;
       const next = [...prev];
       next[existing] = {
         ...next[existing],
-        ...(contentChanged && { content }),
-        ...(runAnchorChanged && { turnRunId }),
+        content,
       };
       return next;
     }
@@ -697,7 +695,6 @@ function appendRunFailureMessage(
         role: "error",
         content,
         timestamp: new Date().toISOString(),
-        ...(turnRunId && { turnRunId }),
       },
     ];
   });

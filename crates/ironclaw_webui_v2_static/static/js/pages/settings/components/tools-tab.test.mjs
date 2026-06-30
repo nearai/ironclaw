@@ -92,7 +92,7 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderToolsModule({ tools = [] } = {}) {
+function renderToolsModule({ tools = [], translations = {} } = {}) {
   const saved = [];
   const context = {
     Badge: "Badge",
@@ -102,7 +102,7 @@ function renderToolsModule({ tools = [] } = {}) {
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
-    useT: () => (key) => key,
+    useT: () => (key) => translations[key] || key,
     useTools: () => ({
       tools,
       query: { isLoading: false, error: null },
@@ -183,4 +183,132 @@ test("Tool permission select follows global unless a per-tool override exists", 
   });
   const overrideSelect = findTemplateNode(overrideTool, "<select");
   assert.equal(overrideSelect.values[0], "ask_each_time");
+});
+
+test("Tool rows localize built-in descriptions by capability id", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  const scalars = collectScalars(rendered);
+  assert.ok(scalars.includes("回显一条消息"));
+  assert.ok(!scalars.includes("Echo a message"));
+});
+
+test("Tool rows localize descriptions when backend payload omits description", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  assert.ok(collectScalars(rendered).includes("回显一条消息"));
+});
+
+test("Tool rows localize extension and provider capability descriptions", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "tools.description.builtin.extension_search": "搜索本地 Reborn 扩展目录",
+      "tools.description.nearai.web_search": "通过 NEAR AI MCP 服务器搜索",
+    },
+  });
+  const renderDescription = (name) =>
+    collectScalars(
+      exports.ToolRow({
+        tool: {
+          name,
+          description: "Backend description",
+          state: "always_allow",
+          default_state: "ask_each_time",
+          effective_source: "global",
+          locked: false,
+        },
+        onPermissionChange: () => {},
+        isSaved: false,
+      })
+    );
+
+  assert.ok(renderDescription("builtin.extension_search").includes("搜索本地 Reborn 扩展目录"));
+  assert.ok(renderDescription("nearai.web_search").includes("通过 NEAR AI MCP 服务器搜索"));
+});
+
+test("Tools tab search matches localized and raw tool descriptions", () => {
+  const tools = [
+    {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+  ];
+  const { exports } = renderToolsModule({
+    tools,
+    translations: {
+      "tools.description.builtin.echo": "回显一条消息",
+    },
+  });
+
+  const zhRendered = exports.ToolsTab({ searchQuery: "回显" });
+  assert.ok(
+    findComponentNode(zhRendered, exports.ToolRow),
+    "localized description should keep the tool visible"
+  );
+
+  const enRendered = exports.ToolsTab({ searchQuery: "Echo" });
+  assert.ok(
+    findComponentNode(enRendered, exports.ToolRow),
+    "raw backend description should still keep the tool visible"
+  );
+});
+
+test("Tools tab search does not index locked tools as disabled unless disabled", () => {
+  const tools = [
+    {
+      name: "builtin.echo",
+      description: "Echo a message",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: true,
+    },
+  ];
+  const { exports } = renderToolsModule({
+    tools,
+    translations: {
+      "tools.disabled": "disabled",
+    },
+  });
+
+  const rendered = exports.ToolsTab({ searchQuery: "disabled" });
+  assert.equal(findComponentNode(rendered, exports.ToolRow), null);
+  assert.ok(collectScalars(rendered).includes("tools.noMatch"));
 });

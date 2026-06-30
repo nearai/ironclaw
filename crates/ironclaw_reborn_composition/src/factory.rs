@@ -180,7 +180,10 @@ struct LocalDevRootFilesystemBundle {
     durable_backend: LocalDevDurableBackend,
 }
 
-enum LocalDevDurableBackend {
+// `pub(crate)` to match `build_default_local_dev_database_roots` (also
+// `pub(crate)` for the `test_support` accessor): a `pub(crate)` fn returning a
+// private enum trips `private_interfaces`. The enum stays crate-internal.
+pub(crate) enum LocalDevDurableBackend {
     #[cfg(feature = "libsql")]
     LibSql(Arc<libsql::Database>),
     #[cfg(feature = "postgres")]
@@ -508,6 +511,23 @@ impl RebornServices {
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
             local_runtime.auto_approve_settings.clone();
         Some(auto_approve_settings)
+    }
+
+    /// Test-support access to the extension installation store for this
+    /// composition. Returns `None` for production-profile compositions that did
+    /// not wire up local-dev extension management.
+    ///
+    /// Mirrors the `installation_store` that `build_local_runtime` wires into
+    /// `RebornLocalExtensionManagementPort`. For tests only — zero bytes
+    /// shipped in production builds.
+    #[cfg(feature = "test-support")]
+    pub fn extension_installation_store_for_test(
+        &self,
+    ) -> Option<Arc<dyn ExtensionInstallationStore>> {
+        self.local_runtime
+            .as_ref()
+            .and_then(|rt| rt.extension_management.as_ref())
+            .map(|em| em.installation_store_for_test())
     }
 }
 
@@ -2246,13 +2266,23 @@ async fn build_local_dev_root_filesystem(
     })
 }
 
-async fn build_default_local_dev_database_roots(
+/// Filename of the local-dev libSQL database within the per-user root directory.
+/// One owner for the string — production factory, integration-test framework, and
+/// any on-disk path assertion all derive from this constant.
+pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
+
+// `pub(crate)` so the `test_support` accessor
+// (`build_default_local_dev_database_roots_for_test`) can call this
+// without duplicating the 4-step libSQL setup sequence (Builder →
+// LibSqlRootFilesystem → run_migrations → mount). Production callers
+// stay inside this module (`build_local_dev_root_filesystem`).
+pub(crate) async fn build_default_local_dev_database_roots(
     root: &Path,
     composite: &mut CompositeRootFilesystem,
 ) -> Result<LocalDevDurableBackend, RebornBuildError> {
     #[cfg(feature = "libsql")]
     {
-        let db_path = root.join("reborn-local-dev.db");
+        let db_path = root.join(LOCAL_DEV_DB_FILENAME);
         let db = Arc::new(
             libsql::Builder::new_local(&db_path)
                 .build()
@@ -2275,6 +2305,22 @@ async fn build_default_local_dev_database_roots(
         mount_local_dev_database_roots(composite, Arc::new(InMemoryBackend::new()))?;
         Ok(LocalDevDurableBackend::Ephemeral)
     }
+}
+
+/// Thin void wrapper over [`build_default_local_dev_database_roots`] for
+/// `#[cfg(feature = "test-support")]` callers that need to mount the local-dev
+/// database roots but don't need the opaque `LocalDevDurableBackend` handle
+/// (which is private to this module).
+///
+/// Used by `test_support::build_default_local_dev_database_roots_for_test`.
+#[cfg(feature = "test-support")]
+pub(crate) async fn mount_default_local_dev_database_roots(
+    root: &Path,
+    composite: &mut CompositeRootFilesystem,
+) -> Result<(), RebornBuildError> {
+    build_default_local_dev_database_roots(root, composite)
+        .await
+        .map(|_| ())
 }
 
 fn local_dev_project_filesystem(
@@ -2326,7 +2372,12 @@ where
     Ok(())
 }
 
-fn mount_local_dev_database_roots<F>(
+// `pub(crate)` (not private) so the `test_support` accessor
+// (`mount_local_dev_database_roots_for_test`) can forward to it across the
+// crate boundary for downstream integration tests without a second copy of the
+// mount truth. Production callers stay inside this module
+// (`build_local_dev_root_filesystem` / `build_default_local_dev_database_roots`).
+pub(crate) fn mount_local_dev_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,
 ) -> Result<(), RebornBuildError>
@@ -2393,7 +2444,7 @@ fn mount_local_dev_project_roots(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn build_local_dev_secret_store<F>(
+pub(crate) fn build_local_dev_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
