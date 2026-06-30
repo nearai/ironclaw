@@ -16,7 +16,7 @@
 
 // arch-exempt: large_file, Reborn binary-E2E + host-runtime capability harness; the
 // mock-MCP scaffolding has been split into `harness_mcp.rs`, further focused splits
-// (auth, hooks) are tracked in docs/reborn/reborn-backend-coverage-roadmap.md.
+// (auth, hooks) are tracked in `tests/support/reborn/CLAUDE.md`.
 
 use std::{
     collections::{HashMap, VecDeque},
