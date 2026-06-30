@@ -176,11 +176,6 @@ pub(crate) struct GroupSharedStorage {
     /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
-    /// The group's single shared loop-checkpoint state store, wired into the
-    /// group-level `ThreadCheckpointLoopExitEvidencePort` via
-    /// `with_checkpoint_state_store` (the de-mask fix: without this, a
-    /// genuinely-`Failed` run is misreported as `driver_protocol_violation`).
-    pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
     /// The group's single capability recorder, shared by `Arc` with the real
     /// capability factory wired into the one planned runtime. Every thread
     /// clones this (cheap — `HarnessCapabilityRecorder` is `Clone` over
@@ -293,7 +288,9 @@ impl RebornIntegrationGroup {
         }
     }
 
-    /// Create a per-thread runtime builder for `conversation_id`.
+    /// Create a per-thread *workflow* builder for `conversation_id`, over the
+    /// group's ONE shared runtime (coordinator + scheduler) — this does NOT
+    /// build a new runtime per thread.
     ///
     /// Each call gets a distinct binding/thread_id/turn_scope over the
     /// **shared** composite and capability backend. Build with
@@ -539,7 +536,6 @@ impl RebornIntegrationGroupBuilder {
                 scheduler_handle: composition.scheduler_handle,
                 scope_gateway,
                 turn_store,
-                checkpoint_state_store,
                 capability_recorder,
             }),
         })
@@ -646,14 +642,16 @@ impl<'g> RebornThreadBuilder<'g> {
     /// storage and ONE shared planned runtime.
     ///
     /// Builds the per-thread scripted `LlmProviderModelGateway`, resolves the
-    /// per-thread binding + `TurnScope`, and **registers** the gateway on the
-    /// group's `scope_gateway` BEFORE the binding/workflow can submit any
-    /// turn — by the time this fn returns, the group runtime can already
-    /// route a submit for this thread's scope to the right scripted replies.
-    /// Builds a per-thread workflow over the group's SHARED coordinator (no
-    /// new runtime, no new scheduler). Arc-clones every shared field from
-    /// `GroupSharedStorage` so the returned harness is `'static` (does not
-    /// borrow `'g`).
+    /// per-thread binding + `TurnScope`, and builds a per-thread workflow over
+    /// the group's SHARED coordinator (no new runtime, no new scheduler). The
+    /// gateway is **registered** on the group's `scope_gateway` only after all
+    /// of that fallible (`?`) setup has succeeded, immediately before the
+    /// harness is constructed — so a failed `build()` never leaves a scope
+    /// registered for a harness that doesn't exist, while still guaranteeing
+    /// registration happens before this fn returns (and thus before
+    /// `submit_turn` can be called for this thread's scope). Arc-clones every
+    /// shared field from `GroupSharedStorage` so the returned harness is
+    /// `'static` (does not borrow `'g`).
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         let shared = Arc::clone(&self.group.shared);
 
@@ -703,12 +701,6 @@ impl<'g> RebornThreadBuilder<'g> {
         let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
         let thread_gateway: Arc<dyn HostManagedModelGateway> =
             Arc::new(LlmProviderModelGateway::new(provider, policy));
-        // Register BEFORE any turn for this scope can be submitted — the loop-
-        // driver host resolves `resolve_for_scope` at host construction (off the
-        // model hot path), so the registration must happen before `submit_turn`.
-        shared
-            .scope_gateway
-            .register(turn_scope.clone(), thread_gateway);
 
         // --- per-thread thread_harness (shared composite) -----------------------
         let thread_harness = RebornThreadHarness::filesystem_shared_composite(
@@ -738,6 +730,21 @@ impl<'g> RebornThreadBuilder<'g> {
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
         let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+
+        // Register the gateway only now that every fallible (`?`) step above has
+        // succeeded — `register` is infallible and interior-mutable, so deferring
+        // it here costs nothing, but registering any earlier risks leaving the
+        // scope registered for a harness that never finished building: a later
+        // `?` bailing out of `build()` would leave `turn_scope` registered, and
+        // retrying the same conversation would then hit the duplicate-
+        // registration panic. The loop-driver host only resolves
+        // `resolve_for_scope` at host construction (off the model hot path), and
+        // that happens strictly after this fn returns, so registering
+        // immediately before the harness is constructed still satisfies
+        // "registered before any submit for this scope".
+        shared
+            .scope_gateway
+            .register(turn_scope.clone(), thread_gateway);
 
         Ok(RebornIntegrationHarness {
             ingress,

@@ -1,6 +1,6 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives three scenarios over a shared
+//! One sequential `#[tokio::test]` drives five scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
 //! shared across threads). See `tests/support/reborn/CLAUDE.md` §"Group tests".
@@ -10,7 +10,9 @@
 //! `TurnStatus::BlockedApproval` gate (auto-approve is disabled for the group at
 //! construction) → the test resolves it through the real `ApprovalResolver`
 //! (`approve_gate`/`deny_gate`) and `coordinator.resume_turn`. Nothing is faked
-//! except the model at the vendor-SDK seam.
+//! except the model at the vendor-SDK seam. The exception is
+//! `failure_category_demasked`, which drives a genuinely-FAILED run (no gate
+//! involved) to prove the group's loop-exit de-mask wiring.
 //!
 //! ## Scenario ordering (a state machine over the shared auto-approve store)
 //!
@@ -22,7 +24,13 @@
 //!    `TurnCoordinator`, resolved independently (approve one, deny the other)
 //!    — proves resume dispatch is keyed by `run_id` with zero cross-resume.
 //!    Must run while auto-approve is still OFF (same control window as 1–2).
-//! 4. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
+//! 4. `failure_category_demasked` — an empty-scripted thread drives a run to a
+//!    genuine `TurnStatus::Failed` and asserts the TRUE failure category
+//!    (`"model_error"`) survives instead of being rewritten to the masking
+//!    `"driver_protocol_violation"` sentinel. Independent of the auto-approve
+//!    toggle (no gate involved); ordered alongside the other independent
+//!    scenarios, before the toggle is flipped.
+//! 5. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
 //!    setting persists across thread boundaries. MUST run last (it flips the
 //!    toggle ON for the whole group), so the gate scenarios above are the control
@@ -37,6 +45,7 @@ mod support;
 
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_concurrent_dual_gate_resume;
+mod scenario_failure_category_demasked;
 mod scenario_gate_then_approve;
 mod scenario_gate_then_deny;
 
@@ -60,6 +69,10 @@ async fn approvals_group_e2e() {
     report.record(
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
+    );
+    report.record(
+        "failure_category_demasked",
+        scenario_failure_category_demasked::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)
@@ -87,6 +100,10 @@ async fn approvals_group_libsql_e2e() {
     report.record(
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
+    );
+    report.record(
+        "failure_category_demasked",
+        scenario_failure_category_demasked::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)
