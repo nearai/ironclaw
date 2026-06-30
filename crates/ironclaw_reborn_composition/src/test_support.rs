@@ -1,14 +1,20 @@
-//! Test-only helpers for driving budget E2E tests against
-//! [`build_reborn_runtime`].
+//! Test-only helpers for the Reborn integration-test framework and budget E2E tests.
 //!
-//! Gated behind the `test-support` feature so production builds never pay
-//! the cost of the mock gateway / introspection accessors. The shapes here
-//! are deliberately small: a mock [`HostManagedModelGateway`] with
-//! per-turn scripted responses (including token usage), plus its companion
-//! cost-table helper. Tests inject these via
-//! [`RebornRuntimeInput::with_model_gateway_override`] and
-//! [`RebornRuntimeInput::with_model_cost_table_override`], which are
-//! exposed under the same `test-support` feature.
+//! Gated behind the `test-support` feature so production builds never pay the cost
+//! of the mock gateway / introspection accessors. The module covers three areas:
+//!
+//! 1. **Budget / mock-gateway helpers** — [`BudgetTestGateway`], [`FailingTestGateway`],
+//!    [`ScriptedReply`] — scripted model responses with configurable token counts for
+//!    `RebornRuntimeInput::with_model_gateway_override` tests.
+//! 2. **OAuth / product-auth test bundles** — [`ScriptedOAuthTokenEgress`],
+//!    [`OAuthProductAuthTestBundle`], `build_oauth_product_auth_for_test`,
+//!    `build_google_oauth_product_auth_for_test` — real store / real client / scripted
+//!    HTTP egress for OAuth connect, refresh, and error-path tests.
+//! 3. **Reborn integration-test framework accessors** — `build_local_dev_approval_gate_evidence_for_test`,
+//!    `build_default_local_dev_database_roots_for_test`, `mount_local_dev_database_roots_for_test`,
+//!    `build_local_dev_secret_store_for_test` — mirror the production local-dev boot
+//!    sequence so the integration-test harness (`tests/support/reborn/`) drives the
+//!    real local-dev composition paths without duplicating the wiring logic.
 
 use std::sync::{Arc, Mutex};
 
@@ -209,15 +215,47 @@ impl HostManagedModelGateway for FailingTestGateway {
 /// Scripted [`ironclaw_host_api::RuntimeHttpEgress`] for OAuth token-exchange
 /// tests.
 ///
-/// Returns a fixed `200` JSON body on every call, records every request so the
-/// test can assert the exchange happened, and ignores the URL so the
-/// `HostOAuthProviderClient`'s HTTPS guard can use a fake-but-valid URL.
+/// Returns a configurable HTTP status and JSON body on every call, records
+/// every request so the test can assert the exchange happened, and ignores the
+/// URL so the `HostOAuthProviderClient`'s HTTPS guard can use a fake-but-valid
+/// URL.
+///
+/// The default `(status, body)` is used for every call unless a per-call
+/// override has been queued with [`push_response`].
+///
+/// **Sequential-use assumption.** Callers drive this egress from a single test
+/// thread. The internal `Mutex` guards against accidental concurrent access but
+/// is not intended to support concurrent callers — FIFO ordering of
+/// `push_response` / `captured_count` / `captured_grant_types` is meaningful
+/// only under sequential use.
+///
+/// [`push_response`]: ScriptedOAuthTokenEgress::push_response
 pub struct ScriptedOAuthTokenEgress {
+    /// HTTP status code returned by the default response.  Success constructors
+    /// set this to `200`; `with_error_response` sets it to the supplied code.
+    status: u16,
     body: Vec<u8>,
     captured: Arc<Mutex<Vec<ironclaw_host_api::RuntimeHttpEgressRequest>>>,
+    /// Pre-scripted sequential response overrides consumed FIFO on each
+    /// `execute()` call.  While the queue is non-empty the front entry is
+    /// popped and used instead of `(status, body)`.  Use `push_response` to
+    /// stage per-call overrides after construction.
+    response_queue: ScriptedResponseQueue,
 }
 
+/// FIFO queue of per-call `(status, body)` overrides for [`ScriptedOAuthTokenEgress`].
+type ScriptedResponseQueue = Arc<Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>>;
+
 impl ScriptedOAuthTokenEgress {
+    fn build(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body,
+            captured: Arc::new(Mutex::new(Vec::new())),
+            response_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        }
+    }
+
     /// Build a scripted egress that returns `200` with a minimal
     /// `{access_token, token_type, expires_in}` body.
     pub fn with_access_token(access_token: &str) -> Self {
@@ -228,10 +266,7 @@ impl ScriptedOAuthTokenEgress {
         })
         .to_string()
         .into_bytes();
-        Self {
-            body,
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self::build(200, body)
     }
 
     /// Build a scripted egress that returns `200` with
@@ -249,10 +284,43 @@ impl ScriptedOAuthTokenEgress {
         })
         .to_string()
         .into_bytes();
-        Self {
-            body,
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self::build(200, body)
+    }
+
+    /// Build a scripted egress that returns `status` with a minimal
+    /// `{"error":"<error_code>"}` body — for example, `(400, "invalid_grant")`
+    /// to simulate an OAuth provider permanently revoking a refresh token.
+    ///
+    /// Every call returns this error response until a per-call override is
+    /// pushed via [`push_response`].  To interleave a success response followed
+    /// by an error (e.g. a valid connect exchange then a rejected sweep), use a
+    /// success constructor and queue the error with `push_response`:
+    ///
+    /// ```ignore
+    /// let bundle = build_google_oauth_product_auth_for_test(); // default: 200
+    /// connect_google_account(&bundle, &scope, 0xcc).await;     // call 1 → 200
+    /// bundle.egress.push_response(400, b"{\"error\":\"invalid_grant\"}".to_vec());
+    /// bundle.sweep_for_refresh(candidates, settings, now).await; // call 2 → 400
+    /// ```
+    ///
+    /// [`push_response`]: ScriptedOAuthTokenEgress::push_response
+    pub fn with_error_response(status: u16, error_code: &str) -> Self {
+        let body = serde_json::json!({"error": error_code})
+            .to_string()
+            .into_bytes();
+        Self::build(status, body)
+    }
+
+    /// Stage a one-shot response override to be consumed on the next
+    /// `execute()` call before the default `(status, body)` is used.
+    ///
+    /// Overrides are consumed in FIFO order; each `push_response` call adds
+    /// one entry that covers exactly one future `execute()` call.
+    pub fn push_response(&self, status: u16, body: Vec<u8>) {
+        self.response_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back((status, body));
     }
 
     /// Number of token-exchange HTTP calls captured so far.
@@ -263,25 +331,56 @@ impl ScriptedOAuthTokenEgress {
             .len()
     }
 
-    /// Request body bytes of every captured token-exchange call, in order.
+    /// The OAuth `grant_type` of every captured token-exchange request, in order.
     ///
-    /// Exposes only the body (not the full `RuntimeHttpEgressRequest`, whose
-    /// url/headers are `ZeroizeOnDrop` because they carry injected credentials)
-    /// so a test can assert the OAuth `grant_type` — distinguishing the
-    /// authorization-code connect exchange from the refresh exchange.
-    pub fn captured_bodies(&self) -> Vec<Vec<u8>> {
+    /// Deliberately returns ONLY the non-secret `grant_type` discriminator —
+    /// NOT the raw request body, which carries the authorization code / refresh
+    /// token / client credentials. Tests use this to distinguish the
+    /// `authorization_code` connect exchange from the `refresh_token` exchange
+    /// without exposing secrets in assertion output.
+    pub fn captured_grant_types(&self) -> Vec<String> {
         self.captured
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|request| request.body.clone())
+            .map(|request| parse_grant_type(&request.body))
             .collect()
     }
+}
+
+/// Extract the `grant_type` value from an `application/x-www-form-urlencoded`
+/// token-exchange body. Returns `"<unknown>"` if the field is absent or the
+/// body is not valid UTF-8.
+///
+/// OAuth `grant_type` values (`authorization_code`, `refresh_token`) are ASCII
+/// alphanumeric + underscore and are never percent-encoded; no decoder is
+/// needed for these specific values.
+///
+/// # Security
+///
+/// This helper is intentionally narrow: it returns ONLY the grant_type string
+/// and never echoes authorization codes, refresh tokens, client secrets, or
+/// any other field from the body. Call sites must not widen this to expose
+/// additional body fields.
+fn parse_grant_type(body: &[u8]) -> String {
+    let text = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return "<unknown>".to_string(),
+    };
+    for pair in text.split('&') {
+        if let Some(value) = pair.strip_prefix("grant_type=") {
+            // grant_type values are ASCII alphanumeric + underscore; they are
+            // not percent-encoded and contain no secret material.
+            return value.to_string();
+        }
+    }
+    "<unknown>".to_string()
 }
 
 impl std::fmt::Debug for ScriptedOAuthTokenEgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptedOAuthTokenEgress")
+            .field("status", &self.status)
             .field("body_len", &self.body.len())
             .finish()
     }
@@ -301,10 +400,20 @@ impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request);
-        let body = self.body.clone();
+        // Pop a per-call override if one was staged; fall back to the default
+        // (status, body) set by the constructor.
+        let (status, body) = {
+            let mut queue = self
+                .response_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue
+                .pop_front()
+                .unwrap_or_else(|| (self.status, self.body.clone()))
+        };
         let response_bytes = body.len() as u64;
         Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body,
             saved_body: None,
@@ -494,6 +603,13 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 ///
 /// Gated on `any(feature = "libsql", feature = "postgres")` because
 /// `credential_refresh_worker` is only compiled under those features.
+// TODO(follow-up): add a LibSql-backed sweep test that drives the real
+// `FilesystemCredentialRefreshCandidateSource` enumeration. `FixedCandidateSource`
+// bypasses the tenant-path filesystem walk because this bundle's fixed view
+// mounts only `/secrets` (no tenant tree to enumerate). The refresh path itself
+// (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
+// write-back) is already covered here at full fidelity; only candidate
+// enumeration is stubbed.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FixedCandidateSource {
     candidates: Vec<ironclaw_auth::CredentialAccount>,
@@ -677,4 +793,50 @@ where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
     crate::factory::mount_local_dev_database_roots(root, database)
+}
+
+/// Test-only entry point for building a local-dev
+/// [`ironclaw_secrets::FilesystemSecretStore`] without going through the full
+/// Reborn runtime assembly.
+///
+/// Mirrors the production wiring in `build_local_runtime` where
+/// `build_local_dev_secret_store` is called with the scoped filesystem and a
+/// master key resolved from the environment or the root directory's cached key
+/// file. Tests that need a real `FilesystemSecretStore` — for example, to
+/// verify `put` + `lease_once` + `consume` round-trips against an in-process
+/// backend — can call this instead of wiring a full runtime.
+///
+/// The master key is resolved exactly as production does: from the
+/// `SECRETS_MASTER_KEY` env var when set, otherwise from (or generating to)
+/// the `.reborn-local-dev-secrets-master-key` file under `root`. Using the
+/// same `root` across two calls therefore yields the same key, so a second
+/// `FilesystemSecretStore` over the same scoped filesystem can consume a
+/// secret written by the first. For tests only — zero bytes shipped in
+/// production builds.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn build_local_dev_secret_store_for_test<F>(
+    root: &std::path::Path,
+    scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+) -> Result<std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>, crate::RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    crate::factory::build_local_dev_secret_store(root, scoped, None)
+}
+
+/// Mirrors the production approval-gate evidence wiring done by
+/// `build_local_runtime` (runtime.rs ~line 2799) — returns the REAL
+/// `LocalDevApprovalGateEvidence` so the gate-evidence lookup logic
+/// (the `gate:approval-` prefix parse + `ApprovalStatus::Pending` check)
+/// never drifts from production. Tests only.
+///
+/// Wired by the Reborn integration-test framework's `assemble_thread_runtime`
+/// so a `BlockedApproval` run is verified against the persisted `Pending`
+/// approval request at loop exit and genuinely pauses — mirrors the production
+/// `runtime.rs` path with the real type, never a hand-mirrored copy.
+#[cfg(feature = "test-support")]
+pub fn build_local_dev_approval_gate_evidence_for_test(
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+    crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
 }

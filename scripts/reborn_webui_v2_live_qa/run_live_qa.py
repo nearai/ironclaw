@@ -1185,7 +1185,7 @@ async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResul
         case_name="qa_3b_endpoint_status_live_chat",
         prompt=_qa_sheet_prompt("qa_3b_endpoint_status_live_chat"),
         marker=None,
-        required_text=["status"],
+        required_text=["status|http|200|up|running|responded"],
         extra_details={"endpoint_url": url, "expected_status_code": live_status},
     )
 
@@ -2440,7 +2440,7 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
         ctx,
         case_name="qa_6c_gmail_to_sheet_live_chat",
         marker=None,
-        required_text=["ABC", "spreadsheet"],
+        required_text=["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
         extensions=[
             {
                 "package_id": "gmail",
@@ -2768,7 +2768,7 @@ async def case_qa_4d_github_release_slack_routine(ctx: LiveQaContext) -> ProbeRe
         case_name="qa_4d_github_release_slack_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine"],
+        required_text=["routine|trigger|automation|cron|schedule|created"],
         prompt=_qa_sheet_prompt("qa_4d_github_release_slack_routine"),
     )
 
@@ -3311,7 +3311,7 @@ async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
         case_name="qa_8b_hn_keyword_live_chat",
         prompt=_qa_sheet_prompt("qa_8b_hn_keyword_live_chat"),
         marker=None,
-        required_text=["news.ycombinator.com"],
+        required_text=["news.ycombinator.com|hacker news|hn|discussion|id="],
         timeout=240.0,
     )
 

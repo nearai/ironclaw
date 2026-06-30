@@ -785,6 +785,21 @@ struct LocalDevApprovalGateEvidence {
     approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 }
 
+/// Test-only constructor for [`LocalDevApprovalGateEvidence`].
+///
+/// Mirrors the production wiring in `build_local_runtime` (runtime.rs ~line 2799)
+/// where `LocalDevApprovalGateEvidence` is constructed inline and passed to
+/// `loop_exit_evidence.with_approval_gate_evidence`. Exists so `test_support.rs`
+/// can build the real evidence type without needing the struct or its field to be
+/// `pub(crate)`. For tests only — gated behind `test-support`, ships zero bytes
+/// in production binaries.
+#[cfg(feature = "test-support")]
+pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+    std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(
