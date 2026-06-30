@@ -8,6 +8,7 @@ pub mod filesystem;
 pub mod github;
 pub mod group;
 pub mod harness;
+pub mod harness_mcp;
 pub mod http_matcher;
 pub mod model_replay;
 pub mod network;

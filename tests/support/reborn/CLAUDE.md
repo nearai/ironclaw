@@ -79,12 +79,16 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results`) the assertion file reads.
-- **`harness.rs` split follow-up** — the MCP/process-port wiring block
-  (`LoopbackMcpRuntimeHttpEgress`, `mock_mcp_extension_package`,
-  `local_dev_host_runtime_with_registry_egress_and_mcp`,
-  `HostRuntimeCapabilityHarness::mock_mcp_tools`, and the `LoopbackMcpRuntime`
-  type alias) is a tracked follow-up to extract into a `harness_mcp.rs` sub-module
-  (the file exceeds 4000 lines; see arch-exempt annotation near `LoopbackMcpRuntime`).
+- `harness_mcp.rs` — the mock-MCP scaffolding extracted from `harness.rs`:
+  `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
+  `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
+  `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`,
+  and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
+  stays in `harness.rs` (it is a full `Self {..}` constructor co-located with its
+  sibling constructors and would otherwise force every private field of the central
+  harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
+  in `harness_mcp.rs`. `harness.rs` remains large (further `harness_auth.rs` /
+  `harness_hooks.rs` splits are tracked in the coverage roadmap).
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
