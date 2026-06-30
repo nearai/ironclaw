@@ -1014,11 +1014,29 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<u64, SessionThreadError> {
-        self.read_thread_versioned(scope, thread_id)
+        let (stored, _) = self
+            .read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
+        // Migration safety: a thread that already assigned message sequences
+        // under the legacy per-thread-record counter (`next_sequence > 1`) must
+        // keep using it. The native path-local counter starts at 1 for a path
+        // with no row, so switching an *existing* thread onto it would restart
+        // at 1 and collide with messages already at sequences 1..N — corrupting
+        // ordering and clobbering the sequence index on instances that predate
+        // this change. New/empty threads (`next_sequence == 1`, no messages
+        // yet) take the fast native counter; because the native path never
+        // rewrites `next_sequence`, such a thread's record stays at 1 and
+        // deterministically keeps using the native path for its whole life,
+        // while a pre-existing thread stays on the legacy counter for its whole
+        // life. No thread ever switches counters mid-stream.
+        if stored.next_sequence > 1 {
+            return self
+                .reserve_sequence_via_thread_record(scope, thread_id)
+                .await;
+        }
         let sequence_path = message_sequence_counter_path(scope, thread_id)?;
         match self
             .filesystem
@@ -3097,5 +3115,96 @@ mod tests {
 
         assert!(record_key.starts_with("sha256-"));
         assert_eq!(record_key.len(), "sha256-".len() + 64);
+    }
+
+    /// Migration safety: a thread that already assigned message sequences under
+    /// the legacy per-thread-record counter (`next_sequence > 1`) must keep
+    /// resuming from it, never restart at 1 on the native path-local counter —
+    /// otherwise deploying this change onto an existing instance would collide
+    /// new messages with the existing 1..N sequences. New/empty threads
+    /// (`next_sequence == 1`) take the native counter.
+    #[tokio::test]
+    async fn reserve_sequence_resumes_existing_thread_counter_not_native_restart() {
+        use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
+        use ironclaw_host_api::{
+            MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
+        };
+
+        use super::{FilesystemSessionThreadService, thread_record_path};
+        use crate::{EnsureThreadRequest, SessionThreadService};
+
+        let backend = std::sync::Arc::new(InMemoryBackend::new());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/threads").unwrap(),
+            VirtualPath::new("/tenants/t/users/u/threads").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let scoped = std::sync::Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+        let service = FilesystemSessionThreadService::new(scoped);
+        let scope = ThreadScope {
+            tenant_id: TenantId::new("t").unwrap(),
+            agent_id: AgentId::new("a").unwrap(),
+            project_id: Some(ProjectId::new("p").unwrap()),
+            owner_user_id: Some(UserId::new("u").unwrap()),
+            mission_id: None,
+        };
+
+        // Fresh thread (next_sequence == 1) → native path-local counter from 1.
+        let fresh = ThreadId::new("fresh").unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(fresh.clone()),
+                created_by_actor_id: "actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(service.reserve_sequence(&scope, &fresh).await.unwrap(), 1);
+        assert_eq!(service.reserve_sequence(&scope, &fresh).await.unwrap(), 2);
+
+        // Simulate a pre-existing thread: bump its on-disk `next_sequence` to 5
+        // (as the legacy per-record counter would have, for a thread with
+        // messages at sequences 1..4) while leaving the native counter absent.
+        let existing = ThreadId::new("existing").unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(existing.clone()),
+                created_by_actor_id: "actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let (mut stored, version) = service
+            .read_thread_versioned(&scope, &existing)
+            .await
+            .unwrap()
+            .unwrap();
+        stored.next_sequence = 5;
+        let record_path = thread_record_path(&scope, &existing).unwrap();
+        service
+            .filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &record_path,
+                FilesystemSessionThreadService::<InMemoryBackend>::thread_entry(&stored).unwrap(),
+                CasExpectation::Version(version),
+            )
+            .await
+            .unwrap();
+
+        // Reservation resumes the legacy counter at 5, not the native restart 1.
+        assert_eq!(
+            service.reserve_sequence(&scope, &existing).await.unwrap(),
+            5
+        );
+        assert_eq!(
+            service.reserve_sequence(&scope, &existing).await.unwrap(),
+            6
+        );
     }
 }
