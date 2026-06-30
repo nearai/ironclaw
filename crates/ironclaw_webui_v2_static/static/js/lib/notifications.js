@@ -11,16 +11,20 @@ let state = {
   seenIds: new Set(),
 };
 
-function storageKey() {
-  return `${STORAGE_PREFIX}${authScope()}`;
+function notificationScope(scope) {
+  return scope || authScope();
 }
 
-function readPersisted() {
+function storageKey(scope) {
+  return `${STORAGE_PREFIX}${notificationScope(scope)}`;
+}
+
+function readPersisted(scope) {
   try {
     if (typeof window === "undefined" || !window.localStorage) {
       return { initialized: false, seenIds: [] };
     }
-    const raw = window.localStorage.getItem(storageKey());
+    const raw = window.localStorage.getItem(storageKey(scope));
     if (!raw) return { initialized: false, seenIds: [] };
     const parsed = JSON.parse(raw);
     return {
@@ -34,11 +38,11 @@ function readPersisted() {
   }
 }
 
-function writePersisted() {
+function writePersisted(scope) {
   try {
     if (typeof window === "undefined" || !window.localStorage) return;
     window.localStorage.setItem(
-      storageKey(),
+      storageKey(scope),
       JSON.stringify({
         initialized: state.initialized,
         seen_ids: [...state.seenIds].slice(-MAX_SEEN_IDS),
@@ -49,38 +53,39 @@ function writePersisted() {
   }
 }
 
-function ensureScope() {
-  const scope = authScope();
-  if (scope === loadedScope) return;
-  const persisted = readPersisted();
+function ensureScope(scope) {
+  const nextScope = notificationScope(scope);
+  if (nextScope === loadedScope) return;
+  const persisted = readPersisted(nextScope);
   state = {
     initialized: persisted.initialized,
     seenIds: new Set(persisted.seenIds),
   };
-  loadedScope = scope;
+  loadedScope = nextScope;
 }
 
-function snapshot() {
-  ensureScope();
+function snapshot(scope) {
+  ensureScope(scope);
   return {
     initialized: state.initialized,
     seenIds: new Set(state.seenIds),
   };
 }
 
-function emit() {
-  const next = snapshot();
+function emit(scope) {
+  const nextScope = notificationScope(scope);
+  const next = snapshot(nextScope);
   for (const listener of subscribers) {
     try {
-      listener(next);
+      listener(next, nextScope);
     } catch (_) {
       // Ignore subscriber errors; this is UI convenience state.
     }
   }
 }
 
-export function getNotificationState() {
-  return snapshot();
+export function getNotificationState(scope) {
+  return snapshot(scope);
 }
 
 export function subscribeNotifications(listener) {
@@ -90,28 +95,28 @@ export function subscribeNotifications(listener) {
   };
 }
 
-export function ensureNotificationBaseline(messageIds = []) {
-  ensureScope();
+export function ensureNotificationBaseline(messageIds = [], scope) {
+  ensureScope(scope);
   if (!state.initialized) {
     state.initialized = true;
     for (const id of messageIds) {
       if (id) state.seenIds.add(id);
     }
-    writePersisted();
-    emit();
+    writePersisted(scope);
+    emit(scope);
   }
-  return snapshot();
+  return snapshot(scope);
 }
 
-export function markNotificationIdsSeen(messageIds = []) {
-  ensureScope();
+export function markNotificationIdsSeen(messageIds = [], scope) {
+  ensureScope(scope);
   state.initialized = true;
   for (const id of messageIds) {
     if (id) state.seenIds.add(id);
   }
-  writePersisted();
-  emit();
-  return snapshot();
+  writePersisted(scope);
+  emit(scope);
+  return snapshot(scope);
 }
 
 export function automationRunNotificationId(automation, run) {

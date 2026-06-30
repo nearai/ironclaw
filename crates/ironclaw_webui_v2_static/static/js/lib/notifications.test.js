@@ -108,3 +108,20 @@ test("notification persistence is optional outside the browser", () => {
   state = markNotificationIdsSeen(["m2"]);
   assert.equal(state.seenIds.has("m2"), true);
 });
+
+test("explicit notification scopes stay isolated from auth scope", () => {
+  setAuthScope({ tenant_id: "tenant", user_id: `auth-${testScopeId}` });
+
+  ensureNotificationBaseline(["profile-message"], "tenant:profile-user");
+  markNotificationIdsSeen(["profile-read"], "tenant:profile-user");
+  markNotificationIdsSeen(["auth-read"]);
+
+  const profileState = getNotificationState("tenant:profile-user");
+  assert.equal(profileState.seenIds.has("profile-message"), true);
+  assert.equal(profileState.seenIds.has("profile-read"), true);
+  assert.equal(profileState.seenIds.has("auth-read"), false);
+
+  const authState = getNotificationState();
+  assert.equal(authState.seenIds.has("auth-read"), true);
+  assert.equal(authState.seenIds.has("profile-message"), false);
+});

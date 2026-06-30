@@ -24,11 +24,15 @@ function profileScope(profile) {
 export function useNotifications({ profile, enabled = true } = {}) {
   const { t, lang } = useI18n();
   const scope = profileScope(profile);
-  const [notificationState, setNotificationState] = React.useState(getNotificationState);
+  const [notificationState, setNotificationState] = React.useState(() =>
+    getNotificationState(scope),
+  );
 
   React.useEffect(() => {
-    setNotificationState(getNotificationState());
-    return subscribeNotifications(setNotificationState);
+    setNotificationState(getNotificationState(scope));
+    return subscribeNotifications((nextState, changedScope) => {
+      if (changedScope === scope) setNotificationState(nextState);
+    });
   }, [scope]);
 
   const query = useQuery({
@@ -56,7 +60,7 @@ export function useNotifications({ profile, enabled = true } = {}) {
 
   React.useEffect(() => {
     if (!query.isSuccess) return;
-    const next = ensureNotificationBaseline(messageIds);
+    const next = ensureNotificationBaseline(messageIds, scope);
     setNotificationState(next);
   }, [messageIds, scope, query.isSuccess]);
 
@@ -70,9 +74,9 @@ export function useNotifications({ profile, enabled = true } = {}) {
   }, [messages, notificationState]);
 
   const markAllRead = React.useCallback(() => {
-    const next = markNotificationIdsSeen(messageIds);
+    const next = markNotificationIdsSeen(messageIds, scope);
     setNotificationState(next);
-  }, [messageIds]);
+  }, [messageIds, scope]);
 
   return {
     messages,

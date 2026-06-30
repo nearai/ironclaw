@@ -24,49 +24,115 @@ function sourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`;
 }
 
+function depsEqual(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  return left.every((item, index) => Object.is(item, right[index]));
+}
+
 function createReactStub() {
+  const slots = [];
+  let cursor = 0;
+  let pendingRender = false;
   return {
-    useCallback: (fn) => fn,
-    useEffect: (fn) => {
+    beginRender: () => {
+      cursor = 0;
+      pendingRender = false;
+    },
+    didScheduleUpdate: () => pendingRender,
+    useCallback: (fn, deps) => {
+      const index = cursor++;
+      const slot = slots[index];
+      if (slot && depsEqual(slot.deps, deps)) return slot.value;
+      slots[index] = { deps, value: fn };
+      return fn;
+    },
+    useEffect: (fn, deps) => {
+      const index = cursor++;
+      const slot = slots[index];
+      if (slot && depsEqual(slot.deps, deps)) return;
+      slots[index] = { deps };
       fn();
     },
-    useMemo: (fn) => fn(),
+    useMemo: (fn, deps) => {
+      const index = cursor++;
+      const slot = slots[index];
+      if (slot && depsEqual(slot.deps, deps)) return slot.value;
+      const value = fn();
+      slots[index] = { deps, value };
+      return value;
+    },
     useState: (initial) => {
-      let value = typeof initial === "function" ? initial() : initial;
+      const index = cursor++;
+      if (!slots[index]) {
+        slots[index] = {
+          value: typeof initial === "function" ? initial() : initial,
+        };
+      }
       return [
-        value,
+        slots[index].value,
         (next) => {
-          value = typeof next === "function" ? next(value) : next;
+          const value =
+            typeof next === "function" ? next(slots[index].value) : next;
+          if (!Object.is(value, slots[index].value)) {
+            slots[index].value = value;
+            pendingRender = true;
+          }
         },
       ];
     },
   };
 }
 
-function instantiate(queryState) {
+function instantiate(queryState, options = {}) {
   const baselineCalls = [];
+  const getStateScopes = [];
+  const markSeenCalls = [];
+  const subscribeCalls = [];
+  const react = createReactStub();
+  const translate = (key) => key;
+  const messages = options.messages || [{ id: "message-1" }];
   const context = {
     AUTOMATIONS_BASE_REFETCH_MS: 30_000,
-    React: createReactStub(),
-    useI18n: () => ({ t: (key) => key, lang: "en" }),
+    React: react,
+    useI18n: () => ({ t: translate, lang: "en" }),
     useQuery: () => queryState,
     listAutomations: async () => ({}),
     normalizeAutomations: () => [],
-    automationRunNotifications: () => [{ id: "message-1" }],
-    ensureNotificationBaseline: (ids) => {
-      baselineCalls.push(ids);
+    automationRunNotifications: () => messages,
+    ensureNotificationBaseline: (ids, scope) => {
+      baselineCalls.push({ ids, scope });
       return { initialized: true, seenIds: new Set(ids) };
     },
-    getNotificationState: () => ({ initialized: false, seenIds: new Set() }),
-    markNotificationIdsSeen: () => ({ initialized: true, seenIds: new Set() }),
-    subscribeNotifications: () => () => {},
+    getNotificationState: (scope) => {
+      getStateScopes.push(scope);
+      return { initialized: false, seenIds: new Set() };
+    },
+    markNotificationIdsSeen: (ids, scope) => {
+      markSeenCalls.push({ ids, scope });
+      return { initialized: true, seenIds: new Set(ids) };
+    },
+    subscribeNotifications: (listener) => {
+      subscribeCalls.push(listener);
+      return () => {};
+    },
     globalThis: {},
   };
   vm.runInNewContext(sourceForTest(), context);
-  const hook = context.globalThis.__testExports.useNotifications({
-    profile: { tenant_id: "tenant", user_id: "user" },
-  });
-  return { hook, baselineCalls };
+  const render = () => {
+    let hook;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      react.beginRender();
+      hook = context.globalThis.__testExports.useNotifications({
+        profile: { tenant_id: "tenant", user_id: "user" },
+      });
+      if (!react.didScheduleUpdate()) break;
+    }
+    return hook;
+  };
+  const hook = render();
+  return { hook, render, baselineCalls, getStateScopes, markSeenCalls, subscribeCalls };
 }
 
 test("does not baseline notifications before the automations query succeeds", () => {
@@ -90,7 +156,28 @@ test("baselines the current notification ids after the first successful query", 
     refetch: () => {},
   });
 
-  assert.deepEqual(baselineCalls, [["message-1"]]);
+  assert.deepEqual(baselineCalls, [
+    { ids: ["message-1"], scope: "tenant:user" },
+  ]);
   assert.equal(hook.unreadCount, 0);
 });
 
+test("uses the profile scope for notification persistence", () => {
+  const { baselineCalls, getStateScopes, hook, markSeenCalls } = instantiate({
+    data: { automations: [] },
+    isLoading: false,
+    isSuccess: true,
+    error: null,
+    refetch: () => {},
+  });
+
+  assert(getStateScopes.includes("tenant:user"));
+  assert.deepEqual(baselineCalls, [
+    { ids: ["message-1"], scope: "tenant:user" },
+  ]);
+
+  hook.markAllRead();
+  assert.deepEqual(markSeenCalls, [
+    { ids: ["message-1"], scope: "tenant:user" },
+  ]);
+});

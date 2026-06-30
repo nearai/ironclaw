@@ -62,6 +62,7 @@ export function NotificationCenter({ state }) {
   const unreadIds = state?.unreadIds || new Set();
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
+  const markAllRead = state?.markAllRead;
   const visibleUnreadCount = open ? openedUnreadIds.size : unreadCount;
 
   const toggleOpen = React.useCallback(() => {
@@ -69,9 +70,25 @@ export function NotificationCenter({ state }) {
     setOpen(nextOpen);
     if (nextOpen) {
       setOpenedUnreadIds(new Set(unreadIds));
-      state?.markAllRead?.();
+      markAllRead?.();
     }
-  }, [open, state, unreadIds]);
+  }, [markAllRead, open, unreadIds]);
+
+  React.useEffect(() => {
+    if (!open || unreadIds.size === 0) return;
+    setOpenedUnreadIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const id of unreadIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    markAllRead?.();
+  }, [markAllRead, open, unreadIds]);
 
   const close = React.useCallback(() => {
     setOpen(false);
