@@ -1,0 +1,118 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running `target/release/ironclaw_stress --backend libsql --scenario mixed-user-session --concurrency 12 --operations 10 --users 1000 --progress-interval-seconds 0 --human-read --bottleneck-report`
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=d7e29fdd2a3142d883d47477245bca17
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=12 operations_per_task=10 total_operations=120 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=120 succeeded=119 failed=1 duration_ms=4193 throughput_ops_sec=28.6
+
+Run summary
+field                    value
+------------------------ --------------------------------
+backend                  libsql
+preset                   -
+scenario                 mixed-user-session
+run_id                   d7e29fdd2a3142d883d47477245bca17
+target                   libsql://<redacted-local-path>
+processes                1
+concurrency              12
+operations_per_thread    10
+duration_seconds         0
+warmup_seconds           0
+trace_jsonl_enabled      false
+trace_interval_seconds   1
+users                    1000
+active_thread_count      per-user (1000)
+tenants                  1
+prefill_threads          0
+prefill_turns_per_thread 0
+prefill_concurrency      4
+model_latency_ms         0
+model_latency_profile    fixed
+model_latency_jitter_ms  0
+model_latency_spike_every 0
+model_latency_spike_ms   0
+user_message_bytes       0
+assistant_message_bytes  0
+context_max_messages     20
+context_growth_turns_per_op 4
+tool_calls_per_turn      2
+tool_latency_ms          0
+tool_output_bytes        1024
+tool_failure_every       0
+attempted                120
+succeeded                119
+failed                   1
+duration                 4.19s
+throughput_ops_sec       28.62
+
+Operation latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+operation                     120    366.9ms      1.05s      2.11s      2.15s
+
+Process metrics
+metric                          value
+------------------------ ------------
+cpu_total                       2.30s
+cpu_user                        1.05s
+cpu_system                      1.25s
+peak_rss                       24.6MB
+peak_threads                        -
+peak_open_fds                      26
+
+DB probe
+metric                                     before        after        delta
+------------------------------------ ------------ ------------ ------------
+libsql_file                                32.0KB        3.5MB       +3.4MB
+libsql_wal                                     0B           0B          +0B
+libsql_shm                                     0B           0B          +0B
+
+Operation attribution
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+thread_store_writes           120     43.2ms    694.4ms      1.62s      1.83s
+context_reads                 119      590us     40.8ms    163.9ms    282.9ms
+turn_store                    119     11.8ms    168.9ms    262.8ms    530.9ms
+resource_governor             119    199.2ms    389.0ms    396.0ms    479.3ms
+synthetic_wait                114        0us        0us        0us        0us
+
+Stage latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+ensure_thread                 120      800us     64.7ms      1.60s      1.75s
+accept_inbound                120      5.0ms    215.2ms    673.8ms    677.8ms
+submit_turn                   119      818us     24.5ms    144.3ms    243.3ms
+mark_submitted                119      768us     38.5ms     96.3ms    118.0ms
+claim_run                     119      1.9ms    134.7ms    258.4ms    477.0ms
+append_assistant              119      6.6ms    177.4ms    473.1ms    935.5ms
+finalize_assistant            119      1.5ms     53.2ms    205.6ms    212.0ms
+complete_run                  119      3.2ms     50.9ms    159.6ms    164.6ms
+load_context                  119      590us     40.8ms    163.9ms    282.9ms
+resource_reserve              119     97.2ms    252.4ms    274.8ms    297.6ms
+model_wait                    119        0us        0us        0us        0us
+resource_reconcile            119    102.2ms    229.5ms    309.7ms    311.8ms
+
+Errors
+bucket                                  count
+------------------------------------ --------
+thread_backend                              1
+
+Failure causes
+bucket                              count stages                               sample_detail
+-------------------------------- -------- ------------------------------------ --------------------------------
+thread_backend                          1 accept_inbound:1                     thread backend error: filesystem backend error during write_file at /...
+
+Bottleneck analysis
+signal                 level   evidence
+---------------------- ------- --------------------------------------------------------
+top_operation_group    high    thread_store_writes p95=694.4ms p99=1.62s count=120
+failure_rate           medium  1 failed of 120 (0.83%), top_error=thread_backend=1
+memory_growth          medium  rss_start=11.1MiB peak=24.6MiB delta=13.5MiB
+libsql_growth          info    database_file_delta=3.4MiB
+top_stage_p95          info    resource_reserve p95=252.4ms p99=274.8ms count=119
+
+Next probes
+- Sweep --assistant-message-bytes, --tool-output-bytes, and --active-thread-count to separate payload write cost from hot-thread write contention.
+- Inspect failure bucket thread_backend; most common stages={"accept_inbound": 1}, sample=thread backend error: filesystem backend error during write_file at /engine/ironclaw-stress/d7e29fdd2a3142d883d47477245bca17/tenants/tenant-0000/users/user-000059/threads/agents/ironclaw-stress/projects/ironclaw-stress/owners/user-000059/threads/thread-0000-000059/thread.json: SQLite failure: `bad parameter or other API misuse`
+- Run memory-churn as a control, then rerun the target with --duration-seconds to see if RSS keeps climbing.
+- Compare growth across chat-turn, context-growth, and tool-session to find write amplification.
+- Compare reserve-release and reserve-reconcile with the same concurrency to isolate resource-governor write contention.

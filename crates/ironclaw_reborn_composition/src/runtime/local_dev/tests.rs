@@ -1840,6 +1840,118 @@ mod tests {
             .await
             .expect("disable global auto-approve"); // safety: test-only gating precondition
         }
+        let set_capability_id =
+            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
+
+        let missing_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:missing-approved-dm").expect("target id");
+        let missing_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("missing-target set call stages");
+        let missing_set_activity_id = missing_set_candidate.activity_id;
+        let missing_set_surface_version = missing_set_candidate.surface_version.clone();
+        let missing_set_capability_id_from_candidate = missing_set_candidate.capability_id.clone();
+        let missing_blocked_outcome = port
+            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
+            .await
+            .expect("missing-target set call reaches approval gate");
+        let missing_approval_resume = match missing_blocked_outcome {
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref,
+                approval_resume: Some(resume),
+                ..
+            } => {
+                assert!(gate_ref.as_str().starts_with("gate:approval-"));
+                resume
+            }
+            outcome => panic!("missing-target set should require approval, got {outcome:?}"),
+        };
+        let missing_invocation_id =
+            InvocationId::parse(missing_approval_resume.resume_token.as_str())
+                .expect("missing-target resume token carries invocation id");
+        let mut missing_approval_scope = run_context.scope.to_resource_scope();
+        missing_approval_scope.user_id = owner_user_id.clone();
+        missing_approval_scope.invocation_id = missing_invocation_id;
+        let missing_approval = local_runtime
+            .capability_policy
+            .lease_approval_for(
+                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                    capability: &set_capability_id,
+                },
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
+            )
+            .expect("missing-target outbound delivery approval lease terms");
+        ApprovalResolver::new(
+            local_runtime.approval_requests.as_ref(),
+            local_runtime.capability_leases.as_ref(),
+        )
+        .approve_dispatch(
+            &missing_approval_scope,
+            missing_approval_resume.approval_request_id,
+            missing_approval,
+        )
+        .await
+        .expect("missing-target approval issues dispatch lease");
+        let missing_lease_id = local_runtime
+            .capability_leases
+            .leases_for_scope(&missing_approval_scope)
+            .await
+            .into_iter()
+            .find(|lease| lease.grant.capability == set_capability_id)
+            .expect("missing-target approval lease exists")
+            .grant
+            .id;
+
+        let missing_set_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: missing_set_activity_id,
+                surface_version: missing_set_surface_version,
+                capability_id: missing_set_capability_id_from_candidate,
+                input_ref: CapabilityInputRef::new("input:missing-target-approval-resume")
+                    .expect("missing-target input ref"),
+                approval_resume: Some(missing_approval_resume),
+                auth_resume: None,
+            })
+            .await
+            .expect("approved missing-target set call returns a capability outcome");
+        match missing_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.safe_summary,
+                    "outbound delivery target is not available"
+                );
+            }
+            outcome => {
+                panic!("approved missing target should fail non-terminally, got {outcome:?}")
+            }
+        }
+        assert!(
+            local_runtime
+                .outbound_preferences
+                .load_communication_preference(owner_preference_key.clone())
+                .await
+                .expect("owner preference read after approved missing-target set")
+                .is_none()
+        );
+        let missing_leases = local_runtime
+            .capability_leases
+            .leases_for_scope(&missing_approval_scope)
+            .await;
+        let missing_lease = missing_leases
+            .iter()
+            .find(|lease| lease.grant.id == missing_lease_id)
+            .expect("missing-target approval lease remains");
+        assert_eq!(missing_lease.status, CapabilityLeaseStatus::Claimed);
 
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
@@ -1886,8 +1998,6 @@ mod tests {
                 .is_none()
         );
 
-        let set_capability_id =
-            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
         let invocation_id = InvocationId::parse(approval_resume.resume_token.as_str())
             .expect("resume token carries invocation id");
         let mut approval_scope = run_context.scope.to_resource_scope();
@@ -2164,6 +2274,40 @@ mod tests {
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
         );
+        let missing_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:missing-dm").expect("target id");
+        let missing_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("missing-target set call stages");
+        let missing_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
+            .await
+            .expect("missing-target set call returns a capability outcome");
+        match missing_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.safe_summary,
+                    "outbound delivery target is not available"
+                );
+            }
+            outcome => panic!("missing target should fail non-terminally, got {outcome:?}"),
+        }
+        assert!(
+            local_runtime
+                .outbound_preferences
+                .load_communication_preference(owner_preference_key.clone())
+                .await
+                .expect("owner preference read after missing-target set")
+                .is_none()
+        );
+
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
