@@ -201,12 +201,6 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
         let target_summary = target_input.target_id().as_str().to_string();
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
-        if let Some(approved_lease) = approved_lease {
-            self.capability_leases
-                .consume(&approved_lease.scope, approved_lease.lease_id)
-                .await
-                .map_err(|error| approval_lease_error("consume_approval_lease", error))?;
-        }
         let response = match set_outbound_delivery_target_for_model(
             self.facade.as_ref(),
             caller,
@@ -224,6 +218,12 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
             }
             Err(error) => return Err(outbound_delivery_host_error("set_target", error)),
         };
+        if let Some(approved_lease) = approved_lease {
+            self.capability_leases
+                .consume(&approved_lease.scope, approved_lease.lease_id)
+                .await
+                .map_err(|error| approval_lease_error("consume_approval_lease", error))?;
+        }
         let output = serde_json::to_value(response).map_err(|error| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
