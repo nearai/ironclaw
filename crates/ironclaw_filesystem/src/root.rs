@@ -260,6 +260,17 @@ pub trait RootFilesystem: Send + Sync {
         Ok(records.into_iter().map(|record| record.seq).max())
     }
 
+    /// Reserve and return the next monotonic sequence number for `path`.
+    ///
+    /// Unlike [`append`](Self::append), this sequence is scoped to `path`
+    /// rather than the backend's global event table. Consumers use it to
+    /// assign row-native ordering keys without rewriting a shared metadata
+    /// record under CAS. A failed follow-up write may leave a gap; callers must
+    /// rely on monotonicity, not contiguity.
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        unsupported(path, FilesystemOperation::ReserveSeq)
+    }
+
     // ─── Legacy bytes plane (DEPRECATED — removed after consumer migration) ─
     //
     // The methods below predate the unified [`put`]/[`get`] surface and exist

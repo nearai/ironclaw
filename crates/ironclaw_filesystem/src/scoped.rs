@@ -237,6 +237,17 @@ where
         self.root.head_seq(&virtual_path, from).await
     }
 
+    /// Reserve a path-local monotonic sequence number.
+    pub async fn reserve_sequence(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<SeqNo, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)?;
+        self.root.reserve_sequence(&virtual_path).await
+    }
+
     // ─── Legacy bytes-plane methods (DEPRECATED — transitional) ───────────
 
     /// **DEPRECATED — use [`read_bytes`](Self::read_bytes) or
@@ -437,7 +448,8 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         | FilesystemOperation::CreateDirAll
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::ReserveSeq => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
