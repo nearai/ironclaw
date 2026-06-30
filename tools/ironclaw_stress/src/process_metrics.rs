@@ -264,11 +264,6 @@ fn ps_value(column: &str) -> Option<u64> {
     String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ps_value(_column: &str) -> Option<u64> {
-    None
-}
-
 #[cfg(target_os = "linux")]
 fn open_fd_count() -> Option<u64> {
     u64::try_from(fs::read_dir("/proc/self/fd").ok()?.count()).ok()
