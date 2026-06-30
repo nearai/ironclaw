@@ -108,6 +108,13 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 0)]
     pub(crate) active_thread_count: usize,
 
+    /// Distinct threads per owner-user that share one `/turns/state.json`. Set
+    /// >1 to reproduce the production contention shape (a user's foreground turn
+    /// + routine turns on different threads concurrently writing the same
+    /// per-user turn-state document). Default 1 = one thread per owner.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) threads_per_owner: usize,
+
     /// Synthetic tenants distributed across users.
     #[arg(long, default_value_t = 1)]
     pub(crate) tenants: usize,
@@ -126,6 +133,12 @@ pub(crate) struct Args {
 
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
+
+    /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
+    /// per-user state.json (CAS, current production path); `memory` = one shared
+    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
+    pub(crate) turn_state_backend: TurnStateBackend,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
@@ -433,6 +446,27 @@ impl Backend {
         match self {
             Self::Libsql => "libsql",
             Self::Postgres => "postgres",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TurnStateBackend {
+    /// Durable per-user `state.json` via the filesystem store (per-step CAS
+    /// read-modify-write). The current production path; livelocks under
+    /// concurrent same-user writers.
+    Filesystem,
+    /// One shared in-process `InMemoryTurnStateStore` authority — coordination
+    /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
+    Memory,
+}
+
+impl TurnStateBackend {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Filesystem => "filesystem",
+            Self::Memory => "memory",
         }
     }
 }

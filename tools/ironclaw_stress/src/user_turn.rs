@@ -29,8 +29,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
-    ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken,
+    TurnRunnerId, TurnStateStore,
     runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
@@ -39,13 +40,22 @@ use tokio::time::sleep;
 
 use crate::{
     Args, Backend, LatencySummary, ModelLatencyProfile, ModelLatencySource, OperationTarget,
-    Sample, Scenario,
+    Sample, Scenario, TurnStateBackend,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
     summary::{FailureCause, latency_summary},
     synthetic::SyntheticIds,
     trace::{spawn_trace_reporter, stop_trace_reporter},
 };
+
+/// Backend-agnostic turn store for the stress workload. Both the durable
+/// `FilesystemTurnStateStore` and the shared `InMemoryTurnStateStore` already
+/// implement the supertraits, so the impls are empty — this lets
+/// `turn_store_for_context` return one `Arc<dyn StressTurnStore>` and the
+/// workload submit/claim/complete against either without per-method dispatch.
+pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
+impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
+impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
 where
@@ -57,6 +67,11 @@ where
     model_latency: Arc<ModelLatencyDriver>,
     run_id: String,
     target: String,
+    turn_state_backend: TurnStateBackend,
+    /// Single shared in-process turn-state authority, used when
+    /// `turn_state_backend == Memory`. Shared across all workers (one process)
+    /// to faithfully model the production single-process design.
+    memory_turn_store: Arc<InMemoryTurnStateStore>,
 }
 
 pub(crate) enum UserTurnWorkload {
@@ -179,6 +194,7 @@ async fn build_libsql_user_turn_workload(
         run_id,
         target,
         model_latency,
+        args.turn_state_backend,
     )?))
 }
 
@@ -202,6 +218,7 @@ async fn build_postgres_user_turn_workload(
         run_id,
         target,
         model_latency,
+        args.turn_state_backend,
     )?))
 }
 
@@ -993,7 +1010,7 @@ where
         args: &Args,
         context: &crate::synthetic::UserTurnContext,
         thread_id: &ThreadId,
-        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        turn_store: &Arc<dyn StressTurnStore>,
         claimed: &ClaimedTurnRun,
         assistant_message: &str,
         operation_ref: &str,
@@ -1121,7 +1138,7 @@ where
         &self,
         context: &crate::synthetic::UserTurnContext,
         thread_id: &ThreadId,
-        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        turn_store: &Arc<dyn StressTurnStore>,
         claimed: &ClaimedTurnRun,
         assistant_message: String,
         stages: &mut UserTurnStageDurations,
@@ -1157,14 +1174,28 @@ where
     fn turn_store_for_context(
         &self,
         context: &crate::synthetic::UserTurnContext,
-    ) -> Result<Arc<FilesystemTurnStateStore<F>>, OperationFailure> {
-        let view = user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
-            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
-        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.root),
-            view,
-        ));
-        Ok(Arc::new(FilesystemTurnStateStore::new(scoped)))
+    ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
+        match self.turn_state_backend {
+            // One shared authority for the whole process — concurrent same-user
+            // writers coordinate in memory (fast lock), never on a per-user
+            // `state.json` CAS, so they don't livelock.
+            TurnStateBackend::Memory => {
+                Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
+            }
+            // Durable path: a per-context store whose `/turns/state.json`
+            // resolves per (tenant, agent, project, user), so all of a user's
+            // concurrent turns contend on one document via CAS.
+            TurnStateBackend::Filesystem => {
+                let view =
+                    user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
+                        .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+                let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                    Arc::clone(&self.root),
+                    view,
+                ));
+                Ok(Arc::new(FilesystemTurnStateStore::new(scoped)) as Arc<dyn StressTurnStore>)
+            }
+        }
     }
 }
 
@@ -1173,6 +1204,7 @@ fn user_turn_services_from_root<F>(
     run_id: &str,
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
+    turn_state_backend: TurnStateBackend,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1190,6 +1222,11 @@ where
         model_latency,
         run_id,
         target,
+        turn_state_backend,
+        // Constructed once and shared across every worker (the workload is held
+        // behind one Arc), so the Memory backend exercises a single shared
+        // authority exactly as the single-process runtime would.
+        memory_turn_store: Arc::new(InMemoryTurnStateStore::default()),
     })
 }
 
