@@ -82,10 +82,15 @@ impl SyntheticIds {
         worker_index: usize,
         operation_index: usize,
     ) -> Result<UserTurnContext, String> {
-        let (_, user_index, global_index) =
-            self.synthetic_indexes(args, worker_index, operation_index);
-        let thread_user_index = self.thread_user_index(args, user_index, global_index);
-        self.user_turn_context_for_indexes(user_index, thread_user_index)
+        let actor_user_index = partitioned_worker_index(
+            self.users.len(),
+            args.concurrency,
+            worker_index,
+            operation_index,
+        );
+        let thread_user_index =
+            self.thread_user_index(args, actor_user_index, worker_index, operation_index);
+        self.user_turn_context_for_indexes(actor_user_index, thread_user_index)
     }
 
     pub(crate) fn user_turn_context_for_user_index(
@@ -141,11 +146,22 @@ impl SyntheticIds {
         })
     }
 
-    fn thread_user_index(&self, args: &Args, user_index: usize, global_index: usize) -> usize {
+    fn thread_user_index(
+        &self,
+        args: &Args,
+        user_index: usize,
+        worker_index: usize,
+        operation_index: usize,
+    ) -> usize {
         if args.active_thread_count == 0 {
             user_index
         } else {
-            global_index % args.active_thread_count
+            partitioned_worker_index(
+                args.active_thread_count,
+                args.concurrency,
+                worker_index,
+                operation_index,
+            )
         }
     }
 
@@ -162,4 +178,24 @@ impl SyntheticIds {
         let tenant_index = user_index % self.tenants.len();
         (tenant_index, user_index, global_index)
     }
+}
+
+fn partitioned_worker_index(
+    pool_size: usize,
+    worker_count: usize,
+    worker_index: usize,
+    operation_index: usize,
+) -> usize {
+    let worker_count = worker_count.max(1);
+    if pool_size < worker_count {
+        return worker_index % pool_size;
+    }
+
+    let base_len = pool_size / worker_count;
+    let remainder = pool_size % worker_count;
+    let partition_len = base_len + usize::from(worker_index < remainder);
+    let partition_start = worker_index
+        .saturating_mul(base_len)
+        .saturating_add(worker_index.min(remainder));
+    partition_start + operation_index % partition_len
 }

@@ -188,12 +188,6 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
                 scenario: Scenario::ChatTurn,
             },
             SuiteCase {
-                label: "hot-thread",
-                probe: "same-thread-serialization",
-                preset: Some(StressPreset::HotThread),
-                scenario: Scenario::ChatTurn,
-            },
-            SuiteCase {
                 label: "large-context",
                 probe: "context-read-amplification",
                 preset: Some(StressPreset::LargeContext),
@@ -244,12 +238,6 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
                 scenario: Scenario::ChatTurn,
             },
             SuiteCase {
-                label: "postgres-hot-thread-pool",
-                probe: "postgres-hot-thread-pool",
-                preset: Some(StressPreset::HotThread),
-                scenario: Scenario::ChatTurn,
-            },
-            SuiteCase {
                 label: "postgres-context-pool",
                 probe: "postgres-context-read-pool",
                 preset: Some(StressPreset::LargeContext),
@@ -296,10 +284,6 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
     }
 
     match case.label {
-        "hot-thread" => {
-            case_args.active_thread_count = 1;
-            case_args.span_log_failures = true;
-        }
         "large-context" => {
             case_args.prefill_threads = base_args.users.clamp(1, 100);
             case_args.prefill_turns_per_thread = base_args
@@ -333,11 +317,6 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
         }
         "postgres-chat-pool" => {
             apply_postgres_pool_pressure_defaults(base_args, case_args);
-        }
-        "postgres-hot-thread-pool" => {
-            apply_postgres_pool_pressure_defaults(base_args, case_args);
-            case_args.active_thread_count = 1;
-            case_args.span_log_failures = true;
         }
         "postgres-context-pool" => {
             apply_postgres_pool_pressure_defaults(base_args, case_args);

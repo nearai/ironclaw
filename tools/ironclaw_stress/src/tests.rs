@@ -87,6 +87,56 @@ fn fixed_operation_mode_spreads_concurrent_workers_across_threads() {
 }
 
 #[test]
+fn user_turn_workers_keep_disjoint_thread_partitions() {
+    let mut args = test_args();
+    args.users = 10;
+    args.concurrency = 4;
+    args.operations = 100;
+    args.active_thread_count = 0;
+    let ids = SyntheticIds::new(&args).expect("synthetic ids build");
+
+    let mut seen_by_worker = Vec::new();
+    for worker_index in 0..args.concurrency {
+        let thread_ids = (0..args.operations)
+            .map(|operation_index| {
+                ids.user_turn_context(&args, worker_index, operation_index)
+                    .expect("context")
+                    .thread_id
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        seen_by_worker.push(thread_ids);
+    }
+
+    for worker_index in 0..seen_by_worker.len() {
+        for other_worker_index in worker_index + 1..seen_by_worker.len() {
+            assert!(
+                seen_by_worker[worker_index].is_disjoint(&seen_by_worker[other_worker_index]),
+                "workers {worker_index} and {other_worker_index} should not share target threads"
+            );
+        }
+    }
+    let all_threads = seen_by_worker
+        .iter()
+        .flat_map(|thread_ids| thread_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(all_threads.len(), args.users);
+}
+
+#[test]
+fn user_turn_default_rejects_more_workers_than_users() {
+    let mut args = test_args();
+    args.scenario = Scenario::ChatTurn;
+    args.users = 2;
+    args.concurrency = 3;
+    args.active_thread_count = 0;
+
+    let error =
+        validate_args(&args).expect_err("default user-turn mode should require enough users");
+
+    assert!(error.contains("--users to be greater than or equal to --concurrency"));
+}
+
+#[test]
 fn chat_turn_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ChatTurn;
@@ -157,7 +207,7 @@ fn bottleneck_finder_suite_includes_core_pressure_cases() {
 
     assert!(labels.contains("resource-contention"));
     assert!(labels.contains("chat-baseline"));
-    assert!(labels.contains("hot-thread"));
+    assert!(!labels.contains("hot-thread"));
     assert!(labels.contains("large-context"));
     assert!(labels.contains("tool-heavy"));
     assert!(labels.contains("tool-wait"));
@@ -176,7 +226,7 @@ fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
         .collect::<std::collections::BTreeSet<_>>();
 
     assert!(labels.contains("postgres-chat-pool"));
-    assert!(labels.contains("postgres-hot-thread-pool"));
+    assert!(!labels.contains("postgres-hot-thread-pool"));
     assert!(labels.contains("postgres-context-pool"));
     assert!(labels.contains("postgres-tool-pool"));
 }
@@ -379,6 +429,18 @@ fn sweep_concurrency_rejects_zero_values() {
     let error = validate_args(&args).expect_err("zero sweep concurrency is invalid");
 
     assert!(error.contains("--sweep-concurrency values must be greater than 0"));
+}
+
+#[test]
+fn sweep_concurrency_validation_uses_sweep_max_not_base_concurrency() {
+    let mut args = test_args();
+    args.scenario = Scenario::MixedUserSession;
+    args.concurrency = 8;
+    args.sweep_concurrency = vec![2, 4];
+    args.users = 4;
+    args.active_thread_count = 0;
+
+    validate_args(&args).expect("sweep cases only require enough users for the sweep max");
 }
 
 #[test]
@@ -592,6 +654,49 @@ fn tail_spike_model_latency_spikes_every_nth_operation() {
 }
 
 #[test]
+fn provider_model_latency_requires_mixed_user_session() {
+    let matches = Args::command()
+        .try_get_matches_from([
+            "ironclaw_stress",
+            "--backend",
+            "libsql",
+            "--scenario",
+            "chat-turn",
+            "--model-latency-source",
+            "provider",
+        ])
+        .expect("parse args");
+
+    let args = parse_args_from_matches(&matches).expect("parse stress args");
+    let error = validate_args(&args).expect_err("provider mode validation");
+
+    assert!(
+        error.contains("--model-latency-source provider requires --scenario mixed-user-session")
+    );
+}
+
+#[test]
+fn provider_model_latency_args_are_reported() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--scenario",
+        "mixed-user-session",
+        "--model-latency-source",
+        "provider",
+        "--provider-model",
+        "gpt-test",
+        "--provider-max-tokens",
+        "8",
+    ]);
+
+    assert_eq!(args.model_latency_source, ModelLatencySource::Provider);
+    assert_eq!(args.provider_model.as_deref(), Some("gpt-test"));
+    assert_eq!(args.provider_max_tokens, 8);
+}
+
+#[test]
 fn synthetic_tool_failure_cadence_is_deterministic() {
     let mut args = test_args();
     args.operations = 10;
@@ -684,7 +789,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
 
     assert!(rendered.contains("Operation attribution"));
     assert!(rendered.contains("thread_store_writes"));
-    assert!(rendered.contains("synthetic_wait"));
+    assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("Stage latency"));
     assert!(rendered.contains("submit_turn"));
     assert!(rendered.contains("resource_reserve"));
@@ -756,7 +861,7 @@ fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     assert!(rendered.contains("turn_thread_busy"));
     assert!(rendered.contains("top_stage_p95"));
     assert!(rendered.contains("top_operation_group"));
-    assert!(rendered.contains("synthetic_wait"));
+    assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("libsql_growth"));
 }
@@ -959,6 +1064,9 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         prefill_turns_per_thread: 2,
         prefill_concurrency: 1,
         model_latency_ms: 0,
+        model_latency_source: ModelLatencySource::Synthetic,
+        provider_model: None,
+        provider_max_tokens: 16,
         model_latency_profile: ModelLatencyProfile::Fixed,
         model_latency_jitter_ms: 0,
         model_latency_spike_every: 0,
@@ -1060,6 +1168,9 @@ fn test_args() -> Args {
         max_rss_mb: None,
         max_cpu_ms: None,
         model_latency_ms: 0,
+        model_latency_source: ModelLatencySource::Synthetic,
+        provider_model: None,
+        provider_max_tokens: 16,
         model_latency_profile: ModelLatencyProfile::Fixed,
         model_latency_jitter_ms: 0,
         model_latency_spike_every: 0,
