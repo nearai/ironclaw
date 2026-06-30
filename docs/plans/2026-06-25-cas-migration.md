@@ -172,4 +172,30 @@ so `cas_update` is awaited directly on the caller's task and the
 `AsyncStorageWorker`/`block_on` bridge is deleted entirely, letting
 same-store writers overlap like any other `cas_update` caller. That's a
 trait-signature change touching every call site and is its own PR — out of
-scope here. Track it via this note (no GitHub issue filed yet).
+scope here. Tracked as #5470.
+
+## Follow-up issues (out of scope for the migration PR #5234)
+
+Tracked work surfaced during the migration + PR #5234 review. None are the
+runtime-wedge convoy this epic removed; they are correctness/consistency and
+remaining-coverage items:
+
+- **#5469** — migrate `ironclaw_threads::filesystem_service` local
+  `put_with_cas` loops (`reserve_sequence`, `apply_message_update`,
+  `append_capability_display_preview`, `create_summary_artifact`, message
+  indices) onto `cas_update`; only `ensure_thread` was migrated. Lock-free but
+  fail-open (Unsupported→Any). Sibling to #5274.
+- **#5470** — make `ResourceGovernorStore`/`BudgetGateStore` async and delete
+  the `AsyncStorageWorker`/`block_on` bridge so same-store resource CAS writers
+  overlap (see "Follow-up: resources worker concurrency" above).
+- **#5468** — pre-existing per-key `tokio::sync::Mutex<HashMap<..>>` maps
+  guarding CAS loops (the no-mutex anti-pattern this epic's guardrail forbids)
+  still live in `ironclaw_authorization` (`update_lease_cas` + `mutation_lock`),
+  `ironclaw_processes` (`update_status` + `transition_lock`), and
+  `ironclaw_reborn_composition::slack_host_state`. Migrate onto `cas_update`,
+  drop the mutex maps.
+- **#5467** — `InMemoryApprovalRequestStore::discard_pending` deletes the record
+  instead of writing a `Discarded` tombstone, so it allows approval-request-id
+  reuse after discard while the filesystem store rejects it
+  (`ApprovalRequestAlreadyExists`). Cross-backend semantic divergence; make
+  in-memory tombstone for parity or document the difference.
