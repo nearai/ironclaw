@@ -4,6 +4,7 @@
 //! `ScopedFilesystem` boundary before any backend dispatch.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -650,4 +651,387 @@ async fn scoped_txn_per_op_acl_blocks_delete_without_delete_permission() {
         }
         other => panic!("expected Backend(permission), got {other:?}"),
     }
+}
+
+// ─── ScopedFilesystem::put_batch caller gate ──────────────────────────────
+
+#[tokio::test]
+async fn put_batch_denies_when_write_missing() {
+    // The scoped wrapper permission-checks every leg as a write before any
+    // backend dispatch; a scope without write fails closed with the typed
+    // PutBatch denial.
+    let scoped = scoped_in_memory(no_op(true, false, true, false));
+    let err = scoped
+        .put_batch(
+            &test_scope(),
+            vec![ScopedBatchPut {
+                path: ScopedPath::new("/workspace/a").unwrap(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Absent,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::PutBatch,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn put_batch_single_leg_routes_through_on_write_scope() {
+    // A single-leg batch on a write-enabled scope resolves, authorizes, and
+    // lands through the N==1 `put` path on the in-memory backend.
+    let scoped = scoped_in_memory(no_op(true, true, false, false));
+    let versions = scoped
+        .put_batch(
+            &test_scope(),
+            vec![ScopedBatchPut {
+                path: ScopedPath::new("/workspace/a").unwrap(),
+                entry: Entry::bytes(vec![7]),
+                cas: CasExpectation::Absent,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 1);
+    let got = scoped
+        .get(&test_scope(), &ScopedPath::new("/workspace/a").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.entry.body, vec![7]);
+}
+
+// ─── Default put_batch impl: commit + rollback without a DB ────────────────
+
+/// Shared observation point for [`ObservableBackend`]'s transaction, so a test
+/// can assert which terminal (commit vs rollback) the default `put_batch` impl
+/// reached without needing a real database.
+#[derive(Default)]
+struct BatchObserver {
+    begin_calls: AtomicUsize,
+    put_count: AtomicUsize,
+    committed: AtomicBool,
+    rolled_back: AtomicBool,
+}
+
+/// Minimal `RootFilesystem` whose only job is to hand the default `put_batch`
+/// impl a working `begin` transaction wired to a [`BatchObserver`].
+struct ObservableBackend {
+    obs: Arc<BatchObserver>,
+    /// 1-indexed leg whose `put` should error; `None` means every leg succeeds.
+    fail_on_put: Option<usize>,
+    /// When true, `commit()` errors and leaves `committed` unset.
+    fail_commit: bool,
+}
+
+#[async_trait]
+impl RootFilesystem for ObservableBackend {
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<crate::DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<crate::FileStat, FilesystemError> {
+        Ok(crate::FileStat {
+            path: path.clone(),
+            file_type: crate::FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        })
+    }
+
+    async fn begin(&self, _path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.obs.begin_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(ObservableTxn {
+            obs: Arc::clone(&self.obs),
+            fail_on_put: self.fail_on_put,
+            fail_commit: self.fail_commit,
+        }))
+    }
+}
+
+struct ObservableTxn {
+    obs: Arc<BatchObserver>,
+    fail_on_put: Option<usize>,
+    fail_commit: bool,
+}
+
+#[async_trait]
+impl StorageTxn for ObservableTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let leg = self.obs.put_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_on_put == Some(leg) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "observable put failure".to_string(),
+            });
+        }
+        Ok(RecordVersion::from_backend(leg as u64))
+    }
+
+    async fn get(
+        &mut self,
+        _path: &VirtualPath,
+    ) -> Result<Option<VersionedEntry>, FilesystemError> {
+        Ok(None)
+    }
+
+    async fn delete(&mut self, _path: &VirtualPath) -> Result<(), FilesystemError> {
+        Ok(())
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
+        if self.fail_commit {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: "observable commit failure".to_string(),
+            });
+        }
+        self.obs.committed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn rollback(self: Box<Self>) {
+        self.obs.rolled_back.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn put_batch_default_impl_commits_all_legs() {
+    // Drive an N>1 batch through the trait DEFAULT put_batch impl against a
+    // stub whose begin returns a working txn: every leg puts, then commit runs.
+    let obs = Arc::new(BatchObserver::default());
+    let backend = ObservableBackend {
+        obs: Arc::clone(&obs),
+        fail_on_put: None,
+        fail_commit: false,
+    };
+    let versions = backend
+        .put_batch(vec![
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/a").unwrap(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Any,
+            },
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/b").unwrap(),
+                entry: Entry::bytes(vec![2]),
+                cas: CasExpectation::Any,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(obs.put_count.load(Ordering::SeqCst), 2);
+    assert!(obs.committed.load(Ordering::SeqCst), "commit must run");
+    assert!(
+        !obs.rolled_back.load(Ordering::SeqCst),
+        "rollback must not run on success"
+    );
+}
+
+#[tokio::test]
+async fn put_batch_default_impl_rolls_back_on_leg_error() {
+    // A failure on the 2nd leg rolls the txn back and propagates the error;
+    // commit never runs, so nothing is durably written.
+    let obs = Arc::new(BatchObserver::default());
+    let backend = ObservableBackend {
+        obs: Arc::clone(&obs),
+        fail_on_put: Some(2),
+        fail_commit: false,
+    };
+    let err = backend
+        .put_batch(vec![
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/a").unwrap(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Any,
+            },
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/b").unwrap(),
+                entry: Entry::bytes(vec![2]),
+                cas: CasExpectation::Any,
+            },
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::WriteFile,
+            ..
+        }
+    ));
+    // Leg 1 ran before leg 2 aborted: proves the batch applied through the
+    // failing leg (and was then rolled back), not that it bailed pre-write.
+    assert_eq!(obs.put_count.load(Ordering::SeqCst), 2);
+    assert!(obs.rolled_back.load(Ordering::SeqCst), "rollback must run");
+    assert!(
+        !obs.committed.load(Ordering::SeqCst),
+        "commit must not run on failure"
+    );
+}
+
+#[tokio::test]
+async fn put_batch_default_impl_propagates_commit_failure() {
+    // All legs put successfully but commit() fails: the error propagates and
+    // `committed` stays false. rollback is NOT called because commit consumed
+    // the txn (the default impl has no post-commit recovery path).
+    let obs = Arc::new(BatchObserver::default());
+    let backend = ObservableBackend {
+        obs: Arc::clone(&obs),
+        fail_on_put: None,
+        fail_commit: true,
+    };
+    let err = backend
+        .put_batch(vec![
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/a").unwrap(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Any,
+            },
+            BatchPut {
+                path: VirtualPath::new("/secrets/leases/b").unwrap(),
+                entry: Entry::bytes(vec![2]),
+                cas: CasExpectation::Any,
+            },
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::BackendInfrastructure {
+            operation: FilesystemOperation::PutBatch,
+            ..
+        }
+    ));
+    assert_eq!(obs.put_count.load(Ordering::SeqCst), 2);
+    assert!(
+        !obs.committed.load(Ordering::SeqCst),
+        "committed must stay false when commit fails"
+    );
+    assert!(
+        !obs.rolled_back.load(Ordering::SeqCst),
+        "rollback must not run after commit consumed the txn"
+    );
+}
+
+// ─── ScopedFilesystem::put_batch — multi-leg authorization loop ────────────
+
+#[tokio::test]
+async fn put_batch_second_leg_denied_rejects_before_dispatch() {
+    // Two-grant view: `/writable` permits write, `/readonly` does not. A batch
+    // whose first leg is authorized but second leg is not must fail the whole
+    // call with PutBatch denial DURING the per-leg authorization loop, before
+    // any backend dispatch — so `begin` is never reached.
+    let obs = Arc::new(BatchObserver::default());
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(ObservableBackend {
+            obs: Arc::clone(&obs),
+            fail_on_put: None,
+            fail_commit: false,
+        }),
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/writable").unwrap(),
+                VirtualPath::new("/engine/obs_writable").unwrap(),
+                no_op(true, true, true, false),
+            ),
+            MountGrant::new(
+                MountAlias::new("/readonly").unwrap(),
+                VirtualPath::new("/engine/obs_readonly").unwrap(),
+                no_op(true, false, true, false),
+            ),
+        ])
+        .unwrap(),
+    );
+
+    let err = scoped
+        .put_batch(
+            &test_scope(),
+            vec![
+                ScopedBatchPut {
+                    path: ScopedPath::new("/writable/a").unwrap(),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                ScopedBatchPut {
+                    path: ScopedPath::new("/readonly/b").unwrap(),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::PutBatch,
+            ..
+        }
+    ));
+    // The denial short-circuited the authorization loop before delegating, so
+    // the backend was never dispatched.
+    assert_eq!(
+        obs.begin_calls.load(Ordering::SeqCst),
+        0,
+        "backend must not be dispatched when any leg is denied"
+    );
+    assert_eq!(obs.put_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn put_batch_two_legs_both_authorized() {
+    // Both legs authorized under one write grant: the scoped wrapper resolves
+    // and authorizes each, then delegates the N=2 batch to the backend, which
+    // returns one version per leg.
+    let obs = Arc::new(BatchObserver::default());
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(ObservableBackend {
+            obs: Arc::clone(&obs),
+            fail_on_put: None,
+            fail_commit: false,
+        }),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/writable").unwrap(),
+            VirtualPath::new("/engine/obs_writable").unwrap(),
+            no_op(true, true, true, false),
+        )])
+        .unwrap(),
+    );
+
+    let versions = scoped
+        .put_batch(
+            &test_scope(),
+            vec![
+                ScopedBatchPut {
+                    path: ScopedPath::new("/writable/a").unwrap(),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                ScopedBatchPut {
+                    path: ScopedPath::new("/writable/b").unwrap(),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(obs.begin_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(obs.put_count.load(Ordering::SeqCst), 2);
+    assert!(obs.committed.load(Ordering::SeqCst), "commit must run");
 }

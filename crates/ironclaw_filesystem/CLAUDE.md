@@ -4,9 +4,27 @@
 There is one trait (`RootFilesystem`), one entry type (`Entry`), one mount
 table (`CompositeRootFilesystem`). Every persistence concern in the workspace
 (secrets, leases, processes, memory documents, project files, event logs,
-engine state, settings, …) lives behind a single set of ops: `put` / `get` /
+engine state, settings, …) lives behind a single set of ops: `put` / `put_batch` / `get` /
 `delete` / `list_dir` / `query` / `ensure_index` / `stat` / `begin` /
 `append` / `tail`.
+
+### `put_batch` availability contract
+
+`put_batch(Vec<BatchPut>)` writes several entries in one call and returns one
+`RecordVersion` per put, in input order. Its atomicity depends on the backend:
+an empty batch is a programmer error (`BackendInfrastructure`); `N == 1` is
+**always** available (it routes through `put`, so even CAS-only backends serve
+it); `N > 1` is **all-or-nothing atomic only on `TxnCapability::MultiKey`
+backends** (Postgres today). The default trait impl opens a `begin` transaction
+over the longest common directory prefix of the batch, so a CAS-only backend
+returns the typed `Unsupported{BeginTxn}` for `N > 1` and writes nothing.
+Callers that require atomic batching MUST gate on `Capability::BatchPut` and
+fall back to per-key CAS when it is absent. `CompositeRootFilesystem::put_batch`
+additionally refuses a batch that straddles mounts (`PathOutsideMount`, nothing
+written) since cross-mount atomicity is impossible. PR-1 ships only the trait
+primitive + default impl; PR-2/PR-3/PR-4 add native `put_batch` overrides
+(Postgres single-statement, libSQL transaction, in-memory snapshot) that flip
+the `N > 1` legs to atomic and advertise `Capability::BatchPut`.
 
 This supersedes the earlier "bytes mount; structured records stay typed"
 boundary recorded in
@@ -111,3 +129,14 @@ consumers of the legacy methods — new code should call `put`/`get`/
 - Any change to the trait surface needs an accompanying
   `InMemoryBackend` test demonstrating the new op in
   `src/in_memory.rs::tests`.
+- **Adding a `FilesystemOperation` variant requires a WORKSPACE build, not
+  just `-p ironclaw_filesystem`.** The permission gate `operation_allowed`
+  is an exhaustive `match` (no catch-all) duplicated across crates —
+  currently `src/scoped.rs` AND
+  `crates/ironclaw_first_party_extensions/src/coding/paths.rs`. A new
+  variant compiles here but breaks the downstream copy. Grep
+  `rg "FilesystemOperation::Tail" crates src` to find every exhaustive
+  matcher, add the arm to each, then run `cargo build --workspace` before
+  declaring green. (PR-1 of the put_batch work shipped a green
+  `-p ironclaw_filesystem` while the workspace was broken — this note
+  exists so that does not recur.)

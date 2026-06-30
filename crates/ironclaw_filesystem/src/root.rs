@@ -7,6 +7,21 @@ use crate::{
     FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo, VersionedEntry,
 };
 
+/// One write leg of a [`put_batch`](RootFilesystem::put_batch) call: an
+/// [`Entry`] to write at `path` under the given [`CasExpectation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchPut {
+    pub path: VirtualPath,
+    pub entry: Entry,
+    pub cas: CasExpectation,
+}
+
+/// Universal upper bound on the number of legs in a single
+/// [`put_batch`](RootFilesystem::put_batch). The default impl rejects larger
+/// batches before opening a transaction; backends with native multi-key
+/// `put_batch` overrides reuse this same cap rather than defining their own.
+pub const MAX_BATCH_PUTS: usize = 64;
+
 /// Unified filesystem interface over canonical virtual paths.
 ///
 /// Both individual storage backends (local files, Postgres, libSQL, HSM,
@@ -170,6 +185,70 @@ pub trait RootFilesystem: Send + Sync {
     /// always have a CAS-only path.
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         unsupported(path, FilesystemOperation::BeginTxn)
+    }
+
+    /// Write several [`Entry`] values in one call.
+    ///
+    /// Availability contract:
+    /// - `puts.len() == 0` is a programmer error and returns
+    ///   [`FilesystemError::BackendInfrastructure`] (no path is in scope for an
+    ///   empty batch).
+    /// - `puts.len() == 1` is **always** available: it routes through
+    ///   [`put`](Self::put) and needs no transaction, so every backend (even
+    ///   CAS-only ones) serves it.
+    /// - `puts.len() > 1` is **all-or-nothing atomic only on
+    ///   [`TxnCapability::MultiKey`](crate::TxnCapability::MultiKey) backends**
+    ///   (Postgres today; libSQL after PR-3; the in-memory reference after
+    ///   PR-4). The default impl below opens a [`begin`](Self::begin)
+    ///   transaction over the longest common directory prefix; on a CAS-only
+    ///   backend `begin` returns [`FilesystemError::Unsupported`] and that
+    ///   propagates unchanged — callers that require atomic batching MUST gate
+    ///   on [`Capability::BatchPut`](crate::Capability::BatchPut) and fall back
+    ///   to per-key CAS when it is absent.
+    ///
+    /// Returns one [`RecordVersion`] per put, in input order. On any failure in
+    /// a multi-key batch the transaction is rolled back and nothing is written.
+    async fn put_batch(&self, puts: Vec<BatchPut>) -> Result<Vec<RecordVersion>, FilesystemError> {
+        match puts.len() {
+            0 => Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: "empty put_batch".to_string(),
+            }),
+            1 => {
+                let mut puts = puts;
+                let BatchPut { path, entry, cas } = puts.swap_remove(0);
+                Ok(vec![self.put(&path, entry, cas).await?])
+            }
+            _ => {
+                if puts.len() > MAX_BATCH_PUTS {
+                    return Err(FilesystemError::BackendInfrastructure {
+                        operation: FilesystemOperation::PutBatch,
+                        reason: "batch exceeds MAX_BATCH_PUTS".to_string(),
+                    });
+                }
+                let prefix =
+                    crate::common_dir_prefix(puts.iter().map(|p| &p.path)).ok_or_else(|| {
+                        FilesystemError::BackendInfrastructure {
+                            operation: FilesystemOperation::PutBatch,
+                            reason: "put_batch entries share no common directory prefix"
+                                .to_string(),
+                        }
+                    })?;
+                let mut txn = self.begin(&prefix).await?;
+                let mut versions = Vec::with_capacity(puts.len());
+                for BatchPut { path, entry, cas } in puts {
+                    match txn.put(&path, entry, cas).await {
+                        Ok(version) => versions.push(version),
+                        Err(error) => {
+                            txn.rollback().await;
+                            return Err(error);
+                        }
+                    }
+                }
+                txn.commit().await?;
+                Ok(versions)
+            }
+        }
     }
 
     // ─── Event plane (append/tail) ────────────────────────────────────────

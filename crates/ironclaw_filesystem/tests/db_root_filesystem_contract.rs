@@ -6,9 +6,9 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
-    Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
-    SeqNo,
+    BatchPut, Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation,
+    Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page,
+    RecordKind, SeqNo,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::VirtualPath;
@@ -1333,6 +1333,86 @@ async fn libsql_capabilities_advertise_events() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_batch_single_put_succeeds() {
+    // N==1 works on every backend: it routes through the plain `put`
+    // and needs no multi-key transaction.
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/batch_single/L1").unwrap();
+    let versions = filesystem
+        .put_batch(vec![BatchPut {
+            path: path.clone(),
+            entry: Entry::bytes(vec![1, 2, 3]),
+            cas: CasExpectation::Absent,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].get(), 1);
+    assert_eq!(
+        filesystem.get(&path).await.unwrap().unwrap().entry.body,
+        vec![1, 2, 3]
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_batch_multi_surfaces_unsupported_begin_txn() {
+    // libSQL advertises CAS only (no `begin` override), so an N>1
+    // put_batch surfaces the typed `Unsupported{BeginTxn}` from the
+    // default trait impl today. PR-3 adds a native libSQL multi-key
+    // transaction that flips this leg to all-or-nothing atomic.
+    let filesystem = libsql_root().await;
+    let a = VirtualPath::new("/secrets/leases/batch_multi/A").unwrap();
+    let b = VirtualPath::new("/secrets/leases/batch_multi/B").unwrap();
+    let err = filesystem
+        .put_batch(vec![
+            BatchPut {
+                path: a.clone(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Absent,
+            },
+            BatchPut {
+                path: b.clone(),
+                entry: Entry::bytes(vec![2]),
+                cas: CasExpectation::Absent,
+            },
+        ])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::Unsupported {
+                operation: FilesystemOperation::BeginTxn,
+                ..
+            }
+        ),
+        "libSQL N>1 put_batch must be Unsupported until PR-3, got {err:?}"
+    );
+    // begin() failed before any write, so nothing landed.
+    assert!(filesystem.get(&a).await.unwrap().is_none());
+    assert!(filesystem.get(&b).await.unwrap().is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_batch_empty_rejected() {
+    let filesystem = libsql_root().await;
+    let err = filesystem.put_batch(Vec::new()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                ..
+            }
+        ),
+        "empty put_batch must be rejected, got {err:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -1359,9 +1439,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-        IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem,
-        RecordKind, SeqNo, TxnCapability,
+        BatchPut, Capability, CasExpectation, Entry, FileType, FilesystemError,
+        FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
+        PostgresRootFilesystem, RecordKind, SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1677,6 +1757,145 @@ mod postgres_tests {
         assert!(fs.get(&pending).await.unwrap().is_none());
         let got = fs.get(&existing).await.unwrap().unwrap();
         assert_eq!(got.entry.body, b"already committed");
+    }
+
+    #[tokio::test]
+    async fn postgres_put_batch_single_put_succeeds() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "batch_single");
+        let versions = fs
+            .put_batch(vec![BatchPut {
+                path: path.clone(),
+                entry: Entry::bytes(vec![7, 8, 9]),
+                cas: CasExpectation::Absent,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].get(), 1);
+        assert_eq!(
+            fs.get(&path).await.unwrap().unwrap().entry.body,
+            vec![7, 8, 9]
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_put_batch_multi_all_or_nothing() {
+        // Postgres advertises TxnCapability::MultiKey, so the default
+        // put_batch impl drives a real multi-key transaction: a mix of
+        // Absent (insert) and Version (CAS update) legs all land together,
+        // and a single stale leg rolls the whole batch back.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
+
+        // Pre-create two paths so we can exercise Version CAS legs.
+        let c = vpath(&prefix, "C");
+        let d = vpath(&prefix, "D");
+        let vc = fs
+            .put(&c, Entry::bytes(vec![10]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let vd = fs
+            .put(&d, Entry::bytes(vec![20]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Happy batch: 2 Absent (new) + 2 Version (existing) all land.
+        let a = vpath(&prefix, "A");
+        let b = vpath(&prefix, "B");
+        let versions = fs
+            .put_batch(vec![
+                BatchPut {
+                    path: a.clone(),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                BatchPut {
+                    path: b.clone(),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+                BatchPut {
+                    path: c.clone(),
+                    entry: Entry::bytes(vec![11]),
+                    cas: CasExpectation::Version(vc),
+                },
+                BatchPut {
+                    path: d.clone(),
+                    entry: Entry::bytes(vec![21]),
+                    cas: CasExpectation::Version(vd),
+                },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 4);
+        assert_eq!(versions[0].get(), 1);
+        assert_eq!(versions[1].get(), 1);
+        assert_eq!(versions[2].get(), 2);
+        assert_eq!(versions[3].get(), 2);
+        assert_eq!(fs.get(&a).await.unwrap().unwrap().entry.body, vec![1]);
+        assert_eq!(fs.get(&b).await.unwrap().unwrap().entry.body, vec![2]);
+        assert_eq!(fs.get(&c).await.unwrap().unwrap().entry.body, vec![11]);
+        assert_eq!(fs.get(&d).await.unwrap().unwrap().entry.body, vec![21]);
+
+        // Stale leg: `vc` is now stale (c advanced to v2). The batch puts
+        // E and F first (both ok), then the stale C leg fails → the whole
+        // batch must roll back, leaving E and F unwritten and C unchanged.
+        let e = vpath(&prefix, "E");
+        let f = vpath(&prefix, "F");
+        let err = fs
+            .put_batch(vec![
+                BatchPut {
+                    path: e.clone(),
+                    entry: Entry::bytes(vec![5]),
+                    cas: CasExpectation::Absent,
+                },
+                BatchPut {
+                    path: f.clone(),
+                    entry: Entry::bytes(vec![6]),
+                    cas: CasExpectation::Absent,
+                },
+                BatchPut {
+                    path: c.clone(),
+                    entry: Entry::bytes(vec![99]),
+                    cas: CasExpectation::Version(vc),
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "stale CAS leg must surface VersionMismatch, got {err:?}"
+        );
+        assert!(fs.get(&e).await.unwrap().is_none(), "E must roll back");
+        assert!(fs.get(&f).await.unwrap().is_none(), "F must roll back");
+        assert_eq!(
+            fs.get(&c).await.unwrap().unwrap().entry.body,
+            vec![11],
+            "C must be unchanged after the failed batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_put_batch_empty_rejected() {
+        let Some((fs, _prefix)) = postgres_root().await else {
+            return;
+        };
+        let err = fs.put_batch(Vec::new()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::BackendInfrastructure {
+                    operation: FilesystemOperation::PutBatch,
+                    ..
+                }
+            ),
+            "empty put_batch must be rejected, got {err:?}"
+        );
     }
 
     #[tokio::test]
