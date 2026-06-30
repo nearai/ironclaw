@@ -1061,6 +1061,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
     scheduler_enabled: bool,
+    list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
     /// thread id so tests prove the lookup contract rather than accepting a
     /// cached scope for any request.
@@ -1073,6 +1074,7 @@ impl StaticAutomationFacade {
         Self {
             output,
             scheduler_enabled: true,
+            list_calls: Arc::new(Mutex::new(Vec::new())),
             resolve_scopes: HashMap::new(),
             resolve_calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1095,6 +1097,10 @@ impl StaticAutomationFacade {
     fn resolve_calls(&self) -> Vec<ThreadId> {
         self.resolve_calls.lock().expect("lock").clone()
     }
+
+    fn list_calls(&self) -> Vec<ListAutomationCall> {
+        self.list_calls.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -1105,9 +1111,18 @@ impl AutomationProductFacade for StaticAutomationFacade {
 
     async fn list_automations(
         &self,
-        _caller: ProductAgentBoundCaller,
-        _request: AutomationListRequest,
+        caller: ProductAgentBoundCaller,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        self.list_calls
+            .lock()
+            .expect("lock")
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+                include_completed: request.include_completed,
+            });
         Ok(self.output.clone())
     }
 
@@ -10106,6 +10121,52 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
         thread_ids,
         vec![automation_pending_thread_id],
         "notification approval lookup must use the same actor-fallback turn scope shape as blocked run state",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_bounded_run_candidates() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-bounded").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let automation_facade =
+        automation_facade_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone())
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].limit, 20);
+    assert_eq!(list_calls[0].run_limit, 20);
+    assert!(list_calls[0].include_completed);
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![automation_pending_thread_id],
+        "notification lookup should still resolve the thread id once to recover the true trigger creator scope",
     );
 }
 

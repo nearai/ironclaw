@@ -651,7 +651,7 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
             created_by_actor_id: c.user_id.as_str().to_string(),
             title: Some("Needs approval trigger run".to_string()),
             metadata_json: Some(automation_trigger_thread_metadata_json(
-                &trigger_id.to_string(),
+                trigger_id.to_string(),
             )),
         })
         .await

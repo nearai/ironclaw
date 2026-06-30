@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -577,6 +578,41 @@ pub struct TriggerRunThreadScope {
     /// `creator_user_id` stored on the trigger record, which equals
     /// `owner_user_id` in the stored thread scope.
     pub creator_user_id: UserId,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationNotificationTitle(String);
+
+impl AutomationNotificationTitle {
+    const MAX_CHARS: usize = 120;
+
+    fn from_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let sanitized = trimmed
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(Self::MAX_CHARS)
+            .collect::<String>();
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(Self(sanitized.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutomationApprovalThreadCandidate {
+    thread_id: ThreadId,
+    title: Option<AutomationNotificationTitle>,
 }
 
 #[async_trait]
@@ -4224,13 +4260,16 @@ impl RebornServices {
         let visible_limit = clamp_thread_list_limit(request.limit);
         let needs_approval = request.needs_approval;
         if needs_approval {
-            return self
-                .list_automation_threads_needing_approval(
+            return tokio::time::timeout(
+                NOTIFICATION_APPROVAL_QUERY_TIMEOUT,
+                self.list_automation_threads_needing_approval(
                     caller,
                     visible_limit,
                     request.candidate_thread_id,
-                )
-                .await;
+                ),
+            )
+            .await
+            .map_err(|_| notification_approval_timeout_error())?;
         }
         let fetch_limit = visible_limit
             .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
@@ -4315,25 +4354,32 @@ impl RebornServices {
             .list_automations(
                 bound_caller.clone(),
                 AutomationListRequest {
-                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+                    limit: NOTIFICATION_APPROVAL_AUTOMATION_LIMIT,
+                    run_limit: NOTIFICATION_APPROVAL_RUN_LIMIT,
                     include_completed: true,
                 },
             )
             .await?;
 
-        let mut automation_thread_names = HashMap::new();
+        let mut candidate_seen = HashSet::new();
+        let mut candidates = Vec::with_capacity(NOTIFICATION_APPROVAL_CANDIDATE_LIMIT);
         for automation in &automations {
-            let name = automation.name.trim();
-            if name.is_empty() {
-                continue;
-            }
+            let title = AutomationNotificationTitle::from_name(&automation.name);
             for run in &automation.recent_runs {
                 if let Some(thread_id) = &run.thread_id {
-                    automation_thread_names
-                        .entry(thread_id.clone())
-                        .or_insert_with(|| name.to_string());
+                    if candidate_seen.insert(thread_id.clone()) {
+                        candidates.push(AutomationApprovalThreadCandidate {
+                            thread_id: thread_id.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                        break;
+                    }
                 }
+            }
+            if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                break;
             }
         }
 
@@ -4341,38 +4387,41 @@ impl RebornServices {
         let mut threads = Vec::with_capacity(visible_limit);
         if let Some(candidate_thread_id) = candidate_thread_id {
             let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
-            if seen.insert(thread_id.clone())
-                && let Some(record) = self
-                    .automation_run_thread_record(
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let record = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
                         &caller,
                         &bound_caller,
-                        thread_id.clone(),
-                        automation_thread_names.get(&thread_id).cloned(),
+                        candidate.thread_id,
+                        candidate.title,
                     )
                     .await?
-            {
-                threads.push(record);
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(record) = record {
+                    threads.push(record);
+                }
             }
         }
-        for run in automations
-            .into_iter()
-            .flat_map(|automation| automation.recent_runs.into_iter())
-        {
+        for candidate in candidates {
             if threads.len() >= visible_limit {
                 break;
             }
-            let Some(thread_id) = run.thread_id else {
-                continue;
-            };
-            if !seen.insert(thread_id.clone()) {
+            if !seen.insert(candidate.thread_id.clone()) {
                 continue;
             }
             let Some(record) = self
                 .automation_run_thread_record(
                     &caller,
                     &bound_caller,
-                    thread_id.clone(),
-                    automation_thread_names.get(&thread_id).cloned(),
+                    candidate.thread_id,
+                    candidate.title,
                 )
                 .await?
             else {
@@ -4392,7 +4441,7 @@ impl RebornServices {
         caller: &WebUiAuthenticatedCaller,
         bound_caller: &ProductAgentBoundCaller,
         thread_id: ThreadId,
-        automation_name: Option<String>,
+        automation_title: Option<AutomationNotificationTitle>,
     ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
         let Some(trigger_scope) = self
             .automation_facade
@@ -4401,11 +4450,44 @@ impl RebornServices {
         else {
             return Ok(None);
         };
+        self.automation_run_thread_record_for_scope(
+            caller,
+            bound_caller,
+            thread_id,
+            trigger_scope,
+            automation_title,
+        )
+        .await
+    }
+
+    async fn automation_run_thread_record_for_scope(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        trigger_scope: TriggerRunThreadScope,
+        title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
         let true_agent_id = trigger_scope
             .agent_id
             .clone()
             .or_else(|| Some(bound_caller.agent_id.clone()));
         let creator_user_id = trigger_scope.creator_user_id.clone();
+
+        let approval_turn_scope = TurnScope::new(
+            caller.tenant_id.clone(),
+            true_agent_id.clone(),
+            trigger_scope.project_id.clone(),
+            thread_id.clone(),
+        );
+        let run_actor = TurnActor::new(creator_user_id.clone());
+        if !self
+            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
+            .await?
+        {
+            return Ok(None);
+        }
+
         let mut record = None;
         for owner_user_id in [Some(creator_user_id.clone()), None] {
             let thread_turn_scope = TurnScope::new_with_owner(
@@ -4445,34 +4527,11 @@ impl RebornServices {
             .title
             .as_ref()
             .is_none_or(|title| title.trim().is_empty())
-            && let Some(name) = automation_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
+            && let Some(title) = title.as_ref()
         {
-            record.title = Some(name.to_string());
+            record.title = Some(title.as_str().to_string());
         }
-        let run_actor = TurnActor::new(
-            record
-                .scope
-                .owner_user_id
-                .clone()
-                .unwrap_or(creator_user_id),
-        );
-        let approval_turn_scope = TurnScope::new(
-            record.scope.tenant_id.clone(),
-            Some(record.scope.agent_id.clone()),
-            record.scope.project_id.clone(),
-            record.thread_id.clone(),
-        );
-        if self
-            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
-            .await?
-        {
-            Ok(Some(record))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(record))
     }
 
     async fn thread_scope_has_pending_approval(
@@ -5668,6 +5727,10 @@ const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
 const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
 const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
+const NOTIFICATION_APPROVAL_AUTOMATION_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_RUN_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_CANDIDATE_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -5692,6 +5755,10 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
+}
+
+fn notification_approval_timeout_error() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
 }
 
 /// Wire shape of the opaque timeline cursor. The browser does not need
