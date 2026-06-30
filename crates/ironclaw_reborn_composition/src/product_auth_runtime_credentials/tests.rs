@@ -4,7 +4,7 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, InvocationId, MissionId, ResourceScope,
+    AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
     RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
     RuntimeCredentialAuthRequirement, SecretHandle, TenantId, ThreadId, UserId,
 };
@@ -563,6 +563,37 @@ async fn resolver_uses_host_managed_nearai_account_for_nearai_requester() {
 }
 
 #[tokio::test]
+async fn resolver_uses_tenant_agent_level_host_managed_nearai_account_for_project_scope() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let mut host_scope = owner_auth_scope("reborn-cli");
+    host_scope.resource.project_id = None;
+    let mut user_scope = owner_auth_scope("alice");
+    user_scope.resource.project_id = Some(ProjectId::new("project-a").unwrap());
+    let host_access_secret = SecretHandle::new("host_nearai_access").unwrap();
+    ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .access_secret(Some(host_access_secret.clone()))
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope.clone());
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &user_scope.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect("tenant/agent-level host-managed NEAR AI credential should cover project scopes");
+
+    assert_eq!(resolved.handle, host_access_secret);
+    assert_eq!(resolved.scope, host_scope.resource);
+}
+
+#[tokio::test]
 async fn resolver_prefers_user_nearai_account_over_host_managed_nearai_account() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let host_scope = owner_auth_scope("reborn-cli");
@@ -647,6 +678,61 @@ async fn resolver_does_not_share_host_managed_nearai_account_across_tenant() {
         })
         .await
         .expect_err("host-managed NEAR AI fallback must stay tenant-scoped");
+
+    assert_eq!(error, CredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn resolver_does_not_share_host_managed_nearai_account_across_agent() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let host_scope = owner_auth_scope("reborn-cli");
+    let mut other_agent_scope = owner_auth_scope("alice");
+    other_agent_scope.resource.agent_id = Some(AgentId::new("other-agent").unwrap());
+    ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &other_agent_scope.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect_err("host-managed NEAR AI fallback must stay agent-scoped");
+
+    assert_eq!(error, CredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn resolver_does_not_share_project_scoped_host_managed_nearai_account_across_project() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let mut host_scope = owner_auth_scope("reborn-cli");
+    host_scope.resource.project_id = Some(ProjectId::new("host-project").unwrap());
+    let mut other_project_scope = owner_auth_scope("alice");
+    other_project_scope.resource.project_id = Some(ProjectId::new("other-project").unwrap());
+    ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &other_project_scope.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect_err("project-scoped host-managed NEAR AI fallback must stay project-scoped");
 
     assert_eq!(error, CredentialStageError::AuthRequired);
 }

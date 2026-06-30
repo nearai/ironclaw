@@ -408,7 +408,8 @@ fn host_managed_nearai_scope_matches_runtime_scope(
     host_scope.surface == runtime_scope.surface
         && host_scope.resource.tenant_id == runtime_scope.resource.tenant_id
         && host_scope.resource.agent_id == runtime_scope.resource.agent_id
-        && host_scope.resource.project_id == runtime_scope.resource.project_id
+        && (host_scope.resource.project_id.is_none()
+            || host_scope.resource.project_id == runtime_scope.resource.project_id)
 }
 
 #[async_trait]
