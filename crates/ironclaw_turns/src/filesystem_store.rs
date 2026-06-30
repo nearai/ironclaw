@@ -2,13 +2,15 @@
 //!
 //! Persists the lower-churn [`TurnPersistenceSnapshot`] as a JSON blob under
 //! the `/turns` mount alias (alias-relative path: `/turns/state.json`) and
-//! high-churn runner lease heartbeats as per-run CAS records under
-//! `/turns/runner-leases`. Snapshot mutations read the snapshot, overlay
-//! current runner leases, delegate to an [`InMemoryTurnStateStore`] in a
-//! transient `apply` closure, and write the resulting snapshot back with
+//! runner lease state as per-run CAS records under `/turns/runner-leases`.
+//! Frequent runner heartbeats refresh a process-local cache first; the durable
+//! sidecar is re-read/refreshed only periodically or when close to expiry so
+//! crash recovery still has a bounded stale-lease window. Snapshot mutations
+//! read the snapshot, overlay current runner leases, delegate to an
+//! [`InMemoryTurnStateStore`] in a transient `apply` closure, and write the
+//! resulting snapshot back with
 //! optimistic CAS + bounded retry. Reads load the snapshot, overlay current
-//! runner leases, and project through the in-memory store without writing
-//! back.
+//! runner leases, and project through the in-memory store without writing back.
 //!
 //! This mirrors the load-snapshot / replace-snapshot pattern the legacy
 //! [`LibSqlTurnStateStore`] / [`PostgresTurnStateStore`] used internally —
@@ -33,6 +35,7 @@
 //! path itself.
 
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -70,7 +73,10 @@ use io::{
     put_with_cas, snapshot_entry, snapshot_path,
 };
 use profile_resolver::PreResolvedRunProfileResolver;
-use runner_lease::{RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar};
+use runner_lease::{
+    RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar, durable_runner_lease_refresh_due,
+    ensure_active_runner_lease, next_lease_expiry,
+};
 
 #[cfg(test)]
 mod tests;
@@ -83,6 +89,39 @@ struct CachedSnapshot {
     snapshot: TurnPersistenceSnapshot,
     version: Option<RecordVersion>,
     loaded_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedRunnerLease {
+    record: RunnerLeaseRecord,
+    durable_last_heartbeat_at: crate::TurnTimestamp,
+    durable_lease_expires_at: crate::TurnTimestamp,
+}
+
+impl CachedRunnerLease {
+    fn from_durable(
+        mut record: RunnerLeaseRecord,
+        now: crate::TurnTimestamp,
+        runner_lease_ttl: chrono::Duration,
+    ) -> Self {
+        let durable_last_heartbeat_at = record.last_heartbeat_at;
+        let durable_lease_expires_at = record.lease_expires_at;
+        record.last_heartbeat_at = now;
+        record.lease_expires_at = next_lease_expiry(runner_lease_ttl, now);
+        Self {
+            record,
+            durable_last_heartbeat_at,
+            durable_lease_expires_at,
+        }
+    }
+
+    fn durable_refresh_due(&self, now: crate::TurnTimestamp) -> bool {
+        durable_runner_lease_refresh_due(
+            self.durable_last_heartbeat_at,
+            self.durable_lease_expires_at,
+            now,
+        )
+    }
 }
 
 impl CachedSnapshot {
@@ -124,6 +163,7 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_cache: Mutex<Option<CachedSnapshot>>,
+    runner_lease_cache: Mutex<BTreeMap<String, CachedRunnerLease>>,
     apply_timeout: Duration,
 }
 
@@ -137,6 +177,7 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_cache: Mutex::new(None),
+            runner_lease_cache: Mutex::new(BTreeMap::new()),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -244,6 +285,9 @@ where
         self.runner_lease_sidecar()
             .cleanup_after_state(result)
             .await;
+        if let Ok(state) = result {
+            self.clear_runner_lease_cache_for(state.run_id);
+        }
         self.clear_snapshot_cache();
     }
 
@@ -251,8 +295,11 @@ where
         &self,
         request: HeartbeatRequest,
     ) -> Result<EventCursor, TurnError> {
+        if let Some(cursor) = self.try_heartbeat_runner_lease_from_cache(&request)? {
+            return Ok(cursor);
+        }
         let sidecar = self.runner_lease_sidecar();
-        let cursor = match sidecar.heartbeat(request.clone()).await {
+        let lease = match sidecar.heartbeat(request.clone()).await {
             Err(TurnError::ScopeNotFound) => {
                 self.seed_missing_runner_lease_from_snapshot(request.run_id)
                     .await?;
@@ -260,6 +307,8 @@ where
             }
             result => result?,
         };
+        let cursor = lease.event_cursor;
+        self.store_runner_lease_cache(lease);
         self.clear_snapshot_cache();
         Ok(cursor)
     }
@@ -295,6 +344,7 @@ where
         self.runner_lease_sidecar()
             .mark_cancel_requested_from_snapshot(&snapshot, request.run_id)
             .await
+            .inspect(|_| self.clear_runner_lease_cache_for(request.run_id))
     }
 
     async fn prepare_runner_lease_retirement(
@@ -305,6 +355,7 @@ where
         retired_status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
+        self.clear_runner_lease_cache_for(run_id);
         self.runner_lease_sidecar()
             .retire_runner_lease_from_snapshot(
                 &snapshot,
@@ -324,9 +375,11 @@ where
         let Some(previous) = previous else {
             return;
         };
+        let run_id = previous.run_id;
         self.runner_lease_sidecar()
             .restore_if_current_status(previous, current_status)
             .await;
+        self.clear_runner_lease_cache_for(run_id);
         self.clear_snapshot_cache();
     }
 
@@ -336,6 +389,66 @@ where
             self.limits.runner_lease_ttl,
             self.apply_timeout,
         )
+    }
+
+    fn runner_lease_cache_key(run_id: TurnRunId) -> String {
+        run_id.to_string()
+    }
+
+    fn try_heartbeat_runner_lease_from_cache(
+        &self,
+        request: &HeartbeatRequest,
+    ) -> Result<Option<EventCursor>, TurnError> {
+        let mut guard = match self.runner_lease_cache.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(None),
+        };
+        let key = Self::runner_lease_cache_key(request.run_id);
+        let Some(cached) = guard.get_mut(&key) else {
+            return Ok(None);
+        };
+        let now = chrono::Utc::now();
+        if cached.durable_refresh_due(now) {
+            return Ok(None);
+        }
+        ensure_active_runner_lease(&cached.record, request.runner_id, request.lease_token, now)?;
+        if cached.record.status != TurnStatus::Running {
+            return Err(TurnError::InvalidTransition {
+                from: cached.record.status,
+                to: TurnStatus::Running,
+            });
+        }
+        cached.record.last_heartbeat_at = now;
+        cached.record.lease_expires_at = next_lease_expiry(self.limits.runner_lease_ttl, now);
+        Ok(Some(cached.record.event_cursor))
+    }
+
+    fn store_runner_lease_cache(&self, lease: RunnerLeaseRecord) {
+        if lease.status != TurnStatus::Running {
+            self.clear_runner_lease_cache_for(lease.run_id);
+            return;
+        }
+        let now = chrono::Utc::now();
+        let cached = CachedRunnerLease::from_durable(lease, now, self.limits.runner_lease_ttl);
+        match self.runner_lease_cache.lock() {
+            Ok(mut guard) => {
+                guard.insert(Self::runner_lease_cache_key(cached.record.run_id), cached);
+            }
+            Err(error) => {
+                tracing::debug!(%error, "turn runner lease cache mutex poisoned; skipping cache update");
+            }
+        }
+    }
+
+    fn clear_runner_lease_cache_for(&self, run_id: TurnRunId) {
+        match self.runner_lease_cache.lock() {
+            Ok(mut guard) => {
+                guard.remove(&Self::runner_lease_cache_key(run_id));
+            }
+            Err(error) => {
+                tracing::debug!(%error, "turn runner lease cache mutex poisoned; skipping cache eviction");
+            }
+        }
     }
 
     fn fresh_cached_snapshot(&self) -> Option<(TurnPersistenceSnapshot, Option<RecordVersion>)> {
@@ -487,6 +600,7 @@ where
 
     async fn compensate_failed_claim(&self, claimed: &ClaimedTurnRun) {
         let run_id = claimed.state.run_id;
+        self.clear_runner_lease_cache_for(run_id);
         let result = self
             .apply(RunnerLeaseOverlay::Run(run_id), |store| async move {
                 let outcome = store
@@ -792,6 +906,7 @@ where
                 self.runner_lease_sidecar()
                     .delete_best_effort(state.run_id)
                     .await;
+                self.clear_runner_lease_cache_for(state.run_id);
             }
             self.clear_snapshot_cache();
         }

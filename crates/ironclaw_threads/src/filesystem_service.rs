@@ -45,7 +45,7 @@ use chrono::Utc;
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-    Page, RecordVersion, RootFilesystem, ScopedFilesystem,
+    Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -58,16 +58,16 @@ use crate::title::derive_title_from_message;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_entry_for_message};
@@ -223,7 +223,12 @@ where
             .get(&scope.to_resource_scope(), &path)
             .await?
         else {
-            return Ok(None);
+            let Some(events) = self.read_message_append_events(scope, thread_id).await? else {
+                return Ok(None);
+            };
+            return Ok(events
+                .into_iter()
+                .find(|(record, _)| record.message_id == message_id));
         };
         let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
         if &record.thread_id != thread_id || record.message_id != message_id {
@@ -320,6 +325,92 @@ where
         }
     }
 
+    async fn append_message_event(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<bool, SessionThreadError> {
+        let path = message_append_log_path(scope, thread_id)?;
+        let payload = serialize_pretty(&StoredThreadMessageRecord::from(message))?;
+        match self
+            .filesystem
+            .append(&scope.to_resource_scope(), &path, payload)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(FilesystemError::Unsupported {
+                operation: FilesystemOperation::Append,
+                ..
+            }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn read_message_append_events(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<Vec<(ThreadMessageRecord, RecordVersion)>>, SessionThreadError> {
+        let path = message_append_log_path(scope, thread_id)?;
+        let events = match self
+            .filesystem
+            .tail(&scope.to_resource_scope(), &path, SeqNo::ZERO)
+            .await
+        {
+            Ok(events) => events,
+            Err(FilesystemError::Unsupported {
+                operation: FilesystemOperation::Tail,
+                ..
+            }) => return Ok(None),
+            Err(FilesystemError::NotFound { .. }) => return Ok(Some(Vec::new())),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut messages = Vec::with_capacity(events.len());
+        for event in events {
+            let message = deserialize::<ThreadMessageRecord>(&event.payload)?;
+            if &message.thread_id == thread_id {
+                messages.push((message, RecordVersion::from_backend(event.seq.get())));
+            }
+        }
+        messages.sort_by_key(|(message, _)| message.sequence);
+        Ok(Some(messages))
+    }
+
+    async fn list_message_append_events(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        Ok(self
+            .read_message_append_events(scope, thread_id)
+            .await?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect())
+    }
+
+    async fn merge_message_append_events(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        messages: &mut Vec<ThreadMessageRecord>,
+    ) -> Result<(), SessionThreadError> {
+        let mut event_messages = self.list_message_append_events(scope, thread_id).await?;
+        if event_messages.is_empty() {
+            return Ok(());
+        }
+        messages.retain(|existing| {
+            !event_messages
+                .iter()
+                .any(|event| event.message_id == existing.message_id)
+        });
+        messages.append(&mut event_messages);
+        Ok(())
+    }
+
     async fn try_write_new_message_transactionally(
         &self,
         scope: &ThreadScope,
@@ -375,33 +466,17 @@ where
                     thread_id: thread_id.clone(),
                 });
             };
-            let mut stored = deserialize::<StoredThreadRecord>(&versioned_thread.entry.body)?;
+            let stored = deserialize::<StoredThreadRecord>(&versioned_thread.entry.body)?;
             if &stored.record.scope != scope || &stored.record.thread_id != thread_id {
                 txn.rollback().await;
                 return Err(SessionThreadError::UnknownThread {
                     thread_id: thread_id.clone(),
                 });
             }
-            let assigned = stored.next_sequence;
-            stored.next_sequence = assigned + 1;
-            stored.record.updated_at = Some(Utc::now());
-            let thread_entry = Self::thread_entry(&stored)?;
-            if let Err(error) = txn
-                .put(
-                    &thread_virtual_path,
-                    thread_entry,
-                    CasExpectation::Version(versioned_thread.version),
-                )
-                .await
-            {
-                txn.rollback().await;
-                match error {
-                    FilesystemError::VersionMismatch { .. } => continue,
-                    error => return Err(error.into()),
-                };
-            }
 
-            message.sequence = assigned;
+            if message.sequence == 0 {
+                message.sequence = self.reserve_sequence(scope, thread_id).await?;
+            }
             let message_entry = Self::message_entry(message)?;
             if let Err(error) = txn
                 .put(&message_virtual_path, message_entry, CasExpectation::Absent)
@@ -489,6 +564,8 @@ where
             offset = offset.saturating_add(entry_count as u64);
         }
 
+        self.merge_message_append_events(scope, thread_id, &mut messages)
+            .await?;
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
     }
@@ -526,6 +603,8 @@ where
                 messages.push(record);
             }
         }
+        self.merge_message_append_events(scope, thread_id, &mut messages)
+            .await?;
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
     }
@@ -671,32 +750,13 @@ where
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
-        next_sequence: u64,
+        _next_sequence: u64,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-        let index_store = MessageSequenceIndexStore::new(self.filesystem.as_ref());
-        for sequence in 1..next_sequence {
-            let Some(index) = index_store.read(scope, thread_id, sequence).await? else {
-                return Ok(self
-                    .list_thread_messages(scope, thread_id)
-                    .await?
-                    .into_iter()
-                    .find(|message| message.kind == MessageKind::User));
-            };
-            let Some((message, _)) = self
-                .read_message_versioned(scope, thread_id, index.message_id)
-                .await?
-            else {
-                return Ok(self
-                    .list_thread_messages(scope, thread_id)
-                    .await?
-                    .into_iter()
-                    .find(|message| message.kind == MessageKind::User));
-            };
-            if message.kind == MessageKind::User {
-                return Ok(Some(message));
-            }
-        }
-        Ok(None)
+        Ok(self
+            .list_thread_messages(scope, thread_id)
+            .await?
+            .into_iter()
+            .find(|message| message.kind == MessageKind::User))
     }
 
     async fn materialize_message_range(
@@ -714,7 +774,6 @@ where
                 thread_id: thread_id.clone(),
             })?
             .0;
-        let through_sequence = through_sequence.min(thread.next_sequence.saturating_sub(1));
         let messages = match self
             .list_thread_messages_range_indexed(scope, thread_id, after_sequence, through_sequence)
             .await?
@@ -929,11 +988,41 @@ where
         Ok(())
     }
 
-    /// Read-modify-write the `next_sequence` counter on the thread record
-    /// with optimistic CAS and bounded retry. Returns the sequence
-    /// assigned to the caller (i.e. `next_sequence` before the bump) plus
-    /// a clone of the post-bump record.
+    /// Reserve a per-thread message sequence without rewriting the thread
+    /// metadata record. SQL-backed filesystems serve this with an atomic
+    /// path-local counter row; older/backends without the sequence primitive
+    /// fall back to the legacy `thread.json` CAS counter.
     async fn reserve_sequence(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<u64, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        let sequence_path = message_sequence_counter_path(scope, thread_id)?;
+        match self
+            .filesystem
+            .reserve_sequence(&scope.to_resource_scope(), &sequence_path)
+            .await
+        {
+            Ok(sequence) => return Ok(sequence.get()),
+            Err(FilesystemError::Unsupported {
+                operation: FilesystemOperation::ReserveSeq,
+                ..
+            }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.reserve_sequence_via_thread_record(scope, thread_id)
+            .await
+    }
+
+    /// Legacy fallback for backends that cannot atomically reserve a
+    /// path-local sequence. This preserves compatibility but retains the old
+    /// shared-thread-record CAS bottleneck.
+    async fn reserve_sequence_via_thread_record(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -1403,6 +1492,73 @@ where
             "assistant draft",
         )
         .await?;
+        Ok(message)
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(existing) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                None,
+            )
+            .await?
+        {
+            if existing.status != MessageStatus::Draft {
+                return Ok(existing);
+            }
+            let content = request.content.clone();
+            return self
+                .apply_message_update(
+                    &request.scope,
+                    &request.thread_id,
+                    existing.message_id,
+                    |message| {
+                        ensure_draft(message)?;
+                        message.status = MessageStatus::Finalized;
+                        message.content = Some(content.clone().into_text());
+                        message.attachments = Vec::new();
+                        Ok(())
+                    },
+                )
+                .await;
+        }
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::Assistant,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(request.content.into_text()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        if !self
+            .append_message_event(&request.scope, &request.thread_id, &message)
+            .await?
+        {
+            self.write_new_message(
+                &request.scope,
+                &request.thread_id,
+                &message,
+                "finalized assistant message",
+            )
+            .await?;
+        }
         Ok(message)
     }
 
@@ -2023,12 +2179,12 @@ where
             .await;
         // Keep present, scope-matching records paired with their
         // `next_sequence` (needed for page-scoped title derivation).
-        let mut listed: Vec<(SessionThreadRecord, u64)> = Vec::with_capacity(reads.len());
+        let mut listed: Vec<(SessionThreadRecord, u64, u64)> = Vec::with_capacity(reads.len());
         for (thread_id, result) in reads {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
                     let next_sequence = stored.next_sequence;
-                    listed.push((stored.record, next_sequence));
+                    listed.push((stored.record, next_sequence, 0));
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -2050,16 +2206,69 @@ where
                 }
             }
         }
-        // Newest activity first (`updated_at`, falling back to
-        // `created_at`). Legacy records without timestamps sort last.
+        let latest_sequence_results: Vec<(ThreadId, Result<u64, SessionThreadError>)> =
+            futures::stream::iter(
+                listed
+                    .iter()
+                    .map(|(record, _, _)| record.thread_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map(|thread_id| {
+                let scope = request.scope.clone();
+                async move {
+                    let result =
+                        self.list_thread_messages(&scope, &thread_id)
+                            .await
+                            .map(|messages| {
+                                messages
+                                    .into_iter()
+                                    .map(|message| message.sequence)
+                                    .max()
+                                    .unwrap_or(0)
+                            });
+                    (thread_id, result)
+                }
+            })
+            .buffer_unordered(LIST_THREADS_RECORD_READ_CONCURRENCY)
+            .collect()
+            .await;
+        for (thread_id, latest_sequence_result) in latest_sequence_results {
+            let latest_sequence = match latest_sequence_result {
+                Ok(latest_sequence) => latest_sequence,
+                Err(error) => {
+                    tracing::debug!(
+                        thread_id = %thread_id.as_str(),
+                        scope = ?request.scope,
+                        ?error,
+                        "skipping unreadable thread messages during list_threads_for_scope activity sort",
+                    );
+                    0
+                }
+            };
+            if let Some((_, _, sequence_slot)) = listed
+                .iter_mut()
+                .find(|(record, _, _)| record.thread_id == thread_id)
+            {
+                *sequence_slot = latest_sequence;
+            }
+        }
+        // Newest activity first. Native sequence allocation no longer rewrites
+        // `thread.updated_at` on every append, so message-bearing threads sort
+        // ahead of empty threads and then by latest per-thread sequence.
+        // Empty/legacy records fall back to `updated_at` then `created_at`.
         // Tie-break on thread_id ascending so the order is stable and
         // opaque cursors stay resumable — and to match the web sidebar's
         // `byActivityDesc` comparator.
-        listed.sort_by(|(a, _), (b, _)| {
+        listed.sort_by(|(a, _, a_latest_sequence), (b, _, b_latest_sequence)| {
             let a_key = a.updated_at.or(a.created_at);
             let b_key = b.updated_at.or(b.created_at);
-            std::cmp::Reverse(a_key)
-                .cmp(&std::cmp::Reverse(b_key))
+            std::cmp::Reverse(*a_latest_sequence > 0)
+                .cmp(&std::cmp::Reverse(*b_latest_sequence > 0))
+                .then_with(|| {
+                    std::cmp::Reverse(*a_latest_sequence)
+                        .cmp(&std::cmp::Reverse(*b_latest_sequence))
+                })
+                .then_with(|| std::cmp::Reverse(a_key).cmp(&std::cmp::Reverse(b_key)))
                 .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
         });
         // Opaque cursor is the last thread_id of the previous page; find
@@ -2069,7 +2278,7 @@ where
         let start_index = match request.cursor.as_deref() {
             Some(cursor) => listed
                 .iter()
-                .position(|(record, _)| record.thread_id.as_str() == cursor)
+                .position(|(record, _, _)| record.thread_id.as_str() == cursor)
                 .map(|index| index + 1)
                 .unwrap_or(listed.len()),
             None => 0,
@@ -2082,7 +2291,7 @@ where
         // indices here and fan-out the indexed first-user reads below so
         // we don't serialize N transcript probes inline.
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
-        for (record, next_sequence) in listed.drain(start_index..end_index) {
+        for (record, next_sequence, _) in listed.drain(start_index..end_index) {
             let idx = page.len();
             if record.title.is_none() {
                 needs_title.push((idx, record.thread_id.clone(), next_sequence));
@@ -2235,6 +2444,26 @@ fn message_record_path(
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
         "{}/messages/{message_id}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn message_sequence_counter_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/message_sequence",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn message_append_log_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/message_appends",
         thread_root_string(scope, thread_id)
     ))
 }

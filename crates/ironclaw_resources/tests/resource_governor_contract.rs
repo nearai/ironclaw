@@ -1,6 +1,9 @@
 use std::{
     fs,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
 };
 
@@ -22,6 +25,35 @@ impl ResourceGovernorStore for AlwaysFailingStore {
         Err(ResourceError::Storage {
             reason: "forced durable write failure".to_string(),
         })
+    }
+}
+
+#[derive(Clone, Default)]
+struct CountingStore {
+    snapshot: Arc<Mutex<ResourceGovernorSnapshot>>,
+    updates: Arc<AtomicUsize>,
+    inspects: Arc<AtomicUsize>,
+}
+
+impl ResourceGovernorStore for CountingStore {
+    fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.updates.fetch_add(1, Ordering::SeqCst);
+        let mut snapshot = self.snapshot.lock().unwrap();
+        update(&mut snapshot)
+    }
+
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.inspects.fetch_add(1, Ordering::SeqCst);
+        let snapshot = self.snapshot.lock().unwrap();
+        inspect(&snapshot)
     }
 }
 
@@ -791,6 +823,77 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
     assert!(
         path.exists(),
         "finite limits should force the durable governor path"
+    );
+}
+
+#[test]
+fn persistent_governor_unlimited_fast_path_caches_empty_limit_probe() {
+    let store = CountingStore::default();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let governor = PersistentResourceGovernor::new(store.clone()).with_unlimited_fast_path();
+
+    for _ in 0..3 {
+        let reservation = governor
+            .reserve(
+                scope.clone(),
+                ResourceEstimate {
+                    usd: Some(dec!(0.20)),
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+            )
+            .unwrap();
+        governor
+            .reconcile(
+                reservation.id,
+                ResourceUsage {
+                    usd: dec!(0.20),
+                    ..ResourceUsage::default()
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.inspects.load(Ordering::SeqCst),
+        1,
+        "unlimited fast path should inspect durable limits once, not per reservation"
+    );
+    assert_eq!(
+        store.updates.load(Ordering::SeqCst),
+        0,
+        "unlimited fast path should not perform durable reservation writes"
+    );
+
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let _durable = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.inspects.load(Ordering::SeqCst),
+        1,
+        "set_limit refreshes the finite-limit cache without another inspect"
+    );
+    assert_eq!(
+        store.updates.load(Ordering::SeqCst),
+        2,
+        "finite limits should force durable set_limit and reservation writes"
     );
 }
 

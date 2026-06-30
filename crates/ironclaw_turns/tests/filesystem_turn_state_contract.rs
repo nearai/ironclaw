@@ -175,6 +175,50 @@ fn runner_lease_virtual_path(run_id: TurnRunId) -> VirtualPath {
     .unwrap()
 }
 
+async fn runner_lease_version<F>(backend: &F, run_id: TurnRunId) -> RecordVersion
+where
+    F: RootFilesystem,
+{
+    backend
+        .get(&runner_lease_virtual_path(run_id))
+        .await
+        .unwrap()
+        .expect("runner lease sidecar")
+        .version
+}
+
+async fn overwrite_runner_lease_sidecar_times<F>(
+    backend: &F,
+    run_id: TurnRunId,
+    last_heartbeat_at: Option<chrono::DateTime<Utc>>,
+    lease_expires_at: Option<chrono::DateTime<Utc>>,
+) where
+    F: RootFilesystem,
+{
+    let versioned = backend
+        .get(&runner_lease_virtual_path(run_id))
+        .await
+        .unwrap()
+        .expect("runner lease sidecar");
+    let mut lease: serde_json::Value = serde_json::from_slice(&versioned.entry.body).unwrap();
+    if let Some(last_heartbeat_at) = last_heartbeat_at {
+        lease["last_heartbeat_at"] = serde_json::to_value(last_heartbeat_at).unwrap();
+    }
+    if let Some(lease_expires_at) = lease_expires_at {
+        lease["lease_expires_at"] = serde_json::to_value(lease_expires_at).unwrap();
+    }
+    let mut entry = versioned.entry;
+    entry.body = serde_json::to_vec(&lease).unwrap();
+    backend
+        .put(
+            &runner_lease_virtual_path(run_id),
+            entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
+}
+
 async fn overwrite_snapshot_lease_expiry(
     backend: &InMemoryBackend,
     run_id: TurnRunId,
@@ -798,7 +842,7 @@ async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapsh
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_snapshot() {
+async fn filesystem_turn_state_store_heartbeat_skips_fresh_durable_refresh() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = FilesystemTurnStateStore::new(scoped);
@@ -840,8 +884,17 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
         .expect("claimed run");
     let first_heartbeat_at = claimed_run.last_heartbeat_at.expect("heartbeat timestamp");
     let first_expiry = claimed_run.lease_expires_at.expect("lease expiry");
+    let sidecar_version_after_claim = runner_lease_version(backend.as_ref(), run_id).await;
 
     tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
     store
         .heartbeat(HeartbeatRequest {
             run_id,
@@ -859,7 +912,142 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
         .version;
     assert_eq!(
         version_after_heartbeat, version_after_claim,
-        "heartbeat must refresh the runner lease without rewriting state.json"
+        "heartbeat must not rewrite state.json"
+    );
+    let sidecar_version_after_heartbeat = runner_lease_version(backend.as_ref(), run_id).await;
+    assert_eq!(
+        sidecar_version_after_heartbeat, sidecar_version_after_claim,
+        "fresh heartbeat ticks must not rewrite the durable runner lease sidecar"
+    );
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_run = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("heartbeat run");
+    assert_eq!(
+        heartbeat_run
+            .last_heartbeat_at
+            .expect("heartbeat timestamp"),
+        first_heartbeat_at,
+        "fresh heartbeat ticks should keep exposing the last durable heartbeat timestamp"
+    );
+    assert_eq!(
+        heartbeat_run.lease_expires_at.expect("lease expiry"),
+        first_expiry,
+        "fresh heartbeat ticks should keep exposing the current durable lease expiry"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_uses_process_cache_for_fresh_lease() {
+    let backend = Arc::new(CountingFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let response = store
+        .submit_turn(
+            submit_request_for(
+                turn_scope("thread-fs-heartbeat-cache"),
+                "idem-fs-heartbeat-cache",
+            ),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("first heartbeat validates the durable sidecar");
+
+    backend.reset_get_calls();
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("fresh heartbeat should use the process-local lease cache");
+
+    assert_eq!(
+        backend.get_calls(),
+        0,
+        "fresh cached heartbeat should not read state.json or the runner lease sidecar"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_refreshes_durable_lease_near_expiry() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-sidecar-near-expiry"),
+        "idem-fs-heartbeat-sidecar-near-expiry",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_heartbeat_at = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("claimed heartbeat timestamp");
+    let near_expiry = Utc::now() + chrono::Duration::seconds(5);
+    overwrite_runner_lease_sidecar_times(backend.as_ref(), run_id, None, Some(near_expiry)).await;
+    let sidecar_version_before_heartbeat = runner_lease_version(backend.as_ref(), run_id).await;
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let sidecar_version_after_heartbeat = runner_lease_version(backend.as_ref(), run_id).await;
+    assert_ne!(
+        sidecar_version_after_heartbeat, sidecar_version_before_heartbeat,
+        "near-expiry heartbeats must refresh the durable runner lease sidecar"
     );
     let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
     let heartbeat_run = heartbeat_snapshot
@@ -872,11 +1060,11 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
             .last_heartbeat_at
             .expect("heartbeat timestamp")
             > first_heartbeat_at,
-        "heartbeat read model should expose the refreshed sidecar timestamp"
+        "near-expiry refresh should expose the refreshed durable heartbeat timestamp"
     );
     assert!(
-        heartbeat_run.lease_expires_at.expect("lease expiry") > first_expiry,
-        "heartbeat read model should expose the refreshed sidecar expiry"
+        heartbeat_run.lease_expires_at.expect("lease expiry") > near_expiry,
+        "near-expiry refresh should extend the crash-recovery lease"
     );
 }
 
@@ -928,6 +1116,11 @@ async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_si
         })
         .await
         .expect("heartbeat should lazily seed a missing sidecar from state.json");
+    backend
+        .get(&runner_lease_virtual_path(run_id))
+        .await
+        .unwrap()
+        .expect("heartbeat should recreate the runner lease sidecar");
 
     let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
     let heartbeat_run = heartbeat_snapshot
@@ -935,12 +1128,12 @@ async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_si
         .iter()
         .find(|record| record.run_id == run_id)
         .expect("heartbeat run");
-    assert!(
+    assert_eq!(
         heartbeat_run
             .last_heartbeat_at
-            .expect("heartbeat timestamp")
-            > first_heartbeat_at,
-        "lazy sidecar backfill must still expose the refreshed heartbeat"
+            .expect("heartbeat timestamp"),
+        first_heartbeat_at,
+        "lazy sidecar backfill preserves the durable heartbeat timestamp when the lease is still fresh"
     );
 }
 
@@ -972,6 +1165,12 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_si
         .unwrap()
         .unwrap();
     let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_heartbeat_at = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("claimed heartbeat timestamp");
     let first_expiry = claimed_snapshot
         .runs
         .iter()
@@ -979,6 +1178,13 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_si
         .and_then(|record| record.lease_expires_at)
         .expect("claimed lease expiry");
 
+    overwrite_runner_lease_sidecar_times(
+        backend.as_ref(),
+        run_id,
+        Some(first_heartbeat_at - chrono::Duration::seconds(31)),
+        None,
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(5)).await;
     store
         .heartbeat(HeartbeatRequest {
@@ -1048,6 +1254,7 @@ async fn filesystem_turn_state_store_complete_run_uses_runner_lease_sidecar() {
         .await
         .unwrap()
         .unwrap();
+    let sidecar_version_after_claim = runner_lease_version(backend.as_ref(), run_id).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
     store
         .heartbeat(HeartbeatRequest {
@@ -1057,6 +1264,11 @@ async fn filesystem_turn_state_store_complete_run_uses_runner_lease_sidecar() {
         })
         .await
         .unwrap();
+    let sidecar_version_after_heartbeat = runner_lease_version(backend.as_ref(), run_id).await;
+    assert_eq!(
+        sidecar_version_after_heartbeat, sidecar_version_after_claim,
+        "terminal transition coverage should start from a skipped durable heartbeat refresh"
+    );
 
     overwrite_snapshot_lease_expiry(&backend, run_id, Utc::now() - chrono::Duration::seconds(1))
         .await;
@@ -1109,6 +1321,13 @@ async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas(
         .and_then(|record| record.last_heartbeat_at)
         .expect("claimed heartbeat timestamp");
 
+    overwrite_runner_lease_sidecar_times(
+        backend.as_ref(),
+        run_id,
+        Some(first_heartbeat_at - chrono::Duration::seconds(31)),
+        None,
+    )
+    .await;
     backend.reject_next_runner_lease_put();
     tokio::time::sleep(Duration::from_millis(5)).await;
     store

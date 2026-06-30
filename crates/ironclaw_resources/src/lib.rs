@@ -1102,6 +1102,8 @@ where
     clock: Arc<dyn Clock>,
     unlimited_fast_path: bool,
     unlimited_state: Mutex<ResourceState>,
+    unlimited_reservations: Mutex<HashMap<ResourceReservationId, UnlimitedReservationRecord>>,
+    finite_limits_cache: Mutex<Option<bool>>,
     /// Optional sink that receives `BudgetEvent`s as reservations,
     /// reconciliations, warnings, and denials happen. Wired by
     /// composition; defaults to [`NoOpBudgetEventSink`] so the
@@ -1120,6 +1122,8 @@ where
             clock: Arc::new(SystemClock),
             unlimited_fast_path: false,
             unlimited_state: Mutex::new(ResourceState::default()),
+            unlimited_reservations: Mutex::new(HashMap::new()),
+            finite_limits_cache: Mutex::new(None),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1133,6 +1137,8 @@ where
             clock,
             unlimited_fast_path: false,
             unlimited_state: Mutex::new(ResourceState::default()),
+            unlimited_reservations: Mutex::new(HashMap::new()),
+            finite_limits_cache: Mutex::new(None),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1142,9 +1148,12 @@ where
     /// When no finite resource limits are configured, the persistent governor
     /// does not need durable snapshot writes to enforce limits. This opt-in
     /// path preserves same-process reservation lifecycle checks while avoiding
-    /// synchronous writes on reserve/reconcile/release. As soon as any finite
-    /// limit is present in the durable snapshot, new reservations use the
-    /// durable path again.
+    /// synchronous writes and full ledger accounting on reserve/reconcile/
+    /// release. As soon as any finite limit is present in the durable snapshot,
+    /// new reservations use the durable path again. The finite-limit probe is
+    /// cached after the first durable read and refreshed when this governor
+    /// updates limits, so the fast path does not re-read the governor snapshot
+    /// on every reservation.
     pub fn with_unlimited_fast_path(mut self) -> Self {
         self.unlimited_fast_path = true;
         self
@@ -1167,10 +1176,14 @@ where
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
+        let outcome = self.store.update(move |snapshot| {
             set_limit_in_state(&mut snapshot.state, account, limits, now);
-            Ok(())
-        })
+            Ok(has_finite_limits_in_state(&snapshot.state))
+        });
+        if let Ok(has_finite_limits) = outcome {
+            self.cache_finite_limits(has_finite_limits);
+        }
+        outcome.map(|_| ())
     }
 
     pub fn reserved_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
@@ -1200,17 +1213,26 @@ where
     }
 
     fn has_finite_limits(&self) -> Result<bool, ResourceError> {
-        self.store.inspect(|snapshot| {
-            Ok(snapshot
-                .state
-                .limits
-                .values()
-                .any(|limits| !limits.is_unlimited()))
-        })
+        self.store
+            .inspect(|snapshot| Ok(has_finite_limits_in_state(&snapshot.state)))
     }
 
     fn can_use_unlimited_fast_path(&self) -> Result<bool, ResourceError> {
-        Ok(self.unlimited_fast_path && !self.has_finite_limits()?)
+        if !self.unlimited_fast_path {
+            return Ok(false);
+        }
+
+        let mut cache = self
+            .finite_limits_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(has_finite_limits) = *cache {
+            return Ok(!has_finite_limits);
+        }
+
+        let has_finite_limits = self.has_finite_limits()?;
+        *cache = Some(has_finite_limits);
+        Ok(!has_finite_limits)
     }
 
     fn update_active_state<T, F>(&self, update: F) -> Result<T, ResourceError>
@@ -1226,31 +1248,110 @@ where
             .update(move |snapshot| update(&mut snapshot.state))
     }
 
-    fn close_fast_path_or_durable<T, L, D>(
-        &self,
-        local_close: L,
-        durable_close: D,
-    ) -> Result<T, ResourceError>
-    where
-        T: Send + 'static,
-        L: FnOnce(&mut ResourceState) -> Result<T, ResourceError>,
-        D: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
-    {
-        if self.unlimited_fast_path {
-            let mut state = self.lock_unlimited_state();
-            match local_close(&mut state) {
-                Ok(value) => return Ok(value),
-                Err(ResourceError::UnknownReservation { .. }) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        self.store.update(durable_close)
-    }
-
     fn lock_unlimited_state(&self) -> MutexGuard<'_, ResourceState> {
         self.unlimited_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_unlimited_reservations(
+        &self,
+    ) -> MutexGuard<'_, HashMap<ResourceReservationId, UnlimitedReservationRecord>> {
+        self.unlimited_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn cache_finite_limits(&self, has_finite_limits: bool) {
+        if !self.unlimited_fast_path {
+            return;
+        }
+        let mut cache = self
+            .finite_limits_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cache = Some(has_finite_limits);
+    }
+
+    fn reserve_unlimited_fast_path(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ReservationOutcome, ResourceError> {
+        validate_estimate(&estimate)?;
+        let reservation = ResourceReservation {
+            id: reservation_id,
+            scope,
+            estimate,
+        };
+        let mut records = self.lock_unlimited_reservations();
+        if records.contains_key(&reservation.id) {
+            return Err(ResourceError::ReservationAlreadyExists { id: reservation.id });
+        }
+        records.insert(
+            reservation.id,
+            UnlimitedReservationRecord {
+                reservation: reservation.clone(),
+                status: ReservationStatus::Active,
+                actual: None,
+            },
+        );
+        Ok(ReservationOutcome {
+            reservation,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn reconcile_unlimited_fast_path(
+        &self,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        validate_usage(&actual)?;
+        let mut records = self.lock_unlimited_reservations();
+        let record = records
+            .get_mut(&reservation_id)
+            .ok_or(ResourceError::UnknownReservation { id: reservation_id })?;
+        if record.status != ReservationStatus::Active {
+            return Err(ResourceError::ReservationClosed {
+                id: reservation_id,
+                status: record.status,
+            });
+        }
+        record.status = ReservationStatus::Reconciled;
+        record.actual = Some(actual.clone());
+        Ok(ResourceReceipt {
+            id: reservation_id,
+            scope: record.reservation.scope.clone(),
+            status: ReservationStatus::Reconciled,
+            estimate: record.reservation.estimate.clone(),
+            actual: Some(actual),
+        })
+    }
+
+    fn release_unlimited_fast_path(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        let mut records = self.lock_unlimited_reservations();
+        let record = records
+            .get_mut(&reservation_id)
+            .ok_or(ResourceError::UnknownReservation { id: reservation_id })?;
+        if record.status != ReservationStatus::Active {
+            return Err(ResourceError::ReservationClosed {
+                id: reservation_id,
+                status: record.status,
+            });
+        }
+        record.status = ReservationStatus::Released;
+        Ok(ResourceReceipt {
+            id: reservation_id,
+            scope: record.reservation.scope.clone(),
+            status: ReservationStatus::Released,
+            estimate: record.reservation.estimate.clone(),
+            actual: None,
+        })
     }
 }
 
@@ -1287,9 +1388,19 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
-        let result = self.update_active_state(move |state| {
-            reserve_with_outcome_in_state(state, scope, estimate, reservation_id, now)
-        });
+        let result = if self.can_use_unlimited_fast_path()? {
+            self.reserve_unlimited_fast_path(scope, estimate, reservation_id)
+        } else {
+            self.store.update(move |snapshot| {
+                reserve_with_outcome_in_state(
+                    &mut snapshot.state,
+                    scope,
+                    estimate,
+                    reservation_id,
+                    now,
+                )
+            })
+        };
         emit_reserve_events(self.event_sink.as_ref(), &result, now);
         result
     }
@@ -1300,11 +1411,21 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        let local_actual = actual.clone();
-        let result = self.close_fast_path_or_durable(
-            move |state| reconcile_in_state(state, reservation_id, local_actual, now),
-            move |snapshot| reconcile_in_state(&mut snapshot.state, reservation_id, actual, now),
-        );
+        let result = if self.unlimited_fast_path {
+            match self.reconcile_unlimited_fast_path(reservation_id, actual.clone()) {
+                Ok(receipt) => Ok(receipt),
+                Err(ResourceError::UnknownReservation { .. }) => {
+                    self.store.update(move |snapshot| {
+                        reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
+                    })
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.store.update(move |snapshot| {
+                reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
+            })
+        };
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Reconciled {
                 account: most_specific_account(&receipt.scope),
@@ -1320,10 +1441,20 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        let result = self.close_fast_path_or_durable(
-            move |state| release_in_state(state, reservation_id, now),
-            move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now),
-        );
+        let result = if self.unlimited_fast_path {
+            match self.release_unlimited_fast_path(reservation_id) {
+                Ok(receipt) => Ok(receipt),
+                Err(ResourceError::UnknownReservation { .. }) => {
+                    self.store.update(move |snapshot| {
+                        release_in_state(&mut snapshot.state, reservation_id, now)
+                    })
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.store
+                .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now))
+        };
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Released {
                 account: most_specific_account(&receipt.scope),
@@ -1382,6 +1513,10 @@ struct ResourceState {
     period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
 }
 
+fn has_finite_limits_in_state(state: &ResourceState) -> bool {
+    state.limits.values().any(|limits| !limits.is_unlimited())
+}
+
 /// Snapshot of accumulated period-scoped spend + reserved.
 ///
 /// Returned by [`ResourceGovernor`] query helpers so callers can render
@@ -1399,6 +1534,13 @@ struct ReservationRecord {
     reservation: ResourceReservation,
     accounts: Vec<ResourceAccount>,
     tally: ResourceTally,
+    status: ReservationStatus,
+    actual: Option<ResourceUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnlimitedReservationRecord {
+    reservation: ResourceReservation,
     status: ReservationStatus,
     actual: Option<ResourceUsage>,
 }

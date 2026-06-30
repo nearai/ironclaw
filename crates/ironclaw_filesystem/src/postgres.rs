@@ -748,6 +748,26 @@ impl RootFilesystem for PostgresRootFilesystem {
         }
     }
 
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        let row = cached_query_one(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+                VALUES ($1, 2, NOW())
+                ON CONFLICT (path) DO UPDATE SET
+                    next_seq = root_filesystem_sequences.next_seq + 1,
+                    updated_at = NOW()
+                RETURNING next_seq - 1 AS reserved
+                "#,
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+        let reserved: i64 = row.get("reserved");
+        seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -1712,6 +1732,8 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V30__root_filesystem_events.sql"),
     "\n",
     include_str!("../../../migrations/V31__root_filesystem_path_collation.sql"),
+    "\n",
+    include_str!("../../../migrations/V32__root_filesystem_sequences.sql"),
 );
 
 #[cfg(all(test, feature = "postgres"))]
