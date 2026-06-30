@@ -57,7 +57,11 @@ function presentationFor(state) {
 function stateFromThreadSummary(thread) {
   const raw = String(thread?.state || "").toLowerCase();
   if (raw === "processing" || raw === "running") return THREAD_STATE.RUNNING;
-  if (raw === "awaitingapproval" || raw === "awaiting_approval") {
+  if (
+    raw === "needs_attention" ||
+    raw === "awaitingapproval" ||
+    raw === "awaiting_approval"
+  ) {
     return THREAD_STATE.NEEDS_ATTENTION;
   }
   if (raw === "failed" || raw === "interrupted") return THREAD_STATE.FAILED;
@@ -178,7 +182,9 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
             thread=${thread}
             isActive=${thread.id === activeThreadId}
             isPinned=${pinnedIds.has(thread.id)}
-            presentation=${presentationFor(states.get(thread.id) || stateFromThreadSummary(thread))}
+            presentation=${presentationFor(
+              states.has(thread.id) ? states.get(thread.id) : stateFromThreadSummary(thread)
+            )}
             onSelect=${onSelect}
             onDelete=${onDelete}
           />

@@ -198,6 +198,45 @@ fn validate_external_tool_name(name: &str) -> Result<(), ExternalToolSpecError> 
     Ok(())
 }
 
+/// A model-invoked external tool call that parked the run, recorded by the loop
+/// host at invocation time. The OpenAI-compatible Responses surface reads these
+/// back to render a parked [`crate::TurnStatus::BlockedExternalTool`] run's
+/// pending call as a `function_call` output item — the call's
+/// name/arguments/`call_id` are otherwise only in the loop checkpoint, which has
+/// no external read path. Cleared once the client output is consumed on resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingExternalCall {
+    call_id: String,
+    name: String,
+    arguments: serde_json::Value,
+}
+
+impl PendingExternalCall {
+    pub fn new(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arguments(&self) -> &serde_json::Value {
+        &self.arguments
+    }
+}
+
 /// Error surface for [`ExternalToolCatalog`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalToolCatalogError {
@@ -206,6 +245,11 @@ pub enum ExternalToolCatalogError {
     /// A register request exceeded the per-run tool cap or contained duplicate
     /// tool names.
     InvalidRegistration { reason: &'static str },
+    /// A submitted output referenced a call id that is not currently parked.
+    CallNotPending,
+    /// A submitted output conflicts with a different output already stored for
+    /// the same parked call id.
+    OutputAlreadySubmitted,
 }
 
 impl std::fmt::Display for ExternalToolCatalogError {
@@ -213,6 +257,8 @@ impl std::fmt::Display for ExternalToolCatalogError {
         match self {
             Self::Unavailable => f.write_str("external tool catalog unavailable"),
             Self::InvalidRegistration { reason } => f.write_str(reason),
+            Self::CallNotPending => f.write_str("external tool call_id is not pending"),
+            Self::OutputAlreadySubmitted => f.write_str("external tool output already submitted"),
         }
     }
 }
@@ -263,6 +309,36 @@ pub trait ExternalToolCatalog: Send + Sync {
         output: serde_json::Value,
     ) -> Result<(), ExternalToolCatalogError>;
 
+    /// Atomically validate that `call_id` is still a pending parked external
+    /// call and record its client-submitted output.
+    async fn submit_output_for_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: String,
+        output: serde_json::Value,
+    ) -> Result<(), ExternalToolCatalogError>;
+
+    /// Read a submitted output without consuming it.
+    async fn output(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError>;
+
+    /// Resolve the `call_id` bound to `input_ref`, then read its submitted
+    /// output without consuming it. The loop host uses this to keep client
+    /// output durable until the capability-result write commits.
+    async fn output_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+        let Some(call_id) = self.call_id_for_input_ref(run_id, input_ref).await? else {
+            return Ok(None);
+        };
+        self.output(run_id, &call_id).await
+    }
+
     /// Take (remove) a previously submitted output for a call, if present. The
     /// host calls this when re-dispatching a resumed external-tool call so each
     /// output is consumed once.
@@ -286,6 +362,44 @@ pub trait ExternalToolCatalog: Send + Sync {
         self.take_output(run_id, &call_id).await
     }
 
+    /// After the capability result has been written durably, consume the
+    /// submitted output and clear the pending-call record in one catalog update.
+    async fn complete_call_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<(), ExternalToolCatalogError>;
+
+    /// Record (replacing any prior record with the same `call_id`) a model-invoked
+    /// external tool call that parked the run. The loop host calls this when it
+    /// registers the provider tool call, so the parked invocation's
+    /// name/arguments/`call_id` survive in run-scoped state the Responses surface
+    /// can read — the loop checkpoint that also holds them has no external read
+    /// path. Insertion order is preserved across distinct `call_id`s so a run that
+    /// parked on several calls renders them deterministically.
+    async fn record_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call: PendingExternalCall,
+    ) -> Result<(), ExternalToolCatalogError>;
+
+    /// The external tool calls that have parked this run and not yet been
+    /// completed, in invocation order. Read by the Responses surface to render a
+    /// parked `BlockedExternalTool` run's pending `function_call` items.
+    async fn pending_calls(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError>;
+
+    /// Drop the pending-call record for `call_id`. The loop host calls this when a
+    /// resumed external-tool call completes (its client output was consumed) so a
+    /// run that parks again on a later call does not re-surface the resolved one.
+    async fn clear_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<(), ExternalToolCatalogError>;
+
     /// Drop all catalog state for a run. Called when the run reaches a terminal
     /// state so abandoned runs do not leak.
     async fn clear(&self, run_id: TurnRunId) -> Result<(), ExternalToolCatalogError>;
@@ -298,6 +412,10 @@ struct RunEntry {
     outputs: HashMap<String, serde_json::Value>,
     /// `input_ref` → `call_id` bindings for parked external-tool invocations.
     call_ids_by_input_ref: HashMap<String, String>,
+    /// Parked external-tool calls (name/arguments/`call_id`), in invocation
+    /// order, deduplicated by `call_id`. Surfaced to the Responses API as the
+    /// pending `function_call` items of a `BlockedExternalTool` run.
+    pending_calls: Vec<PendingExternalCall>,
 }
 
 /// In-memory [`ExternalToolCatalog`] for local-dev / single-process Reborn.
@@ -406,11 +524,51 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             .runs
             .lock()
             .map_err(|_| ExternalToolCatalogError::Unavailable)?;
-        runs.entry(run_id)
-            .or_default()
-            .outputs
-            .insert(call_id, output);
+        let entry = runs.entry(run_id).or_default();
+        entry.outputs.insert(call_id, output);
         Ok(())
+    }
+
+    async fn submit_output_for_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: String,
+        output: serde_json::Value,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        let entry = runs.entry(run_id).or_default();
+        if !entry
+            .pending_calls
+            .iter()
+            .any(|call| call.call_id() == call_id)
+        {
+            return Err(ExternalToolCatalogError::CallNotPending);
+        }
+        if let Some(existing) = entry.outputs.get(&call_id) {
+            if existing == &output {
+                return Ok(());
+            }
+            return Err(ExternalToolCatalogError::OutputAlreadySubmitted);
+        }
+        entry.outputs.insert(call_id, output);
+        Ok(())
+    }
+
+    async fn output(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        Ok(runs
+            .get(&run_id)
+            .and_then(|entry| entry.outputs.get(call_id).cloned()))
     }
 
     async fn take_output(
@@ -425,6 +583,79 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
         Ok(runs
             .get_mut(&run_id)
             .and_then(|entry| entry.outputs.remove(call_id)))
+    }
+
+    async fn complete_call_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        let Some(entry) = runs.get_mut(&run_id) else {
+            return Ok(());
+        };
+        let Some(call_id) = entry.call_ids_by_input_ref.get(input_ref).cloned() else {
+            return Ok(());
+        };
+        entry.outputs.remove(&call_id);
+        entry.pending_calls.retain(|call| call.call_id() != call_id);
+        entry.call_ids_by_input_ref.remove(input_ref);
+        Ok(())
+    }
+
+    async fn record_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call: PendingExternalCall,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        let pending = &mut runs.entry(run_id).or_default().pending_calls;
+        // Replace in place on re-record (same call id re-dispatched) so order is
+        // stable; otherwise append.
+        if let Some(existing) = pending
+            .iter_mut()
+            .find(|existing| existing.call_id() == call.call_id())
+        {
+            *existing = call;
+        } else {
+            pending.push(call);
+        }
+        Ok(())
+    }
+
+    async fn pending_calls(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError> {
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        Ok(runs
+            .get(&run_id)
+            .map(|entry| entry.pending_calls.clone())
+            .unwrap_or_default())
+    }
+
+    async fn clear_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        if let Some(entry) = runs.get_mut(&run_id) {
+            entry.pending_calls.retain(|call| call.call_id() != call_id);
+        }
+        Ok(())
     }
 
     async fn clear(&self, run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
@@ -587,6 +818,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_output_for_pending_call_validates_and_is_idempotent() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_1", "get_weather", serde_json::json!({})),
+            )
+            .await
+            .expect("record pending");
+
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("submit pending output");
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("identical replay is idempotent");
+
+        let duplicate = catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("70F"))
+            .await
+            .expect_err("different output for same call is rejected");
+        assert_eq!(duplicate, ExternalToolCatalogError::OutputAlreadySubmitted);
+        let wrong_call = catalog
+            .submit_output_for_pending_call(run, "call_2".to_string(), serde_json::json!("ok"))
+            .await
+            .expect_err("non-pending call is rejected");
+        assert_eq!(wrong_call, ExternalToolCatalogError::CallNotPending);
+    }
+
+    #[tokio::test]
     async fn bind_then_take_output_for_input_ref_resolves_via_call_id() {
         let catalog = InMemoryExternalToolCatalog::new();
         let run = TurnRunId::new();
@@ -600,6 +864,11 @@ mod tests {
             .await
             .expect("submit");
         // ...is taken by the host using the parked invocation's input_ref.
+        let peeked = catalog
+            .output_for_input_ref(run, "input-1")
+            .await
+            .expect("peek");
+        assert_eq!(peeked, Some(serde_json::json!("sunny")));
         let taken = catalog
             .take_output_for_input_ref(run, "input-1")
             .await
@@ -640,6 +909,167 @@ mod tests {
         assert_eq!(
             catalog.take_output(run, "call_1").await.expect("take"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_calls_record_read_and_clear_preserve_order() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new(
+                    "call_1",
+                    "get_weather",
+                    serde_json::json!({"city": "SF"}),
+                ),
+            )
+            .await
+            .expect("record 1");
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_2", "search", serde_json::json!({"q": "rust"})),
+            )
+            .await
+            .expect("record 2");
+
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].call_id(), "call_1");
+        assert_eq!(pending[0].name(), "get_weather");
+        assert_eq!(pending[0].arguments(), &serde_json::json!({"city": "SF"}));
+        assert_eq!(pending[1].call_id(), "call_2");
+
+        // Re-recording the same call id replaces in place without reordering.
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new(
+                    "call_1",
+                    "get_weather",
+                    serde_json::json!({"city": "NYC"}),
+                ),
+            )
+            .await
+            .expect("re-record");
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].call_id(), "call_1");
+        assert_eq!(pending[0].arguments(), &serde_json::json!({"city": "NYC"}));
+
+        catalog
+            .submit_output(run, "call_2".to_string(), serde_json::json!("ok"))
+            .await
+            .expect("submit output");
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(PendingExternalCall::call_id)
+                .collect::<Vec<_>>(),
+            vec!["call_1", "call_2"]
+        );
+        assert_eq!(
+            catalog
+                .take_output(run, "call_2")
+                .await
+                .expect("take output"),
+            Some(serde_json::json!("ok"))
+        );
+
+        // Clearing one leaves the rest.
+        catalog
+            .clear_pending_call(run, "call_1")
+            .await
+            .expect("clear one");
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(PendingExternalCall::call_id)
+                .collect::<Vec<_>>(),
+            vec!["call_2"]
+        );
+
+        catalog
+            .clear_pending_call(run, "call_2")
+            .await
+            .expect("clear second");
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert!(pending.is_empty());
+
+        // Unknown run yields no pending calls.
+        assert!(
+            catalog
+                .pending_calls(TurnRunId::new())
+                .await
+                .expect("empty")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_call_for_input_ref_consumes_output_and_clears_pending_call() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .bind_call(run, "input-1".to_string(), "call_1".to_string())
+            .await
+            .expect("bind");
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_1", "get_weather", serde_json::json!({})),
+            )
+            .await
+            .expect("record");
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("submit");
+
+        catalog
+            .complete_call_for_input_ref(run, "input-1")
+            .await
+            .expect("complete");
+
+        assert_eq!(catalog.output(run, "call_1").await.expect("output"), None);
+        assert!(
+            catalog
+                .pending_calls(run)
+                .await
+                .expect("pending")
+                .is_empty()
+        );
+        assert_eq!(
+            catalog
+                .call_id_for_input_ref(run, "input-1")
+                .await
+                .expect("binding"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_run_drops_pending_calls() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_1", "t", serde_json::json!({})),
+            )
+            .await
+            .expect("record");
+        catalog.clear(run).await.expect("clear");
+        assert!(
+            catalog
+                .pending_calls(run)
+                .await
+                .expect("pending")
+                .is_empty()
         );
     }
 

@@ -44,6 +44,10 @@ cargo install --path crates/ironclaw_reborn_cli --features webui-v2-beta
 cargo build -p ironclaw_reborn_cli --features webui-v2-beta --release
 ```
 
+The beta WebUI static crate runs the frontend bundler from Cargo build scripts,
+so any `webui-v2-beta` or `--all-features` build needs Node.js/npm available
+even though the generated `static/dist/` bundle is not committed.
+
 When the feature is off, `ironclaw-reborn --help` does not list `serve`
 and `ironclaw-reborn serve …` returns `error: unrecognized subcommand`.
 This is verified by `help_mentions_reborn_commands` in `tests/smoke.rs`,

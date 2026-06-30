@@ -365,14 +365,14 @@ async def test_reborn_legacy_pending_message_survives_thread_reload(
         await expect(pending_message).to_have_count(1, timeout=5000)
         pending_timeline_requests = len(harness["timeline_requests"])
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Other thread"
         ).first.click()
         await expect(
             page.locator(SEL_V2["msg_user"]).filter(has_text="Other thread seed")
         ).to_be_visible(timeout=15000)
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Pending message regression"
         ).first.click()
         await expect(pending_message).to_have_count(1, timeout=15000)
@@ -452,14 +452,14 @@ async def test_reborn_legacy_pending_attachment_message_survives_thread_reload(
             "pending-note.txt"
         )
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Other thread"
         ).first.click()
         await expect(
             page.locator(SEL_V2["msg_user"]).filter(has_text="Other thread seed")
         ).to_be_visible(timeout=15000)
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Pending attachment regression"
         ).first.click()
         await expect(pending_message).to_have_count(1, timeout=15000)
@@ -532,7 +532,7 @@ async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary
         assert await page.evaluate("() => location.pathname") == f"/v2/chat/{THREAD_ID}"
         await expect(composer).to_be_visible(timeout=5000)
         await expect(
-            page.locator("#gateway-sidebar").get_by_role("button").filter(
+            page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
                 has_text="Newest summary thread"
             )
         ).to_be_visible(timeout=5000)
@@ -561,7 +561,7 @@ async def test_reborn_legacy_sidebar_running_indicator_clears_on_terminal_run(
     )
     try:
         page = harness["page"]
-        sidebar_thread = page.locator("#gateway-sidebar").get_by_role("button").filter(
+        sidebar_thread = page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
             has_text="Processing thread"
         ).first
         await expect(sidebar_thread).to_be_visible(timeout=5000)
@@ -638,10 +638,10 @@ async def test_reborn_legacy_background_thread_shows_processing_indicator(
     )
     try:
         page = harness["page"]
-        active_thread = page.locator("#gateway-sidebar").get_by_role("button").filter(
+        active_thread = page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
             has_text="Active quiet thread"
         ).first
-        background_thread = page.locator("#gateway-sidebar").get_by_role(
+        background_thread = page.locator(SEL_V2["sidebar"]).get_by_role(
             "button"
         ).filter(has_text="Background processing thread").first
 
@@ -693,7 +693,7 @@ async def test_reborn_legacy_processing_indicator_does_not_leak_after_thread_swi
     )
     try:
         page = harness["page"]
-        sidebar = page.locator("#gateway-sidebar")
+        sidebar = page.locator(SEL_V2["sidebar"])
         running_thread = sidebar.get_by_role("button").filter(
             has_text="Running source thread"
         ).first

@@ -22,6 +22,7 @@ export function ChannelPairingSection({ channel, action }) {
   });
 
   const submit = () => {
+    if (redeemMutation.isPending) return;
     const code = manualCode.trim().toUpperCase();
     if (!code) return;
     redeemMutation.mutate({ code });
@@ -75,9 +76,8 @@ function redeemChannelPairingCode(channel, code) {
     method: "POST",
     body: JSON.stringify({ channel, code }),
   }).then((response) => ({
+    ...response,
     success: true,
-    provider: response.provider,
-    provider_user_id: response.provider_user_id,
   }));
 }
 

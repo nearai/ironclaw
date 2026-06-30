@@ -39,7 +39,7 @@ async def test_reborn_legacy_message_copy_button_writes_raw_text(reborn_v2_page)
     await expect(user_message).to_contain_text("link test", timeout=15000)
     await expect(assistant_message).to_contain_text("the pull request", timeout=30000)
 
-    user_copy = user_message.locator("button[title]").first
+    user_copy = user_message.locator(SEL_V2["message_copy_button"]).first
     await user_copy.click(force=True)
     await page.wait_for_function(
         "() => window.__copiedText === 'link test'",
@@ -48,7 +48,7 @@ async def test_reborn_legacy_message_copy_button_writes_raw_text(reborn_v2_page)
     await expect(user_copy).to_have_attribute("aria-label", "Copied", timeout=5000)
     await expect(user_copy).to_have_attribute("aria-label", "Copy message", timeout=3000)
 
-    assistant_copy = assistant_message.locator("button[title]").first
+    assistant_copy = assistant_message.locator(SEL_V2["message_copy_button"]).first
     await assistant_copy.click(force=True)
     await page.wait_for_function(
         """() => window.__copiedText ===
@@ -110,13 +110,13 @@ async def test_reborn_legacy_command_palette_filters_and_navigates(reborn_v2_pag
     page = reborn_v2_page
 
     await page.keyboard.press("Control+K")
-    palette = page.get_by_role("dialog", name="Command palette")
+    palette = page.get_by_role("dialog", name=SEL_V2["command_palette_dialog_name"])
     await expect(palette).to_be_visible(timeout=5000)
     await expect(palette.get_by_role("button", name="New chat")).to_be_visible()
     await expect(palette.get_by_role("button", name="Go to Extensions")).to_be_visible()
     await expect(palette.get_by_role("button", name="Go to Settings")).to_be_visible()
 
-    search = palette.get_by_placeholder("Type a command or search")
+    search = palette.get_by_placeholder(SEL_V2["command_palette_search_placeholder"])
     await search.fill("settings")
     await expect(palette.get_by_role("button", name="Go to Settings")).to_be_visible()
     await expect(palette.get_by_role("button", name="Go to Extensions")).to_have_count(0)

@@ -1,7 +1,7 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
-  "description": "Search, access, upload, share, and organize files and folders in Google Drive. Supports personal drives and shared (organizational) drives.",
+  "description": "Search, access, upload, share, and organize files and folders in Google Drive, including finding Google Sheets/spreadsheets, Docs, and Slides by name or title. Supports personal drives and shared (organizational) drives.",
   "http": {
     "allowlist": [
       {

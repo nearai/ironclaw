@@ -76,6 +76,7 @@ function renderChatInput({
   onSend = async () => {},
   onCancel,
   setCalls = [],
+  refs = [],
   disabled = true,
   sendDisabled,
   canCancel = true,
@@ -91,7 +92,11 @@ function renderChatInput({
     React: {
       useCallback: (fn) => fn,
       useEffect: () => {},
-      useRef: () => ({ current: null }),
+      useRef: (initial = null) => {
+        const ref = { current: initial };
+        refs.push(ref);
+        return ref;
+      },
       useState: (initial) => {
         const index = stateIndex++;
         let value = typeof initial === "function" ? initial() : initial;
@@ -268,4 +273,49 @@ test("ChatInput preserves draft when caller refuses send", async () => {
     setCalls.some((call) => call.index === 0 && call.value === ""),
     false,
   );
+});
+
+test("ChatInput keeps Enter blocked when submit becomes disabled during send", async () => {
+  const refs = [];
+  let sendCalls = 0;
+  let resolveSend;
+  const { tree } = renderChatInput({
+    refs,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () =>
+      new Promise((resolve) => {
+        sendCalls += 1;
+        resolveSend = () => resolve(null);
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  // Re-render in production would update submitDisabledRef before the original
+  // async send closure reaches finally.
+  const submitDisabledRef = refs[3];
+  submitDisabledRef.current = true;
+  resolveSend();
+  await flushAsyncHandlers();
+
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+
+  assert.equal(sendCalls, 1);
 });

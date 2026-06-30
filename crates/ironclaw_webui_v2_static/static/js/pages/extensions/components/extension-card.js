@@ -143,7 +143,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   } else if (primaryAction === "activate") {
     primaryActions.push({
       id: "activate",
-      label: "Activate",
+      label: t("extensions.activate"),
       run: () => onActivate(configurePayload),
     });
   }
@@ -166,7 +166,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   ) {
     overflowActions.push({
       id: "setup",
-      label: "Setup",
+      label: t("extensions.setup"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -179,7 +179,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   ) {
     overflowActions.push({
       id: "reconfigure",
-      label: "Reconfigure",
+      label: t("extensions.reconfigure"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -187,7 +187,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage) {
     overflowActions.push({
       id: "remove",
-      label: t("common.remove") || "Remove",
+      label: t("common.remove"),
       icon: "trash",
       danger: true,
       run: () => onRemove(configurePayload),
@@ -247,7 +247,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
                 />
               </button>
             `
-          : html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">No capabilities</span>`}
+          : html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">${t("extensions.noCapabilities")}</span>`}
         <span className="flex-1"></span>
         ${primary &&
         html`
@@ -326,7 +326,7 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
             disabled=${isBusy}
           >
             <${Icon} name="plus" className="mr-1.5 h-3.5 w-3.5" />
-            Install
+            ${t("extensions.install")}
           <//>
         `}
       </div>

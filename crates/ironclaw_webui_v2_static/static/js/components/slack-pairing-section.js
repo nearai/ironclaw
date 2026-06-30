@@ -20,6 +20,7 @@ export function SlackPairingSection({ action }) {
   const copy = slackPairingCopy(action, t);
 
   const submit = () => {
+    if (redeemMutation.isPending) return;
     const code = manualCode.trim().toUpperCase();
     if (!code) return;
     redeemMutation.mutate({ code });

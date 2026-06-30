@@ -42,6 +42,8 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const [expandedPayload, setExpandedPayload] = React.useState(false);
   const [isResolving, setIsResolving] = React.useState(false);
   const isResolvingRef = React.useRef(false);
+  const currentGateRef = React.useRef(gate);
+  currentGateRef.current = gate;
 
   React.useEffect(() => {
     setExpandedPayload(false);
@@ -59,13 +61,16 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
 
   const resolve = React.useCallback(async (handler) => {
     if (isResolvingRef.current) return;
+    const gateAtStart = currentGateRef.current;
     isResolvingRef.current = true;
     setIsResolving(true);
     try {
       await handler?.();
     } finally {
-      isResolvingRef.current = false;
-      setIsResolving(false);
+      if (currentGateRef.current === gateAtStart) {
+        isResolvingRef.current = false;
+        setIsResolving(false);
+      }
     }
   }, []);
 

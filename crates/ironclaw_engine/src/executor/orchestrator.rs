@@ -3158,7 +3158,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .cloned()
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
-                resume_output: result.get("resume_output").cloned(),
+                resume_output: result.get("resume_output").cloned().map(Box::new),
                 paused_lease: result
                     .get("paused_lease")
                     .cloned()

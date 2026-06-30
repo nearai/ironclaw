@@ -153,7 +153,7 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
                 timeout=5000,
             )
 
-        await page.locator("button[title='Sign out']").click()
+        await page.locator(SEL_V2["sign_out_button"]).click()
         await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
         await page.locator(SEL_V2["login_token"]).fill("token-user-b")
         await page.get_by_role("button", name="Connect").click()
@@ -239,7 +239,7 @@ async def test_reborn_legacy_first_conversation_appears_in_sidebar(reborn_v2_pag
         timeout=30000
     )
 
-    sidebar_row = reborn_v2_page.locator("#gateway-sidebar").get_by_role(
+    sidebar_row = reborn_v2_page.locator(SEL_V2["sidebar"]).get_by_role(
         "button"
     ).filter(has_text=title).first
     await expect(sidebar_row).to_be_visible(timeout=15000)
