@@ -503,6 +503,10 @@ pub struct RebornRuntime {
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
+    /// Whether the multi-user capability policy is active (#5385). Read by the
+    /// WebUI facade builder to decide whether to wire the directory-backed
+    /// admin surface + per-user availability gate.
+    capability_policy_enabled: bool,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
@@ -1089,6 +1093,25 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    /// Whether the multi-user capability policy (#5385) is active for this
+    /// runtime (resolved from `IRONCLAW_REBORN_CAPABILITY_POLICY` at the edge).
+    pub(crate) fn capability_policy_enabled(&self) -> bool {
+        self.capability_policy_enabled
+    }
+
+    /// The multi-user directory store, when a local-dev runtime is present. The
+    /// `serve` command wraps the auth surface with a directory authenticator
+    /// built from this when the capability policy is enabled (#5385).
+    #[cfg(feature = "webui-v2-beta")]
+    pub fn webui_user_directory(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::UserDirectoryStore>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.user_directory))
     }
 
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
@@ -2471,6 +2494,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         default_project_id,
+        capability_policy_enabled,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
         hooks: hooks_config,
@@ -2912,8 +2936,28 @@ pub async fn build_reborn_runtime(
             local_dev_capabilities.capability_factory,
             local_dev_capabilities.capability_input_resolver,
             local_dev_capabilities.capability_result_writer,
-            Arc::new(AllowAllCapabilitySurfaceResolver)
-                as Arc<dyn CapabilitySurfaceProfileResolver>,
+            {
+                // Multi-user capability policy (#5385): when enabled, narrow
+                // each member's offered tool surface from the directory; owner/
+                // admin keep the full surface. Otherwise allow-all (unchanged).
+                #[cfg(feature = "webui-v2-beta")]
+                let resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+                    match (capability_policy_enabled, local_runtime) {
+                        (true, Some(local_runtime)) => Arc::new(
+                            crate::capability_policy::UserCapabilitySurfaceResolver::new(
+                                Arc::clone(&local_runtime.user_directory),
+                                actor_user_id.clone(),
+                            ),
+                        ),
+                        _ => Arc::new(AllowAllCapabilitySurfaceResolver),
+                    };
+                #[cfg(not(feature = "webui-v2-beta"))]
+                let resolver: Arc<dyn CapabilitySurfaceProfileResolver> = {
+                    let _ = capability_policy_enabled;
+                    Arc::new(AllowAllCapabilitySurfaceResolver)
+                };
+                resolver
+            },
             local_dev_capabilities.model_gateway,
             Some(local_dev_capability_policy),
             Some(local_dev_capabilities.display_previews),
@@ -3446,6 +3490,7 @@ pub async fn build_reborn_runtime(
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
+        capability_policy_enabled,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,

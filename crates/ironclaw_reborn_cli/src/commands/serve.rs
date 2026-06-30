@@ -140,6 +140,14 @@ impl ServeCommand {
             user_id.clone(),
         )?);
 
+        // Multi-user capability policy (#5385): opt-in via env. When on, members
+        // are born default-DENY (essential allowlist), and the directory-backed
+        // authenticator + admin REST surface + per-user surface filtering
+        // activate. Off → behaves as a single env-owner deployment (unchanged).
+        let capability_policy_enabled = std::env::var("IRONCLAW_REBORN_CAPABILITY_POLICY")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // Resolve trusted host-installation default agent/project from
         // `[identity]`. The v2 facade builds `ThreadScope` from
         // `caller.agent_id` on every mutation and read, so an absent
@@ -154,7 +162,9 @@ impl ServeCommand {
         // runtime owner stays at `[identity].default_owner` (a different
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
-        let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
+        let mut runtime_input = runtime_input
+            .with_owner_id(runtime_owner)
+            .with_capability_policy_enabled(capability_policy_enabled);
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
         #[cfg(feature = "root-llm-provider")]
@@ -474,6 +484,23 @@ impl ServeCommand {
                 }),
             )
             .await?;
+
+            // Multi-user capability policy (#5385): wrap the assembled auth
+            // surface so a directory user's minted login bearer authenticates
+            // (admins/owner carry the operator capability; members do not). The
+            // env owner and any SSO session still resolve through the inner
+            // authenticator first; only an unrecognized bearer hits the
+            // directory. No-op when the policy is disabled or no directory is
+            // wired (single env-owner deployment).
+            let authenticator = match (capability_policy_enabled, runtime.webui_user_directory()) {
+                (true, Some(directory)) => {
+                    Arc::new(ironclaw_reborn_composition::DirectoryAuthenticator::new(
+                        authenticator,
+                        directory,
+                    )) as Arc<dyn WebuiAuthenticator>
+                }
+                _ => authenticator,
+            };
 
             print_serve_banner(
                 listen_addr,

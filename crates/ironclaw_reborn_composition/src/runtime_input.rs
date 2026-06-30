@@ -396,6 +396,12 @@ pub struct RebornRuntimeInput {
     /// that stamp a project onto inbound turns must set the same project here,
     /// otherwise the loop host rejects the run before model execution.
     pub default_project_id: Option<ProjectId>,
+    /// Activate the multi-user capability policy (#5385): directory-backed
+    /// per-user tool-surface filtering (members default-DENY to an essential
+    /// allowlist; owner/admin keep the full surface) and the directory-aware
+    /// facade. Resolved from `IRONCLAW_REBORN_CAPABILITY_POLICY` at the CLI
+    /// edge. Default OFF — the runtime behaves as a single env-owner deployment.
+    pub capability_policy_enabled: bool,
     pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     /// Hook-framework activation knobs. Default OFF. Callers resolve
@@ -451,6 +457,7 @@ impl RebornRuntimeInput {
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             default_project_id: None,
+            capability_policy_enabled: false,
             regex_skill_activation_enabled: true,
             skill_context_source: None,
             hooks: HooksActivationConfig::default(),
@@ -606,6 +613,13 @@ impl RebornRuntimeInput {
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Activate the multi-user capability policy (#5385). See
+    /// [`RebornRuntimeInput::capability_policy_enabled`].
+    pub fn with_capability_policy_enabled(mut self, enabled: bool) -> Self {
+        self.capability_policy_enabled = enabled;
         self
     }
 

@@ -85,6 +85,29 @@ impl<F: RootFilesystem> MountScopedFilesystemReader<F> {
     fn require_alias(mount: FsMount) -> Result<&'static str, ProjectFsError> {
         Self::alias_for(mount).ok_or(ProjectFsError::NotFound)
     }
+
+    /// The browse base path for `mount`, confined to the calling user where the
+    /// mount is per-user.
+    ///
+    /// The memory mount stores every user's documents under one shared tree
+    /// (`/memory/tenants/<t>/users/<u>/…`). Confining the base to the caller's
+    /// own `tenants/<t>/users/<u>` prefix — derived from the trusted request
+    /// scope, never the request path — is what stops one member from reading
+    /// another member's memory through the viewer: a caller can only ever name
+    /// paths inside their own subtree, and `..` is already rejected by
+    /// `ScopedPath`. Workspace keeps its bare alias; its sharing model is owned
+    /// by the project filesystem, not this read-only viewer.
+    fn mount_base(mount: FsMount, scope: &ResourceScope) -> Result<String, ProjectFsError> {
+        let alias = Self::require_alias(mount)?;
+        Ok(match mount {
+            FsMount::Memory => format!(
+                "{alias}/tenants/{}/users/{}",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ),
+            FsMount::Workspace | FsMount::Skills => alias.to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -105,8 +128,8 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         mount: FsMount,
         path: &str,
     ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
-        let alias = Self::require_alias(mount)?;
-        let dir = Self::scoped_path(alias, path)?;
+        let base = Self::mount_base(mount, scope)?;
+        let dir = Self::scoped_path(&base, path)?;
         let is_root = path.trim_matches('/').is_empty();
         let entries = list_dir_or_empty_root(self.filesystem.list_dir(scope, &dir).await, is_root)?;
         let scoped_base = dir.as_str().trim_end_matches('/');
@@ -123,7 +146,7 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
                 {
                     return None;
                 }
-                let path = Self::relativize(alias, &scoped_child);
+                let path = Self::relativize(&base, &scoped_child);
                 Some(ProjectFsEntry {
                     path,
                     name: entry.name,
@@ -139,8 +162,8 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         mount: FsMount,
         path: &str,
     ) -> Result<ProjectFsFile, ProjectFsError> {
-        let alias = Self::require_alias(mount)?;
-        let file = Self::scoped_path(alias, path)?;
+        let base = Self::mount_base(mount, scope)?;
+        let file = Self::scoped_path(&base, path)?;
         if is_internal_browse_path(file.as_str()) {
             return Err(ProjectFsError::Denied);
         }
@@ -167,7 +190,7 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         let filename = file_name_of(&scoped_str);
         Ok(ProjectFsFile {
             size_bytes: bytes.len() as u64,
-            path: Self::relativize(alias, &scoped_str),
+            path: Self::relativize(&base, &scoped_str),
             filename,
             mime_type,
             bytes,
@@ -180,8 +203,8 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         mount: FsMount,
         path: &str,
     ) -> Result<ProjectFsStat, ProjectFsError> {
-        let alias = Self::require_alias(mount)?;
-        let target = Self::scoped_path(alias, path)?;
+        let base = Self::mount_base(mount, scope)?;
+        let target = Self::scoped_path(&base, path)?;
         if is_internal_browse_path(target.as_str()) {
             return Err(ProjectFsError::Denied);
         }
@@ -198,7 +221,7 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
             kind: map_kind(stat.file_type),
             size_bytes: stat.len,
             mime_type: mime_for_path(&scoped_str),
-            path: Self::relativize(alias, &scoped_str),
+            path: Self::relativize(&base, &scoped_str),
         })
     }
 }
@@ -320,7 +343,12 @@ mod tests {
         let scope = scope();
         rw.write_bytes(
             &scope,
-            &ScopedPath::new(format!("{BROWSE_MEMORY_ALIAS}/daily/today.md")).unwrap(),
+            &ScopedPath::new(format!(
+                "{BROWSE_MEMORY_ALIAS}/tenants/{}/users/{}/daily/today.md",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ))
+            .unwrap(),
             b"# notes".to_vec(),
         )
         .await
@@ -405,7 +433,12 @@ mod tests {
         ] {
             rw.write_bytes(
                 &scope,
-                &ScopedPath::new(format!("{BROWSE_MEMORY_ALIAS}/{path}")).unwrap(),
+                &ScopedPath::new(format!(
+                    "{BROWSE_MEMORY_ALIAS}/tenants/{}/users/{}/{path}",
+                    scope.tenant_id.as_str(),
+                    scope.user_id.as_str()
+                ))
+                .unwrap(),
                 body.to_vec(),
             )
             .await
@@ -443,6 +476,74 @@ mod tests {
                 .await
                 .expect_err("internal read denied"),
             ProjectFsError::Denied,
+        );
+    }
+
+    #[tokio::test]
+    async fn one_member_cannot_read_another_members_memory() {
+        // Regression for the cross-member leak: every user's memory lives under
+        // one shared `/memory/tenants/<t>/users/<u>` tree, so the browse reader
+        // must confine each caller to their OWN `users/<u>` subtree.
+        let rw = rw_fs();
+        let alice = ResourceScope {
+            user_id: UserId::new("alice").unwrap(),
+            ..scope()
+        };
+        let bob = ResourceScope {
+            user_id: UserId::new("bob").unwrap(),
+            ..scope()
+        };
+        // Bob writes a memory doc under his own scope.
+        rw.write_bytes(
+            &bob,
+            &ScopedPath::new(format!(
+                "{BROWSE_MEMORY_ALIAS}/tenants/{}/users/{}/secret.md",
+                bob.tenant_id.as_str(),
+                bob.user_id.as_str()
+            ))
+            .unwrap(),
+            b"bob's private poem".to_vec(),
+        )
+        .await
+        .expect("seed bob memory");
+
+        let reader = MountScopedFilesystemReader {
+            filesystem: rw,
+            max_read_bytes: DEFAULT_MAX_ATTACHMENT_BYTES as u64,
+        };
+
+        // Bob sees his own memory at the (confined) mount root.
+        let bob_entries = reader
+            .list_dir(&bob, FsMount::Memory, "")
+            .await
+            .expect("bob lists own memory");
+        assert!(
+            bob_entries.iter().any(|entry| entry.name == "secret.md"),
+            "bob must see his own memory: {bob_entries:?}"
+        );
+
+        // Alice's mount root shows only HER subtree — bob's doc is absent.
+        let alice_root = reader
+            .list_dir(&alice, FsMount::Memory, "")
+            .await
+            .expect("alice lists own memory root");
+        assert!(
+            alice_root.is_empty(),
+            "alice must not see bob's files at the memory root: {alice_root:?}"
+        );
+
+        // Alice cannot reach bob's doc even by spelling out his absolute path:
+        // the confined base nests it under her own users/alice prefix -> NotFound.
+        let leaked = reader
+            .read_file(
+                &alice,
+                FsMount::Memory,
+                &format!("tenants/{}/users/bob/secret.md", bob.tenant_id.as_str()),
+            )
+            .await;
+        assert!(
+            matches!(leaked, Err(ProjectFsError::NotFound)),
+            "alice must not read bob's memory by absolute path, got {leaked:?}"
         );
     }
 }

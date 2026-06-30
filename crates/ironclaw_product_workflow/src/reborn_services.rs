@@ -5,7 +5,7 @@
 //! stores, dispatchers, or capability hosts directly.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
 };
@@ -43,22 +43,25 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    AdminCreateUserRequest, AdminListUsersResponse, AdminSetCapabilityRequest, AdminSetRoleRequest,
+    AdminUserResponse, AdminUserSummary, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
+    LifecyclePackageRef, LifecycleProductFacade, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, UserDirectoryError, UserDirectoryRecord, UserDirectoryStore,
+    UserRole, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
+    capability_available, generate_login_token, hash_login_token, is_approval_gate_ref,
+    is_auth_gate_ref, is_valid_capability_id, thread_metadata_is_automation_trigger,
 };
 
 mod error;
@@ -1670,6 +1673,84 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 
+    // ---- multi-user capability policy admin surface (#5385) ----------------
+    //
+    // Default bodies report the service unavailable so every existing
+    // `RebornServicesApi` impl (live + test stubs) compiles untouched; only the
+    // capability-policy-wired `RebornServices` overrides them. THE owner is
+    // env-configured and is never a directory row; REST mints no owners.
+
+    /// Create a directory user (member or admin) and mint a one-time login
+    /// bearer. Rejects `role: owner` (403). Caller must be admin/owner.
+    async fn admin_create_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: AdminCreateUserRequest,
+    ) -> Result<AdminUserResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List directory users (excludes THE env owner, which is not a row).
+    async fn admin_list_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<AdminListUsersResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Set a directory user's role. Rejects `role: owner` (403) and an unknown
+    /// target (404).
+    async fn admin_set_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+        request: AdminSetRoleRequest,
+    ) -> Result<AdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Delete a directory user, enforcing the rank guards (no self-delete, no
+    /// owner delete, admins may not delete peer admins; owner outranks admin).
+    async fn admin_delete_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Set one per-user capability availability delta (`available`/`hidden`).
+    /// Rejects an invalid cap-id (400), the owner as target (403), and an
+    /// unknown target (404).
+    async fn admin_set_user_capability(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+        capability_id: String,
+        request: AdminSetCapabilityRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, user_id, capability_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Reject (403) if `capability_id` is NOT available to the caller under the
+    /// active capability policy; `Ok(())` if it is. Gates per-user approval-pref
+    /// writes. The default (no policy wired) is always `Ok(())`, so the settings
+    /// surface behaves exactly as before — every capability is available in the
+    /// unrestricted model.
+    async fn ensure_capability_available_to_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability_id: String,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, capability_id);
+        Ok(())
+    }
+
     /// List a directory under the thread's project workspace.
     ///
     /// Read-only navigation surface over the same `/workspace` mount the agent's
@@ -2368,6 +2449,14 @@ pub struct RebornServices {
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
+    // Multi-user capability policy (#5385). Both are `Some` only when host
+    // composition wires the directory-backed policy (`capability-policy`
+    // feature + `IRONCLAW_REBORN_CAPABILITY_POLICY=1`); otherwise the admin
+    // methods report the service unavailable and behaviour is unchanged.
+    // arch-exempt: optional_arc, capability-policy admin surface is a
+    // feature-gated optional component the binary may ship without, issue #5385
+    user_directory: Option<Arc<dyn UserDirectoryStore>>,
+    capability_policy_owner: Option<UserId>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2404,8 +2493,25 @@ impl RebornServices {
             skill_activation_clearer: None,
             llm_config: None,
             operator_approval_config: None,
+            user_directory: None,
+            capability_policy_owner: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Wire the multi-user capability policy: a persistent user directory plus
+    /// the env-configured owner id (recognized as `Owner` though it is never a
+    /// directory row). Without it, the `admin_*` methods report the service
+    /// unavailable and `capability_available_to_caller` reports everything
+    /// available — i.e. the single-operator behaviour is unchanged. (#5385)
+    pub fn with_capability_policy(
+        mut self,
+        user_directory: Arc<dyn UserDirectoryStore>,
+        owner_user_id: UserId,
+    ) -> Self {
+        self.user_directory = Some(user_directory);
+        self.capability_policy_owner = Some(owner_user_id);
+        self
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
@@ -2626,8 +2732,310 @@ impl RebornServices {
     }
 }
 
+// ---- capability-policy helpers (#5385) -------------------------------------
+
+fn capability_policy_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn capability_policy_invalid_request() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+}
+
+fn map_user_directory_error(error: UserDirectoryError) -> RebornServicesError {
+    match error {
+        UserDirectoryError::AlreadyExists(_) => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
+        UserDirectoryError::NotFound(_) => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        // Carry the backend cause into the server log (sanitized 500 to client).
+        UserDirectoryError::Backend(reason) => RebornServicesError::internal_from(reason),
+    }
+}
+
+impl RebornServices {
+    /// The wired user directory, or a sanitized "service unavailable" when the
+    /// capability policy is not active.
+    fn user_directory_or_unavailable(
+        &self,
+    ) -> Result<&Arc<dyn UserDirectoryStore>, RebornServicesError> {
+        self.user_directory
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// The env-configured owner id, or "service unavailable" when policy is off.
+    fn capability_policy_owner_or_unavailable(&self) -> Result<&UserId, RebornServicesError> {
+        self.capability_policy_owner
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Resolve a caller's effective role: the env owner is `Owner` (never a
+    /// directory row); everyone else is looked up in the directory. Fails
+    /// closed (403) for an authenticated principal that is neither.
+    async fn capability_policy_caller_role(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<UserRole, RebornServicesError> {
+        let owner_id = self.capability_policy_owner_or_unavailable()?;
+        if &caller.user_id == owner_id {
+            return Ok(UserRole::Owner);
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        match directory
+            .get(&caller.user_id)
+            .await
+            .map_err(map_user_directory_error)?
+        {
+            Some(record) => Ok(record.role),
+            None => Err(capability_policy_forbidden()),
+        }
+    }
+}
+
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn admin_create_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: AdminCreateUserRequest,
+    ) -> Result<AdminUserResponse, RebornServicesError> {
+        // The route is operator-gated, but re-derive authority here too.
+        if !self
+            .capability_policy_caller_role(&caller)
+            .await?
+            .is_admin()
+        {
+            return Err(capability_policy_forbidden());
+        }
+        // REST mints no owners; THE owner is env-only.
+        if request.role.is_owner() {
+            return Err(capability_policy_forbidden());
+        }
+        // Identity + token policy: an SSO user is provisioned BY EMAIL
+        // (token-less — they authenticate via their SSO session, not a minted
+        // login bearer) with a derived id; a directory-token user is provisioned
+        // by user_id and gets a one-time login bearer. Exactly one is required.
+        let (target, token, token_hash) =
+            match (request.email.as_deref(), request.user_id.as_deref()) {
+                (Some(email), _) => (
+                    crate::capability_policy::sso_user_id_from_email(email)
+                        .map_err(|_| capability_policy_invalid_request())?,
+                    None,
+                    None,
+                ),
+                (None, Some(user_id)) => {
+                    let id = UserId::new(user_id.to_string())
+                        .map_err(|_| capability_policy_invalid_request())?;
+                    let token = generate_login_token();
+                    let hash = hash_login_token(&token);
+                    (id, Some(token), Some(hash))
+                }
+                (None, None) => return Err(capability_policy_invalid_request()),
+            };
+        let owner_id = self.capability_policy_owner_or_unavailable()?;
+        if &target == owner_id {
+            // The env owner id is reserved and is never a directory row.
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::Conflict,
+                409,
+                false,
+            ));
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        let now = Utc::now();
+        let response_user_id = target.as_str().to_string();
+        let record = UserDirectoryRecord {
+            user_id: target,
+            role: request.role,
+            token_hash,
+            grants: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        directory
+            .insert(record)
+            .await
+            .map_err(map_user_directory_error)?;
+        Ok(AdminUserResponse {
+            user_id: response_user_id,
+            role: request.role,
+            token,
+        })
+    }
+
+    async fn admin_list_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<AdminListUsersResponse, RebornServicesError> {
+        if !self
+            .capability_policy_caller_role(&caller)
+            .await?
+            .is_admin()
+        {
+            return Err(capability_policy_forbidden());
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        let users = directory
+            .list()
+            .await
+            .map_err(map_user_directory_error)?
+            .into_iter()
+            .map(|record| AdminUserSummary {
+                user_id: record.user_id.as_str().to_string(),
+                role: record.role,
+            })
+            .collect();
+        Ok(AdminListUsersResponse { users })
+    }
+
+    async fn admin_set_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+        request: AdminSetRoleRequest,
+    ) -> Result<AdminUserResponse, RebornServicesError> {
+        if !self
+            .capability_policy_caller_role(&caller)
+            .await?
+            .is_admin()
+        {
+            return Err(capability_policy_forbidden());
+        }
+        // REST promotes no owners.
+        if request.role.is_owner() {
+            return Err(capability_policy_forbidden());
+        }
+        let target =
+            UserId::new(user_id.clone()).map_err(|_| capability_policy_invalid_request())?;
+        let owner_id = self.capability_policy_owner_or_unavailable()?;
+        if &target == owner_id {
+            // The owner is env-only; its role cannot be changed via REST.
+            return Err(capability_policy_forbidden());
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        let updated = directory
+            .set_role(&target, request.role)
+            .await
+            .map_err(map_user_directory_error)?;
+        Ok(AdminUserResponse {
+            user_id,
+            role: updated.role,
+            token: None,
+        })
+    }
+
+    async fn admin_delete_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+    ) -> Result<(), RebornServicesError> {
+        let caller_role = self.capability_policy_caller_role(&caller).await?;
+        if !caller_role.is_admin() {
+            return Err(capability_policy_forbidden());
+        }
+        let target = UserId::new(user_id).map_err(|_| capability_policy_invalid_request())?;
+        // No self-delete (covers owner-self and admin-self).
+        if target == caller.user_id {
+            return Err(capability_policy_forbidden());
+        }
+        let owner_id = self.capability_policy_owner_or_unavailable()?;
+        let directory = self.user_directory_or_unavailable()?;
+        // Resolve the target's role; the env owner is recognized by id.
+        let target_role = if &target == owner_id {
+            UserRole::Owner
+        } else {
+            directory
+                .get(&target)
+                .await
+                .map_err(map_user_directory_error)?
+                .map(|record| record.role)
+                .ok_or_else(|| {
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+                })?
+        };
+        let permitted = match (caller_role, target_role) {
+            // Nobody deletes THE owner via REST (self-owner already handled).
+            (_, UserRole::Owner) => false,
+            // An admin may not delete a peer admin; the owner outranks admins.
+            (UserRole::Admin, UserRole::Admin) => false,
+            (UserRole::Owner, _) => true,
+            (UserRole::Admin, UserRole::Member) => true,
+            // Members never reach here (route-gated); fail closed.
+            (UserRole::Member, _) => false,
+        };
+        if !permitted {
+            return Err(capability_policy_forbidden());
+        }
+        directory
+            .delete(&target)
+            .await
+            .map_err(map_user_directory_error)?;
+        Ok(())
+    }
+
+    async fn admin_set_user_capability(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: String,
+        capability_id: String,
+        request: AdminSetCapabilityRequest,
+    ) -> Result<(), RebornServicesError> {
+        if !self
+            .capability_policy_caller_role(&caller)
+            .await?
+            .is_admin()
+        {
+            return Err(capability_policy_forbidden());
+        }
+        if !is_valid_capability_id(&capability_id) {
+            return Err(capability_policy_invalid_request());
+        }
+        let target = UserId::new(user_id).map_err(|_| capability_policy_invalid_request())?;
+        let owner_id = self.capability_policy_owner_or_unavailable()?;
+        // An admin may not modify THE owner's capabilities (env-only; has all).
+        if &target == owner_id {
+            return Err(capability_policy_forbidden());
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        directory
+            .set_capability(&target, &capability_id, request.availability)
+            .await
+            .map_err(map_user_directory_error)?;
+        Ok(())
+    }
+
+    async fn ensure_capability_available_to_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability_id: String,
+    ) -> Result<(), RebornServicesError> {
+        // Policy not wired → unrestricted model: every capability is available
+        // (matches the trait default so the settings surface is unchanged).
+        if self.user_directory.is_none() {
+            return Ok(());
+        }
+        let role = self.capability_policy_caller_role(&caller).await?;
+        if role.is_admin() {
+            return Ok(());
+        }
+        let directory = self.user_directory_or_unavailable()?;
+        let grants = directory
+            .get(&caller.user_id)
+            .await
+            .map_err(map_user_directory_error)?
+            .map(|record| record.grants)
+            .unwrap_or_default();
+        if capability_available(role, &grants, &capability_id) {
+            Ok(())
+        } else {
+            Err(capability_policy_forbidden())
+        }
+    }
+
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,

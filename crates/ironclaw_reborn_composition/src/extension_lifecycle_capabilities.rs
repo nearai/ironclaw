@@ -7,16 +7,22 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, CredentialStageError, EffectKind, HostApiError,
     PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    ProductWorkflowError,
+};
 use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
+use crate::extension_lifecycle::{
+    ExtensionActivationMode, RebornLocalExtensionManagementPort, extension_search_has_ready_result,
+};
 use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -38,14 +44,31 @@ pub(crate) fn extend_builtin_first_party_package(
     ExtensionPackage::from_manifest(package.manifest, package.root)
 }
 
-pub(crate) fn insert_handlers(
+/// Authorizes a member's engagement with an extension under the capability
+/// policy (#5385). Owner/admin: every extension. Member: only extensions they
+/// were granted at least one capability for. When no authorizer is wired
+/// (policy off), every extension is permitted — behaviour is unchanged.
+#[async_trait]
+pub(crate) trait ExtensionActivationAuthorizer: Send + Sync {
+    async fn may_use_extension(&self, user_id: &UserId, extension_id: &str) -> bool;
+}
+
+/// Register the extension-lifecycle capability handlers (search/install/
+/// activate/remove). With `activation_policy = Some(..)`, extension discovery/
+/// install/activation is gated by the member capability policy: a member only
+/// discovers and can install/activate extensions they hold a grant for;
+/// everything else returns a recoverable, model-visible `PolicyDenied`.
+/// Owner/admin — and `None` (policy off) — are unaffected.
+pub(crate) fn insert_handlers_with_policy(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    activation_policy: Option<Arc<dyn ExtensionActivationAuthorizer>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        activation_policy,
     });
     for capability_id in EXTENSION_LIFECYCLE_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -123,6 +146,65 @@ fn lifecycle_manifest(
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    /// Member capability policy gate (#5385). `None` when the policy is not
+    /// wired, in which case all extensions are permitted (unchanged behaviour).
+    activation_policy: Option<Arc<dyn ExtensionActivationAuthorizer>>,
+}
+
+impl ExtensionLifecycleToolHandler {
+    /// `Some(error)` if the member may not engage with `extension_id` under the
+    /// active policy (recoverable `PolicyDenied`); `None` if permitted or no
+    /// policy is wired.
+    async fn deny_extension_out_of_policy(
+        &self,
+        user_id: &UserId,
+        extension_id: &str,
+        started: Instant,
+    ) -> Option<FirstPartyCapabilityError> {
+        let policy = self.activation_policy.as_ref()?;
+        if policy.may_use_extension(user_id, extension_id).await {
+            return None;
+        }
+        Some(
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::PolicyDenied)
+                .with_usage(resource_usage(started)),
+        )
+    }
+
+    /// Drop search results for extensions the member has no grant for, so an
+    /// out-of-policy extension is never surfaced (or claimed "available").
+    async fn filter_search_results_by_policy(
+        &self,
+        response: &mut LifecycleProductResponse,
+        user_id: &UserId,
+    ) {
+        let Some(policy) = self.activation_policy.as_ref() else {
+            return;
+        };
+        let filtered = if let Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) =
+            response.payload.as_mut()
+        {
+            let mut kept = Vec::with_capacity(extensions.len());
+            for summary in std::mem::take(extensions) {
+                let extension_id = summary.summary.package_ref.id.as_str().to_string();
+                if policy.may_use_extension(user_id, &extension_id).await {
+                    kept.push(summary);
+                }
+            }
+            *count = kept.len();
+            *extensions = kept;
+            true
+        } else {
+            false
+        };
+        // `search` set the "treat these as ready / don't ask for credentials"
+        // hint over the UNFILTERED results. Re-derive it against the filtered
+        // payload so the message can never claim ready/available results we just
+        // hid from the member (a hidden extension must not leave a stale hint).
+        if filtered && !extension_search_has_ready_result(response.payload.as_ref()) {
+            response.message = None;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,18 +232,51 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.scope.clone(),
                     Arc::clone(&self.credential_accounts),
                 );
-                self.extension_management
+                let mut searched = self
+                    .extension_management
                     .search(&input.query, Some(&credential_gate))
-                    .await
+                    .await;
+                // Policy (#5385): hide extensions the member has no grant for, so
+                // an out-of-policy extension is never surfaced or claimed
+                // "available" to a member who could never use it.
+                if let Ok(response) = searched.as_mut() {
+                    self.filter_search_results_by_policy(response, &request.scope.user_id)
+                        .await;
+                }
+                searched
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                if let Some(denied) = self
+                    .deny_extension_out_of_policy(
+                        &request.scope.user_id,
+                        &input.extension_id,
+                        started,
+                    )
+                    .await
+                {
+                    return Err(denied);
+                }
                 self.extension_management
                     .install(extension_package_ref(input.extension_id)?)
                     .await
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                // Policy (#5385): a member may only activate an extension they
+                // were granted a capability for. Otherwise return a recoverable,
+                // model-visible denial so the agent replies "not available to
+                // you" instead of dead-ending on a credential gate / loop.
+                if let Some(denied) = self
+                    .deny_extension_out_of_policy(
+                        &request.scope.user_id,
+                        &input.extension_id,
+                        started,
+                    )
+                    .await
+                {
+                    return Err(denied);
+                }
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management

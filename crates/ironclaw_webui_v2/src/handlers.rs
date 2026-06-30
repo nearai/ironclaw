@@ -1386,7 +1386,7 @@ pub struct SettingsToolPermissionRequest {
     pub state: SettingsToolPermissionState,
 }
 
-/// `POST /api/webchat/v2/settings/tools/{capability_id}`
+/// `PUT|POST /api/webchat/v2/settings/tools/{capability_id}`
 pub async fn set_settings_tool_permission(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -1395,6 +1395,13 @@ pub async fn set_settings_tool_permission(
     Json(body): Json<SettingsToolPermissionRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_tool_capability_id(&capability_id)?;
+    // Capability policy (#5385): a user may set an approval pref only on a
+    // capability AVAILABLE to them; otherwise this rejects with 403. With no
+    // policy wired the facade always permits, so behaviour is unchanged.
+    state
+        .services()
+        .ensure_capability_available_to_caller(caller.clone(), capability_id.clone())
+        .await?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
     let response = state
@@ -1436,6 +1443,92 @@ fn validate_settings_tool_config_response(
         WebUiInboundValidationCode::InvalidValue,
     ))
     .into())
+}
+
+// ---- multi-user capability policy admin surface (#5385) --------------------
+//
+// Thin handlers over the `RebornServicesApi` admin methods. The operator
+// capability is checked at the edge (rejecting members early); the facade then
+// re-checks the finer owner > admin > member rank guards against the caller's
+// directory role. Compiled only with the `capability-policy` feature.
+
+#[cfg(feature = "capability-policy")]
+use ironclaw_product_workflow::{
+    AdminCreateUserRequest, AdminListUsersResponse, AdminSetCapabilityRequest, AdminSetRoleRequest,
+    AdminUserResponse,
+};
+
+/// `POST /api/webchat/v2/admin/users`
+#[cfg(feature = "capability-policy")]
+pub async fn admin_create_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<AdminCreateUserRequest>,
+) -> Result<Json<AdminUserResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Ok(Json(
+        state.services().admin_create_user(caller, body).await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users`
+#[cfg(feature = "capability-policy")]
+pub async fn admin_list_users(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<AdminListUsersResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Ok(Json(state.services().admin_list_users(caller).await?))
+}
+
+/// `PUT /api/webchat/v2/admin/users/{user_id}/role`
+#[cfg(feature = "capability-policy")]
+pub async fn admin_set_user_role(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(user_id): Path<String>,
+    Json(body): Json<AdminSetRoleRequest>,
+) -> Result<Json<AdminUserResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Ok(Json(
+        state
+            .services()
+            .admin_set_user_role(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}`
+#[cfg(feature = "capability-policy")]
+pub async fn admin_delete_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(user_id): Path<String>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    state.services().admin_delete_user(caller, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/webchat/v2/admin/users/{user_id}/capabilities/{capability_id}`
+#[cfg(feature = "capability-policy")]
+pub async fn admin_set_user_capability(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path((user_id, capability_id)): Path<(String, String)>,
+    Json(body): Json<AdminSetCapabilityRequest>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    state
+        .services()
+        .admin_set_user_capability(caller, user_id, capability_id, body)
+        .await?;
+    Ok(StatusCode::OK)
 }
 
 /// `GET /api/webchat/v2/operator/config`

@@ -163,7 +163,8 @@ use crate::{
         restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
-        extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
+        extend_builtin_first_party_package,
+        insert_handlers_with_policy as insert_extension_lifecycle_handlers_with_policy,
     },
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
@@ -570,6 +571,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<LocalDevToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<LocalDevAutoApproveSettingStore>,
+    /// Persistent multi-user directory (roles + login-token hashes + per-user
+    /// capability grants) for the capability-policy feature (#5385). Shared by
+    /// reference with the per-user surface resolver and the directory
+    /// authenticator. Only built with the WebChat v2 surface.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) user_directory: Arc<dyn ironclaw_product_workflow::UserDirectoryStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     /// Facade-shaped handle (not the raw `ProjectRepository`): composition
@@ -1385,10 +1392,28 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
-    insert_extension_lifecycle_handlers(
+    // Multi-user capability policy (#5385): gate extension discovery/install/
+    // activation by the member's grants. Harmless when the policy is off (the
+    // only caller is then THE owner, who bypasses the gate). Built only with the
+    // WebChat v2 surface, where the user directory exists.
+    #[cfg(feature = "webui-v2-beta")]
+    let extension_activation_policy: Option<
+        Arc<dyn crate::extension_lifecycle_capabilities::ExtensionActivationAuthorizer>,
+    > = Some(Arc::new(
+        crate::capability_policy::DirectoryExtensionActivationAuthorizer::new(
+            Arc::clone(&store_graph.local_runtime.user_directory),
+            store_graph.local_runtime.owner_user_id.clone(),
+        ),
+    ));
+    #[cfg(not(feature = "webui-v2-beta"))]
+    let extension_activation_policy: Option<
+        Arc<dyn crate::extension_lifecycle_capabilities::ExtensionActivationAuthorizer>,
+    > = None;
+    insert_extension_lifecycle_handlers_with_policy(
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
+        extension_activation_policy,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -1904,6 +1929,10 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         tool_permission_overrides: Arc::clone(&tool_permission_overrides),
         auto_approve_settings: Arc::clone(&auto_approve_settings),
+        #[cfg(feature = "webui-v2-beta")]
+        user_directory: Arc::new(crate::capability_policy::FilesystemUserDirectoryStore::new(
+            Arc::clone(&scoped_filesystem),
+        )),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
@@ -2054,6 +2083,10 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         tool_permission_overrides: Arc::clone(&tool_permission_overrides),
         auto_approve_settings: Arc::clone(&auto_approve_settings),
+        #[cfg(feature = "webui-v2-beta")]
+        user_directory: Arc::new(crate::capability_policy::FilesystemUserDirectoryStore::new(
+            Arc::clone(&scoped_filesystem),
+        )),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
@@ -4498,6 +4531,8 @@ mod tests {
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
             auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
+            #[cfg(feature = "webui-v2-beta")]
+            user_directory: Arc::clone(&base_runtime.user_directory),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             project_service: Arc::clone(&base_runtime.project_service),

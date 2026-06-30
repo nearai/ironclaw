@@ -90,11 +90,18 @@ pub(crate) async fn build_webui_auth_surface(
         )
     })?;
 
+    // Local-dev opt-in: key SSO identities off the verified email so a real
+    // login matches an email-provisioned record (see WebuiUserDirectory). Off by
+    // default — production keeps the durable subject-keyed identity.
+    let email_keyed_identity = std::env::var("IRONCLAW_REBORN_WEBUI_SSO_EMAIL_KEYED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let mut user_directory = WebuiUserDirectory::new(
         identity_resolver,
         tenant_id.clone(),
         sso.allowed_email_domains,
-    );
+    )
+    .with_email_keyed_identity(email_keyed_identity);
     if let Some(config) = local_trigger_access {
         user_directory =
             user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config));

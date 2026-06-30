@@ -42,6 +42,13 @@ pub(crate) struct WebuiUserDirectory {
     /// Lowercased verified-email domains allowed to log in. Never empty
     /// in production — an empty list rejects every login (fail closed).
     allowed_email_domains: Vec<String>,
+    /// Local-dev opt-in: derive the user id deterministically from the verified
+    /// email (`sso_user_id_from_email`) instead of the durable subject-keyed
+    /// identity, so a real SSO login lands on the SAME id that email-based
+    /// provisioning (`POST /admin/users {email}`) creates. Off by default
+    /// (production keeps subject-keyed identity); opted in via env at the call
+    /// site.
+    email_keyed_identity: bool,
 }
 
 impl WebuiUserDirectory {
@@ -55,7 +62,14 @@ impl WebuiUserDirectory {
             tenant_id,
             local_trigger_access: None,
             allowed_email_domains,
+            email_keyed_identity: false,
         }
+    }
+
+    /// Opt into local-dev email-keyed SSO identity (see `email_keyed_identity`).
+    pub(crate) fn with_email_keyed_identity(mut self, email_keyed: bool) -> Self {
+        self.email_keyed_identity = email_keyed;
+        self
     }
 
     pub(crate) fn with_local_trigger_access(
@@ -171,6 +185,18 @@ impl UserDirectory for WebuiUserDirectory {
             );
             return Err(UserDirectoryError::Unknown);
         };
+        // Local-dev (opt-in): key the user id off the verified email so a real
+        // SSO login lands on the SAME id that `POST /admin/users {email}`
+        // provisions — provision-by-email and login converge. Production keeps
+        // the durable subject-keyed identity below.
+        if self.email_keyed_identity {
+            let user_id = ironclaw_reborn_composition::sso_user_id_from_email(&admitted_email)
+                .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
+            if let Some(local_trigger_access) = &self.local_trigger_access {
+                local_trigger_access.seed_for_user(&user_id).await?;
+            }
+            return Ok(user_id);
+        }
         // An OAuth login is an `oauth`-surface external identity: no adapter
         // installation, keyed by provider + subject within the host tenant.
         // The admitted (verified, allowlisted) email is what cross-provider
@@ -243,6 +269,24 @@ mod tests {
                 .collect(),
             display_name: None,
         }
+    }
+
+    #[tokio::test]
+    async fn email_keyed_identity_derives_user_id_from_verified_email() {
+        // With the local-dev opt-in, resolve() must return the SAME deterministic
+        // id that email-based provisioning derives — so a real SSO login lands on
+        // an email-provisioned record (the resolver-linking that makes "log in
+        // with your Gmail -> you're the role you were provisioned" actually work).
+        let dir = directory(&["xyzorg.com"])
+            .await
+            .with_email_keyed_identity(true);
+        let uid = dir
+            .resolve(&google(), &profile(Some("user@xyzorg.com"), true))
+            .await
+            .expect("resolve");
+        let expected = ironclaw_reborn_composition::sso_user_id_from_email("user@xyzorg.com")
+            .expect("derive id");
+        assert_eq!(uid, expected);
     }
 
     #[tokio::test]

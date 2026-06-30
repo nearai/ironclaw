@@ -1071,6 +1071,21 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
+    // Carry the thread id on the span so the reborn model-gateway's
+    // "resolved provider tool definitions" debug line (emitted within this
+    // call) can be attributed to a thread — the only signal the per-user
+    // capability-policy e2e check has for which user's surface was offered
+    // (#5385). Targeted at `ironclaw_reborn` so the documented
+    // `ironclaw_reborn=debug` filter enables it even though this thread-backed
+    // model port lives in `ironclaw_loop_support`. Only thread-scoped model
+    // calls flow through here (system inference does not), so the field is
+    // always present.
+    #[tracing::instrument(
+        target = "ironclaw_reborn",
+        level = "debug",
+        skip_all,
+        fields(thread_id = %self.run_context.thread_id)
+    )]
     async fn stream_model(
         &self,
         request: LoopModelRequest,

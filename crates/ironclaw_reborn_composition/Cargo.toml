@@ -58,6 +58,14 @@ slack-v2-host-beta = [
     "dep:ironclaw_wasm_product_adapters",
     "dep:ironclaw_product_workflow_storage",
 ]
+# Multi-user capability policy: directory-backed authenticator, owner/admin/
+# member roles, per-user capability grants, and the admin REST surface. Pulls
+# in the route crate's matching feature. Enforcement additionally requires
+# `IRONCLAW_REBORN_CAPABILITY_POLICY=1` at runtime.
+capability-policy = [
+    "webui-v2-beta",
+    "ironclaw_webui_v2/capability-policy",
+]
 openai-compat-beta = [
     "webui-v2-beta",
     "dep:ironclaw_reborn_openai_compat",

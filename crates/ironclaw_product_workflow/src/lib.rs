@@ -31,6 +31,7 @@ mod auth_interaction;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod capability_policy;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -81,6 +82,15 @@ pub use automation_thread_metadata::{
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
+};
+// Multi-user capability policy (#5385): roles, the user-directory port, and the
+// admin REST DTOs the v2 handlers consume through `RebornServicesApi`.
+pub use capability_policy::{
+    AdminCreateUserRequest, AdminListUsersResponse, AdminSetCapabilityRequest, AdminSetRoleRequest,
+    AdminUserResponse, AdminUserSummary, CapabilityAvailability, ESSENTIAL_MEMBER_CAPABILITIES,
+    UserDirectoryError, UserDirectoryRecord, UserDirectoryStore, UserRole, capability_available,
+    generate_login_token, hash_login_token, is_valid_capability_id, member_allowed_capability_ids,
+    sso_user_id_from_email,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,

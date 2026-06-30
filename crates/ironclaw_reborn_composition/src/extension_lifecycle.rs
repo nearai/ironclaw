@@ -1228,7 +1228,7 @@ fn suppress_search_credential_onboarding(summary: &mut LifecycleExtensionSummary
     summary.onboarding = None;
 }
 
-fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) -> bool {
+pub(crate) fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) -> bool {
     let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
         return false;
     };

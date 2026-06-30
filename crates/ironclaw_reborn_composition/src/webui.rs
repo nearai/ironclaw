@@ -232,6 +232,16 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 synthetic_operator_tools,
             )),
         );
+        // Multi-user capability policy (#5385): wire the directory-backed admin
+        // surface + per-user availability gate when the policy is active. THE
+        // owner is the env-configured runtime owner (never a directory row).
+        #[cfg(feature = "webui-v2-beta")]
+        if runtime.capability_policy_enabled() {
+            api = api.with_capability_policy(
+                std::sync::Arc::clone(&local_runtime.user_directory),
+                local_runtime.owner_user_id.clone(),
+            );
+        }
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {
