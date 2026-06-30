@@ -1157,6 +1157,39 @@ impl RootFilesystem for LibSqlRootFilesystem {
         }
     }
 
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+                VALUES (?1, 2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(path) DO UPDATE SET
+                    next_seq = root_filesystem_sequences.next_seq + 1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING next_seq - 1
+                "#,
+                libsql::params![path.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
+            .ok_or_else(|| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReserveSeq,
+                reason: "sequence reservation returned no row".to_string(),
+            })?;
+        let seq_raw: i64 = row.get(0).map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
+        })?;
+        seq_no_from_i64(path, seq_raw, FilesystemOperation::ReserveSeq)
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {
@@ -1218,6 +1251,7 @@ async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), Fi
     ensure_libsql_records_columns(conn).await?;
     ensure_libsql_index_specs_table(conn).await?;
     ensure_libsql_events_table(conn).await?;
+    ensure_libsql_sequences_table(conn).await?;
     Ok(())
 }
 
@@ -1635,6 +1669,14 @@ async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), Fil
 }
 
 #[cfg(feature = "libsql")]
+async fn ensure_libsql_sequences_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_SEQUENCES_SCHEMA)
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::ReserveSeq, error))?;
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
 fn seq_no_from_i64(
     path: &VirtualPath,
     raw: i64,
@@ -1929,6 +1971,15 @@ CREATE TABLE IF NOT EXISTS root_filesystem_events (
 );
 CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
     ON root_filesystem_events(path, seq);
+"#;
+
+#[cfg(feature = "libsql")]
+const LIBSQL_SEQUENCES_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_sequences (
+    path TEXT PRIMARY KEY,
+    next_seq INTEGER NOT NULL CHECK (next_seq > 0),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 "#;
 
 #[cfg(test)]

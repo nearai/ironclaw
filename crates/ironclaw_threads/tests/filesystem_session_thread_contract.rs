@@ -28,8 +28,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
-    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
@@ -204,6 +205,111 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_run() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-append", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-append");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-append").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+            content: MessageContent::text("retry answer ignored"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(duplicate.kind, MessageKind::Assistant);
+    assert_eq!(duplicate.status, MessageStatus::Finalized);
+    assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message should be indexed by run");
+    assert_eq!(finalized.message_id, first.message_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, first.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+}
+
+#[tokio::test]
+async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_by_turn_run() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-existing-draft", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-existing-draft");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-existing-draft").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-existing-draft".into(),
+            content: MessageContent::text("draft answer"),
+        })
+        .await
+        .unwrap();
+    let finalized = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-finalized-existing-draft".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final answer"));
 }
 
 #[tokio::test]

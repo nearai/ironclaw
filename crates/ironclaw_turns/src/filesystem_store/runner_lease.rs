@@ -18,16 +18,18 @@ use crate::{
 
 const TURNS_RUNNER_LEASE_PREFIX: &str = "/turns/runner-leases";
 const TURNS_RUNNER_LEASE_KIND: &str = "turn_runner_lease";
+const DURABLE_HEARTBEAT_REFRESH_INTERVAL_SECONDS: i64 = 30;
+const DURABLE_LEASE_EXPIRY_REFRESH_MARGIN_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct RunnerLeaseRecord {
-    run_id: TurnRunId,
-    runner_id: crate::TurnRunnerId,
-    lease_token: crate::TurnLeaseToken,
-    lease_expires_at: crate::TurnTimestamp,
-    last_heartbeat_at: crate::TurnTimestamp,
-    status: TurnStatus,
-    event_cursor: EventCursor,
+    pub(super) run_id: TurnRunId,
+    pub(super) runner_id: crate::TurnRunnerId,
+    pub(super) lease_token: crate::TurnLeaseToken,
+    pub(super) lease_expires_at: crate::TurnTimestamp,
+    pub(super) last_heartbeat_at: crate::TurnTimestamp,
+    pub(super) status: TurnStatus,
+    pub(super) event_cursor: EventCursor,
 }
 
 #[derive(Clone, Copy)]
@@ -110,7 +112,7 @@ where
     pub(super) async fn heartbeat(
         &self,
         request: HeartbeatRequest,
-    ) -> Result<EventCursor, TurnError> {
+    ) -> Result<RunnerLeaseRecord, TurnError> {
         self.with_timeout(self.heartbeat_inner(request), "heartbeat runner lease")
             .await
     }
@@ -290,7 +292,10 @@ where
         self.seed_from_snapshot_inner(snapshot, run_id).await
     }
 
-    async fn heartbeat_inner(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+    async fn heartbeat_inner(
+        &self,
+        request: HeartbeatRequest,
+    ) -> Result<RunnerLeaseRecord, TurnError> {
         for attempt in 0..FILESYSTEM_CAS_RETRIES {
             let now = chrono::Utc::now();
             let Some((existing, version)) = self.read(request.run_id).await? else {
@@ -303,11 +308,14 @@ where
                     to: TurnStatus::Running,
                 });
             }
+            if !should_refresh_durable_runner_lease(&existing, now) {
+                return Ok(existing);
+            }
             let mut next = existing.clone();
             next.lease_expires_at = next_lease_expiry(self.runner_lease_ttl, now);
             next.last_heartbeat_at = now;
             match self.write(&next, CasExpectation::Version(version)).await {
-                Ok(_) => return Ok(existing.event_cursor),
+                Ok(_) => return Ok(next),
                 Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
                 Err(PutError::Other(error)) => return Err(error),
             }
@@ -476,11 +484,29 @@ fn runner_lease_path(run_id: TurnRunId) -> Result<ScopedPath, TurnError> {
     })
 }
 
-fn next_lease_expiry(
+pub(super) fn next_lease_expiry(
     runner_lease_ttl: chrono::Duration,
     now: crate::TurnTimestamp,
 ) -> crate::TurnTimestamp {
     now.checked_add_signed(runner_lease_ttl).unwrap_or(now)
+}
+
+pub(super) fn durable_runner_lease_refresh_due(
+    durable_last_heartbeat_at: crate::TurnTimestamp,
+    durable_lease_expires_at: crate::TurnTimestamp,
+    now: crate::TurnTimestamp,
+) -> bool {
+    let refresh_interval = chrono::Duration::seconds(DURABLE_HEARTBEAT_REFRESH_INTERVAL_SECONDS);
+    let expiry_margin = chrono::Duration::seconds(DURABLE_LEASE_EXPIRY_REFRESH_MARGIN_SECONDS);
+    now.signed_duration_since(durable_last_heartbeat_at) >= refresh_interval
+        || durable_lease_expires_at.signed_duration_since(now) <= expiry_margin
+}
+
+fn should_refresh_durable_runner_lease(
+    record: &RunnerLeaseRecord,
+    now: crate::TurnTimestamp,
+) -> bool {
+    durable_runner_lease_refresh_due(record.last_heartbeat_at, record.lease_expires_at, now)
 }
 
 fn run_can_use_external_lease(record: &TurnRunRecord) -> bool {
@@ -537,7 +563,7 @@ fn apply_runner_lease_overlay(record: &mut TurnRunRecord, lease: &RunnerLeaseRec
     record.lease_expires_at = Some(lease.lease_expires_at);
 }
 
-fn ensure_active_runner_lease(
+pub(super) fn ensure_active_runner_lease(
     record: &RunnerLeaseRecord,
     runner_id: crate::TurnRunnerId,
     lease_token: crate::TurnLeaseToken,

@@ -50,6 +50,7 @@ struct State {
     entries: HashMap<VirtualPath, StoredEntry>,
     indexes: HashMap<String, Vec<IndexSpec>>,
     event_logs: HashMap<String, Vec<EventRecord>>,
+    sequences: HashMap<String, SeqNo>,
 }
 
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
@@ -64,6 +65,7 @@ impl InMemoryBackend {
                 entries: HashMap::new(),
                 indexes: HashMap::new(),
                 event_logs: HashMap::new(),
+                sequences: HashMap::new(),
             }),
         }
     }
@@ -432,6 +434,17 @@ impl RootFilesystem for InMemoryBackend {
             .collect())
     }
 
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let mut state = self.state.lock().await;
+        let next = state
+            .sequences
+            .entry(path.as_str().to_string())
+            .or_insert_with(|| SeqNo::ZERO.next());
+        let reserved = *next;
+        *next = next.next();
+        Ok(reserved)
+    }
+
     // Legacy bytes ops — default impls in the trait route them through put/get
     // and use our native implementations. The only one needing an explicit
     // impl is the required-method `list_dir`, which we already overrode above.
@@ -665,6 +678,18 @@ mod tests {
 
         // Empty batch is a no-op that returns no seqs.
         assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reserve_sequence_assigns_path_local_monotonic_values() {
+        let fs = InMemoryBackend::new();
+        let thread_a = vpath("/threads/a/message_sequence");
+        let thread_b = vpath("/threads/b/message_sequence");
+
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&thread_b).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 3);
     }
 
     #[tokio::test]

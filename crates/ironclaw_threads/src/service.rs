@@ -6,14 +6,15 @@ use ironclaw_host_api::ThreadId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -54,6 +55,28 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let scope = request.scope;
+        let thread_id = request.thread_id;
+        let content = request.content;
+        let message = self
+            .append_assistant_draft(AppendAssistantDraftRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_run_id: request.turn_run_id,
+                content: content.clone(),
+            })
+            .await?;
+        if message.status != crate::MessageStatus::Draft {
+            return Ok(message);
+        }
+        self.finalize_assistant_message(&scope, &thread_id, message.message_id, content)
+            .await
+    }
 
     async fn append_tool_result_reference(
         &self,
@@ -319,6 +342,15 @@ where
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref().append_assistant_draft(request).await
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .append_finalized_assistant_message(request)
+            .await
     }
 
     async fn append_tool_result_reference(
