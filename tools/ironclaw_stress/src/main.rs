@@ -11,6 +11,7 @@ mod ramp;
 mod redaction;
 mod report;
 mod resource_ops;
+mod suite;
 mod summary;
 mod sweep;
 mod synthetic;
@@ -72,6 +73,10 @@ pub(crate) struct Args {
     /// Named workload preset. Explicit CLI flags override preset defaults.
     #[arg(long, value_enum)]
     pub(crate) preset: Option<StressPreset>,
+
+    /// Run a curated multi-scenario stress suite.
+    #[arg(long, value_enum)]
+    pub(crate) suite: Option<StressSuite>,
 
     /// OS processes to run against the same snapshot path. Use >1 to exercise
     /// cross-process CAS contention that the in-process lock cannot serialize.
@@ -465,6 +470,20 @@ impl StressPreset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub(crate) enum StressSuite {
+    BottleneckFinder,
+}
+
+impl StressSuite {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::BottleneckFinder => "bottleneck-finder",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
@@ -610,7 +629,9 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let result = if args.child_index.is_none() && ramp::is_enabled(&args) {
+    let result = if args.child_index.is_none() && args.suite.is_some() {
+        suite::run(&args, &run_id).await
+    } else if args.child_index.is_none() && ramp::is_enabled(&args) {
         ramp::run(&args, &run_id).await
     } else if args.child_index.is_none() && sweep::is_enabled(&args) {
         trace::prepare_trace_outputs(&args).await?;
@@ -777,6 +798,36 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.ramp_concurrency.is_some() && args.ramp_users.is_some() {
         return Err("use only one of --ramp-concurrency or --ramp-users".to_string());
+    }
+    if args.suite.is_some() {
+        if args.preset.is_some() {
+            return Err("--suite cannot be combined with --preset".to_string());
+        }
+        if args.processes > 1 {
+            return Err(
+                "--suite requires --processes 1 because it includes user-turn scenarios"
+                    .to_string(),
+            );
+        }
+        if args.ramp_concurrency.is_some()
+            || args.ramp_users.is_some()
+            || !args.sweep_concurrency.is_empty()
+            || !args.sweep_users.is_empty()
+            || !args.sweep_active_thread_count.is_empty()
+            || !args.sweep_model_latency_ms.is_empty()
+            || !args.sweep_user_message_bytes.is_empty()
+            || !args.sweep_assistant_message_bytes.is_empty()
+            || !args.sweep_context_max_messages.is_empty()
+            || !args.sweep_context_growth_turns_per_operation.is_empty()
+            || !args.sweep_tool_calls_per_turn.is_empty()
+            || !args.sweep_tool_output_bytes.is_empty()
+            || args.repetitions > 1
+        {
+            return Err(
+                "--suite cannot be combined with ramp flags, sweep flags, or --repetitions > 1"
+                    .to_string(),
+            );
+        }
     }
     if args.ramp_factor < 2 {
         return Err("--ramp-factor must be greater than 1".to_string());

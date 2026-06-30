@@ -128,6 +128,46 @@ fn preset_respects_explicit_overrides() {
 }
 
 #[test]
+fn bottleneck_finder_suite_includes_core_pressure_cases() {
+    let cases = suite::build_cases(StressSuite::BottleneckFinder);
+    let labels = cases
+        .iter()
+        .map(|case| case.label)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(labels.contains("resource-contention"));
+    assert!(labels.contains("chat-baseline"));
+    assert!(labels.contains("hot-thread"));
+    assert!(labels.contains("large-context"));
+    assert!(labels.contains("tool-heavy"));
+    assert!(labels.contains("model-tail"));
+    assert!(labels.contains("cpu-burn"));
+    assert!(labels.contains("memory-churn"));
+}
+
+#[test]
+fn suite_rejects_multi_process_runs() {
+    let mut args = test_args();
+    args.suite = Some(StressSuite::BottleneckFinder);
+    args.processes = 2;
+
+    let error = validate_args(&args).expect_err("suite should reject multi-process runs");
+
+    assert!(error.contains("--suite requires --processes 1"));
+}
+
+#[test]
+fn suite_rejects_preset_runs() {
+    let mut args = test_args();
+    args.suite = Some(StressSuite::BottleneckFinder);
+    args.preset = Some(StressPreset::LargeContext);
+
+    let error = validate_args(&args).expect_err("suite should reject preset runs");
+
+    assert!(error.contains("--suite cannot be combined with --preset"));
+}
+
+#[test]
 fn context_growth_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ContextGrowth;
@@ -850,6 +890,7 @@ fn test_args() -> Args {
     Args {
         backend: Backend::Libsql,
         preset: None,
+        suite: None,
         processes: 1,
         concurrency: 2,
         operations: 3,
