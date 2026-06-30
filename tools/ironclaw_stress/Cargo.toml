@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_filesystem = { path = "../../crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../../crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_llm = { path = "../../crates/ironclaw_llm", version = "0.1.0", features = ["registry-provider-factory"] }
 ironclaw_resources = { path = "../../crates/ironclaw_resources", version = "0.1.0" }
 ironclaw_threads = { path = "../../crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../../crates/ironclaw_turns", version = "0.1.0" }

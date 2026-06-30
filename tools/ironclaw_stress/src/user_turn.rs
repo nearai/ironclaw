@@ -14,6 +14,10 @@ use ironclaw_host_api::{
     CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
     ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
 };
+use ironclaw_llm::{
+    ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,
+    build_static_provider_chain, resolve_llm_config_from_env,
+};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -34,7 +38,8 @@ use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
 use crate::{
-    Args, Backend, LatencySummary, ModelLatencyProfile, OperationTarget, Sample, Scenario,
+    Args, Backend, LatencySummary, ModelLatencyProfile, ModelLatencySource, OperationTarget,
+    Sample, Scenario,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
     summary::{FailureCause, latency_summary},
@@ -49,6 +54,7 @@ where
     root: Arc<F>,
     governor: Arc<dyn ResourceGovernor>,
     thread_service: Arc<FilesystemSessionThreadService<F>>,
+    model_latency: Arc<ModelLatencyDriver>,
     run_id: String,
     target: String,
 }
@@ -111,7 +117,7 @@ pub(crate) fn operation_attribution_rows(
         ("context_reads", &attribution.context_reads),
         ("turn_store", &attribution.turn_store),
         ("resource_governor", &attribution.resource_governor),
-        ("synthetic_wait", &attribution.synthetic_wait),
+        ("model_tool_wait", &attribution.synthetic_wait),
     ]
 }
 
@@ -167,8 +173,12 @@ async fn build_libsql_user_turn_workload(
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
     let (filesystem, target) = crate::build_libsql_root(args).await?;
+    let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Libsql(user_turn_services_from_root(
-        filesystem, run_id, target,
+        filesystem,
+        run_id,
+        target,
+        model_latency,
     )?))
 }
 
@@ -186,8 +196,12 @@ async fn build_postgres_user_turn_workload(
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
     let (filesystem, target) = crate::build_postgres_root(args).await?;
+    let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Postgres(user_turn_services_from_root(
-        filesystem, run_id, target,
+        filesystem,
+        run_id,
+        target,
+        model_latency,
     )?))
 }
 
@@ -862,9 +876,9 @@ where
                 let execution = async {
                     time_stage(
                         &mut stages.model_wait,
-                        synthetic_model_wait(args, worker_index, operation_index),
+                        self.model_latency.run(args, worker_index, operation_index),
                     )
-                    .await;
+                    .await?;
 
                     self.write_assistant_turn(
                         &context,
@@ -1169,6 +1183,7 @@ fn user_turn_services_from_root<F>(
     root: Arc<F>,
     run_id: &str,
     target: String,
+    model_latency: Arc<ModelLatencyDriver>,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1183,6 +1198,7 @@ where
         root,
         governor,
         thread_service: Arc::new(FilesystemSessionThreadService::new(scoped)),
+        model_latency,
         run_id,
         target,
     })
@@ -1268,6 +1284,114 @@ async fn synthetic_model_wait(args: &Args, worker_index: usize, operation_index:
     if wait_ms > 0 {
         sleep(Duration::from_millis(wait_ms)).await;
     }
+}
+
+enum ModelLatencyDriver {
+    Synthetic,
+    Provider(ProviderLatencyDriver),
+}
+
+impl ModelLatencyDriver {
+    async fn run(
+        &self,
+        args: &Args,
+        worker_index: usize,
+        operation_index: usize,
+    ) -> Result<(), OperationFailure> {
+        match self {
+            Self::Synthetic => {
+                synthetic_model_wait(args, worker_index, operation_index).await;
+                Ok(())
+            }
+            Self::Provider(driver) => driver.run(args, worker_index, operation_index).await,
+        }
+    }
+}
+
+struct ProviderLatencyDriver {
+    provider: Arc<dyn LlmProvider>,
+}
+
+impl ProviderLatencyDriver {
+    async fn run(
+        &self,
+        args: &Args,
+        worker_index: usize,
+        operation_index: usize,
+    ) -> Result<(), OperationFailure> {
+        let prompt = provider_latency_prompt(worker_index, operation_index);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user(prompt)])
+            .with_max_tokens(args.provider_max_tokens);
+        if let Some(model) = args.provider_model.as_deref() {
+            request = request.with_model(model);
+        }
+        self.provider
+            .complete(request)
+            .await
+            .map(|_| ())
+            .map_err(provider_latency_failure)
+    }
+}
+
+async fn build_model_latency_driver(args: &Args) -> Result<Arc<ModelLatencyDriver>, String> {
+    match args.model_latency_source {
+        ModelLatencySource::Synthetic => Ok(Arc::new(ModelLatencyDriver::Synthetic)),
+        ModelLatencySource::Provider => {
+            if !matches!(args.scenario, Scenario::MixedUserSession) {
+                return Err(
+                    "--model-latency-source provider is only supported with --scenario mixed-user-session"
+                        .to_string(),
+                );
+            }
+            let config = resolve_llm_config_from_env(None)
+                .map_err(|error| format!("resolve LLM provider config: {error}"))?
+                .ok_or_else(|| {
+                    "no LLM provider configuration found; set LLM_BACKEND and provider credentials"
+                        .to_string()
+                })?;
+            let session = Arc::new(SessionManager::new_async(config.session.clone()).await);
+            let provider = build_static_provider_chain(&config, session)
+                .await
+                .map_err(|error| format!("build LLM provider chain: {error}"))?;
+            eprintln!(
+                "{} provider latency source initialized backend={} model={} max_tokens={}",
+                crate::log_prefix(args),
+                config.backend,
+                args.provider_model
+                    .as_deref()
+                    .unwrap_or_else(|| provider.model_name()),
+                args.provider_max_tokens
+            );
+            Ok(Arc::new(ModelLatencyDriver::Provider(
+                ProviderLatencyDriver { provider },
+            )))
+        }
+    }
+}
+
+fn provider_latency_prompt(worker_index: usize, operation_index: usize) -> String {
+    format!(
+        "IronClaw stress latency probe. Reply with exactly: ok. worker={worker_index} operation={operation_index}"
+    )
+}
+
+fn provider_latency_failure(error: LlmError) -> OperationFailure {
+    let bucket = match &error {
+        LlmError::RateLimited { .. } => "model_provider_rate_limited",
+        LlmError::AuthFailed { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. } => "model_provider_auth",
+        LlmError::ContextLengthExceeded { .. } => "model_provider_context_length",
+        LlmError::ModelNotAvailable { .. } => "model_provider_model_unavailable",
+        LlmError::BadGateway { .. }
+        | LlmError::RequestFailed { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::EmptyResponse { .. }
+        | LlmError::Http(_)
+        | LlmError::Json(_)
+        | LlmError::Io(_) => "model_provider_error",
+    };
+    OperationFailure::new(bucket, "model_wait", error)
 }
 
 async fn synthetic_tool_wait(wait_ms: u64) {
