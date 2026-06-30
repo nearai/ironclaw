@@ -78,7 +78,7 @@ async def test_reborn_legacy_attachment_flow_renders_and_reaches_model(
     """Stage browser files, render cards, and prove text extraction reaches the LLM."""
     page = reborn_v2_page
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "marker.txt",
@@ -123,7 +123,7 @@ async def test_reborn_legacy_attachment_document_extraction_reaches_model(
     """Port of legacy PDF/text/PPTX/image model-payload attachment assertions."""
     page = reborn_v2_vision_page
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "tiny.png",
@@ -183,7 +183,7 @@ async def test_reborn_legacy_unextractable_attachment_uses_placeholder(
     corrupt_pdf = b"%PDF-1.4\n<<garbage>> not a real pdf body \x00\x01\x02"
 
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "mystery.pdf",
@@ -222,7 +222,7 @@ async def test_reborn_legacy_files_only_attachments_reload_from_history(
     """Port of legacy files-only attachment send and history re-render coverage."""
     page = reborn_v2_page
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "files-only.pdf",
@@ -272,7 +272,7 @@ async def test_reborn_legacy_attachment_count_limit_blocks_extra_files(
     """Port of legacy batch count validation to Reborn's staging alert UI."""
     page = reborn_v2_page
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": f"limit-{index}.txt",
@@ -297,7 +297,7 @@ async def test_reborn_legacy_attachment_size_limits_block_invalid_files(
     page = reborn_v2_page
 
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "too-large.txt",
@@ -313,7 +313,7 @@ async def test_reborn_legacy_attachment_size_limits_block_invalid_files(
 
     await page.get_by_label("Dismiss").click()
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": f"chunk-{index}.txt",
@@ -338,7 +338,7 @@ async def test_reborn_legacy_attachment_unsupported_type_is_rejected(
     """Port of legacy attachment type rejection through Reborn's accept contract."""
     page = reborn_v2_page
     await page.set_input_files(
-        "input[type=file][multiple]",
+        SEL_V2["attachment_file_input"],
         files=[
             {
                 "name": "unsupported.bin",

@@ -679,7 +679,7 @@ function appendRunFailureMessage(
       failureSummary,
     });
     if (existing >= 0) {
-      if (!failureSummary || prev[existing].content === content) return prev;
+      if (prev[existing].content === content) return prev;
       const next = [...prev];
       next[existing] = {
         ...next[existing],

@@ -252,7 +252,9 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
+  return preserved.length > 0
+    ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
+    : hydratedFresh;
 }
 
 function isSeededOptimisticMessage(message) {
@@ -315,4 +317,59 @@ function isFinalAssistantMessage(message) {
 
 function isRuntimeActivityMessage(message) {
   return message?.role === "tool_activity" || message?.role === "thinking";
+}
+
+function insertPreservedAtOriginalPositions(fresh, preserved, current) {
+  const freshIndexById = new Map();
+  for (const [index, message] of fresh.entries()) {
+    if (typeof message?.id === "string") freshIndexById.set(message.id, index);
+  }
+  const currentAnchors = current.map((message) =>
+    freshIndexForCurrentMessage(message, freshIndexById),
+  );
+  const after = new Map();
+  const append = [];
+
+  for (const message of preserved) {
+    if (!isRuntimeActivityMessage(message)) {
+      append.push(message);
+      continue;
+    }
+    const originalIndex = current.indexOf(message);
+    let previousAnchor = null;
+    for (let index = originalIndex - 1; index >= 0; index -= 1) {
+      if (currentAnchors[index] !== null) {
+        previousAnchor = currentAnchors[index];
+        break;
+      }
+    }
+    if (previousAnchor !== null) {
+      const group = after.get(previousAnchor) || [];
+      group.push(message);
+      after.set(previousAnchor, group);
+    } else {
+      append.push(message);
+    }
+  }
+
+  const merged = [];
+  for (const [index, message] of fresh.entries()) {
+    merged.push(message);
+    const group = after.get(index);
+    if (group) merged.push(...group);
+  }
+  merged.push(...append);
+  return merged;
+}
+
+function freshIndexForCurrentMessage(message, freshIndexById) {
+  if (!message) return null;
+  if (typeof message.id === "string" && freshIndexById.has(message.id)) {
+    return freshIndexById.get(message.id);
+  }
+  if (typeof message.timelineMessageId === "string") {
+    const timelineId = `msg-${message.timelineMessageId}`;
+    if (freshIndexById.has(timelineId)) return freshIndexById.get(timelineId);
+  }
+  return null;
 }

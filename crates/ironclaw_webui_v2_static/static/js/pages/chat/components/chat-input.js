@@ -165,11 +165,19 @@ export function ChatInput({
       // later add.
       stagingQueueRef.current = stagingQueueRef.current
         .then(async () => {
+          const expectedDraftKey = draftKey;
+          const expectedStorageScope = storageScope;
           const { staged, errors } = await stageFiles(files, {
             limits,
             existing: attachmentsRef.current,
             t,
           });
+          if (
+            stagedDraftKeyRef.current !== expectedDraftKey ||
+            stagedDraftScopeRef.current !== expectedStorageScope
+          ) {
+            return;
+          }
           if (staged.length > 0) {
             const next = [...attachmentsRef.current, ...staged];
             attachmentsRef.current = next;
@@ -182,7 +190,7 @@ export function ChatInput({
           setAttachmentError(t("chat.attachmentStagingFailed"));
         });
     },
-    [disabled, draftKey, limits, t]
+    [disabled, draftKey, storageScope, limits, t]
   );
 
   const removeAttachment = React.useCallback((id) => {

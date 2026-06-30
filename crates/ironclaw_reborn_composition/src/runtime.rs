@@ -1966,26 +1966,42 @@ impl RebornRuntime {
             // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
             // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
+                if let Err(error) = self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        ?error,
+                        %run_id,
+                        "failed to cancel timed-out run while preserving timeout error"
+                    );
+                }
                 return Err(RebornRuntimeError::RunTimeout {
                     timeout: self.poll_settings.max_total,
                 });
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
+                    if let Err(error) = self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            ?error,
+                            %run_id,
+                            "failed to cancel caller-cancelled run while preserving cancellation error"
+                        );
+                    }
                     return Err(RebornRuntimeError::OperationCancelled);
                 }
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
@@ -3048,7 +3064,7 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
-            planned_default_iteration_limit: optional_u32_env(
+            planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
             ..DefaultPlannedRuntimeConfig::default()
@@ -3480,7 +3496,9 @@ struct LocalDevSkillContextSource {
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
 
-fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError> {
+fn optional_nonzero_u32_env(
+    key: &'static str,
+) -> Result<Option<std::num::NonZeroU32>, RebornRuntimeError> {
     match std::env::var(key) {
         Ok(value) => {
             let trimmed = value.trim();
@@ -3498,7 +3516,7 @@ fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError
                     reason: format!("{key} must be greater than zero"),
                 });
             }
-            Ok(Some(parsed))
+            Ok(std::num::NonZeroU32::new(parsed))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {

@@ -89,9 +89,11 @@ pub(crate) fn spawn_trigger_poller(
         return Ok(None);
     }
     settings.worker.validate()?;
+    let cancel = CancellationToken::new();
     #[cfg(feature = "slack-v2-host-beta")]
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
-        Arc::new(PostSubmitHookObserver::new(deps.post_submit_hook_slot));
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
+        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
+    );
     #[cfg(feature = "slack-v2-host-beta")]
     let trusted_submitter = deps.trusted_submitter;
     #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -110,7 +112,6 @@ pub(crate) fn spawn_trigger_poller(
             fire_settlement_observer,
         },
     )?;
-    let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
@@ -140,15 +141,20 @@ pub(crate) struct PostSubmitHookObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
     pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
+    drain_cancel: CancellationToken,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
 impl PostSubmitHookObserver {
-    fn new(hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>) -> Self {
+    fn new(
+        hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+        drain_cancel: CancellationToken,
+    ) -> Self {
         Self {
             hook_slot,
             pending: Arc::new(Mutex::new(VecDeque::new())),
             drain_scheduled: Arc::new(AtomicBool::new(false)),
+            drain_cancel,
         }
     }
 
@@ -160,7 +166,7 @@ impl PostSubmitHookObserver {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
                 pending.pop_front();
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::trigger_poller",
                     pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
                     "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
@@ -183,6 +189,7 @@ impl PostSubmitHookObserver {
         let hook_slot = Arc::clone(&self.hook_slot);
         let pending = Arc::clone(&self.pending);
         let drain_scheduled = Arc::clone(&self.drain_scheduled);
+        let drain_cancel = self.drain_cancel.clone();
         tokio::spawn(async move {
             loop {
                 if let Some(hook) = hook_slot.get().cloned() {
@@ -198,7 +205,13 @@ impl PostSubmitHookObserver {
                     drain_scheduled.store(false, Ordering::Release);
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                tokio::select! {
+                    _ = drain_cancel.cancelled() => {
+                        drain_scheduled.store(false, Ordering::Release);
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
             }
         });
     }
@@ -337,6 +350,7 @@ mod tests {
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
+        use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
         use crate::slack_delivery::PostSubmitDeliveryHook;
@@ -437,7 +451,8 @@ mod tests {
         async fn uninstalled_hook_buffers_until_hook_is_installed() {
             let run_id = TurnRunId::new();
             let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot));
+            let observer =
+                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
             let recording = Arc::new(RecordingHook::default());
 
             observer
@@ -464,7 +479,8 @@ mod tests {
         #[tokio::test]
         async fn uninstalled_hook_buffer_drops_oldest_when_full() {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot));
+            let observer =
+                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
             let recording = Arc::new(RecordingHook::default());
             let run_ids: Vec<_> = (0..=POST_SUBMIT_HOOK_PENDING_CAPACITY)
                 .map(|_| TurnRunId::new())
@@ -515,7 +531,7 @@ mod tests {
                 .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot);
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
@@ -558,7 +574,7 @@ mod tests {
                 }) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot);
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
@@ -580,6 +596,30 @@ mod tests {
             })
             .await
             .expect("hook task should complete after release");
+        }
+
+        #[tokio::test]
+        async fn uninstalled_hook_drain_task_exits_when_cancelled() {
+            let hook_slot = Arc::new(std::sync::OnceLock::new());
+            let cancel = CancellationToken::new();
+            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot), cancel.clone());
+
+            observer
+                .on_accepted_fire_settled(settlement_event(TurnRunId::new()))
+                .await;
+            assert!(
+                observer.drain_scheduled.load(Ordering::SeqCst),
+                "buffered settlement should schedule a drain task"
+            );
+
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while observer.drain_scheduled.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("drain task should observe runtime cancellation");
         }
     }
 }

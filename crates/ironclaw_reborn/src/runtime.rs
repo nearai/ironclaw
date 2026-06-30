@@ -99,7 +99,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
-    pub planned_default_iteration_limit: Option<u32>,
+    pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {

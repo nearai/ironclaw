@@ -597,6 +597,10 @@ export function useChat(threadId) {
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
         submitBusyRef.current = false;
+        if (err && typeof err === "object") {
+          err.optimisticMessageId = optimisticId;
+          err.optimisticThreadId = sendThreadId;
+        }
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:
@@ -799,10 +803,8 @@ export function useChat(threadId) {
       if (!content && attachments.length === 0) return;
 
       const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
-      setMessages(removeFailed);
-      if (threadId) seedThreadMessages(threadId, removeFailed);
       try {
-        await send(content, {
+        const response = await send(content, {
           threadId,
           attachments,
           displayContent:
@@ -810,8 +812,14 @@ export function useChat(threadId) {
               ? message.retryDisplayContent
               : message.content,
         });
-      } catch {
-        // `send` renders the replacement failed optimistic message itself.
+        if (response === null) return;
+        setMessages(removeFailed);
+        if (threadId) seedThreadMessages(threadId, removeFailed);
+      } catch (err) {
+        if (err?.optimisticMessageId) {
+          setMessages(removeFailed);
+          if (threadId) seedThreadMessages(threadId, removeFailed);
+        }
       }
     },
     [send, seedThreadMessages, setMessages, threadId],

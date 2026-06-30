@@ -311,13 +311,13 @@ async def test_reborn_legacy_generic_connect_command_redeems_pairing_code(
     await expect(card).to_contain_text("Connect Telegram")
     await expect(card).to_contain_text("Claim your Telegram account")
 
-    section = card.locator("[data-testid='pairing-section']")
+    section = card.locator(SEL_V2["pairing_section"])
     await expect(section).to_be_visible(timeout=5000)
-    input_field = section.locator("[data-testid='pairing-code-input']")
+    input_field = section.locator(SEL_V2["pairing_code_input"])
     await input_field.fill("  pair-2468  ")
-    await section.locator("[data-testid='pairing-submit']").click()
+    await section.locator(SEL_V2["pairing_submit"]).click()
 
-    await expect(section.locator("[data-testid='pairing-success']")).to_contain_text(
+    await expect(section.locator(SEL_V2["pairing_success"])).to_contain_text(
         "Telegram account connected.", timeout=5000
     )
     await expect(input_field).to_have_value("")

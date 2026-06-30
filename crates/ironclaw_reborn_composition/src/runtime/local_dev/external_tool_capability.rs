@@ -450,7 +450,8 @@ fn surface_lock_error() -> AgentLoopHostError {
     )
 }
 
-fn catalog_error(_error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+fn catalog_error(error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+    tracing::debug!(?error, "external tool catalog operation failed");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,
         "external tool catalog is unavailable",

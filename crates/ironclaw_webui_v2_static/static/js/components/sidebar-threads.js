@@ -178,7 +178,9 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
             thread=${thread}
             isActive=${thread.id === activeThreadId}
             isPinned=${pinnedIds.has(thread.id)}
-            presentation=${presentationFor(states.get(thread.id) || stateFromThreadSummary(thread))}
+            presentation=${presentationFor(
+              states.has(thread.id) ? states.get(thread.id) : stateFromThreadSummary(thread)
+            )}
             onSelect=${onSelect}
             onDelete=${onDelete}
           />

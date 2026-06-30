@@ -230,15 +230,22 @@ SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_button": "#gateway-sidebar button",
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
+    "msg_error":      "[data-testid='msg-error']",
+    "message_copy_button": "button[title]",
     "message_list_scroll": "[data-testid='message-list-scroll']",
     "message_list_content": "[data-testid='message-list-content']",
     "message_list_load_older": "[data-testid='message-list-load-older']",
+    "command_palette_dialog_name": "Command palette",
+    "command_palette_search_placeholder": "Type a command or search",
     "auth_gate":      "[data-testid='auth-gate']",
     "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
     "auth_token_input": "[data-testid='auth-token-input']",
@@ -249,6 +256,11 @@ SEL_V2 = {
         "[data-strategy='{strategy}']"
     ),
     "channel_connect_dismiss": "[data-testid='channel-connect-dismiss']",
+    "pairing_section": "[data-testid='pairing-section']",
+    "pairing_code_input": "[data-testid='pairing-code-input']",
+    "pairing_submit": "[data-testid='pairing-submit']",
+    "pairing_success": "[data-testid='pairing-success']",
+    "pairing_error": "[data-testid='pairing-error']",
     "slack_pairing_section": "[data-testid='slack-pairing-section']",
     "slack_pairing_code_input": "[data-testid='slack-pairing-code-input']",
     "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
