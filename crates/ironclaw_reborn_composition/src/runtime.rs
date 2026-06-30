@@ -22,9 +22,8 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Utc;
 use thiserror::Error;
@@ -52,7 +51,7 @@ use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ModelGatewayBackedSystemInferencePort,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
@@ -101,6 +100,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::run_profile::UserProfileContext;
 
+use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
@@ -115,54 +115,6 @@ use crate::outbound_preferences::{
     OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
-
-fn trace_runtime_latency_ok(
-    operation: &'static str,
-    thread_id: &ThreadId,
-    run_id: Option<TurnRunId>,
-    started_at: Option<Instant>,
-) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "reborn_runtime",
-        operation,
-        thread_id = %thread_id,
-        run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
-        "reborn runtime operation completed",
-    );
-}
-
-fn trace_runtime_latency_error<E>(
-    operation: &'static str,
-    thread_id: &ThreadId,
-    run_id: Option<TurnRunId>,
-    started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "reborn_runtime",
-        operation,
-        thread_id = %thread_id,
-        run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
-        "reborn runtime operation failed",
-    );
-}
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -389,6 +341,7 @@ mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
+mod latency;
 mod local_dev;
 #[cfg(test)]
 #[path = "runtime/tests/outbound_delivery.rs"]

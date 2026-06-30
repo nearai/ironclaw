@@ -1,8 +1,8 @@
-use std::{fmt, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
@@ -10,6 +10,11 @@ use ironclaw_processes::{
 struct ProcessLatencyFields {
     capability_id: String,
     runtime: String,
+    tenant_id: String,
+    user_id: String,
+    agent_id: String,
+    project_id: String,
+    mission_id: String,
     thread_id: String,
     invocation_id: String,
 }
@@ -23,6 +28,26 @@ impl ProcessLatencyFields {
         Some(Self {
             capability_id: request.capability_id.to_string(),
             runtime: format!("{:?}", request.runtime),
+            tenant_id: request.scope.tenant_id.as_str().to_string(),
+            user_id: request.scope.user_id.as_str().to_string(),
+            agent_id: request
+                .scope
+                .agent_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            project_id: request
+                .scope
+                .project_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            mission_id: request
+                .scope
+                .mission_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
             thread_id: request
                 .scope
                 .thread_id
@@ -43,41 +68,47 @@ fn trace_process_latency_ok(
         return;
     };
 
-    ironclaw_observability::live_latency_trace!(
-        component = "process_executor",
+    ironclaw_observability::live_latency_trace_ok!(
+        "process_executor",
         operation,
+        Some(started_at),
         capability_id = fields.capability_id.as_str(),
         runtime = fields.runtime.as_str(),
+        tenant_id = fields.tenant_id.as_str(),
+        user_id = fields.user_id.as_str(),
+        agent_id = fields.agent_id.as_str(),
+        project_id = fields.project_id.as_str(),
+        mission_id = fields.mission_id.as_str(),
         thread_id = fields.thread_id.as_str(),
         invocation_id = fields.invocation_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "process execution operation completed",
     );
 }
 
-fn trace_process_latency_error<E>(
+fn trace_process_latency_error<E: ?Sized>(
     operation: &'static str,
     fields: Option<&ProcessLatencyFields>,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
+    _error: &E,
+) {
     let (Some(fields), Some(started_at)) = (fields, started_at) else {
         return;
     };
 
-    ironclaw_observability::live_latency_trace!(
-        component = "process_executor",
+    ironclaw_observability::live_latency_trace_error!(
+        "process_executor",
         operation,
+        Some(started_at),
+        "process_execution_error",
         capability_id = fields.capability_id.as_str(),
         runtime = fields.runtime.as_str(),
+        tenant_id = fields.tenant_id.as_str(),
+        user_id = fields.user_id.as_str(),
+        agent_id = fields.agent_id.as_str(),
+        project_id = fields.project_id.as_str(),
+        mission_id = fields.mission_id.as_str(),
         thread_id = fields.thread_id.as_str(),
         invocation_id = fields.invocation_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "process execution operation failed",
     );
 }

@@ -603,8 +603,7 @@ async fn drain_queued_runs(
             return false;
         };
         let claim_started_at = live_latency_started_at();
-        let scope_filter_thread_id =
-            latency::scope_thread_id(claim_started_at, scope_filter.as_ref());
+        let scope_filter_fields = latency::scope_fields(claim_started_at, scope_filter.as_ref());
         let claim = context
             .transitions
             .claim_next_run(ClaimRunRequest {
@@ -613,7 +612,7 @@ async fn drain_queued_runs(
                 scope_filter: scope_filter.clone(),
             })
             .await;
-        latency::claim_next_run_result(scope_filter_thread_id.as_deref(), claim_started_at, &claim);
+        latency::claim_next_run_result(scope_filter_fields.as_ref(), claim_started_at, &claim);
         match claim {
             Ok(Some(claimed)) => {
                 let run_id = claimed.state.run_id;
@@ -688,7 +687,7 @@ fn spawn_executor_task(
     // the event self-contained and allows test layers to find them without
     // relying on span registration timing (which can be racy under parallel
     // test execution when using `tracing::dispatcher::set_default`).
-    let recovery_thread_id = claimed.state.scope.thread_id.clone();
+    let recovery_scope = claimed.state.scope.clone();
     let recovery_run_id_for_start = claimed.state.run_id;
     executor_tasks.spawn(
         async move {
@@ -696,7 +695,7 @@ fn spawn_executor_task(
             let recovery_runner_id = claimed.runner_id;
             let recovery_lease_token = claimed.lease_token;
             tracing::debug!(
-                thread_id = %recovery_thread_id,
+                thread_id = %recovery_scope.thread_id,
                 run_id = %recovery_run_id_for_start,
                 "turn run started",
             );
@@ -720,7 +719,7 @@ fn spawn_executor_task(
                     biased;
                     result = &mut executor_result => {
                         break executor_task::result_to_outcome(
-                            recovery_thread_id.as_str(),
+                            &recovery_scope,
                             recovery_run_id,
                             executor_started_at,
                             result,

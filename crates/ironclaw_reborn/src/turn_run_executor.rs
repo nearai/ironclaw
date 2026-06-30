@@ -4,14 +4,13 @@
 //! to the `TurnRunExecutor` trait consumed by `TurnRunScheduler`.
 
 use std::{
-    fmt,
     sync::{Arc, OnceLock},
     time::Instant,
 };
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{TurnRunExecutor, TurnRunExecutorError};
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
     TurnStatus,
@@ -34,41 +33,37 @@ fn trace_executor_latency_ok(
     claimed: &ClaimedTurnRun,
     started_at: Option<Instant>,
 ) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "reborn_turn_executor",
+    ironclaw_observability::live_latency_trace_ok!(
+        "reborn_turn_executor",
         operation,
+        started_at,
+        tenant_id = %claimed.state.scope.tenant_id,
+        agent_id = claimed.state.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = claimed.state.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = %claimed.state.scope.thread_id,
+        owner_user_id = claimed.state.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %claimed.state.run_id,
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "reborn turn executor operation completed",
     );
 }
 
-fn trace_executor_latency_error<E>(
+fn trace_executor_latency_error<E: ?Sized>(
     operation: &'static str,
     claimed: &ClaimedTurnRun,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "reborn_turn_executor",
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "reborn_turn_executor",
         operation,
+        started_at,
+        "executor_error",
+        tenant_id = %claimed.state.scope.tenant_id,
+        agent_id = claimed.state.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = claimed.state.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = %claimed.state.scope.thread_id,
+        owner_user_id = claimed.state.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %claimed.state.run_id,
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "reborn turn executor operation failed",
     );
 }

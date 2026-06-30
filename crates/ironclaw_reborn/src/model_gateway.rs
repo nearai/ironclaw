@@ -30,7 +30,7 @@ use ironclaw_loop_support::{
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
@@ -69,44 +69,32 @@ fn trace_model_latency_ok(
     provider_turn_scope: Option<&str>,
     started_at: Option<Instant>,
 ) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "model_gateway",
+    ironclaw_observability::live_latency_trace_ok!(
+        "model_gateway",
         operation,
+        started_at,
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
         provider_turn_scope = provider_turn_scope.unwrap_or(""),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "model gateway operation completed",
     );
 }
 
-fn trace_model_latency_error<E>(
+fn trace_model_latency_error<E: ?Sized>(
     operation: &'static str,
     replay_identity: &ProviderReplayIdentity,
     provider_turn_scope: Option<&str>,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: std::fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "model_gateway",
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "model_gateway",
         operation,
+        started_at,
+        "model_gateway_error",
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
         provider_turn_scope = provider_turn_scope.unwrap_or(""),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "model gateway operation failed",
     );
 }

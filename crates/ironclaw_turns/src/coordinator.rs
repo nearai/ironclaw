@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use std::{
     collections::HashMap,
     fmt,
@@ -17,44 +17,40 @@ fn trace_coordinator_latency_ok(
     run_id: Option<TurnRunId>,
     started_at: Option<Instant>,
 ) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "turn_coordinator",
+    ironclaw_observability::live_latency_trace_ok!(
+        "turn_coordinator",
         operation,
+        started_at,
+        tenant_id = %scope.tenant_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = %scope.thread_id,
+        owner_user_id = scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "turn coordinator operation completed",
     );
 }
 
-fn trace_coordinator_latency_error<E>(
+fn trace_coordinator_latency_error<E: ?Sized>(
     operation: &'static str,
     scope: &TurnScope,
     run_id: Option<TurnRunId>,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
+    _error: &E,
+) {
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "turn_coordinator",
+    ironclaw_observability::live_latency_trace_error!(
+        "turn_coordinator",
         operation,
+        started_at,
+        "turn_error",
+        tenant_id = %scope.tenant_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = %scope.thread_id,
+        owner_user_id = scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "turn coordinator operation failed",
     );
 }

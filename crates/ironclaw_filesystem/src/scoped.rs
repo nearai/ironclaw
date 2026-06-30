@@ -1,9 +1,9 @@
-use std::{fmt, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -51,52 +51,56 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     }
 }
 
-fn scoped_path_class(path: &ScopedPath) -> String {
-    let raw = path.as_str();
-    match raw
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
-    {
-        Some(segment) => format!("/{segment}"),
-        None => "/".to_string(),
+fn scoped_path_class(_path: &ScopedPath) -> &'static str {
+    "scoped"
+}
+
+fn filesystem_error_kind(error: &FilesystemError) -> &'static str {
+    match error {
+        FilesystemError::Contract(_) => "contract",
+        FilesystemError::PermissionDenied { .. } => "permission_denied",
+        FilesystemError::MountNotFound { .. } => "mount_not_found",
+        FilesystemError::NotFound { .. } => "not_found",
+        FilesystemError::PathOutsideMount { .. } => "path_outside_mount",
+        FilesystemError::SymlinkEscape { .. } => "symlink_escape",
+        FilesystemError::MountConflict { .. } => "mount_conflict",
+        FilesystemError::Backend { .. } => "backend",
+        FilesystemError::VersionMismatch { .. } => "version_mismatch",
+        FilesystemError::Unsupported { .. } => "unsupported",
+        FilesystemError::IndexConflict { .. } => "index_conflict",
+        FilesystemError::DescriptorOverclaims { .. } => "descriptor_overclaims",
+        FilesystemError::SerializeIndexed { .. } => "serialize_indexed",
+        FilesystemError::DeserializeIndexed { .. } => "deserialize_indexed",
+        FilesystemError::CorruptRecordVersion { .. } => "corrupt_record_version",
+        FilesystemError::IndexSpecMissingAfterUpsert { .. } => "index_spec_missing_after_upsert",
+        FilesystemError::BackendInfrastructure { .. } => "backend_infrastructure",
     }
 }
 
-fn trace_fs_latency<T, E>(
+fn trace_fs_latency<T>(
     operation: &'static str,
     path: &ScopedPath,
     started_at: Option<Instant>,
-    result: &Result<T, E>,
+    result: &Result<T, FilesystemError>,
     bytes: Option<usize>,
-) where
-    E: fmt::Display,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    let elapsed_ms = elapsed_ms(started_at);
+) {
     let path_class = scoped_path_class(path);
     match result {
-        Ok(_) => ironclaw_observability::live_latency_trace!(
-            component = "filesystem",
+        Ok(_) => ironclaw_observability::live_latency_trace_ok!(
+            "filesystem",
             operation,
-            path_class = path_class.as_str(),
-            elapsed_ms,
+            started_at,
+            path_class = path_class,
             bytes = bytes.unwrap_or(0),
-            outcome = "ok",
             "filesystem operation completed",
         ),
-        Err(error) => ironclaw_observability::live_latency_trace!(
-            component = "filesystem",
+        Err(error) => ironclaw_observability::live_latency_trace_error!(
+            "filesystem",
             operation,
-            path_class = path_class.as_str(),
-            elapsed_ms,
+            started_at,
+            filesystem_error_kind(error),
+            path_class = path_class,
             bytes = bytes.unwrap_or(0),
-            outcome = "error",
-            error = %error,
             "filesystem operation failed",
         ),
     }

@@ -1,11 +1,41 @@
-use std::{fmt, time::Instant};
+use std::time::Instant;
 
-use ironclaw_observability::elapsed_ms;
 use ironclaw_turns::{TurnRunId, TurnRunWake, TurnScope, runner::ClaimedTurnRun};
 
 pub(super) struct RunFields {
-    thread_id: String,
+    scope: ScopeFields,
     run_id: TurnRunId,
+}
+
+pub(super) struct ScopeFields {
+    tenant_id: String,
+    agent_id: String,
+    project_id: String,
+    thread_id: String,
+    owner_user_id: String,
+}
+
+impl ScopeFields {
+    fn from_scope(scope: &TurnScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.as_str().to_string(),
+            agent_id: scope
+                .agent_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            project_id: scope
+                .project_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            thread_id: scope.thread_id.as_str().to_string(),
+            owner_user_id: scope
+                .explicit_owner_user_id()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 pub(super) fn run_fields_from_wake(
@@ -14,47 +44,54 @@ pub(super) fn run_fields_from_wake(
 ) -> Option<RunFields> {
     started_at?;
     Some(RunFields {
-        thread_id: wake.scope.thread_id.as_str().to_string(),
+        scope: ScopeFields::from_scope(&wake.scope),
         run_id: wake.run_id,
     })
 }
 
-pub(super) fn scope_thread_id(
+pub(super) fn scope_fields(
     started_at: Option<Instant>,
     scope: Option<&TurnScope>,
-) -> Option<String> {
+) -> Option<ScopeFields> {
     started_at?;
-    scope.map(|scope| scope.thread_id.as_str().to_string())
+    scope.map(ScopeFields::from_scope)
 }
 
 pub(super) fn operation_ok(
     operation: &'static str,
-    thread_id: &str,
+    scope: &TurnScope,
     run_id: TurnRunId,
     started_at: Option<Instant>,
 ) {
-    trace_ok(operation, Some(thread_id), Some(run_id), started_at);
+    trace_ok(
+        operation,
+        Some(&ScopeFields::from_scope(scope)),
+        Some(run_id),
+        started_at,
+    );
 }
 
-pub(super) fn operation_error<E>(
+pub(super) fn operation_error<E: ?Sized>(
     operation: &'static str,
-    thread_id: &str,
+    scope: &TurnScope,
     run_id: TurnRunId,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    trace_error(operation, Some(thread_id), Some(run_id), started_at, error);
+    _error: &E,
+) {
+    trace_error(
+        operation,
+        Some(&ScopeFields::from_scope(scope)),
+        Some(run_id),
+        started_at,
+        "executor_error",
+    );
 }
 
 pub(super) fn notify_queued_run_result<E>(
     fields: Option<&RunFields>,
     started_at: Option<Instant>,
     result: &Result<(), E>,
-) where
-    E: fmt::Display,
-{
+) {
     let Some(fields) = fields else {
         return;
     };
@@ -62,94 +99,97 @@ pub(super) fn notify_queued_run_result<E>(
     match result {
         Ok(()) => trace_ok(
             "notify_queued_run",
-            Some(fields.thread_id.as_str()),
+            Some(&fields.scope),
             Some(fields.run_id),
             started_at,
         ),
-        Err(error) => trace_error(
+        Err(_) => trace_error(
             "notify_queued_run",
-            Some(fields.thread_id.as_str()),
+            Some(&fields.scope),
             Some(fields.run_id),
             started_at,
-            error,
+            "notify_error",
         ),
     }
 }
 
 pub(super) fn claim_next_run_result<E>(
-    scope_filter_thread_id: Option<&str>,
+    scope_filter: Option<&ScopeFields>,
     started_at: Option<Instant>,
     claim: &Result<Option<ClaimedTurnRun>, E>,
-) where
-    E: fmt::Display,
-{
+) {
     match claim {
         Ok(Some(claimed)) => trace_ok(
             "claim_next_run",
-            Some(claimed.state.scope.thread_id.as_str()),
+            Some(&ScopeFields::from_scope(&claimed.state.scope)),
             Some(claimed.state.run_id),
             started_at,
         ),
-        Ok(None) => trace_ok(
-            "claim_next_run_empty",
-            scope_filter_thread_id,
-            None,
-            started_at,
-        ),
-        Err(error) => trace_error(
+        Ok(None) => trace_ok("claim_next_run_empty", scope_filter, None, started_at),
+        Err(_) => trace_error(
             "claim_next_run",
-            scope_filter_thread_id,
+            scope_filter,
             None,
             started_at,
-            error,
+            "claim_error",
         ),
     }
 }
 
 fn trace_ok(
     operation: &'static str,
-    thread_id: Option<&str>,
+    scope: Option<&ScopeFields>,
     run_id: Option<TurnRunId>,
     started_at: Option<Instant>,
 ) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "turn_scheduler",
+    let tenant_id = scope.map(|scope| scope.tenant_id.as_str()).unwrap_or("");
+    let agent_id = scope.map(|scope| scope.agent_id.as_str()).unwrap_or("");
+    let project_id = scope.map(|scope| scope.project_id.as_str()).unwrap_or("");
+    let thread_id = scope.map(|scope| scope.thread_id.as_str()).unwrap_or("");
+    let owner_user_id = scope
+        .map(|scope| scope.owner_user_id.as_str())
+        .unwrap_or("");
+    ironclaw_observability::live_latency_trace_ok!(
+        "turn_scheduler",
         operation,
-        thread_id = thread_id.unwrap_or(""),
+        started_at,
+        tenant_id = tenant_id,
+        agent_id = agent_id,
+        project_id = project_id,
+        thread_id = thread_id,
+        owner_user_id = owner_user_id,
         run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "turn scheduler operation completed",
     );
 }
 
-fn trace_error<E>(
+fn trace_error(
     operation: &'static str,
-    thread_id: Option<&str>,
+    scope: Option<&ScopeFields>,
     run_id: Option<TurnRunId>,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
+    error_kind: &'static str,
+) {
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    ironclaw_observability::live_latency_trace!(
-        component = "turn_scheduler",
+    let tenant_id = scope.map(|scope| scope.tenant_id.as_str()).unwrap_or("");
+    let agent_id = scope.map(|scope| scope.agent_id.as_str()).unwrap_or("");
+    let project_id = scope.map(|scope| scope.project_id.as_str()).unwrap_or("");
+    let thread_id = scope.map(|scope| scope.thread_id.as_str()).unwrap_or("");
+    let owner_user_id = scope
+        .map(|scope| scope.owner_user_id.as_str())
+        .unwrap_or("");
+    ironclaw_observability::live_latency_trace_error!(
+        "turn_scheduler",
         operation,
-        thread_id = thread_id.unwrap_or(""),
+        started_at,
+        error_kind,
+        tenant_id = tenant_id,
+        agent_id = agent_id,
+        project_id = project_id,
+        thread_id = thread_id,
+        owner_user_id = owner_user_id,
         run_id = run_id.as_str(),
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "turn scheduler operation failed",
     );
 }

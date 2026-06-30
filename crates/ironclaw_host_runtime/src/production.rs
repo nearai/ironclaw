@@ -13,7 +13,7 @@
 //! claims. The default fail-closed policy denies authority until composition
 //! supplies a concrete host policy.
 
-use std::{fmt, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -35,7 +35,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_started_at};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -56,48 +56,42 @@ fn trace_capability_latency_ok(
     scope: &ResourceScope,
     started_at: Option<Instant>,
 ) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "host_runtime",
+    ironclaw_observability::live_latency_trace_ok!(
+        "host_runtime",
         operation,
+        started_at,
         capability_id = %capability_id,
         tenant_id = %scope.tenant_id,
         user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         invocation_id = %scope.invocation_id,
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "ok",
         "host runtime capability operation completed",
     );
 }
 
-fn trace_capability_latency_error<E>(
+fn trace_capability_latency_error<E: ?Sized>(
     operation: &'static str,
     capability_id: &CapabilityId,
     scope: &ResourceScope,
     started_at: Option<Instant>,
-    error: &E,
-) where
-    E: fmt::Display + ?Sized,
-{
-    let Some(started_at) = started_at else {
-        return;
-    };
-
-    ironclaw_observability::live_latency_trace!(
-        component = "host_runtime",
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "host_runtime",
         operation,
+        started_at,
+        "error",
         capability_id = %capability_id,
         tenant_id = %scope.tenant_id,
         user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         invocation_id = %scope.invocation_id,
-        elapsed_ms = elapsed_ms(started_at),
-        outcome = "error",
-        error = %error,
         "host runtime capability operation failed",
     );
 }
