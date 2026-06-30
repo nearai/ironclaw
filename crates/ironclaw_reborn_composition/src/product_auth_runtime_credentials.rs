@@ -660,5 +660,7 @@ fn map_account_error(error: AuthProductError) -> CredentialStageError {
     }
 }
 
+pub(crate) mod host_managed_fallback;
+
 #[cfg(test)]
 mod tests;

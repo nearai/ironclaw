@@ -348,7 +348,8 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         | FilesystemOperation::CreateDirAll
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::ReserveSeq => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,

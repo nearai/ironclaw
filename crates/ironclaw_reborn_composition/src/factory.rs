@@ -22,6 +22,7 @@ use ironclaw_approvals::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
+use ironclaw_auth::{AuthProductScope, AuthSurface};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -838,7 +839,8 @@ fn compose_product_auth_services(
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
-) -> Arc<RebornProductAuthServices> {
+    nearai_mcp_host_managed_scope: Option<AuthProductScope>,
+) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
@@ -854,7 +856,10 @@ fn compose_product_auth_services(
     if let Some(registry) = provider_composition.gate_registry {
         services = services.with_oauth_gate_registry(registry);
     }
-    Arc::new(services)
+    if let Some(scope) = nearai_mcp_host_managed_scope {
+        services = services.with_host_managed_nearai_credential_scope(scope)?;
+    }
+    Ok(Arc::new(services))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1203,6 +1208,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         product_auth_runtime_ports.clone(),
     )?;
     let security_audit_sink = services.security_audit_sink();
+    let nearai_mcp_host_managed_scope =
+        AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
     let product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(
             ports,
@@ -1210,7 +1217,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             provider_composition,
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
-        ),
+            Some(nearai_mcp_host_managed_scope.clone()),
+        )?,
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
@@ -1254,7 +1262,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                Arc::new(services)
+                Arc::new(services.with_host_managed_nearai_credential_scope(
+                    nearai_mcp_host_managed_scope.clone(),
+                )?)
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             {
@@ -1273,10 +1283,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                Arc::new(match provider_composition.gate_registry.clone() {
+                let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
-                })
+                };
+                Arc::new(services.with_host_managed_nearai_credential_scope(
+                    nearai_mcp_host_managed_scope.clone(),
+                )?)
             }
         }
     };
@@ -4000,7 +4013,11 @@ where
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
-    );
+        // Host-managed NEAR AI MCP fallback is wired only by
+        // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
+        // preserves this builder's prior behavior of never attaching it.
+        None,
+    )?;
     // Bundle the keepalive worker deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); the leader lock and refresh port
@@ -4205,13 +4222,18 @@ mod tests {
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    };
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    use ironclaw_host_runtime::{
+        RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -5746,6 +5768,44 @@ mod tests {
             .expect("NEAR AI product-auth account");
         assert_eq!(nearai_account.status, CredentialAccountStatus::Configured);
         assert!(nearai_account.access_secret.is_some());
+        let nearai_access_secret = nearai_account
+            .access_secret
+            .clone()
+            .expect("NEAR AI product-auth access secret");
+        let nearai_account_scope = nearai_account.scope.resource.clone();
+        let resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
+            services
+                .product_auth
+                .as_ref()
+                .expect("product auth")
+                .runtime_credential_account_selection_service(),
+            services
+                .product_auth
+                .as_ref()
+                .expect("product auth")
+                .runtime_credential_account_refresh_service(),
+        );
+        let sso_scope = ResourceScope {
+            tenant_id: nearai_account_scope.tenant_id.clone(),
+            user_id: UserId::new("local-dev-nearai-mcp-sso-user").unwrap(),
+            agent_id: nearai_account_scope.agent_id.clone(),
+            project_id: nearai_account_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &sso_scope,
+                provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                setup: &RuntimeCredentialAccountSetup::ManualToken,
+                provider_scopes: &[],
+                requester_extension: &ExtensionId::new("nearai").unwrap(),
+            })
+            .await
+            .expect("SSO user should resolve host-managed NEAR AI credential");
+        assert_eq!(resolved.handle, nearai_access_secret);
+        assert_eq!(resolved.scope, nearai_account_scope);
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]

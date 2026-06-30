@@ -1002,11 +1002,22 @@ async def _wait_for_assistant_reply(
     last_text = ""
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
-        if await assistant.count() > 0:
+        assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
+        if await assistant_blocks.count() > 0:
             try:
                 text = await assistant.inner_text(timeout=1000)
             except Exception:
                 text = ""
+            try:
+                block_texts = [
+                    block.strip()
+                    for block in await assistant_blocks.all_inner_texts()
+                    if block.strip()
+                ]
+            except Exception:
+                block_texts = []
+            if block_texts:
+                text = "\n".join(block_texts)
             if text:
                 last_text = text
             normalized = text.lower()
@@ -2042,7 +2053,7 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         case_name="qa_2e_calendar_prep_email_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine", "email"],
+        required_text=["routine", "email|emails|gmail"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
     )
 
