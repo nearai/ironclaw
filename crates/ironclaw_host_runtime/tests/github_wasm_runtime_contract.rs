@@ -885,6 +885,46 @@ async fn host_runtime_services_maps_github_search_validation_status_to_invalid_i
 }
 
 #[tokio::test]
+async fn host_runtime_services_keeps_github_non_validation_422_as_operation_failed() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_status_body(
+        422,
+        br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
+            .to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"query": "author:serrrfirat is:pr created:YYYY-MM-DD", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_eq!(network.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
