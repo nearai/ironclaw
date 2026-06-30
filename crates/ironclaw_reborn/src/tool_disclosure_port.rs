@@ -11,7 +11,7 @@ use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
+    CapabilityActivityId, LoopResultRef, TurnId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureKind,
@@ -26,9 +26,10 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::tool_disclosure::{
-    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set, tool_search_rank,
+    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, RESULT_READ_NAME, TOOL_CALL_NAME,
+    TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json,
+    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name, select_active_set,
+    tool_search_rank,
 };
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
@@ -720,8 +721,64 @@ impl ToolDisclosureCapabilityPort {
             TOOL_CALL_NAME => Ok(failed_invalid_input(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
+            RESULT_READ_NAME => self.invoke_result_read(&request, &bridge).await,
             _ => Ok(failed_invalid_input("unknown bridge tool")),
         }
+    }
+
+    async fn invoke_result_read(
+        &self,
+        request: &CapabilityInvocation,
+        bridge: &BridgeInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let Some(result_ref_str) = bridge.arguments.get("result_ref").and_then(Value::as_str) else {
+            return Ok(failed_invalid_input("result_read requires result_ref"));
+        };
+        let result_ref = match LoopResultRef::new(result_ref_str.to_string()) {
+            Ok(result_ref) => result_ref,
+            Err(_) => return Ok(failed_invalid_input("result_read result_ref is malformed")),
+        };
+        let offset = bridge
+            .arguments
+            .get("offset")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        let max_bytes = bridge
+            .arguments
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
+
+        let output = self
+            .result_writer
+            .read_capability_result(&self.run_context, &result_ref)
+            .await?;
+        let Some(output) = output else {
+            return Ok(failed_invalid_input(
+                "result_read: unknown or expired result_ref (the full body is no longer staged)",
+            ));
+        };
+
+        // Paginate over the deterministic serialization so the model can chunk
+        // through very large bodies with offset/max_bytes.
+        let rendered = serde_json::to_string(&output).unwrap_or_default();
+        let total = rendered.len();
+        let start = clamp_down_to_char_boundary(&rendered, offset.min(total));
+        let end = match max_bytes {
+            Some(max_bytes) => clamp_down_to_char_boundary(&rendered, start.saturating_add(max_bytes).min(total)),
+            None => total,
+        };
+        let slice = rendered.get(start..end).unwrap_or("");
+        let result_output = json!({
+            "result_ref": result_ref_str,
+            "total_bytes": total,
+            "byte_range": format!("{start}-{end}"),
+            "truncated": end < total || start > 0,
+            "output": slice,
+        });
+        self.completed_bridge_result(request, result_output, "result_read returned tool result body")
+            .await
     }
 
     async fn invoke_tool_search(
@@ -1112,6 +1169,16 @@ fn failed_invalid_input(summary: &'static str) -> CapabilityOutcome {
 
 fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
     AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, summary)
+}
+
+/// Largest offset `<= index` that lands on a UTF-8 char boundary of `text`, so
+/// `result_read` byte-range slicing never panics on a multi-byte boundary.
+fn clamp_down_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 #[cfg(test)]
@@ -2851,5 +2918,21 @@ mod tests {
 
     fn input_ref(value: impl Into<String>) -> CapabilityInputRef {
         CapabilityInputRef::new(value.into()).expect("valid input ref")
+    }
+
+    #[test]
+    fn clamp_down_to_char_boundary_never_splits_multibyte() {
+        use super::clamp_down_to_char_boundary;
+        let text = "héllo wörld"; // 'é','ö' are 2 bytes
+        for index in 0..=text.len() + 5 {
+            let clamped = super::clamp_down_to_char_boundary(text, index);
+            assert!(clamped <= text.len());
+            assert!(clamped <= index.max(0).min(text.len()).max(clamped));
+            assert!(text.is_char_boundary(clamped), "index {index} -> {clamped}");
+            // Slicing at the clamped boundary must not panic.
+            let _ = &text[..clamped];
+        }
+        // Past-the-end clamps to len.
+        assert_eq!(clamp_down_to_char_boundary(text, 9999), text.len());
     }
 }

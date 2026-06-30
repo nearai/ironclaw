@@ -247,6 +247,22 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         Ok(())
     }
 
+    /// Read back a staged capability result by ref, for the `result_read`
+    /// recall bridge (lets the model recover the full body of a tool result
+    /// that was elided to a snippet on prompt replay). Returns `Ok(None)` when
+    /// the ref is unknown/evicted. Default: unsupported — only writers that
+    /// retain full outputs (e.g. the local-dev staging store) implement it.
+    async fn read_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _result_ref: &LoopResultRef,
+    ) -> Result<Option<serde_json::Value>, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability result reads are not supported by this writer",
+        ))
+    }
+
     /// Note that the invocation `invocation_id` has started executing with the
     /// input staged under `input_ref`. Links the two so the still-running
     /// activity frame can surface the input (inline argument + parameters)

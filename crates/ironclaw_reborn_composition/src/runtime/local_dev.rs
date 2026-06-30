@@ -38,6 +38,8 @@ use ironclaw_turns::{
     },
 };
 
+use ironclaw_reborn::runtime::ResultSnippetMode;
+
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
@@ -683,6 +685,15 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             .remove(result_ref.as_str());
         Ok(())
     }
+
+    async fn read_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+    ) -> Result<Option<serde_json::Value>, AgentLoopHostError> {
+        ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
+        self.result_output(result_ref.as_str())
+    }
 }
 
 /// Local-dev replay shim for model-visible tool results.
@@ -711,7 +722,11 @@ impl LocalDevResultHydratingModelGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelRequest, HostManagedModelError> {
-        hydrate_tool_result_messages(request, self.capability_io.as_ref())
+        hydrate_tool_result_messages(
+            request,
+            self.capability_io.as_ref(),
+            ResultSnippetMode::from_env(),
+        )
     }
 }
 
@@ -740,13 +755,32 @@ impl HostManagedModelGateway for LocalDevResultHydratingModelGateway {
 fn hydrate_tool_result_messages(
     mut request: HostManagedModelRequest,
     capability_io: &LocalDevCapabilityIo,
+    snippet_mode: ResultSnippetMode,
 ) -> Result<HostManagedModelRequest, HostManagedModelError> {
-    for message in &mut request.messages {
-        if message.role != HostManagedModelMessageRole::ToolResult {
-            continue;
-        }
-        let envelope = match message.tool_result_content.as_ref() {
-            Some(HostManagedToolResultContent::Reference { envelope }) => envelope,
+    // Positions of tool-result messages, in transcript order (oldest first).
+    // The most-recent `RESULT_SNIPPET_KEEP_FULL` of these are always hydrated in
+    // full; older ones are eligible for snippeting. As the transcript grows a
+    // result drops out of the "recent" window exactly once and never re-enters
+    // (the window is monotonic), so a given result transitions full -> snippet a
+    // single time — and since the snippet is a deterministic function of the
+    // stored output, its bytes are identical on every later turn. That keeps the
+    // prompt prefix byte-stable for KV/prefix-cache reuse.
+    let tool_result_indices: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == HostManagedModelMessageRole::ToolResult)
+        .map(|(index, _)| index)
+        .collect();
+    let total_tool_results = tool_result_indices.len();
+
+    for (rank, &index) in tool_result_indices.iter().enumerate() {
+        let message = &mut request.messages[index];
+        // Clone the small reference bits and drop the borrow before we mutate.
+        let (result_ref, safe_summary) = match message.tool_result_content.as_ref() {
+            Some(HostManagedToolResultContent::Reference { envelope }) => {
+                (envelope.result_ref.clone(), envelope.safe_summary.clone())
+            }
             Some(HostManagedToolResultContent::Resolved { .. }) => continue,
             None => {
                 return Err(HostManagedModelError::safe(
@@ -756,15 +790,22 @@ fn hydrate_tool_result_messages(
             }
         };
         let output = capability_io
-            .result_output(&envelope.result_ref)
+            .result_output(&result_ref)
             .map_err(model_capability_io_error)?;
         let Some(output) = output else {
             continue;
         };
-        message.content = model_visible_tool_result_content(&output)?;
-        message.tool_result_content = Some(HostManagedToolResultContent::Resolved {
-            safe_summary: envelope.safe_summary.clone(),
-        });
+        let full = model_visible_tool_result_content(&output)?;
+        let content = if snippet_mode.is_enabled()
+            && result_is_stale(rank, total_tool_results)
+            && full.len() > RESULT_SNIPPET_MIN_BYTES
+        {
+            model_visible_tool_result_snippet(&full, &result_ref)
+        } else {
+            full
+        };
+        message.content = content;
+        message.tool_result_content = Some(HostManagedToolResultContent::Resolved { safe_summary });
     }
     Ok(request)
 }
@@ -787,6 +828,69 @@ fn model_visible_tool_result_content(
         content.push_str(" bytes. Use a follow-up tool call to inspect the full result.]");
     }
     Ok(content)
+}
+
+/// Number of most-recent tool results that are always replayed in full. Older
+/// results are eligible for snippeting under [`ResultSnippetMode::On`].
+const RESULT_SNIPPET_KEEP_FULL: usize = 3;
+/// Only snippet a stale result when its full rendering exceeds this — below it
+/// the head+tail+hint would not be smaller than the original.
+const RESULT_SNIPPET_MIN_BYTES: usize = 1_500;
+/// Leading bytes of the full rendering retained in a snippet.
+const RESULT_SNIPPET_HEAD_BYTES: usize = 800;
+/// Trailing bytes of the full rendering retained in a snippet.
+const RESULT_SNIPPET_TAIL_BYTES: usize = 300;
+
+/// Whether the tool result at `rank` (0 = oldest) among `total` tool results is
+/// stale — i.e. it has aged out of the most-recent [`RESULT_SNIPPET_KEEP_FULL`]
+/// window. `total - 1 - rank` is the distance from the newest result. The window
+/// is monotonic: as `total` grows a result's distance only increases, so a
+/// result transitions stale exactly once and never back.
+fn result_is_stale(rank: usize, total: usize) -> bool {
+    total.saturating_sub(1).saturating_sub(rank) >= RESULT_SNIPPET_KEEP_FULL
+}
+
+/// Render a stale tool result as a compact, deterministic snippet: the head and
+/// tail of the *same* full rendering the model saw while the result was fresh,
+/// plus a pointer to recover the complete body via `result_read`. Pure function
+/// of `full` + `result_ref`, so it produces identical bytes on every replay.
+fn model_visible_tool_result_snippet(full: &str, result_ref: &str) -> String {
+    let head = prefix_on_char_boundary(full, RESULT_SNIPPET_HEAD_BYTES);
+    let tail = suffix_on_char_boundary(full, RESULT_SNIPPET_TAIL_BYTES);
+    format!(
+        "{head}\n\n[... stale tool result elided to save context: {total} bytes total, \
+         showing first {head_len} and last {tail_len}. Call result_read with result_ref \
+         {result_ref} to read the full body. ...]\n\n{tail}",
+        total = full.len(),
+        head_len = head.len(),
+        tail_len = tail.len(),
+    )
+}
+
+/// Longest prefix of `text` no longer than `max_bytes` that ends on a UTF-8
+/// char boundary.
+fn prefix_on_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// Longest suffix of `text` no longer than `max_bytes` that starts on a UTF-8
+/// char boundary.
+fn suffix_on_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 fn append_model_visible_value(value: &serde_json::Value, output: &mut String) -> bool {
@@ -985,3 +1089,93 @@ fn host_api_agent_loop_error(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod result_snippet_tests {
+    use super::{
+        RESULT_SNIPPET_KEEP_FULL, model_visible_tool_result_snippet, prefix_on_char_boundary,
+        result_is_stale, suffix_on_char_boundary,
+    };
+
+    #[test]
+    fn recent_results_stay_full_stale_ones_snippet() {
+        // 6 tool results, newest = rank 5. Keep-full window protects the newest
+        // RESULT_SNIPPET_KEEP_FULL; everything older is stale.
+        let total = 6;
+        for rank in 0..total {
+            let distance_from_newest = total - 1 - rank;
+            assert_eq!(
+                result_is_stale(rank, total),
+                distance_from_newest >= RESULT_SNIPPET_KEEP_FULL,
+                "rank {rank} of {total}"
+            );
+        }
+        // The newest result is never stale; the oldest of a long transcript is.
+        assert!(!result_is_stale(total - 1, total));
+        assert!(result_is_stale(0, total));
+        // Fewer results than the window: nothing is stale.
+        assert!(!result_is_stale(0, RESULT_SNIPPET_KEEP_FULL));
+    }
+
+    #[test]
+    fn stale_window_is_monotonic_as_transcript_grows() {
+        // A given result (fixed rank) only becomes "more stale" as the transcript
+        // grows — it never flips back to fresh. This is what keeps the prompt
+        // prefix byte-stable for KV-cache reuse.
+        let rank = 2;
+        let mut seen_stale = false;
+        for total in (rank + 1)..(rank + 12) {
+            let stale = result_is_stale(rank, total);
+            if seen_stale {
+                assert!(stale, "result at rank {rank} un-staled at total {total}");
+            }
+            seen_stale |= stale;
+        }
+        assert!(seen_stale, "result must eventually go stale as transcript grows");
+    }
+
+    #[test]
+    fn snippet_is_smaller_keeps_head_tail_and_points_at_result_read() {
+        let full: String = (0..400).map(|i| format!("line-{i} ")).collect();
+        let snippet = model_visible_tool_result_snippet(&full, "result:abc123");
+        assert!(
+            snippet.len() < full.len(),
+            "snippet ({}) must be smaller than full ({})",
+            snippet.len(),
+            full.len()
+        );
+        assert!(snippet.contains("line-0 "), "snippet must keep the head");
+        assert!(snippet.contains("line-399 "), "snippet must keep the tail");
+        assert!(
+            snippet.contains("result:abc123"),
+            "snippet must name the result_ref to expand"
+        );
+        assert!(snippet.contains("result_read"));
+        assert!(snippet.contains("stale tool result elided"));
+    }
+
+    #[test]
+    fn snippet_is_deterministic() {
+        // Same stored output -> byte-identical snippet on every replay, so a
+        // snippeted result never perturbs the cached prompt prefix.
+        let full: String = (0..400).map(|i| format!("row {i},value\n")).collect();
+        let a = model_visible_tool_result_snippet(&full, "result:xyz");
+        let b = model_visible_tool_result_snippet(&full, "result:xyz");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn char_boundary_helpers_never_split_multibyte() {
+        // A string of multi-byte chars: slicing at an arbitrary byte budget must
+        // land on a char boundary and stay within budget.
+        let text = "héllo wörld ".repeat(100); // 'é' and 'ö' are 2 bytes each
+        for budget in [0usize, 1, 2, 3, 13, 101, 500] {
+            let head = prefix_on_char_boundary(&text, budget);
+            assert!(head.len() <= budget.max(0));
+            assert!(text.starts_with(head));
+            let tail = suffix_on_char_boundary(&text, budget);
+            assert!(tail.len() <= budget);
+            assert!(text.ends_with(tail));
+        }
+    }
+}

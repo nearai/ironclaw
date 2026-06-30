@@ -150,6 +150,63 @@ impl ToolDisclosureMode {
     }
 }
 
+pub const REBORN_RESULT_SNIPPETS_ENV: &str = "REBORN_RESULT_SNIPPETS";
+
+/// Controls whether stale, large tool results are rendered as a compact
+/// snippet (head/tail + `result_read` hint) on prompt replay instead of the
+/// full body re-sent every turn. Recent results stay full; only results that
+/// have aged out of the most-recent window are snippeted, and that transition
+/// happens exactly once per result (the window is monotonic and the snippet is
+/// a deterministic function of the stored output), keeping the prompt prefix
+/// byte-stable for KV/prefix-cache reuse.
+///
+/// Defaults **off** so an A/B (snippets on vs off) is clean; flip the default
+/// once a full benchmark confirms the cost/quality win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResultSnippetMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl ResultSnippetMode {
+    pub fn from_env() -> Self {
+        match std::env::var(REBORN_RESULT_SNIPPETS_ENV) {
+            Ok(value) => Self::from_raw(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::from_raw(None),
+            Err(error @ std::env::VarError::NotUnicode(_)) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_RESULT_SNIPPETS_ENV,
+                    error = %error,
+                    "REBORN_RESULT_SNIPPETS is set but not valid UTF-8; using default"
+                );
+                Self::from_raw(None)
+            }
+        }
+    }
+
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw {
+            Some(value) if value.eq_ignore_ascii_case("on") => Self::On,
+            Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
+            Some(value) if !value.is_empty() => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    value,
+                    "unrecognized REBORN_RESULT_SNIPPETS value; falling back to default Off"
+                );
+                Self::Off
+            }
+            _ => Self::Off,
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -923,6 +980,24 @@ mod tests {
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());
         assert!(ToolDisclosureMode::Bridged.is_bridged());
+    }
+
+    #[test]
+    fn result_snippet_mode_defaults_off_with_on_opt_in() {
+        use super::ResultSnippetMode;
+        // Unset / empty / unrecognized resolve to Off so the A/B baseline is the
+        // current full-replay behavior; only an explicit `on` enables snippeting.
+        assert!(!ResultSnippetMode::from_raw(None).is_enabled());
+        assert!(!ResultSnippetMode::from_raw(Some("")).is_enabled());
+        assert!(!ResultSnippetMode::from_raw(Some("garbage")).is_enabled());
+        assert!(!ResultSnippetMode::from_raw(Some("off")).is_enabled());
+        assert!(ResultSnippetMode::from_raw(Some("on")).is_enabled());
+        assert!(
+            ResultSnippetMode::from_raw(Some("ON")).is_enabled(),
+            "the on switch must be case-insensitive"
+        );
+        assert!(!ResultSnippetMode::Off.is_enabled());
+        assert!(ResultSnippetMode::On.is_enabled());
     }
 
     #[test]

@@ -54,6 +54,7 @@ const BRIDGE_CAPABILITY_PREFIX: &str = "ironclaw";
 pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
+pub(crate) const RESULT_READ_NAME: &str = "result_read";
 const MAX_KEYWORD_SCORE: u32 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +384,35 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
                     "additionalProperties": false
                 }),
             ),
+            bridge_tool_definition(
+                RESULT_READ_NAME,
+                "Read back the full body of an earlier tool result that was \
+                 elided to a snippet in the conversation. Pass the result_ref \
+                 shown in the snippet marker. Optionally page through large \
+                 bodies with offset/max_bytes.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "result_ref": {
+                            "type": "string",
+                            "description": "The result_ref from the elided-result marker (e.g. \"result:abc123\")."
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Byte offset into the rendered result to start from.",
+                            "default": 0,
+                            "minimum": 0
+                        },
+                        "max_bytes": {
+                            "type": "integer",
+                            "description": "Maximum number of bytes to return from offset.",
+                            "minimum": 1
+                        }
+                    },
+                    "required": ["result_ref"],
+                    "additionalProperties": false
+                }),
+            ),
         ];
         definitions
             .into_iter()
@@ -482,7 +512,10 @@ fn tool_call_safety_description() -> String {
 }
 
 pub(crate) fn is_bridge_name(name: &str) -> bool {
-    matches!(name, TOOL_SEARCH_NAME | TOOL_DESCRIBE_NAME | TOOL_CALL_NAME)
+    matches!(
+        name,
+        TOOL_SEARCH_NAME | TOOL_DESCRIBE_NAME | TOOL_CALL_NAME | RESULT_READ_NAME
+    )
 }
 
 pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
