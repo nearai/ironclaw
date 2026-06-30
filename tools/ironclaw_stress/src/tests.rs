@@ -140,9 +140,43 @@ fn bottleneck_finder_suite_includes_core_pressure_cases() {
     assert!(labels.contains("hot-thread"));
     assert!(labels.contains("large-context"));
     assert!(labels.contains("tool-heavy"));
+    assert!(labels.contains("tool-wait"));
+    assert!(labels.contains("tool-failure"));
     assert!(labels.contains("model-tail"));
     assert!(labels.contains("cpu-burn"));
     assert!(labels.contains("memory-churn"));
+}
+
+#[test]
+fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
+    let cases = suite::build_cases(StressSuite::PostgresPoolPressure);
+    let labels = cases
+        .iter()
+        .map(|case| case.label)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(labels.contains("postgres-chat-pool"));
+    assert!(labels.contains("postgres-hot-thread-pool"));
+    assert!(labels.contains("postgres-context-pool"));
+    assert!(labels.contains("postgres-tool-pool"));
+}
+
+#[test]
+fn soak_user_session_preset_uses_duration_mode() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--preset",
+        "soak-user-session",
+    ]);
+
+    assert_eq!(args.preset, Some(StressPreset::SoakUserSession));
+    assert_eq!(args.scenario, Scenario::MixedUserSession);
+    assert_eq!(args.duration_seconds, 900);
+    assert_eq!(args.warmup_seconds, 60);
+    assert_eq!(args.trace_interval_seconds, 30);
+    assert_eq!(args.prefill_turns_per_thread, 20);
 }
 
 #[test]
@@ -154,6 +188,17 @@ fn suite_rejects_multi_process_runs() {
     let error = validate_args(&args).expect_err("suite should reject multi-process runs");
 
     assert!(error.contains("--suite requires --processes 1"));
+}
+
+#[test]
+fn postgres_pool_pressure_suite_requires_postgres_backend() {
+    let mut args = test_args();
+    args.suite = Some(StressSuite::PostgresPoolPressure);
+    args.backend = Backend::Libsql;
+
+    let error = validate_args(&args).expect_err("postgres suite should reject libsql backend");
+
+    assert!(error.contains("--suite postgres-pool-pressure requires --backend postgres"));
 }
 
 #[test]

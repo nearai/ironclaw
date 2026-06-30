@@ -25,7 +25,21 @@ struct SuiteResult {
     label: &'static str,
     probe: &'static str,
     metrics: sweep::RunMetrics,
-    top_operation_group: Option<String>,
+    top_failure_bucket: Option<TopFailureBucket>,
+    top_operation_group: Option<TopOperationGroup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TopFailureBucket {
+    bucket: String,
+    count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TopOperationGroup {
+    name: String,
+    count: u64,
+    p95_us: u128,
 }
 
 pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
@@ -72,6 +86,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         let metrics = captured.metrics();
         let summary = captured.summary_value();
         let duration_ms = started.elapsed().as_millis();
+        let top_failure_bucket = top_failure_bucket(&summary);
         let top_operation_group = top_operation_group(&summary);
         let record = json!({
             "suite_run_id": suite_run_id,
@@ -84,6 +99,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "scenario": case_args.scenario,
             "processes": case_args.processes,
             "concurrency": case_args.concurrency,
+            "postgres_pool_size": case_args.postgres_pool_size,
             "users": case_args.users,
             "active_thread_count": case_args.active_thread_count,
             "tenants": case_args.tenants,
@@ -107,6 +123,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "tool_output_bytes": case_args.tool_output_bytes,
             "tool_failure_every": case_args.tool_failure_every,
             "duration_ms": duration_ms,
+            "top_failure_bucket": top_failure_bucket,
             "top_operation_group": top_operation_group,
             "metrics": metrics,
             "summary": summary,
@@ -120,6 +137,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             label: case.label,
             probe: case.probe,
             metrics,
+            top_failure_bucket,
             top_operation_group,
         });
     }
@@ -188,6 +206,18 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
                 scenario: Scenario::ToolSession,
             },
             SuiteCase {
+                label: "tool-wait",
+                probe: "tool-latency-ceiling",
+                preset: Some(StressPreset::ToolHeavy),
+                scenario: Scenario::ToolSession,
+            },
+            SuiteCase {
+                label: "tool-failure",
+                probe: "tool-failure-path",
+                preset: Some(StressPreset::ToolHeavy),
+                scenario: Scenario::ToolSession,
+            },
+            SuiteCase {
                 label: "model-tail",
                 probe: "model-tail-latency",
                 preset: Some(StressPreset::ModelTail),
@@ -204,6 +234,32 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
                 probe: "memory-pressure",
                 preset: Some(StressPreset::MemoryChurn),
                 scenario: Scenario::MemoryChurn,
+            },
+        ],
+        StressSuite::PostgresPoolPressure => vec![
+            SuiteCase {
+                label: "postgres-chat-pool",
+                probe: "postgres-thread-store-pool",
+                preset: Some(StressPreset::ChatBaseline),
+                scenario: Scenario::ChatTurn,
+            },
+            SuiteCase {
+                label: "postgres-hot-thread-pool",
+                probe: "postgres-hot-thread-pool",
+                preset: Some(StressPreset::HotThread),
+                scenario: Scenario::ChatTurn,
+            },
+            SuiteCase {
+                label: "postgres-context-pool",
+                probe: "postgres-context-read-pool",
+                preset: Some(StressPreset::LargeContext),
+                scenario: Scenario::MixedUserSession,
+            },
+            SuiteCase {
+                label: "postgres-tool-pool",
+                probe: "postgres-tool-write-pool",
+                preset: Some(StressPreset::ToolHeavy),
+                scenario: Scenario::ToolSession,
             },
         ],
     }
@@ -258,27 +314,83 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
             case_args.tool_output_bytes = base_args.tool_output_bytes.max(4096);
             case_args.assistant_message_bytes = base_args.assistant_message_bytes.max(1024);
         }
+        "tool-wait" => {
+            case_args.tool_calls_per_turn = base_args.tool_calls_per_turn.max(4);
+            case_args.tool_latency_ms = base_args.tool_latency_ms.max(250);
+            case_args.tool_output_bytes = base_args.tool_output_bytes.max(1024);
+        }
+        "tool-failure" => {
+            case_args.tool_calls_per_turn = base_args.tool_calls_per_turn.max(4);
+            case_args.tool_failure_every = base_args.tool_failure_every.max(3);
+            case_args.span_log_failures = true;
+        }
         "model-tail" => {
             case_args.model_latency_ms = base_args.model_latency_ms.max(100);
             case_args.model_latency_profile = ModelLatencyProfile::TailSpike;
             case_args.model_latency_spike_every = base_args.model_latency_spike_every.max(10);
             case_args.model_latency_spike_ms = base_args.model_latency_spike_ms.max(2000);
         }
+        "postgres-chat-pool" => {
+            apply_postgres_pool_pressure_defaults(base_args, case_args);
+        }
+        "postgres-hot-thread-pool" => {
+            apply_postgres_pool_pressure_defaults(base_args, case_args);
+            case_args.active_thread_count = 1;
+            case_args.span_log_failures = true;
+        }
+        "postgres-context-pool" => {
+            apply_postgres_pool_pressure_defaults(base_args, case_args);
+            case_args.prefill_threads = base_args.users.clamp(1, 100);
+            case_args.prefill_turns_per_thread = base_args
+                .prefill_turns_per_thread
+                .max(base_args.operations.clamp(1, 50));
+            case_args.prefill_concurrency = base_args.prefill_concurrency.max(1);
+            case_args.context_max_messages = base_args.context_max_messages.max(100);
+        }
+        "postgres-tool-pool" => {
+            apply_postgres_pool_pressure_defaults(base_args, case_args);
+            case_args.tool_calls_per_turn = base_args.tool_calls_per_turn.max(8);
+            case_args.tool_output_bytes = base_args.tool_output_bytes.max(4096);
+            case_args.assistant_message_bytes = base_args.assistant_message_bytes.max(1024);
+        }
         _ => {}
     }
 }
 
-fn top_operation_group(summary: &Value) -> Option<String> {
+fn apply_postgres_pool_pressure_defaults(base_args: &Args, case_args: &mut Args) {
+    case_args.concurrency = base_args.concurrency.max(8);
+    case_args.users = base_args.users.max(100);
+    case_args.postgres_pool_size = base_args.postgres_pool_size.clamp(1, 4);
+}
+
+fn top_failure_bucket(summary: &Value) -> Option<TopFailureBucket> {
+    let errors = summary.get("errors")?.as_object()?;
+    errors
+        .iter()
+        .filter_map(|(bucket, value)| value.as_u64().map(|count| (bucket, count)))
+        .filter(|(_, count)| *count > 0)
+        .max_by_key(|(_, count)| *count)
+        .map(|(bucket, count)| TopFailureBucket {
+            bucket: bucket.to_string(),
+            count,
+        })
+}
+
+fn top_operation_group(summary: &Value) -> Option<TopOperationGroup> {
     let groups = summary.get("operation_attribution")?.as_object()?;
     groups
         .iter()
         .filter_map(|(name, value)| {
             let count = value.get("count")?.as_u64()?;
             let p95 = value.pointer("/latency/p95_us")?.as_u64()?;
-            (count > 0).then_some((name, p95))
+            (count > 0).then_some((name, count, p95))
         })
-        .max_by_key(|(_, p95)| *p95)
-        .map(|(name, _)| name.to_string())
+        .max_by_key(|(_, _, p95)| *p95)
+        .map(|(name, count, p95)| TopOperationGroup {
+            name: name.to_string(),
+            count,
+            p95_us: u128::from(p95),
+        })
 }
 
 fn render_suite_summary(suite: StressSuite, results: &[SuiteResult]) -> String {
@@ -286,19 +398,29 @@ fn render_suite_summary(suite: StressSuite, results: &[SuiteResult]) -> String {
     let _ = writeln!(output, "\nSuite summary ({})", suite.as_str());
     let _ = writeln!(
         output,
-        "{:<20} {:<24} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:<20}",
-        "case", "probe", "attempts", "fail%", "ops/sec", "p95", "p99", "cpu", "rss", "top_group"
+        "{:<24} {:<24} {:>9} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:<22} {:<22}",
+        "case",
+        "probe",
+        "attempts",
+        "fail%",
+        "ops/sec",
+        "p95",
+        "p99",
+        "cpu",
+        "rss",
+        "top_failure",
+        "top_group"
     );
     let _ = writeln!(
         output,
-        "{:-<20} {:-<24} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:-<20}",
-        "", "", "", "", "", "", "", "", "", ""
+        "{:-<24} {:-<24} {:->9} {:->8} {:->10} {:->10} {:->10} {:->10} {:->10} {:-<22} {:-<22}",
+        "", "", "", "", "", "", "", "", "", "", ""
     );
     for result in results {
         let _ = writeln!(
             output,
-            "{:<20} {:<24} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:<20}",
-            truncate(result.label, 20),
+            "{:<24} {:<24} {:>9} {:>7.2}% {:>10.2} {:>10} {:>10} {:>10} {:>10} {:<22} {:<22}",
+            truncate(result.label, 24),
             truncate(result.probe, 24),
             result.metrics.attempted,
             failure_rate(result.metrics) * 100.0,
@@ -307,7 +429,8 @@ fn render_suite_summary(suite: StressSuite, results: &[SuiteResult]) -> String {
             format_latency_us(result.metrics.p99_us),
             format_optional_ms(result.metrics.cpu_ms),
             format_optional_kb(result.metrics.peak_rss_kb),
-            result.top_operation_group.as_deref().unwrap_or("-"),
+            format_top_failure(result.top_failure_bucket.as_ref()),
+            format_top_group(result.top_operation_group.as_ref()),
         );
     }
     output
@@ -363,8 +486,33 @@ fn render_suite_bottleneck_report(results: &[SuiteResult]) -> String {
             truncate(result.label, 20),
             format_latency_us(result.metrics.p95_us),
             format_latency_us(result.metrics.p99_us),
-            result.top_operation_group.as_deref().unwrap_or("-")
+            format_top_group(result.top_operation_group.as_ref())
         );
+    }
+
+    for result in results {
+        if let Some(failure) = &result.top_failure_bucket {
+            let _ = writeln!(
+                output,
+                "{:<22} {:<20} top_failure={} count={} failed={}",
+                "case_failure",
+                truncate(result.label, 20),
+                truncate(&failure.bucket, 28),
+                failure.count,
+                result.metrics.failed
+            );
+        }
+        if let Some(group) = &result.top_operation_group {
+            let _ = writeln!(
+                output,
+                "{:<22} {:<20} top_group={} p95={} count={}",
+                "case_operation_group",
+                truncate(result.label, 20),
+                truncate(&group.name, 28),
+                format_latency_us(group.p95_us),
+                group.count
+            );
+        }
     }
 
     if let Some(result) = results
@@ -405,6 +553,24 @@ fn render_suite_bottleneck_report(results: &[SuiteResult]) -> String {
         "- Use --suite as a broad scan, then switch to --preset, --sweep-*, or --ramp-* on the failing case."
     );
     output
+}
+
+fn format_top_failure(failure: Option<&TopFailureBucket>) -> String {
+    failure
+        .map(|failure| format!("{}:{}", truncate(&failure.bucket, 16), failure.count))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_top_group(group: Option<&TopOperationGroup>) -> String {
+    group
+        .map(|group| {
+            format!(
+                "{}@{}",
+                truncate(&group.name, 14),
+                format_latency_us(group.p95_us)
+            )
+        })
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn failure_rate(metrics: sweep::RunMetrics) -> f64 {

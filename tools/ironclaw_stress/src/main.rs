@@ -451,6 +451,7 @@ pub(crate) enum StressPreset {
     ResourceContention,
     CpuBurn,
     MemoryChurn,
+    SoakUserSession,
 }
 
 impl StressPreset {
@@ -464,6 +465,7 @@ impl StressPreset {
             Self::ResourceContention => "resource-contention",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
+            Self::SoakUserSession => "soak-user-session",
         }
     }
 }
@@ -472,12 +474,14 @@ impl StressPreset {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum StressSuite {
     BottleneckFinder,
+    PostgresPoolPressure,
 }
 
 impl StressSuite {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::BottleneckFinder => "bottleneck-finder",
+            Self::PostgresPoolPressure => "postgres-pool-pressure",
         }
     }
 }
@@ -748,6 +752,24 @@ fn apply_preset(args: &mut Args, matches: &ArgMatches) {
             set_default!(memory_bytes = 16 * 1024 * 1024);
             set_default!(memory_hold_ms = 10);
         }
+        StressPreset::SoakUserSession => {
+            set_default!(scenario = Scenario::MixedUserSession);
+            set_default!(concurrency = 6);
+            set_default!(operations = 200);
+            set_default!(duration_seconds = 900);
+            set_default!(warmup_seconds = 60);
+            set_default!(users = 200);
+            set_default!(active_thread_count = 0);
+            set_default!(prefill_threads = args.users.min(100));
+            set_default!(prefill_turns_per_thread = 20);
+            set_default!(prefill_concurrency = 8);
+            set_default!(context_max_messages = 80);
+            set_default!(user_message_bytes = 512);
+            set_default!(assistant_message_bytes = 1024);
+            set_default!(tool_calls_per_turn = 2);
+            set_default!(tool_output_bytes = 1024);
+            set_default!(trace_interval_seconds = 30);
+        }
     }
 }
 
@@ -802,6 +824,11 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.suite.is_some() {
         if args.preset.is_some() {
             return Err("--suite cannot be combined with --preset".to_string());
+        }
+        if matches!(args.suite, Some(StressSuite::PostgresPoolPressure))
+            && !matches!(args.backend, Backend::Postgres)
+        {
+            return Err("--suite postgres-pool-pressure requires --backend postgres".to_string());
         }
         if args.processes > 1 {
             return Err(
