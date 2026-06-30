@@ -6,7 +6,7 @@ from urllib.parse import unquote, urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -148,12 +148,14 @@ async def _open_mocked_skills_page(reborn_v2_server, reborn_v2_browser, *, initi
 
 
 async def _add_mock_skill(page):
-    await page.get_by_placeholder("skill-name").fill("markdown-helper")
-    await page.get_by_placeholder("---\\nname: example\\ndescription: ...\\n---\\n").fill(
+    await page.get_by_placeholder(SEL_V2["skill_name_placeholder"]).fill(
+        "markdown-helper"
+    )
+    await page.get_by_placeholder(SEL_V2["skill_content_placeholder"]).fill(
         MOCK_SKILL_CONTENT
     )
     await page.get_by_role("button", name="Add").click()
-    card = page.locator("#skills-list .ext-card").filter(has_text="markdown-helper")
+    card = page.locator(SEL_V2["skills_card"]).filter(has_text="markdown-helper")
     await expect(card).to_be_visible(timeout=5000)
     return card
 
@@ -163,9 +165,11 @@ async def test_reborn_legacy_skills_tab_visible(reborn_v2_server, reborn_v2_brow
     try:
         page = harness["page"]
         await expect(page.get_by_text("Add skill")).to_be_visible()
-        await expect(page.get_by_placeholder("skill-name")).to_be_visible()
         await expect(
-            page.get_by_placeholder("---\\nname: example\\ndescription: ...\\n---\\n")
+            page.get_by_placeholder(SEL_V2["skill_name_placeholder"])
+        ).to_be_visible()
+        await expect(
+            page.get_by_placeholder(SEL_V2["skill_content_placeholder"])
         ).to_be_visible()
         await expect(page.get_by_role("button", name="Default: On")).to_be_visible()
     finally:
@@ -203,12 +207,12 @@ async def test_reborn_legacy_skills_add_edit_delete(reborn_v2_server, reborn_v2_
         loop = asyncio.get_running_loop()
         dialog_future = loop.create_future()
 
-        def handle_dialog(dialog):
+        async def handle_dialog(dialog):
             if not dialog_future.done():
                 dialog_future.set_result(
                     {"type": dialog.type, "message": dialog.message}
                 )
-            loop.create_task(dialog.accept())
+            await dialog.accept()
 
         page.once("dialog", handle_dialog)
         await card.get_by_role("button", name="Delete").click()
@@ -217,7 +221,7 @@ async def test_reborn_legacy_skills_add_edit_delete(reborn_v2_server, reborn_v2_
         assert "markdown-helper" in dialog["message"]
 
         await expect(
-            page.locator("#skills-list .ext-card").filter(has_text="markdown-helper")
+            page.locator(SEL_V2["skills_card"]).filter(has_text="markdown-helper")
         ).to_have_count(0, timeout=5000)
         assert harness["delete_requests"] == ["markdown-helper"]
     finally:
@@ -234,14 +238,20 @@ async def test_reborn_legacy_skills_read_only_sources_hide_edit_and_delete(
     )
     try:
         page = harness["page"]
-        system_card = page.locator("#skills-list .ext-card").filter(has_text="system-helper")
-        workspace_card = page.locator("#skills-list .ext-card").filter(has_text="workspace-helper")
+        system_card = page.locator(SEL_V2["skills_card"]).filter(
+            has_text="system-helper"
+        )
+        workspace_card = page.locator(SEL_V2["skills_card"]).filter(
+            has_text="workspace-helper"
+        )
         await expect(system_card).to_be_visible(timeout=5000)
         await expect(workspace_card).to_be_visible(timeout=5000)
 
         for card in (system_card, workspace_card):
             await expect(card.get_by_role("button", name="Edit")).to_have_count(0)
             await expect(card.get_by_role("button", name="Delete")).to_have_count(0)
-            await expect(card.get_by_role("button", name="Auto-activate: On")).to_have_count(0)
+            await expect(
+                card.get_by_role("button", name="Auto-activate: On")
+            ).to_have_count(0)
     finally:
         await harness["context"].close()

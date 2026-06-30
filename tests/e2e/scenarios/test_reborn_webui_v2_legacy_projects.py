@@ -64,174 +64,184 @@ MOCK_PROJECTS = [
 
 
 async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-    project_requests: list[str] = []
-    thread_create_requests: list[dict] = []
-    project_thread_requests: list[str] = []
-    project_file_requests: list[str] = []
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    try:
+        page = await context.new_page()
+        project_requests: list[str] = []
+        thread_create_requests: list[dict] = []
+        project_thread_requests: list[str] = []
+        project_file_requests: list[str] = []
 
-    async def fulfill_json(route, payload, status=200):
-        await route.fulfill(
-            status=status,
-            content_type="application/json",
-            body=json.dumps(payload),
-            headers={"Cache-Control": "no-store"},
-        )
-
-    async def handle_projects(route):
-        request = route.request
-        parsed = urlparse(request.url)
-        path = parsed.path
-
-        if path == "/api/webchat/v2/projects" and request.method == "GET":
-            project_requests.append(path)
-            await fulfill_json(route, {"projects": MOCK_PROJECTS})
-            return
-
-        prefix = "/api/webchat/v2/projects/"
-        if path.startswith(prefix) and request.method == "GET":
-            project_id = unquote(path.removeprefix(prefix))
-            project_requests.append(path)
-            project = next(
-                (
-                    candidate
-                    for candidate in MOCK_PROJECTS
-                    if candidate["project_id"] == project_id
-                ),
-                None,
+        async def fulfill_json(route, payload, status=200):
+            await route.fulfill(
+                status=status,
+                content_type="application/json",
+                body=json.dumps(payload),
+                headers={"Cache-Control": "no-store"},
             )
-            await fulfill_json(
-                route,
-                {"project": project},
-                status=200 if project is not None else 404,
-            )
-            return
 
-        await route.continue_()
+        async def handle_projects(route):
+            request = route.request
+            parsed = urlparse(request.url)
+            path = parsed.path
 
-    async def handle_threads(route):
-        request = route.request
-        parsed = urlparse(request.url)
-        path = parsed.path
+            if path == "/api/webchat/v2/projects" and request.method == "GET":
+                project_requests.append(path)
+                await fulfill_json(route, {"projects": MOCK_PROJECTS})
+                return
 
-        if path == "/api/webchat/v2/threads" and request.method == "GET":
-            query = parse_qs(parsed.query)
-            if query.get("project_id") == [MOCK_PROJECT_ID]:
-                project_thread_requests.append(request.url)
+            prefix = "/api/webchat/v2/projects/"
+            if path.startswith(prefix) and request.method == "GET":
+                project_id = unquote(path.removeprefix(prefix))
+                project_requests.append(path)
+                project = next(
+                    (
+                        candidate
+                        for candidate in MOCK_PROJECTS
+                        if candidate["project_id"] == project_id
+                    ),
+                    None,
+                )
+                await fulfill_json(
+                    route,
+                    {"project": project},
+                    status=200 if project is not None else 404,
+                )
+                return
+
+            await route.continue_()
+
+        async def handle_threads(route):
+            request = route.request
+            parsed = urlparse(request.url)
+            path = parsed.path
+
+            if path == "/api/webchat/v2/threads" and request.method == "GET":
+                query = parse_qs(parsed.query)
+                if query.get("project_id") == [MOCK_PROJECT_ID]:
+                    project_thread_requests.append(request.url)
+                    await fulfill_json(
+                        route,
+                        {
+                            "threads": [
+                                {
+                                    "thread_id": PROJECT_THREAD_ID,
+                                    "title": "Weekly research digest",
+                                    "goal": "Summarize launch-readiness signals.",
+                                    "thread_type": "chat",
+                                    "project_id": MOCK_PROJECT_ID,
+                                    "created_at": "2026-04-12T11:30:00Z",
+                                    "updated_at": "2026-04-12T12:00:00Z",
+                                }
+                            ],
+                            "next_cursor": None,
+                        },
+                    )
+                    return
+                await fulfill_json(route, {"threads": [], "next_cursor": None})
+                return
+
+            if path == "/api/webchat/v2/threads" and request.method == "POST":
+                body = json.loads(request.post_data or "{}")
+                thread_create_requests.append(body)
                 await fulfill_json(
                     route,
                     {
-                        "threads": [
-                            {
-                                "thread_id": PROJECT_THREAD_ID,
-                                "title": "Weekly research digest",
-                                "goal": "Summarize launch-readiness signals.",
-                                "thread_type": "chat",
-                                "project_id": MOCK_PROJECT_ID,
-                                "created_at": "2026-04-12T11:30:00Z",
-                                "updated_at": "2026-04-12T12:00:00Z",
-                            }
-                        ],
-                        "next_cursor": None,
+                        "thread": {
+                            "thread_id": "thread-project-scoped",
+                            "title": "Project scoped conversation",
+                            "project_id": body.get("project_id"),
+                            "created_at": "2026-04-12T11:00:00Z",
+                            "updated_at": "2026-04-12T11:00:00Z",
+                        }
                     },
                 )
                 return
-            await fulfill_json(route, {"threads": [], "next_cursor": None})
-            return
 
-        if path == "/api/webchat/v2/threads" and request.method == "POST":
-            body = json.loads(request.post_data or "{}")
-            thread_create_requests.append(body)
-            await fulfill_json(
-                route,
-                {
-                    "thread": {
-                        "thread_id": "thread-project-scoped",
-                        "title": "Project scoped conversation",
-                        "project_id": body.get("project_id"),
-                        "created_at": "2026-04-12T11:00:00Z",
-                        "updated_at": "2026-04-12T11:00:00Z",
-                    }
-                },
-            )
-            return
+            if path == "/api/webchat/v2/threads/thread-project-scoped/timeline":
+                await fulfill_json(route, {"messages": [], "next_cursor": None})
+                return
 
-        if path == "/api/webchat/v2/threads/thread-project-scoped/timeline":
-            await fulfill_json(route, {"messages": [], "next_cursor": None})
-            return
+            if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files":
+                project_file_requests.append(request.url)
+                query = parse_qs(parsed.query)
+                if query.get("path") == ["/workspace/reports"]:
+                    await fulfill_json(
+                        route,
+                        {
+                            "entries": [
+                                {
+                                    "name": "launch-brief.md",
+                                    "path": "/workspace/reports/launch-brief.md",
+                                    "kind": "file",
+                                    "size": len(PROJECT_WORKSPACE_FILE_BYTES),
+                                }
+                            ]
+                        },
+                    )
+                    return
 
-        if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files":
-            project_file_requests.append(request.url)
-            query = parse_qs(parsed.query)
-            if query.get("path") == ["/workspace/reports"]:
                 await fulfill_json(
                     route,
                     {
                         "entries": [
                             {
-                                "name": "launch-brief.md",
-                                "path": "/workspace/reports/launch-brief.md",
+                                "name": "reports",
+                                "path": "/workspace/reports",
+                                "kind": "directory",
+                            },
+                            {
+                                "name": "README.md",
+                                "path": "/workspace/README.md",
                                 "kind": "file",
-                                "size": len(PROJECT_WORKSPACE_FILE_BYTES),
-                            }
+                                "size": 42,
+                            },
                         ]
                     },
                 )
                 return
 
-            await fulfill_json(
-                route,
-                {
-                    "entries": [
-                        {
-                            "name": "reports",
-                            "path": "/workspace/reports",
-                            "kind": "directory",
-                        },
-                        {
-                            "name": "README.md",
-                            "path": "/workspace/README.md",
-                            "kind": "file",
-                            "size": 42,
-                        },
-                    ]
-                },
+            if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files/content":
+                project_file_requests.append(request.url)
+                await route.fulfill(
+                    status=200,
+                    content_type="text/markdown",
+                    body=PROJECT_WORKSPACE_FILE_BYTES.decode("utf-8"),
+                    headers={"Cache-Control": "no-store"},
+                )
+                return
+
+            await route.continue_()
+
+        await page.route("**/api/webchat/v2/projects**", handle_projects)
+        await page.route("**/api/webchat/v2/threads**", handle_threads)
+        await page.goto(
+            f"{reborn_v2_server}/v2/projects?token={REBORN_V2_AUTH_TOKEN}"
+        )
+
+        try:
+            await expect(page.locator(SEL_V2["projects_grid"])).to_be_visible(
+                timeout=15000
             )
-            return
+        except AssertionError as error:
+            body_text = await page.locator("body").inner_text(timeout=1000)
+            raise AssertionError(
+                f"Projects grid did not render on {page.url}.\nBody text:\n{body_text}"
+            ) from error
 
-        if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files/content":
-            project_file_requests.append(request.url)
-            await route.fulfill(
-                status=200,
-                content_type="text/markdown",
-                body=PROJECT_WORKSPACE_FILE_BYTES.decode("utf-8"),
-                headers={"Cache-Control": "no-store"},
-            )
-            return
-
-        await route.continue_()
-
-    await page.route("**/api/webchat/v2/projects**", handle_projects)
-    await page.route("**/api/webchat/v2/threads**", handle_threads)
-    await page.goto(f"{reborn_v2_server}/v2/projects?token={REBORN_V2_AUTH_TOKEN}")
-
-    try:
-        await expect(page.locator(SEL_V2["projects_grid"])).to_be_visible(timeout=15000)
-    except AssertionError as error:
-        body_text = await page.locator("body").inner_text(timeout=1000)
-        raise AssertionError(
-            f"Projects grid did not render on {page.url}.\nBody text:\n{body_text}"
-        ) from error
-
-    return {
-        "context": context,
-        "page": page,
-        "project_requests": project_requests,
-        "thread_create_requests": thread_create_requests,
-        "project_thread_requests": project_thread_requests,
-        "project_file_requests": project_file_requests,
-    }
+        return {
+            "context": context,
+            "page": page,
+            "project_requests": project_requests,
+            "thread_create_requests": thread_create_requests,
+            "project_thread_requests": project_thread_requests,
+            "project_file_requests": project_file_requests,
+        }
+    except Exception:
+        await context.close()
+        raise
 
 
 async def test_reborn_legacy_projects_overview_search_and_open_workspace(

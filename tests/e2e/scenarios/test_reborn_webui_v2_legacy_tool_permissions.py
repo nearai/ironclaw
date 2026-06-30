@@ -9,7 +9,7 @@ import httpx
 import pytest
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     client_action_id,
     create_thread,
@@ -166,7 +166,9 @@ async def _open_mocked_tools_page(reborn_v2_server, reborn_v2_browser):
 
     await page.route("**/api/webchat/v2/settings/tools**", handle_settings_tools)
     await page.goto(f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}")
-    await expect(page.get_by_placeholder("Search settings...")).to_be_visible(timeout=15000)
+    await expect(
+        page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
+    ).to_be_visible(timeout=15000)
     await expect(page.get_by_text("Tool permissions")).to_be_visible(timeout=5000)
 
     return {
@@ -178,7 +180,7 @@ async def _open_mocked_tools_page(reborn_v2_server, reborn_v2_browser):
 
 
 def _tool_row(page, name: str):
-    return page.locator(f'[data-testid="settings-tool-row"][data-tool-name="{name}"]')
+    return page.locator(SEL_V2["settings_tool_row_for"].format(name=name))
 
 
 @pytest.fixture
@@ -280,7 +282,9 @@ async def test_reborn_legacy_tool_permission_select_persists_after_reload(
         }
 
         await page.reload()
-        await expect(page.get_by_placeholder("Search settings...")).to_be_visible(timeout=15000)
+        await expect(
+            page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
+        ).to_be_visible(timeout=15000)
         await expect(page.get_by_label("Permission for echo")).to_have_value(
             "ask_each_time",
             timeout=5000,
@@ -304,8 +308,10 @@ async def test_reborn_legacy_locked_tool_shows_badge_without_select(
         page = harness["page"]
         locked = _tool_row(page, "tool.financial")
         await expect(locked).to_be_visible(timeout=5000)
-        await expect(locked.locator('[data-testid="settings-tool-lock"]')).to_be_visible()
-        await expect(locked.get_by_label("Permission for tool.financial")).to_have_count(0)
+        await expect(locked.locator(SEL_V2["settings_tool_lock"])).to_be_visible()
+        await expect(
+            locked.get_by_label("Permission for tool.financial")
+        ).to_have_count(0)
         await expect(locked.get_by_text("Ask each time")).to_be_visible()
     finally:
         await harness["context"].close()
@@ -339,8 +345,12 @@ async def test_reborn_legacy_auto_approve_real_api_persists_across_browser_conte
         assert update["entry"]["key"] == "agent.auto_approve_tools"
         assert update["entry"]["value"] is True
 
-        await page.goto(f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}")
-        await expect(page.get_by_placeholder("Search settings...")).to_be_visible(timeout=15000)
+        await page.goto(
+            f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(
+            page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
+        ).to_be_visible(timeout=15000)
         switch = page.get_by_role("switch", name="Always allow eligible tools")
         await expect(switch).to_have_attribute("aria-checked", "true", timeout=5000)
     finally:

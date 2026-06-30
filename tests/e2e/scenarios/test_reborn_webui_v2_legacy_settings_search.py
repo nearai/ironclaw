@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -304,7 +304,7 @@ async def _open_mocked_settings_page(
     await page.route("**/api/webchat/v2/llm/**", handle_llm)
 
     await page.goto(f"{reborn_v2_server}/v2/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
-    search = page.get_by_placeholder("Search settings...")
+    search = page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     try:
         await expect(search).to_be_visible(timeout=15000)
     except AssertionError as error:
@@ -320,7 +320,7 @@ async def _open_mocked_settings_page(
 
 def _provider_card(page, provider_id: str):
     return page.locator(
-        f"[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
+        SEL_V2["llm_provider_card_for"].format(provider_id=provider_id)
     )
 
 
@@ -567,7 +567,7 @@ async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
         legacy_card = _provider_card(page, "legacy-local")
         await expect(legacy_card).to_be_visible(timeout=5000)
 
-        await legacy_card.get_by_test_id("llm-provider-disclosure").click()
+        await legacy_card.get_by_test_id(SEL_V2["llm_provider_disclosure"]).click()
         await legacy_card.get_by_role("button", name="Edit").click()
         dialog = page.get_by_role("dialog")
         await expect(

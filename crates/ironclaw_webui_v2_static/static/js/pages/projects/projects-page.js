@@ -64,6 +64,7 @@ export function ProjectsPage() {
         type: "error",
         message: error.message || t("projects.chatAutoFail"),
       });
+      return;
     }
 
     navigate(nextThreadId ? `/chat/${nextThreadId}` : "/chat", {

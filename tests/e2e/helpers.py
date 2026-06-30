@@ -306,6 +306,18 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "settings_search_placeholder": "Search settings...",
+    "settings_tool_row_for": (
+        "[data-testid='settings-tool-row'][data-tool-name='{name}']"
+    ),
+    "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "llm_provider_card_for": (
+        "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
+    ),
+    "llm_provider_disclosure": "llm-provider-disclosure",
+    "skills_card": "#skills-list .ext-card",
+    "skill_name_placeholder": "skill-name",
+    "skill_content_placeholder": "---\\nname: example\\ndescription: ...\\n---\\n",
 }
 
 
