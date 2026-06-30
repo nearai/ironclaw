@@ -10,10 +10,10 @@ use ironclaw_host_api::{
     ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, MessageContent, SessionThreadError, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest,
-    ThreadScope,
+    AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
+    MessageContent, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
 };
 
 #[tokio::test]
@@ -40,6 +40,49 @@ async fn filesystem_store_range_read_returns_only_requested_sequences() {
     assert_eq!(
         fixture.range_contents(1, 3).await,
         vec!["message 2".to_string(), "message 3".to_string()]
+    );
+}
+
+/// A finalized assistant message stored only via the append log (no
+/// per-message file) must still be written into the sequence index, otherwise
+/// indexed range reads — which back `list_thread_messages_range`, summaries,
+/// and compaction — would silently omit it from threads that also have
+/// indexed messages.
+#[tokio::test]
+async fn filesystem_store_range_read_includes_append_only_finalized_message() {
+    let fixture = RangeFixture::new("fs-range-append", "tenant-range-append").await;
+    // Two indexed user messages (sequences 1, 2) so the index is non-empty —
+    // `list_thread_messages_range_indexed` will not fall back to a full scan.
+    fixture.seed_messages("event", 2).await;
+
+    let finalized = fixture
+        .service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: "run-append-only".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(finalized.sequence, 3);
+
+    // The append-only finalize path must have written the sequence index entry.
+    assert_eq!(
+        fixture.index_entry_names().await,
+        vec![
+            "00000000000000000001.json",
+            "00000000000000000002.json",
+            "00000000000000000003.json",
+        ]
+    );
+
+    // The indexed range read includes the append-only finalized message (its id
+    // resolves through `read_message_versioned`'s append-log fallback).
+    assert_eq!(fixture.range_sequences(0, 3).await, vec![1, 2, 3]);
+    assert_eq!(
+        fixture.range_contents(2, 3).await,
+        vec!["assistant reply".to_string()]
     );
 }
 

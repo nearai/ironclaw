@@ -1679,10 +1679,25 @@ where
             attachments: Vec::new(),
             redaction_ref: None,
         };
-        if !self
+        if self
             .append_message_event(&request.scope, &request.thread_id, &message)
             .await?
         {
+            // Append-only path: the log event is durable, but unlike
+            // `write_new_message` it wrote neither the per-message file nor
+            // the sequence index. Write the sequence index so indexed range
+            // reads (`list_thread_messages_range` and the summary/context
+            // paths built on it) surface this finalized message — full-history
+            // and context reads already see it via `merge_message_append_events`,
+            // but the index-backed range path would otherwise omit it. The id
+            // resolves through `read_message_versioned`'s append-log fallback
+            // until a later mutation materializes the file. Treated as
+            // must-write (matching `write_new_message`), not best-effort,
+            // because a missing index entry silently drops the message from
+            // range reads.
+            self.write_message_sequence_index(&request.scope, &request.thread_id, &message)
+                .await?;
+        } else {
             self.write_new_message(
                 &request.scope,
                 &request.thread_id,
@@ -1977,14 +1992,22 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
-        self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_draft(message)?;
-            message.status = MessageStatus::Finalized;
-            message.content = Some(content.clone().into_text());
-            message.attachments = Vec::new();
-            Ok(())
-        })
-        .await
+        let finalized = self
+            .apply_message_update(scope, thread_id, message_id, |message| {
+                ensure_draft(message)?;
+                message.status = MessageStatus::Finalized;
+                message.content = Some(content.clone().into_text());
+                message.attachments = Vec::new();
+                Ok(())
+            })
+            .await?;
+        // Finalizing the assistant draft is thread activity — stamp recency
+        // (best-effort; the finalize above is already durable). Without this,
+        // the draft/update/finalize path would leave active threads stale in
+        // the `updated_at`-sorted sidebar.
+        self.touch_thread_updated_at_best_effort(scope, thread_id)
+            .await;
+        Ok(finalized)
     }
 
     async fn redact_message(
