@@ -141,6 +141,25 @@ jobs:
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
 
+  tracked-ignored-files:
+    name: Tracked ignored files
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Reject tracked files that match .gitignore
+        run: |
+          tracked_ignored="$(git ls-files -ci --exclude-standard)"
+          if [ -n "$tracked_ignored" ]; then
+            echo "Tracked files match .gitignore; remove them from source control or update .gitignore:"
+            printf '%s\n' "$tracked_ignored"
+            exit 1
+          fi
+
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: [changes, clippy-matrix]
@@ -288,6 +307,7 @@ jobs:
       - clippy
       - clippy-windows
       - deny-check
+      - tracked-ignored-files
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
@@ -303,6 +323,7 @@ jobs:
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
+            "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
