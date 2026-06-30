@@ -20,6 +20,7 @@ use ironclaw_approvals::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
+use ironclaw_auth::{AuthProductScope, AuthSurface};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1189,7 +1190,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         product_auth_runtime_ports.clone(),
     )?;
     let security_audit_sink = services.security_audit_sink();
-    let product_auth = match product_auth_ports {
+    let mut product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(
             ports,
             turn_coordinator.clone(),
@@ -1266,6 +1267,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
     };
+    if let Some(product_auth) = Arc::get_mut(&mut product_auth) {
+        product_auth.set_host_managed_nearai_credential_scope(AuthProductScope::new(
+            nearai_mcp_owner_scope.clone(),
+            AuthSurface::Api,
+        ));
+    } else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "product-auth services were shared before NEAR AI MCP credential scope could be attached"
+                .to_string(),
+        });
+    }
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth.runtime_credential_account_selection_service(),
@@ -4105,13 +4117,18 @@ mod tests {
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    };
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    use ironclaw_host_runtime::{
+        RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -5545,6 +5562,44 @@ mod tests {
             .expect("NEAR AI product-auth account");
         assert_eq!(nearai_account.status, CredentialAccountStatus::Configured);
         assert!(nearai_account.access_secret.is_some());
+        let nearai_access_secret = nearai_account
+            .access_secret
+            .clone()
+            .expect("NEAR AI product-auth access secret");
+        let nearai_account_scope = nearai_account.scope.resource.clone();
+        let resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
+            services
+                .product_auth
+                .as_ref()
+                .expect("product auth")
+                .runtime_credential_account_selection_service(),
+            services
+                .product_auth
+                .as_ref()
+                .expect("product auth")
+                .runtime_credential_account_refresh_service(),
+        );
+        let sso_scope = ResourceScope {
+            tenant_id: nearai_account_scope.tenant_id.clone(),
+            user_id: UserId::new("local-dev-nearai-mcp-sso-user").unwrap(),
+            agent_id: nearai_account_scope.agent_id.clone(),
+            project_id: nearai_account_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &sso_scope,
+                provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                setup: &RuntimeCredentialAccountSetup::ManualToken,
+                provider_scopes: &[],
+                requester_extension: &ExtensionId::new("nearai").unwrap(),
+            })
+            .await
+            .expect("SSO user should resolve host-managed NEAR AI credential");
+        assert_eq!(resolved.handle, nearai_access_secret);
+        assert_eq!(resolved.scope, nearai_account_scope);
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]

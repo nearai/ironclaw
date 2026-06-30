@@ -466,6 +466,7 @@ pub struct RebornProductAuthServices {
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     /// Secret store forwarded to the inline-refresh margin check (A2).
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    host_managed_nearai_credential_scope: Option<AuthProductScope>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -512,6 +513,10 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("secret_store", &"<wired>")
+            .field(
+                "host_managed_nearai_credential_scope",
+                &self.host_managed_nearai_credential_scope.is_some(),
+            )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -546,6 +551,7 @@ impl RebornProductAuthServices {
             continuation_dispatcher,
             security_audit_sink: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            host_managed_nearai_credential_scope: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -658,12 +664,14 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
-        Arc::new(
-            ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
-                self.credential_account_record_source(),
-                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
-            ),
-        )
+        let mut selector = ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
+            self.credential_account_record_source(),
+            Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+        );
+        if let Some(scope) = self.host_managed_nearai_credential_scope.clone() {
+            selector = selector.with_host_managed_nearai_credential_scope(scope);
+        }
+        Arc::new(selector)
     }
 
     pub(crate) fn runtime_credential_account_refresh_service(
@@ -757,6 +765,10 @@ impl RebornProductAuthServices {
     pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
         self.secret_store = store;
         self
+    }
+
+    pub(crate) fn set_host_managed_nearai_credential_scope(&mut self, scope: AuthProductScope) {
+        self.host_managed_nearai_credential_scope = Some(scope);
     }
 
     /// Enable WebUI/local-dev auth-flow projection source.
