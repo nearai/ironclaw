@@ -960,6 +960,16 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if deleted == 0 {
             return Err(not_found(path.clone(), FilesystemOperation::Delete));
         }
+        // Sweep the append-event log for this path and its subtree. Append-only
+        // finalized assistant messages live in `root_filesystem_events`, so a
+        // delete/recreate of the same thread would otherwise replay stale
+        // history from the old log. Mirrors the entries-delete predicate above.
+        conn.execute(
+            "DELETE FROM root_filesystem_events WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         // Sweep any reserved sequence counter for this path and its subtree so
         // a delete/recreate restarts sequences from 1 rather than resuming
         // stale state. Mirrors the entries-delete predicate above.

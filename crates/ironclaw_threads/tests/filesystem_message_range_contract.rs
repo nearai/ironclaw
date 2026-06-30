@@ -67,6 +67,15 @@ async fn filesystem_store_range_read_includes_append_only_finalized_message() {
         .unwrap();
     assert_eq!(finalized.sequence, 3);
 
+    // The append-only branch must have actually run: the finalized message has
+    // no per-message file (it lives solely in the append log). Without this
+    // guard the test would still pass if `append_message_event` returned false
+    // and `write_new_message` created the normal per-message file instead.
+    assert!(
+        !fixture.message_file_exists(&finalized.message_id).await,
+        "finalized assistant message must be append-only (no per-message file)"
+    );
+
     // The append-only finalize path must have written the sequence index entry.
     assert_eq!(
         fixture.index_entry_names().await,
@@ -84,6 +93,60 @@ async fn filesystem_store_range_read_includes_append_only_finalized_message() {
         fixture.range_contents(2, 3).await,
         vec!["assistant reply".to_string()]
     );
+}
+
+/// If a finalized assistant message was appended to the log but the process
+/// died before its sequence index was written, an idempotent retry (same
+/// `turn_run_id`) must repair the missing index rather than returning the
+/// already-finalized message with no indexed entry — otherwise a durable LLM
+/// message stays invisible to indexed range reads.
+#[tokio::test]
+async fn filesystem_append_finalized_assistant_message_retry_repairs_missing_sequence_index() {
+    let fixture = RangeFixture::new("fs-range-repair", "tenant-range-repair").await;
+
+    let first = fixture
+        .service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: "run-repair".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.sequence, 1);
+    assert_eq!(
+        fixture.index_entry_names().await,
+        vec!["00000000000000000001.json"]
+    );
+
+    // Simulate the partial-persistence failure: the append-log event survived,
+    // but the sequence index entry is gone.
+    fixture.delete_sequence_index(1).await;
+    assert!(fixture.index_entry_names().await.is_empty());
+
+    // Idempotent retry with the same turn_run_id resolves the finalized
+    // message via the append-log fallback and must repair the index.
+    let retried = fixture
+        .service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: "run-repair".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(retried.message_id, first.message_id);
+    assert_eq!(retried.sequence, 1);
+    assert_eq!(
+        fixture.index_entry_names().await,
+        vec!["00000000000000000001.json"],
+        "idempotent retry must repair the missing sequence index"
+    );
+
+    // The repaired index makes the message visible to indexed range reads.
+    assert_eq!(fixture.range_sequences(0, 1).await, vec![1]);
 }
 
 #[tokio::test]
@@ -235,6 +298,17 @@ impl RangeFixture {
             )
             .await
             .unwrap();
+    }
+
+    async fn message_file_exists(&self, message_id: &ThreadMessageId) -> bool {
+        self.scoped
+            .get(
+                &self.scope.to_resource_scope(),
+                &self.message_path(&message_id.to_string()),
+            )
+            .await
+            .unwrap()
+            .is_some()
     }
 
     async fn delete_message(&self, message_id: ThreadMessageId) {

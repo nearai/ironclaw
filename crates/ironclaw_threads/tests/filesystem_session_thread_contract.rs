@@ -311,6 +311,20 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final answer"));
 
+    // The run index resolves to the same single message — finalizing in place
+    // must not leave the run pointing at a stale or second record.
+    let by_run = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-existing-draft".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message should be indexed by run");
+    assert_eq!(by_run.message_id, draft.message_id);
+    assert_eq!(by_run.status, MessageStatus::Finalized);
+
     // Finalize-by-turn-run finalizes the existing draft IN PLACE — it must
     // not materialize a second history row. Assert the caller-visible
     // single-row invariant, not just the returned record.

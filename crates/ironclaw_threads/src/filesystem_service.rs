@@ -1654,6 +1654,18 @@ where
             .await?
         {
             if existing.status != MessageStatus::Draft {
+                // Idempotent-retry repair. A prior call may have appended the
+                // finalized message event (durable) but failed before writing
+                // the sequence index. On retry we resolve the finalized message
+                // through the append-log fallback and would otherwise return
+                // without the index, leaving a durable LLM message invisible to
+                // indexed range/context reads. Re-assert the index before
+                // returning — `write_new` is idempotent when the same message
+                // is already indexed, so this is a no-op on the fully-persisted
+                // path and a repair on the partial-failure path. Fail loud (`?`)
+                // rather than silently returning an unindexed message.
+                self.write_message_sequence_index(&request.scope, &request.thread_id, &existing)
+                    .await?;
                 return Ok(existing);
             }
             let content = request.content.clone();
