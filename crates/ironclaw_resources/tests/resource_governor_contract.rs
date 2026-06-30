@@ -23,6 +23,16 @@ impl ResourceGovernorStore for AlwaysFailingStore {
             reason: "forced durable write failure".to_string(),
         })
     }
+
+    fn inspect<T, F>(&self, _inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        Err(ResourceError::Storage {
+            reason: "forced durable read failure".to_string(),
+        })
+    }
 }
 
 #[test]
@@ -770,18 +780,9 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
         "reconcile on the unlimited fast path should not create the durable snapshot"
     );
 
-    governor
-        .set_limit(
-            account,
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
-        )
-        .unwrap();
-    let _durable = governor
+    let active = governor
         .reserve(
-            scope,
+            scope.clone(),
             ResourceEstimate {
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
@@ -789,9 +790,36 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
         )
         .unwrap();
     assert!(
-        path.exists(),
-        "finite limits should force the durable governor path"
+        !path.exists(),
+        "active unlimited fast-path reservations should stay process-local before finite limits"
     );
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let denied = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        ResourceError::LimitExceeded {
+            denial,
+            ..
+        } if denial.dimension == ResourceDimension::ConcurrencySlots
+    ));
+    governor.release(active.id).unwrap();
 }
 
 #[test]

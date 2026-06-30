@@ -432,6 +432,18 @@ fn sweep_concurrency_rejects_zero_values() {
 }
 
 #[test]
+fn sweep_concurrency_validation_uses_sweep_max_not_base_concurrency() {
+    let mut args = test_args();
+    args.scenario = Scenario::MixedUserSession;
+    args.concurrency = 8;
+    args.sweep_concurrency = vec![2, 4];
+    args.users = 4;
+    args.active_thread_count = 0;
+
+    validate_args(&args).expect("sweep cases only require enough users for the sweep max");
+}
+
+#[test]
 fn active_thread_count_rejects_values_above_users() {
     let mut args = test_args();
     args.active_thread_count = args.users + 1;

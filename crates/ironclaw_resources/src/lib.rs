@@ -808,10 +808,7 @@ pub trait ResourceGovernorStore: Send + Sync + 'static {
     fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
-    {
-        self.update(move |snapshot| inspect(snapshot))
-    }
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
 }
 
 /// File-backed resource-governor store using a stable sidecar lock file around
@@ -1101,7 +1098,7 @@ where
     store: S,
     clock: Arc<dyn Clock>,
     unlimited_fast_path: bool,
-    unlimited_state: Mutex<ResourceState>,
+    unlimited_state: Mutex<UnlimitedFastPathState>,
     /// Optional sink that receives `BudgetEvent`s as reservations,
     /// reconciliations, warnings, and denials happen. Wired by
     /// composition; defaults to [`NoOpBudgetEventSink`] so the
@@ -1119,7 +1116,7 @@ where
             store,
             clock: Arc::new(SystemClock),
             unlimited_fast_path: false,
-            unlimited_state: Mutex::new(ResourceState::default()),
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1132,7 +1129,7 @@ where
             store,
             clock,
             unlimited_fast_path: false,
-            unlimited_state: Mutex::new(ResourceState::default()),
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1167,6 +1164,24 @@ where
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
+        if self.unlimited_fast_path {
+            let mut local = self.lock_unlimited_state()?;
+            let local_state = local.state.clone();
+            let local_initialized = local.initialized;
+            let updated_state = self.store.update(move |snapshot| {
+                if local_initialized
+                    && !resource_state_has_finite_limits(&snapshot.state)
+                    && !resource_state_has_durable_activity(&snapshot.state)
+                {
+                    snapshot.state = local_state;
+                }
+                set_limit_in_state(&mut snapshot.state, account, limits, now);
+                Ok(snapshot.state.clone())
+            })?;
+            local.state = updated_state;
+            local.initialized = true;
+            return Ok(());
+        }
         self.store.update(move |snapshot| {
             set_limit_in_state(&mut snapshot.state, account, limits, now);
             Ok(())
@@ -1199,18 +1214,19 @@ where
         })
     }
 
-    fn has_finite_limits(&self) -> Result<bool, ResourceError> {
+    fn unlimited_fast_path_seed(&self) -> Result<Option<ResourceState>, ResourceError> {
+        if !self.unlimited_fast_path {
+            return Ok(None);
+        }
         self.store.inspect(|snapshot| {
-            Ok(snapshot
-                .state
-                .limits
-                .values()
-                .any(|limits| !limits.is_unlimited()))
+            if resource_state_has_finite_limits(&snapshot.state)
+                || resource_state_has_durable_activity(&snapshot.state)
+            {
+                Ok(None)
+            } else {
+                Ok(Some(snapshot.state.clone()))
+            }
         })
-    }
-
-    fn can_use_unlimited_fast_path(&self) -> Result<bool, ResourceError> {
-        Ok(self.unlimited_fast_path && !self.has_finite_limits()?)
     }
 
     fn update_active_state<T, F>(&self, update: F) -> Result<T, ResourceError>
@@ -1218,9 +1234,13 @@ where
         T: Send + 'static,
         F: FnOnce(&mut ResourceState) -> Result<T, ResourceError> + Send + 'static,
     {
-        if self.can_use_unlimited_fast_path()? {
-            let mut state = self.lock_unlimited_state();
-            return update(&mut state);
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            return update(&mut local.state);
         }
         self.store
             .update(move |snapshot| update(&mut snapshot.state))
@@ -1236,9 +1256,13 @@ where
         L: FnOnce(&mut ResourceState) -> Result<T, ResourceError>,
         D: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
-        if self.unlimited_fast_path {
-            let mut state = self.lock_unlimited_state();
-            match local_close(&mut state) {
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            match local_close(&mut local.state) {
                 Ok(value) => return Ok(value),
                 Err(ResourceError::UnknownReservation { .. }) => {}
                 Err(error) => return Err(error),
@@ -1247,10 +1271,14 @@ where
         self.store.update(durable_close)
     }
 
-    fn lock_unlimited_state(&self) -> MutexGuard<'_, ResourceState> {
+    fn lock_unlimited_state(
+        &self,
+    ) -> Result<MutexGuard<'_, UnlimitedFastPathState>, ResourceError> {
         self.unlimited_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_err(|_| ResourceError::Storage {
+                reason: "resource governor unlimited fast-path state lock poisoned".to_string(),
+            })
     }
 }
 
@@ -1380,6 +1408,22 @@ struct ResourceState {
     /// `ResourceLimits::period` on each mutation; v1 snapshots that lack
     /// this field migrate transparently.
     period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UnlimitedFastPathState {
+    state: ResourceState,
+    initialized: bool,
+}
+
+fn resource_state_has_finite_limits(state: &ResourceState) -> bool {
+    state.limits.values().any(|limits| !limits.is_unlimited())
+}
+
+fn resource_state_has_durable_activity(state: &ResourceState) -> bool {
+    !state.reserved_by_account.is_empty()
+        || !state.usage_by_account.is_empty()
+        || !state.reservations.is_empty()
 }
 
 /// Snapshot of accumulated period-scoped spend + reserved.

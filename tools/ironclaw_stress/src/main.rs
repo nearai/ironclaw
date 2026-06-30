@@ -908,8 +908,10 @@ fn validate_args(args: &Args) -> Result<(), String> {
         .iter()
         .copied()
         .max()
-        .unwrap_or(args.concurrency)
-        .max(args.ramp_concurrency.unwrap_or(args.concurrency));
+        .unwrap_or(args.concurrency);
+    let max_concurrency = args
+        .ramp_concurrency
+        .map_or(max_concurrency, |ramp_max| max_concurrency.max(ramp_max));
     let min_user_count = args.sweep_users.iter().copied().min().unwrap_or(args.users);
     let max_active_thread_count = args
         .sweep_active_thread_count
