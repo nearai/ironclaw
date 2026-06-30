@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc, time::Instant};
 
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -47,6 +47,63 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
             .field("root", &"<RootFilesystem>")
             .field("resolver", &"<MountViewResolver>")
             .finish()
+    }
+}
+
+fn scoped_path_class(path: &ScopedPath) -> String {
+    let raw = path.as_str();
+    match raw
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+    {
+        Some(segment) => format!("/{segment}"),
+        None => "/".to_string(),
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trace_fs_latency<T, E>(
+    operation: &'static str,
+    path: &ScopedPath,
+    started_at: Instant,
+    result: &Result<T, E>,
+    bytes: Option<usize>,
+) where
+    E: fmt::Display,
+{
+    let elapsed_ms = elapsed_ms(started_at);
+    let path_class = scoped_path_class(path);
+    match result {
+        Ok(_) => tracing::trace!(
+            target: "ironclaw_latency",
+            component = "filesystem",
+            operation,
+            path_class = path_class.as_str(),
+            elapsed_ms,
+            bytes = bytes.unwrap_or(0),
+            outcome = "ok",
+            "filesystem operation completed",
+        ),
+        Err(error) => tracing::trace!(
+            target: "ironclaw_latency",
+            component = "filesystem",
+            operation,
+            path_class = path_class.as_str(),
+            elapsed_ms,
+            bytes = bytes.unwrap_or(0),
+            outcome = "error",
+            error = %error,
+            "filesystem operation failed",
+        ),
     }
 }
 
@@ -104,9 +161,13 @@ where
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        let started_at = Instant::now();
+        let bytes = entry.body.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
-        self.root.put(&virtual_path, entry, cas).await
+        let result = self.root.put(&virtual_path, entry, cas).await;
+        trace_fs_latency("put", path, started_at, &result, Some(bytes));
+        result
     }
 
     /// Read the entry at `path`, returning `None` if absent.
@@ -115,9 +176,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
-        self.root.get(&virtual_path).await
+        let result = self.root.get(&virtual_path).await;
+        trace_fs_latency("get", path, started_at, &result, None);
+        result
     }
 
     /// Filtered query over `prefix`.
@@ -128,9 +192,12 @@ where
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::Query)?;
-        self.root.query(&virtual_path, filter, page).await
+        let result = self.root.query(&virtual_path, filter, page).await;
+        trace_fs_latency("query", prefix, started_at, &result, None);
+        result
     }
 
     /// Declare an index on the mount under `prefix`.
@@ -140,9 +207,12 @@ where
         prefix: &ScopedPath,
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
-        self.root.ensure_index(&virtual_path, spec).await
+        let result = self.root.ensure_index(&virtual_path, spec).await;
+        trace_fs_latency("ensure_index", prefix, started_at, &result, None);
+        result
     }
 
     /// Begin a multi-key transaction (capability-gated).
@@ -157,10 +227,13 @@ where
         scope: &ResourceScope,
         prefix: &ScopedPath,
     ) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let started_at = Instant::now();
         let view = self.mount_view(scope)?;
         let virtual_path =
             resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
-        let inner = self.root.begin(&virtual_path).await?;
+        let result = self.root.begin(&virtual_path).await;
+        trace_fs_latency("begin", prefix, started_at, &result, None);
+        let inner = result?;
         let permissions = view.resolve_with_grant(prefix)?.1.permissions.clone();
         Ok(Box::new(ScopedStorageTxn {
             inner,
@@ -178,9 +251,13 @@ where
         path: &ScopedPath,
         payload: Vec<u8>,
     ) -> Result<SeqNo, FilesystemError> {
+        let started_at = Instant::now();
+        let bytes = payload.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
-        self.root.append(&virtual_path, payload).await
+        let result = self.root.append(&virtual_path, payload).await;
+        trace_fs_latency("append", path, started_at, &result, Some(bytes));
+        result
     }
 
     /// Append multiple `payloads` to the event log at `path` in one backend
@@ -193,9 +270,13 @@ where
         path: &ScopedPath,
         payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let started_at = Instant::now();
+        let bytes = payloads.iter().map(Vec::len).sum();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
-        self.root.append_batch(&virtual_path, payloads).await
+        let result = self.root.append_batch(&virtual_path, payloads).await;
+        trace_fs_latency("append_batch", path, started_at, &result, Some(bytes));
+        result
     }
 
     /// Read events at `path` starting just after `from`.
@@ -205,8 +286,11 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
-        self.root.tail(&virtual_path, from).await
+        let result = self.root.tail(&virtual_path, from).await;
+        trace_fs_latency("tail", path, started_at, &result, None);
+        result
     }
 
     /// Read at most `max_records` events at `path` starting just after `from`.
@@ -217,10 +301,14 @@ where
         from: SeqNo,
         max_records: usize,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
-        self.root
+        let result = self
+            .root
             .tail_bounded(&virtual_path, from, max_records)
-            .await
+            .await;
+        trace_fs_latency("tail_bounded", path, started_at, &result, None);
+        result
     }
 
     /// Return the highest seq present at `path` with `seq > from`, or `None`
@@ -232,9 +320,12 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
-        self.root.head_seq(&virtual_path, from).await
+        let result = self.root.head_seq(&virtual_path, from).await;
+        trace_fs_latency("head_seq", path, started_at, &result, None);
+        result
     }
 
     /// Reserve a path-local monotonic sequence number.
@@ -243,9 +334,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<SeqNo, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)?;
-        self.root.reserve_sequence(&virtual_path).await
+        let result = self.root.reserve_sequence(&virtual_path).await;
+        trace_fs_latency("reserve_sequence", path, started_at, &result, None);
+        result
     }
 
     // ─── Legacy bytes-plane methods (DEPRECATED — transitional) ───────────
@@ -257,9 +351,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<u8>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
-        self.root.read_file(&virtual_path).await
+        let result = self.root.read_file(&virtual_path).await;
+        trace_fs_latency("read_file", path, started_at, &result, None);
+        result
     }
 
     /// **DEPRECATED — use [`write_bytes`](Self::write_bytes) or
@@ -270,9 +367,12 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
-        self.root.write_file(&virtual_path, bytes).await
+        let result = self.root.write_file(&virtual_path, bytes).await;
+        trace_fs_latency("write_file", path, started_at, &result, Some(bytes.len()));
+        result
     }
 
     /// Write bytes using an already-authorized mount view instead of the
@@ -286,16 +386,26 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
-        self.root
+        let result = self
+            .root
             .put(
                 &virtual_path,
                 Entry::bytes(bytes.to_vec()),
                 CasExpectation::Any,
             )
             .await
-            .map(|_| ())
+            .map(|_| ());
+        trace_fs_latency(
+            "write_bytes_with_mount_view",
+            path,
+            started_at,
+            &result,
+            Some(bytes.len()),
+        );
+        result
     }
 
     /// **DEPRECATED — no direct replacement on the unified surface.** Use
@@ -307,9 +417,12 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::AppendFile)?;
-        self.root.append_file(&virtual_path, bytes).await
+        let result = self.root.append_file(&virtual_path, bytes).await;
+        trace_fs_latency("append_file", path, started_at, &result, Some(bytes.len()));
+        result
     }
 
     pub async fn list_dir(
@@ -317,9 +430,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        self.root.list_dir(&virtual_path).await
+        let result = self.root.list_dir(&virtual_path).await;
+        trace_fs_latency("list_dir", path, started_at, &result, None);
+        result
     }
 
     pub async fn list_dir_bounded(
@@ -328,9 +444,12 @@ where
         path: &ScopedPath,
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        self.root.list_dir_bounded(&virtual_path, max_entries).await
+        let result = self.root.list_dir_bounded(&virtual_path, max_entries).await;
+        trace_fs_latency("list_dir_bounded", path, started_at, &result, None);
+        result
     }
 
     pub async fn stat(
@@ -338,8 +457,11 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<FileStat, FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Stat)?;
-        self.root.stat(&virtual_path).await
+        let result = self.root.stat(&virtual_path).await;
+        trace_fs_latency("stat", path, started_at, &result, None);
+        result
     }
 
     pub async fn delete(
@@ -347,9 +469,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
-        self.root.delete(&virtual_path).await
+        let result = self.root.delete(&virtual_path).await;
+        trace_fs_latency("delete", path, started_at, &result, None);
+        result
     }
 
     /// **DEPRECATED — the unified entry plane infers directories from path
@@ -359,9 +484,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
+        let started_at = Instant::now();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::CreateDirAll)?;
-        self.root.create_dir_all(&virtual_path).await
+        let result = self.root.create_dir_all(&virtual_path).await;
+        trace_fs_latency("create_dir_all", path, started_at, &result, None);
+        result
     }
 
     // ─── Convenience helpers for byte-only callers ────────────────────────

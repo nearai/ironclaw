@@ -1,5 +1,10 @@
 use std::{
-    collections::HashMap, error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration,
+    collections::HashMap,
+    error::Error,
+    fmt,
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -57,6 +62,56 @@ fn non_zero_duration(duration: Duration) -> Duration {
     } else {
         duration
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trace_scheduler_latency_ok(
+    operation: &'static str,
+    thread_id: Option<&str>,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+) {
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "turn_scheduler",
+        operation,
+        thread_id = thread_id.unwrap_or(""),
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "ok",
+        "turn scheduler operation completed",
+    );
+}
+
+fn trace_scheduler_latency_error<E>(
+    operation: &'static str,
+    thread_id: Option<&str>,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+    error: &E,
+) where
+    E: fmt::Display + ?Sized,
+{
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "turn_scheduler",
+        operation,
+        thread_id = thread_id.unwrap_or(""),
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "error",
+        error = %error,
+        "turn scheduler operation failed",
+    );
 }
 
 impl TurnRunSchedulerConfig {
@@ -303,9 +358,29 @@ impl fmt::Debug for SchedulerTurnRunWakeNotifier {
 
 impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
-        self.command_tx
+        let started_at = Instant::now();
+        let thread_id = wake.scope.thread_id.as_str().to_string();
+        let run_id = wake.run_id;
+        let result = self
+            .command_tx
             .try_send(SchedulerCommand::Wake(wake))
-            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)
+            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable);
+        match &result {
+            Ok(()) => trace_scheduler_latency_ok(
+                "notify_queued_run",
+                Some(thread_id.as_str()),
+                Some(run_id),
+                started_at,
+            ),
+            Err(error) => trace_scheduler_latency_error(
+                "notify_queued_run",
+                Some(thread_id.as_str()),
+                Some(run_id),
+                started_at,
+                error,
+            ),
+        }
+        result
     }
 }
 
@@ -594,6 +669,10 @@ async fn drain_queued_runs(
         let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
             return false;
         };
+        let claim_started_at = Instant::now();
+        let scope_filter_thread_id = scope_filter
+            .as_ref()
+            .map(|scope| scope.thread_id.as_str().to_string());
         let claim = context
             .transitions
             .claim_next_run(ClaimRunRequest {
@@ -602,6 +681,27 @@ async fn drain_queued_runs(
                 scope_filter: scope_filter.clone(),
             })
             .await;
+        match &claim {
+            Ok(Some(claimed)) => trace_scheduler_latency_ok(
+                "claim_next_run",
+                Some(claimed.state.scope.thread_id.as_str()),
+                Some(claimed.state.run_id),
+                claim_started_at,
+            ),
+            Ok(None) => trace_scheduler_latency_ok(
+                "claim_next_run_empty",
+                scope_filter_thread_id.as_deref(),
+                None,
+                claim_started_at,
+            ),
+            Err(error) => trace_scheduler_latency_error(
+                "claim_next_run",
+                scope_filter_thread_id.as_deref(),
+                None,
+                claim_started_at,
+                error,
+            ),
+        }
         match claim {
             Ok(Some(claimed)) => {
                 let run_id = claimed.state.run_id;
@@ -693,6 +793,7 @@ fn spawn_executor_task(
                 run_id = %recovery_run_id_for_start,
                 "turn run started",
             );
+            let executor_started_at = Instant::now();
             let mut heartbeat_tick = interval(task_config.runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Consume the immediate first tick so the heartbeat loop never fires
@@ -711,15 +812,39 @@ fn spawn_executor_task(
                 tokio::select! {
                     biased;
                     result = &mut executor_result => {
-                        break match result {
-                            Ok(Ok(())) => ExecutorTaskOutcome::Completed,
-                            Ok(Err(error)) => ExecutorTaskOutcome::TerminalFailure(Some(
-                                error.failure().clone(),
-                            )),
-                            Err(_) => ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
-                                "scheduler_executor_panic",
-                            )),
+                        let outcome = match result {
+                            Ok(Ok(())) => {
+                                trace_scheduler_latency_ok(
+                                    "execute_claimed_run",
+                                    Some(recovery_thread_id.as_str()),
+                                    Some(recovery_run_id),
+                                    executor_started_at,
+                                );
+                                ExecutorTaskOutcome::Completed
+                            }
+                            Ok(Err(error)) => {
+                                trace_scheduler_latency_error(
+                                    "execute_claimed_run",
+                                    Some(recovery_thread_id.as_str()),
+                                    Some(recovery_run_id),
+                                    executor_started_at,
+                                    &error,
+                                );
+                                ExecutorTaskOutcome::TerminalFailure(Some(error.failure().clone()))
+                            }
+                            Err(_) => {
+                                let reason = "scheduler_executor_panic";
+                                trace_scheduler_latency_error(
+                                    "execute_claimed_run",
+                                    Some(recovery_thread_id.as_str()),
+                                    Some(recovery_run_id),
+                                    executor_started_at,
+                                    &reason,
+                                );
+                                ExecutorTaskOutcome::TerminalFailure(scheduler_failure(reason))
+                            }
                         };
+                        break outcome;
                     }
                     _ = heartbeat_tick.tick(), if heartbeats.is_idle() => {
                         heartbeats.spawn(

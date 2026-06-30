@@ -22,8 +22,9 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use thiserror::Error;
@@ -113,6 +114,56 @@ use crate::outbound_preferences::{
     OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trace_runtime_latency_ok(
+    operation: &'static str,
+    thread_id: &ThreadId,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+) {
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "reborn_runtime",
+        operation,
+        thread_id = %thread_id,
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "ok",
+        "reborn runtime operation completed",
+    );
+}
+
+fn trace_runtime_latency_error<E>(
+    operation: &'static str,
+    thread_id: &ThreadId,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+    error: &E,
+) where
+    E: fmt::Display + ?Sized,
+{
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "reborn_runtime",
+        operation,
+        thread_id = %thread_id,
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "error",
+        error = %error,
+        "reborn runtime operation failed",
+    );
+}
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -1689,15 +1740,46 @@ impl RebornRuntime {
         cancellation: CancellationToken,
         capture_skill_execution_plan: bool,
     ) -> Result<AssistantReply, RebornRuntimeError> {
-        let submitted = self
+        let total_started_at = Instant::now();
+        let submit_started_at = Instant::now();
+        let submitted = match self
             .submit_user_turn(
                 conversation,
                 text,
                 &cancellation,
                 capture_skill_execution_plan,
             )
-            .await?;
+            .await
+        {
+            Ok(submitted) => {
+                trace_runtime_latency_ok(
+                    "submit_user_turn",
+                    &conversation.0,
+                    Some(submitted.run_id),
+                    submit_started_at,
+                );
+                submitted
+            }
+            Err(error) => {
+                trace_runtime_latency_error(
+                    "submit_user_turn",
+                    &conversation.0,
+                    None,
+                    submit_started_at,
+                    &error,
+                );
+                trace_runtime_latency_error(
+                    "send_user_message",
+                    &conversation.0,
+                    None,
+                    total_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
 
+        let wait_started_at = Instant::now();
         let reply = async {
             let terminal_state = self
                 .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
@@ -1718,6 +1800,21 @@ impl RebornRuntime {
             })
         }
         .await;
+        match &reply {
+            Ok(_) => trace_runtime_latency_ok(
+                "wait_for_terminal_and_read_reply",
+                &conversation.0,
+                Some(submitted.run_id),
+                wait_started_at,
+            ),
+            Err(error) => trace_runtime_latency_error(
+                "wait_for_terminal_and_read_reply",
+                &conversation.0,
+                Some(submitted.run_id),
+                wait_started_at,
+                error,
+            ),
+        }
 
         if let Some(skill_activation_source) = &self.skill_activation_source
             && let Err(clear_error) = skill_activation_source
@@ -1726,6 +1823,13 @@ impl RebornRuntime {
             if reply.is_ok() {
                 // Primary turn succeeded, so the cleanup failure is the only
                 // error to surface.
+                trace_runtime_latency_error(
+                    "send_user_message",
+                    &conversation.0,
+                    Some(submitted.run_id),
+                    total_started_at,
+                    &clear_error,
+                );
                 return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
             }
             // Primary turn already failed: don't mask it with the cleanup
@@ -1737,6 +1841,21 @@ impl RebornRuntime {
             );
         }
 
+        match &reply {
+            Ok(_) => trace_runtime_latency_ok(
+                "send_user_message",
+                &conversation.0,
+                Some(submitted.run_id),
+                total_started_at,
+            ),
+            Err(error) => trace_runtime_latency_error(
+                "send_user_message",
+                &conversation.0,
+                Some(submitted.run_id),
+                total_started_at,
+                error,
+            ),
+        }
         reply
     }
 
@@ -1754,14 +1873,30 @@ impl RebornRuntime {
         capture_skill_execution_plan: bool,
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
+        let send_lock_started_at = Instant::now();
         let _send_guard = send_lock.lock_owned().await;
+        trace_runtime_latency_ok(
+            "send_lock_wait",
+            &conversation.0,
+            None,
+            send_lock_started_at,
+        );
         // Stopped only when every worker has exited; a single crashed worker must not
         // reject submissions while others run.
         if self.turn_scheduler.is_stopped() {
-            return Err(RebornRuntimeError::WorkerStopped);
+            let error = RebornRuntimeError::WorkerStopped;
+            trace_runtime_latency_error(
+                "submit_user_turn_preflight",
+                &conversation.0,
+                None,
+                send_lock_started_at,
+                &error,
+            );
+            return Err(error);
         }
         let scope = self.turn_scope_for(&conversation.0);
-        let accepted = self
+        let accept_started_at = Instant::now();
+        let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
                 scope: self.thread_scope.clone(),
@@ -1780,7 +1915,27 @@ impl RebornRuntime {
                 content: MessageContent::text(text.to_string()),
             })
             .await
-            .map_err(|error| RebornRuntimeError::ThreadService(error.to_string()))?;
+        {
+            Ok(accepted) => {
+                trace_runtime_latency_ok(
+                    "accept_inbound_message",
+                    &conversation.0,
+                    None,
+                    accept_started_at,
+                );
+                accepted
+            }
+            Err(error) => {
+                trace_runtime_latency_error(
+                    "accept_inbound_message",
+                    &conversation.0,
+                    None,
+                    accept_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::ThreadService(error.to_string()));
+            }
+        };
 
         let accepted_message_ref = AcceptedMessageRef::new(format!("msg:{}", accepted.message_id))
             .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
@@ -1796,19 +1951,52 @@ impl RebornRuntime {
                 .skill_execution_adapter
                 .as_ref()
                 .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
-            adapter
-                .record_user_message_for_execution(
-                    scope.clone(),
-                    accepted_message_ref.clone(),
-                    text,
-                )
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            let skill_record_started_at = Instant::now();
+            if let Err(error) = adapter.record_user_message_for_execution(
+                scope.clone(),
+                accepted_message_ref.clone(),
+                text,
+            ) {
+                trace_runtime_latency_error(
+                    "record_skill_execution_message",
+                    &conversation.0,
+                    None,
+                    skill_record_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::TurnSubmission(error.to_string()));
+            }
+            trace_runtime_latency_ok(
+                "record_skill_execution_message",
+                &conversation.0,
+                None,
+                skill_record_started_at,
+            );
         } else if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            let skill_record_started_at = Instant::now();
+            if let Err(error) = skill_activation_source.record_user_message(
+                scope.clone(),
+                accepted_message_ref.clone(),
+                text,
+            ) {
+                trace_runtime_latency_error(
+                    "record_skill_activation_message",
+                    &conversation.0,
+                    None,
+                    skill_record_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::TurnSubmission(error.to_string()));
+            }
+            trace_runtime_latency_ok(
+                "record_skill_activation_message",
+                &conversation.0,
+                None,
+                skill_record_started_at,
+            );
         }
 
+        let turn_submit_started_at = Instant::now();
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
@@ -1830,8 +2018,24 @@ impl RebornRuntime {
             })
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+                trace_runtime_latency_ok(
+                    "turn_coordinator_submit_turn",
+                    &conversation.0,
+                    Some(*run_id),
+                    turn_submit_started_at,
+                );
+                response
+            }
             Err(error) => {
+                trace_runtime_latency_error(
+                    "turn_coordinator_submit_turn",
+                    &conversation.0,
+                    None,
+                    turn_submit_started_at,
+                    &error,
+                );
                 if let Some(skill_activation_source) = &self.skill_activation_source {
                     skill_activation_source
                         .clear_accepted_message(&scope, &accepted_message_ref)
@@ -1864,12 +2068,19 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
+        let notify_started_at = Instant::now();
         self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
             run_id,
             status: submit_status,
             event_cursor: submit_cursor,
         });
+        trace_runtime_latency_ok(
+            "turn_scheduler_notify",
+            &conversation.0,
+            Some(run_id),
+            notify_started_at,
+        );
 
         Ok(SubmittedTurn {
             _send_guard,

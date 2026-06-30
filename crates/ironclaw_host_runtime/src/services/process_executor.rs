@@ -1,10 +1,83 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+struct ProcessLatencyFields {
+    capability_id: String,
+    runtime: String,
+    thread_id: String,
+    invocation_id: String,
+}
+
+impl ProcessLatencyFields {
+    fn from_request(request: &ProcessExecutionRequest) -> Self {
+        Self {
+            capability_id: request.capability_id.to_string(),
+            runtime: format!("{:?}", request.runtime),
+            thread_id: request
+                .scope
+                .thread_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            invocation_id: request.scope.invocation_id.to_string(),
+        }
+    }
+}
+
+fn trace_process_latency_ok(
+    operation: &'static str,
+    fields: &ProcessLatencyFields,
+    started_at: Instant,
+) {
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "process_executor",
+        operation,
+        capability_id = fields.capability_id.as_str(),
+        runtime = fields.runtime.as_str(),
+        thread_id = fields.thread_id.as_str(),
+        invocation_id = fields.invocation_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "ok",
+        "process execution operation completed",
+    );
+}
+
+fn trace_process_latency_error<E>(
+    operation: &'static str,
+    fields: &ProcessLatencyFields,
+    started_at: Instant,
+    error: &E,
+) where
+    E: fmt::Display + ?Sized,
+{
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "process_executor",
+        operation,
+        capability_id = fields.capability_id.as_str(),
+        runtime = fields.runtime.as_str(),
+        thread_id = fields.thread_id.as_str(),
+        invocation_id = fields.invocation_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "error",
+        error = %error,
+        "process execution operation failed",
+    );
+}
 
 #[derive(Clone)]
 pub(super) struct HostProcessExecutor {
@@ -30,15 +103,31 @@ impl ProcessExecutor for HostProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let started_at = Instant::now();
+        let fields = ProcessLatencyFields::from_request(&request);
         if is_process_sandbox_request(&request) {
             let Some(executor) = &self.process_sandbox_executor else {
-                return Err(ProcessExecutionError::new(
-                    "missing_process_sandbox_executor",
-                ));
+                let error = ProcessExecutionError::new("missing_process_sandbox_executor");
+                trace_process_latency_error("host_process_execute", &fields, started_at, &error);
+                return Err(error);
             };
-            return executor.execute(request).await;
+            let result = executor.execute(request).await;
+            match &result {
+                Ok(_) => trace_process_latency_ok("host_process_execute", &fields, started_at),
+                Err(error) => {
+                    trace_process_latency_error("host_process_execute", &fields, started_at, error)
+                }
+            }
+            return result;
         }
-        self.dispatch_executor.execute(request).await
+        let result = self.dispatch_executor.execute(request).await;
+        match &result {
+            Ok(_) => trace_process_latency_ok("host_process_execute", &fields, started_at),
+            Err(error) => {
+                trace_process_latency_error("host_process_execute", &fields, started_at, error)
+            }
+        }
+        result
     }
 }
 
@@ -64,8 +153,12 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let started_at = Instant::now();
+        let fields = ProcessLatencyFields::from_request(&request);
         if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
+            let error = ProcessExecutionError::new("cancelled");
+            trace_process_latency_error("runtime_dispatch_execute", &fields, started_at, &error);
+            return Err(error);
         }
         let result = self
             .dispatcher
@@ -80,11 +173,15 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
             .await
             .map_err(|error| ProcessExecutionError::new(error.event_kind()))?;
         if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
+            let error = ProcessExecutionError::new("cancelled");
+            trace_process_latency_error("runtime_dispatch_execute", &fields, started_at, &error);
+            return Err(error);
         }
-        Ok(ProcessExecutionResult {
+        let result = Ok(ProcessExecutionResult {
             output: result.output,
-        })
+        });
+        trace_process_latency_ok("runtime_dispatch_execute", &fields, started_at);
+        result
     }
 }
 

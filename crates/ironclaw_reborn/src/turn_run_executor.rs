@@ -3,7 +3,11 @@
 //! Adapts `RebornLoopDriverHostFactory` + `DriverRegistry` + `LoopExitApplier`
 //! to the `TurnRunExecutor` trait consumed by `TurnRunScheduler`.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    fmt,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{TurnRunExecutor, TurnRunExecutorError};
@@ -23,6 +27,52 @@ use crate::{
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
 };
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trace_executor_latency_ok(
+    operation: &'static str,
+    claimed: &ClaimedTurnRun,
+    started_at: Instant,
+) {
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "reborn_turn_executor",
+        operation,
+        thread_id = %claimed.state.scope.thread_id,
+        run_id = %claimed.state.run_id,
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "ok",
+        "reborn turn executor operation completed",
+    );
+}
+
+fn trace_executor_latency_error<E>(
+    operation: &'static str,
+    claimed: &ClaimedTurnRun,
+    started_at: Instant,
+    error: &E,
+) where
+    E: fmt::Display + ?Sized,
+{
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "reborn_turn_executor",
+        operation,
+        thread_id = %claimed.state.scope.thread_id,
+        run_id = %claimed.state.run_id,
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "error",
+        error = %error,
+        "reborn turn executor operation failed",
+    );
+}
 
 /// A `TurnRunExecutorError` for the static category `"unknown_failure"`.
 ///
@@ -91,11 +141,27 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
         claimed: ClaimedTurnRun,
         transitions: Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), TurnRunExecutorError> {
+        let started_at = Instant::now();
         match self.invoke_driver(&claimed, &transitions).await {
-            Ok(exit) => self
-                .apply_exit(&claimed, exit, &transitions)
-                .await
-                .map_err(|()| unknown_failure_error().clone()),
+            Ok(exit) => {
+                let result = self.apply_exit(&claimed, exit, &transitions).await;
+                match result {
+                    Ok(()) => {
+                        trace_executor_latency_ok("execute_claimed_run", &claimed, started_at);
+                        Ok(())
+                    }
+                    Err(()) => {
+                        let error = unknown_failure_error().clone();
+                        trace_executor_latency_error(
+                            "execute_claimed_run",
+                            &claimed,
+                            started_at,
+                            &error,
+                        );
+                        Err(error)
+                    }
+                }
+            }
             Err(err) => {
                 let sanitized = match &err {
                     DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
@@ -123,8 +189,10 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // guard that is never reached in practice.
                 let failure =
                     sanitized.unwrap_or_else(|| unknown_failure_error().failure().clone());
-                Err(TurnRunExecutorError::new(failure.category())
-                    .unwrap_or_else(|_| unknown_failure_error().clone()))
+                let error = TurnRunExecutorError::new(failure.category())
+                    .unwrap_or_else(|_| unknown_failure_error().clone());
+                trace_executor_latency_error("execute_claimed_run", &claimed, started_at, &error);
+                Err(error)
             }
         }
     }
@@ -157,24 +225,52 @@ impl RebornTurnRunExecutor {
             "reborn executor resolved loop driver"
         );
 
-        let host = self
-            .host_factory
-            .create_host(claimed)
+        let host_started_at = Instant::now();
+        let host = match self.host_factory.create_host(claimed).await {
+            Ok(host) => {
+                trace_executor_latency_ok("create_loop_host", claimed, host_started_at);
+                host
+            }
+            Err(err) => {
+                trace_executor_latency_error("create_loop_host", claimed, host_started_at, &err);
+                // Use the error's full `Display` (`err.to_string()`) rather than a single
+                // field, so whatever context the host factory embedded in its message
+                // survives into `reason` (HostFactoryError is a flat message with no
+                // `source()` chain of its own).
+                return Err(DriverInvocationError::HostCreationFailed {
+                    reason: err.to_string(),
+                });
+            }
+        };
+        let route_snapshot_started_at = Instant::now();
+        if let Err(error) = self
+            .persist_model_route_snapshot(claimed, host.as_ref(), transitions)
             .await
-            // Use the error's full `Display` (`err.to_string()`) rather than a single
-            // field, so whatever context the host factory embedded in its message
-            // survives into `reason` (HostFactoryError is a flat message with no
-            // `source()` chain of its own).
-            .map_err(|err| DriverInvocationError::HostCreationFailed {
-                reason: err.to_string(),
-            })?;
-        self.persist_model_route_snapshot(claimed, host.as_ref(), transitions)
-            .await?;
+        {
+            trace_executor_latency_error(
+                "persist_model_route_snapshot",
+                claimed,
+                route_snapshot_started_at,
+                &error,
+            );
+            return Err(error);
+        }
+        trace_executor_latency_ok(
+            "persist_model_route_snapshot",
+            claimed,
+            route_snapshot_started_at,
+        );
 
         let turn_id = claimed.state.turn_id;
         let run_id = claimed.state.run_id;
 
-        match (claimed.state.status, claimed.state.checkpoint_id) {
+        let driver_started_at = Instant::now();
+        let driver_operation = if claimed.state.checkpoint_id.is_some() {
+            "driver_resume"
+        } else {
+            "driver_run"
+        };
+        let driver_result = match (claimed.state.status, claimed.state.checkpoint_id) {
             // Requeued blocked runs keep their checkpoint while returning to
             // `Queued`; checkpoint identity is the resume signal.
             (_, Some(checkpoint_id)) => driver
@@ -213,7 +309,14 @@ impl RebornTurnRunExecutor {
                 )
                 .await
                 .map_err(DriverInvocationError::DriverError),
+        };
+        match &driver_result {
+            Ok(_) => trace_executor_latency_ok(driver_operation, claimed, driver_started_at),
+            Err(error) => {
+                trace_executor_latency_error(driver_operation, claimed, driver_started_at, error)
+            }
         }
+        driver_result
     }
 
     async fn persist_model_route_snapshot(
@@ -255,12 +358,14 @@ impl RebornTurnRunExecutor {
         exit: LoopExit,
         transitions: &Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), ()> {
+        let started_at = Instant::now();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
 
         match self.loop_exit_applier.apply(claimed, exit).await {
             Ok(state) => {
+                trace_executor_latency_ok("apply_loop_exit", claimed, started_at);
                 debug!(
                     runner_id = ?runner_id,
                     run_id = ?run_id,
@@ -270,6 +375,7 @@ impl RebornTurnRunExecutor {
                 Ok(())
             }
             Err(err) => {
+                trace_executor_latency_error("apply_loop_exit", claimed, started_at, &err);
                 error!(
                     runner_id = ?runner_id,
                     run_id = ?run_id,

@@ -4,10 +4,61 @@ use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 use tracing::debug;
 
 const MAX_PREPARED_RUN_IDS: usize = 4096;
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trace_coordinator_latency_ok(
+    operation: &'static str,
+    scope: &TurnScope,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+) {
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "turn_coordinator",
+        operation,
+        thread_id = %scope.thread_id,
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "ok",
+        "turn coordinator operation completed",
+    );
+}
+
+fn trace_coordinator_latency_error<E>(
+    operation: &'static str,
+    scope: &TurnScope,
+    run_id: Option<TurnRunId>,
+    started_at: Instant,
+    error: &E,
+) where
+    E: fmt::Display + ?Sized,
+{
+    let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "turn_coordinator",
+        operation,
+        thread_id = %scope.thread_id,
+        run_id = run_id.as_str(),
+        elapsed_ms = elapsed_ms(started_at),
+        outcome = "error",
+        error = %error,
+        "turn coordinator operation failed",
+    );
+}
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
@@ -257,6 +308,7 @@ where
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        let started_at = Instant::now();
         // If the caller passed a run id that came out of prepare_turn, verify
         // it is being submitted under the same scope it was prepared under,
         // unless this is a child run (parent_run_id set). Subagent spawn
@@ -272,14 +324,36 @@ where
             return Err(TurnError::Unauthorized);
         }
         let scope = request.scope.clone();
-        let response = self
+        let response = match self
             .store
             .submit_turn(
                 request,
                 self.admission_policy.as_ref(),
                 self.run_profile_resolver.as_ref(),
             )
-            .await?;
+            .await
+        {
+            Ok(response) => {
+                let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+                trace_coordinator_latency_ok(
+                    "store_submit_turn",
+                    &scope,
+                    Some(*run_id),
+                    started_at,
+                );
+                response
+            }
+            Err(error) => {
+                trace_coordinator_latency_error(
+                    "store_submit_turn",
+                    &scope,
+                    None,
+                    started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         let SubmitTurnResponse::Accepted {
             run_id,
             status,
@@ -294,7 +368,12 @@ where
             resolved_run_profile_version = resolved_run_profile_version.as_u64(),
             "turn coordinator accepted turn with resolved run profile"
         );
-        notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
+        let wake_started_at = Instant::now();
+        notify_queued_run_best_effort(
+            self.wake_notifier.as_ref(),
+            submit_wake(scope.clone(), &response),
+        );
+        trace_coordinator_latency_ok("notify_queued_run", &scope, Some(*run_id), wake_started_at);
         deferred_publication_error(
             self.publication_error_port.as_ref(),
             submit_event_cursor(&response),
@@ -306,27 +385,83 @@ where
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
+        let started_at = Instant::now();
         let scope = request.scope.clone();
-        let response = self.store.resume_turn(request).await?;
+        let response = match self.store.resume_turn(request).await {
+            Ok(response) => {
+                trace_coordinator_latency_ok(
+                    "store_resume_turn",
+                    &scope,
+                    Some(response.run_id),
+                    started_at,
+                );
+                response
+            }
+            Err(error) => {
+                trace_coordinator_latency_error(
+                    "store_resume_turn",
+                    &scope,
+                    None,
+                    started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let wake_started_at = Instant::now();
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             resume_wake(scope.clone(), &response),
+        );
+        trace_coordinator_latency_ok(
+            "notify_resumed_run",
+            &scope,
+            Some(response.run_id),
+            wake_started_at,
         );
         deferred_publication_error(self.publication_error_port.as_ref(), response.event_cursor)?;
         Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        let started_at = Instant::now();
         let scope = request.scope.clone();
-        let response = self.store.request_cancel(request).await?;
+        let response = match self.store.request_cancel(request).await {
+            Ok(response) => {
+                trace_coordinator_latency_ok(
+                    "store_cancel_run",
+                    &scope,
+                    Some(response.run_id),
+                    started_at,
+                );
+                response
+            }
+            Err(error) => {
+                trace_coordinator_latency_error(
+                    "store_cancel_run",
+                    &scope,
+                    None,
+                    started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         // Wake on `CancelRequested` (the cooperative case) AND on any terminal
         // transition. Registered handles otherwise rely solely on the polling
         // fallback to discover a direct-to-terminal cancellation, which would
         // leave them in the requester map until the polling task next ticks.
         if response.status == TurnStatus::CancelRequested || response.status.is_terminal() {
+            let wake_started_at = Instant::now();
             notify_queued_run_best_effort(
                 self.wake_notifier.as_ref(),
                 cancel_wake(scope.clone(), &response),
+            );
+            trace_coordinator_latency_ok(
+                "notify_cancelled_run",
+                &scope,
+                Some(response.run_id),
+                wake_started_at,
             );
         }
         if !response.already_terminal {
@@ -352,18 +487,49 @@ where
         &self,
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        let started_at = Instant::now();
         let child_scope = request.child_scope.clone();
-        let response = self
+        let response = match self
             .store
             .submit_child_turn(
                 request,
                 self.admission_policy.as_ref(),
                 self.run_profile_resolver.as_ref(),
             )
-            .await?;
+            .await
+        {
+            Ok(response) => {
+                let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+                trace_coordinator_latency_ok(
+                    "store_submit_child_turn",
+                    &child_scope,
+                    Some(*run_id),
+                    started_at,
+                );
+                response
+            }
+            Err(error) => {
+                trace_coordinator_latency_error(
+                    "store_submit_child_turn",
+                    &child_scope,
+                    None,
+                    started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+        let wake_started_at = Instant::now();
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
-            submit_wake(child_scope, &response),
+            submit_wake(child_scope.clone(), &response),
+        );
+        trace_coordinator_latency_ok(
+            "notify_child_run",
+            &child_scope,
+            Some(*run_id),
+            wake_started_at,
         );
         deferred_publication_error(
             self.publication_error_port.as_ref(),
