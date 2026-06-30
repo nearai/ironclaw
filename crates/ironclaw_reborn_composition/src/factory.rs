@@ -826,7 +826,7 @@ fn compose_product_auth_services(
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
-) -> Arc<RebornProductAuthServices> {
+) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
@@ -843,9 +843,9 @@ fn compose_product_auth_services(
         services = services.with_oauth_gate_registry(registry);
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
-        services = services.with_host_managed_nearai_credential_scope(scope);
+        services = services.with_host_managed_nearai_credential_scope(scope)?;
     }
-    Arc::new(services)
+    Ok(Arc::new(services))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1204,7 +1204,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
             Some(nearai_mcp_host_managed_scope.clone()),
-        ),
+        )?,
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
@@ -1250,7 +1250,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
                     nearai_mcp_host_managed_scope.clone(),
-                ))
+                )?)
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             {
@@ -1275,7 +1275,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
                     nearai_mcp_host_managed_scope.clone(),
-                ))
+                )?)
             }
         }
     };
@@ -3917,7 +3917,7 @@ where
         // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
         // preserves this builder's prior behavior of never attaching it.
         None,
-    );
+    )?;
     // Bundle the keepalive worker deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); the leader lock and refresh port
