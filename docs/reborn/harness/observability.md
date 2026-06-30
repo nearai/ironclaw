@@ -114,3 +114,13 @@ General rule:
 - audit/persistence failure must follow the domain contract;
 - unsupported obligations still fail closed;
 - redaction failure is a hard failure before exposing output.
+
+## Durable Store Evidence
+
+Standalone Reborn composition should consume durable event/audit handles from
+`ironclaw_reborn_event_store`. Local/test harnesses may use in-memory stores or
+JSONL stores; production must not silently fall back to in-memory storage. JSONL
+is accepted as a single-node durable backend only when explicitly configured.
+PostgreSQL and libSQL stores are the SQL durability adapters for production
+parity when their crate features are enabled; otherwise, selecting those
+backends fails closed before a service graph is returned.

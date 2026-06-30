@@ -1,0 +1,37 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "slack"
+name = "Slack"
+version = "0.1.0"
+description = "Slack Events API channel for DMs, app mentions, and outbound routine delivery."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "slack_v2_host_beta"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Slack-Signature"
+timestamp_header_name = "X-Slack-Request-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = [
+  "inbound_messages",
+  "inbound_attachments",
+  "external_final_reply_push",
+  "delivery_status_reporting",
+]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "slack_bot_token"
+
+[[product_adapter.inbound.egress]]
+host = "slack.com"
+credential_handle = "slack_bot_token"

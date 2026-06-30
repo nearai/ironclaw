@@ -44,10 +44,23 @@ impl ImageUrl {
     pub fn normalized_openai_detail(&self) -> String {
         normalize_openai_image_detail(self.detail.as_deref())
     }
+
+    /// Decode an inline base64 `data:` URL into its `(media_type, base64_data)`
+    /// parts (e.g. `"data:image/png;base64,AQIDBA=="` →
+    /// `("image/png", "AQIDBA==")`). Returns `None` for a non-`data:` URL or a
+    /// `data:` URL that is not base64-encoded — callers that only support inline
+    /// bytes (Anthropic, Gemini, Bedrock) use this to forward the image and skip
+    /// remote URLs they can't fetch. The single shared parser keeps every
+    /// provider adapter consistent with the `data:` URL the model gateway emits.
+    pub fn decode_data_url(&self) -> Option<(&str, &str)> {
+        let rest = self.url.strip_prefix("data:")?;
+        let (media_type, data) = rest.split_once(";base64,")?;
+        Some((media_type, data))
+    }
 }
 
 /// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
-pub fn normalize_openai_image_detail(detail: Option<&str>) -> String {
+pub(crate) fn normalize_openai_image_detail(detail: Option<&str>) -> String {
     match detail
         .map(str::trim)
         .filter(|detail| !detail.is_empty())
@@ -55,6 +68,87 @@ pub fn normalize_openai_image_detail(detail: Option<&str>) -> String {
     {
         Some(detail) if matches!(detail.as_str(), "auto" | "low" | "high") => detail,
         _ => "auto".to_string(),
+    }
+}
+
+/// Provider reasoning details that need exact round-trip through a follow-up
+/// request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ReasoningDetail {
+    /// Plain reasoning text with an optional provider signature.
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Provider-encrypted reasoning payload.
+    Encrypted(String),
+    /// Redacted reasoning payload preserved as opaque data.
+    Redacted { data: String },
+    /// Provider-generated reasoning summary text.
+    Summary(String),
+}
+
+/// Ordered provider reasoning payload with an optional provider-supplied ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub content: Vec<ReasoningDetail>,
+}
+
+impl ReasoningDetails {
+    pub fn from_text(text: impl Into<String>) -> Option<Self> {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text,
+                signature: None,
+            }],
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+            || self.content.iter().all(|detail| match detail {
+                // A Text block is non-empty when EITHER its text OR its
+                // signature carries content. Gemini 2.5+ emits
+                // `thought_signature` as a Text block with empty text but a
+                // populated signature; dropping it causes the next turn to
+                // 400 because the replay artifact is missing (#3201, #3225).
+                ReasoningDetail::Text { text, signature } => {
+                    text.trim().is_empty() && signature.as_ref().is_none_or(|s| s.trim().is_empty())
+                }
+                ReasoningDetail::Encrypted(text) | ReasoningDetail::Summary(text) => {
+                    text.trim().is_empty()
+                }
+                ReasoningDetail::Redacted { data } => data.trim().is_empty(),
+            })
+    }
+
+    pub fn display_text(&self) -> Option<String> {
+        let parts = self
+            .content
+            .iter()
+            .filter_map(|detail| match detail {
+                ReasoningDetail::Text { text, .. } | ReasoningDetail::Summary(text)
+                    if !text.trim().is_empty() =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
     }
 }
 
@@ -86,6 +180,10 @@ pub struct ChatMessage {
     /// reasoning that was dropped (#3201, #3225).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Typed provider reasoning payloads used when an upstream client requires
+    /// exact encrypted/redacted/summary replay rather than plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<ReasoningDetails>,
 }
 
 impl ChatMessage {
@@ -99,6 +197,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -112,6 +211,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -127,6 +227,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -140,6 +241,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -160,6 +262,7 @@ impl ChatMessage {
                 Some(tool_calls)
             },
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -174,6 +277,24 @@ impl ChatMessage {
     /// don't send `reasoning_content: ""` and trip strict-mode validators.
     pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
         self.reasoning = reasoning.filter(|r| !r.trim().is_empty());
+        if self.reasoning_details.is_none() {
+            self.reasoning_details = self
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| ReasoningDetails::from_text(reasoning.clone()));
+        }
+        self
+    }
+
+    /// Attach provider-emitted typed reasoning artifacts to an assistant
+    /// message. The legacy string field is populated only with displayable text
+    /// or summary blocks; encrypted/redacted payloads stay opaque.
+    pub fn with_reasoning_details(mut self, details: Option<ReasoningDetails>) -> Self {
+        self.reasoning_details = details.filter(|details| !details.is_empty());
+        self.reasoning = self
+            .reasoning_details
+            .as_ref()
+            .and_then(ReasoningDetails::display_text);
         self
     }
 
@@ -191,6 +312,7 @@ impl ChatMessage {
             name: Some(name.into()),
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 }
@@ -254,6 +376,9 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Provider-emitted reasoning content, when the text-completion API returns
+    /// a separate reasoning artifact.
+    pub reasoning: Option<String>,
     /// Tokens read from the provider's server-side prompt cache (Anthropic).
     /// Zero when caching is not supported or on a cache miss.
     pub cache_read_input_tokens: u32,
@@ -299,6 +424,24 @@ pub struct ToolCall {
     /// See #3225.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Provider-emitted parse failure for the model's tool-call arguments
+    /// JSON. `Some(reason)` when the wire payload was not valid JSON and the
+    /// provider fell back to an empty object; `None` on successful parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_parse_error: Option<String>,
+}
+
+impl Default for ToolCall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            arguments: serde_json::Value::Object(serde_json::Map::new()),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }
+    }
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -364,6 +507,28 @@ impl ToolCompletionRequest {
             stop_sequences: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Create a tool-aware request from the common completion envelope.
+    pub fn from_completion_request(request: CompletionRequest, tools: Vec<ToolDefinition>) -> Self {
+        let CompletionRequest {
+            messages,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            metadata,
+        } = request;
+        Self {
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            tool_choice: None,
+            metadata,
         }
     }
 
@@ -436,6 +601,9 @@ pub struct ToolCompletionResponse {
     /// for the next turn — otherwise the provider rejects the follow-up with
     /// HTTP 400 (#3201, #3225). `None` when the model produced no reasoning.
     pub reasoning: Option<String>,
+    /// Typed provider reasoning payloads for clients that require exact
+    /// encrypted/redacted/summary round-trip rather than display text.
+    pub reasoning_details: Option<ReasoningDetails>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -675,7 +843,7 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 /// This typed enum replaces stringly-typed parameter names across the codebase,
 /// providing type safety and single-point-of-maintenance for parameter handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnsupportedParam {
+pub(crate) enum UnsupportedParam {
     Temperature,
     MaxTokens,
     StopSequences,
@@ -683,7 +851,7 @@ pub enum UnsupportedParam {
 
 impl UnsupportedParam {
     /// Get the string name of this parameter for config/error messages.
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             UnsupportedParam::Temperature => "temperature",
             UnsupportedParam::MaxTokens => "max_tokens",
@@ -696,7 +864,7 @@ impl UnsupportedParam {
 ///
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support, replacing duplicate stringly-typed logic.
-pub fn strip_unsupported_completion_params(
+pub(crate) fn strip_unsupported_completion_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut CompletionRequest,
 ) {
@@ -719,7 +887,7 @@ pub fn strip_unsupported_completion_params(
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
 ///
-pub fn strip_unsupported_tool_params(
+pub(crate) fn strip_unsupported_tool_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut ToolCompletionRequest,
 ) {
@@ -849,6 +1017,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -894,6 +1063,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -921,6 +1091,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
@@ -928,6 +1099,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
@@ -976,6 +1148,48 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_legacy_json_without_arguments_parse_error_deserializes() {
+        // Pre-Phase-B trace recordings have no `arguments_parse_error` field.
+        // The #[serde(default)] annotation must keep them deserializing as None.
+        let legacy = r#"{
+            "id": "call_abc",
+            "name": "do_thing",
+            "arguments": {"x": 1}
+        }"#;
+        let tc: ToolCall = serde_json::from_str(legacy).expect("legacy payload should deserialize");
+        assert_eq!(tc.id, "call_abc");
+        assert_eq!(tc.name, "do_thing");
+        assert_eq!(tc.arguments["x"], 1);
+        assert!(tc.reasoning.is_none());
+        assert!(tc.signature.is_none());
+        assert!(tc.arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn tool_call_with_arguments_parse_error_round_trips() {
+        let original = ToolCall {
+            id: "call_xyz".to_string(),
+            name: "broken_tool".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: Some(
+                "failed to parse tool-call arguments JSON: expected value at line 1 column 1"
+                    .to_string(),
+            ),
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        // Confirm the field is present in the serialized form (skip_serializing_if guards None,
+        // so Some must be emitted).
+        assert!(json.contains("arguments_parse_error"));
+        let decoded: ToolCall = serde_json::from_str(&json).expect("should round-trip");
+        assert_eq!(
+            decoded.arguments_parse_error.as_deref(),
+            Some(original.arguments_parse_error.as_deref().unwrap())
+        );
+    }
+
+    #[test]
     fn test_strip_unsupported_tool_params_strips_stop_sequences() {
         let mut unsupported = std::collections::HashSet::new();
         unsupported.insert(UnsupportedParam::StopSequences.name().to_string());
@@ -986,5 +1200,49 @@ mod tests {
         strip_unsupported_tool_params(&unsupported, &mut req);
 
         assert!(req.stop_sequences.is_none()); // safety: test assertion for explicit strip behavior
+    }
+
+    /// Regression: a Text block with empty text but a non-empty signature must
+    /// NOT be treated as empty. Gemini 2.5+ emits `thought_signature` as a Text
+    /// block with blank text and a populated signature; the old `..` wildcard
+    /// ignored the signature, causing it to be filtered out by
+    /// `with_reasoning_details` and `rig_reasoning_to_iron`, breaking the next
+    /// turn with HTTP 400 (#3201, #3225).
+    #[test]
+    fn reasoning_details_is_empty_false_for_signature_only_text_block() {
+        let details = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("sig-abc".to_string()),
+            }],
+        };
+        assert!(
+            !details.is_empty(),
+            "Text block with non-empty signature must not be treated as empty"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_is_empty_true_for_blank_text_and_absent_signature() {
+        // Empty text + no signature → empty.
+        let no_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: None,
+            }],
+        };
+        assert!(no_sig.is_empty());
+
+        // Empty text + whitespace-only signature → still empty.
+        let whitespace_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("   ".to_string()),
+            }],
+        };
+        assert!(whitespace_sig.is_empty());
     }
 }

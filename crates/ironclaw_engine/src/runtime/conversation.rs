@@ -189,6 +189,27 @@ impl ConversationManager {
     /// The per-conversation `Mutex` is held for the entire operation — from
     /// the active-thread check through `save_conversation`. This eliminates
     /// the TOCTOU double-spawn window present in the old 5-phase split.
+    ///
+    /// **`extra_initial_metadata` is spawn-only.** It is merged into the
+    /// thread's `metadata` map ONLY when this call allocates a new
+    /// thread (the `None` active-foreground branch below). On the
+    /// `Running` (inject) and `Resumable` (resume) paths the caller-
+    /// supplied metadata is *ignored* — those threads already exist
+    /// with their own metadata. Callers that need per-request state
+    /// (e.g. the bridge's external tool catalog keyed by
+    /// `conversation_scope`) must therefore either re-establish the
+    /// state out-of-band per request (the responses_api handler
+    /// re-registers its catalog every request and the bridge
+    /// `transfer`s it onto the engine thread_id), or persist the
+    /// value with `ThreadManager::set_thread_metadata` before resume
+    /// so the engine reload picks it up. Extending this method to
+    /// also write metadata on inject/resume is a future change, not
+    /// the current contract.
+    // Bundling these into an options struct would just push the
+    // argument list around without making any caller easier to read —
+    // every caller passes literal None for the optional fields and
+    // every required field is already a typed newtype.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         &self,
         conversation_id: ConversationId,
@@ -197,6 +218,7 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
         user_timezone: Option<&str>,
+        extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -313,6 +335,18 @@ impl ConversationManager {
                     "conversation_id".into(),
                     serde_json::Value::String(conversation_id.to_string()),
                 );
+                // Merge caller-supplied metadata (e.g. `conversation_scope`
+                // from the responses_api bridge so the EffectExecutor can
+                // resolve per-conversation state without racing the
+                // executor task that starts immediately after spawn).
+                // Built-in keys above win on conflict so callers can't
+                // shadow `source_channel`, `user_timezone`, or
+                // `conversation_id`.
+                if let Some(extra) = extra_initial_metadata {
+                    for (k, v) in extra {
+                        initial_metadata.entry(k).or_insert(v);
+                    }
+                }
 
                 // Spawn new foreground thread with conversation history.
                 // `goal` holds the full message (the orchestrator feeds it as
@@ -870,6 +904,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -937,6 +972,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1037,6 +1073,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1086,6 +1123,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
         });
@@ -1096,6 +1134,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1172,6 +1211,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await

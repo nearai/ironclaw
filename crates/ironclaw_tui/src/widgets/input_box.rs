@@ -13,13 +13,13 @@ use crate::theme::Theme;
 
 use super::{AppState, TuiWidget};
 
-pub struct InputBoxWidget {
+pub(crate) struct InputBoxWidget {
     theme: Theme,
     textarea: TextArea<'static>,
 }
 
 impl InputBoxWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(ratatui::style::Style::default());
         textarea
@@ -32,7 +32,7 @@ impl InputBoxWidget {
     }
 
     /// Get the current input text and clear the textarea.
-    pub fn take_input(&mut self) -> String {
+    pub(crate) fn take_input(&mut self) -> String {
         let lines: Vec<String> = self
             .textarea
             .lines()
@@ -47,44 +47,44 @@ impl InputBoxWidget {
     }
 
     /// Returns true if the textarea is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.textarea.lines().iter().all(|l| l.is_empty())
     }
 
     /// Insert a literal newline at the cursor.
-    pub fn insert_newline(&mut self) {
+    pub(crate) fn insert_newline(&mut self) {
         self.textarea.insert_newline();
     }
 
     /// Move the cursor to the very top of the input (row 0, col 0).
-    pub fn move_cursor_to_start(&mut self) {
+    pub(crate) fn move_cursor_to_start(&mut self) {
         self.textarea.move_cursor(tui_textarea::CursorMove::Top);
         self.textarea.move_cursor(tui_textarea::CursorMove::Head);
     }
 
     /// Peek at the current text content without consuming it.
-    pub fn current_text(&self) -> String {
+    pub(crate) fn current_text(&self) -> String {
         self.textarea.lines().join("\n")
     }
 
     /// Return the current cursor position as (row, column).
-    pub fn cursor(&self) -> (usize, usize) {
+    pub(crate) fn cursor(&self) -> (usize, usize) {
         self.textarea.cursor()
     }
 
     /// Returns true when the cursor is on the first input line.
-    pub fn is_cursor_on_first_line(&self) -> bool {
+    pub(crate) fn is_cursor_on_first_line(&self) -> bool {
         self.cursor().0 == 0
     }
 
     /// Returns true when the cursor is on the last input line.
-    pub fn is_cursor_on_last_line(&self) -> bool {
+    pub(crate) fn is_cursor_on_last_line(&self) -> bool {
         let (row, _) = self.cursor();
         row + 1 >= self.textarea.lines().len().max(1)
     }
 
     /// Replace the current text content with `text`.
-    pub fn set_text(&mut self, text: &str) {
+    pub(crate) fn set_text(&mut self, text: &str) {
         self.textarea.select_all();
         self.textarea.cut();
         self.textarea.insert_str(text);
@@ -95,13 +95,13 @@ impl InputBoxWidget {
     /// Normalizes line endings (`\r\n` and lone `\r` → `\n`) so pastes from
     /// terminals that use CR or CRLF line breaks (macOS Terminal.app, some
     /// clipboards) show up as real newlines instead of a single long line.
-    pub fn insert_text(&mut self, text: &str) {
+    pub(crate) fn insert_text(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         self.textarea.insert_str(normalized);
     }
 
     /// Number of logical lines currently in the input.
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.textarea.lines().len().max(1)
     }
 }

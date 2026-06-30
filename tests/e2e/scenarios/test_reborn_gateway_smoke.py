@@ -8,10 +8,12 @@ assistant responses.
 """
 
 import asyncio
+import base64
 import os
 import signal
 import socket
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from playwright.async_api import expect
@@ -259,3 +261,185 @@ async def test_reborn_gateway_persists_text_and_tool_turns_without_duplicate_res
         "Expected one terminal assistant response for the tool prompt, got "
         f"{len(matching_tool_turns)} turns: {matching_tool_turns}"
     )
+
+
+# --------------------------------------------------------------------------
+# WebChat v2 native attachment path (#4644)
+#
+# These exercise the Reborn *v2* surface (`/api/webchat/v2/*`) the React SPA
+# at `/v2` uses, not the v1 `/api/chat/*` shim above. The v2 routes + SPA are
+# compiled behind the `webui-v2-beta` Cargo feature, which the default e2e
+# binary (`--features libsql`) does not enable, so every test here probes the
+# session endpoint first and skips when v2 is not mounted — the same
+# convention as the other `test_v2_*` scenarios. Build to run them:
+#   cargo build --features libsql,webui-v2-beta
+# --------------------------------------------------------------------------
+
+V2_BASE = "/api/webchat/v2"
+ATTACHMENT_MARKER = "IRONCLAW_ATTACHMENT_MARKER_4644"
+# A minimal but structurally valid 1x1 PNG (header + IHDR/IDAT/IEND).
+_PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/"
+    "/i6AAAAAElFTkSuQmCC"
+)
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+async def _require_v2(base_url: str) -> None:
+    """Skip the test unless the v2 native routes are compiled in."""
+    response = await api_get(base_url, f"{V2_BASE}/session", timeout=15)
+    if response.status_code == 404:
+        pytest.skip("webui-v2-beta routes not mounted (build with --features webui-v2-beta)")
+    response.raise_for_status()
+
+
+async def _create_thread_v2(base_url: str) -> str:
+    response = await api_post(
+        base_url,
+        f"{V2_BASE}/threads",
+        json={"client_action_id": str(uuid4())},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()["thread"]["thread_id"]
+
+
+async def _send_v2(base_url, thread_id, content, attachments=None):
+    body = {"client_action_id": str(uuid4()), "content": content}
+    if attachments:
+        body["attachments"] = attachments
+    return await api_post(
+        base_url,
+        f"{V2_BASE}/threads/{thread_id}/messages",
+        json=body,
+        timeout=30,
+    )
+
+
+async def _fetch_timeline_v2(base_url, thread_id) -> dict:
+    response = await api_get(
+        base_url,
+        f"{V2_BASE}/threads/{thread_id}/timeline",
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def _wait_for_v2_user_attachments(base_url, thread_id, *, timeout=30.0) -> list:
+    for _ in range(int(timeout * 2)):
+        timeline = await _fetch_timeline_v2(base_url, thread_id)
+        for message in timeline.get("messages", []):
+            if message.get("kind") in ("user", "user_message") and message.get("attachments"):
+                return message["attachments"]
+        await asyncio.sleep(0.5)
+    raise AssertionError("Timed out waiting for a user message carrying attachments")
+
+
+async def _wait_for_v2_assistant_reply(base_url, thread_id, *, timeout=45.0) -> str:
+    for _ in range(int(timeout * 2)):
+        timeline = await _fetch_timeline_v2(base_url, thread_id)
+        for message in timeline.get("messages", []):
+            if message.get("kind") in ("assistant", "assistant_message") and (
+                message.get("content") or ""
+            ).strip():
+                return message["content"]
+        await asyncio.sleep(0.5)
+    raise AssertionError("Timed out waiting for a terminal assistant reply")
+
+
+async def test_reborn_v2_attachments_land_and_persist_in_timeline(reborn_gateway_server):
+    """Uploaded attachments land and the timeline returns their refs (survives refresh)."""
+    await _require_v2(reborn_gateway_server)
+    thread_id = await _create_thread_v2(reborn_gateway_server)
+
+    attachments = [
+        {"mime_type": "application/pdf", "filename": "report.pdf", "data_base64": _b64(b"%PDF-1.7 body")},
+        {"mime_type": "text/csv", "filename": "data.csv", "data_base64": _b64(b"a,b\n1,2\n")},
+        {"mime_type": "text/plain", "filename": "notes.txt", "data_base64": _b64(b"some plain notes")},
+        {"mime_type": "image/png", "filename": "shot.png", "data_base64": _b64(_PNG_1X1)},
+    ]
+    response = await _send_v2(reborn_gateway_server, thread_id, "see attached", attachments)
+    assert response.status_code in (200, 202), response.text
+
+    refs = await _wait_for_v2_user_attachments(reborn_gateway_server, thread_id)
+    by_name = {ref.get("filename"): ref for ref in refs}
+    assert set(by_name) == {"report.pdf", "data.csv", "notes.txt", "shot.png"}, by_name
+    assert by_name["shot.png"]["kind"] == "image"
+    assert by_name["report.pdf"]["kind"] == "document"
+    # The timeline ref carries a storage_key so a later turn can file_read it —
+    # and the browser re-fetches this same timeline on refresh, so the cards
+    # persist (the #3272 class). The bytes never ride in the ref.
+    assert all(ref.get("storage_key") for ref in refs), refs
+
+
+async def test_reborn_v2_attachment_text_reaches_model(reborn_gateway_server):
+    """A document's extracted text is folded into the prompt the model sees."""
+    await _require_v2(reborn_gateway_server)
+    thread_id = await _create_thread_v2(reborn_gateway_server)
+
+    document = f"Internal report. {ATTACHMENT_MARKER}. End of report.".encode()
+    response = await _send_v2(
+        reborn_gateway_server,
+        thread_id,
+        "summarize the attached document",
+        [{"mime_type": "text/plain", "filename": "marker.txt", "data_base64": _b64(document)}],
+    )
+    assert response.status_code in (200, 202), response.text
+
+    reply = await _wait_for_v2_assistant_reply(reborn_gateway_server, thread_id)
+    # The mock LLM only emits this canned line when the marker (which lived
+    # only inside the uploaded file) appears in the prompt — proving the
+    # extracted text reached the model, not `[non_text_content]`.
+    assert "read the attached document text" in reply.lower(), reply
+
+
+async def test_reborn_v2_oversize_attachment_is_rejected(reborn_gateway_server):
+    """An over-budget attachment is refused with a clear status, not silently dropped."""
+    await _require_v2(reborn_gateway_server)
+    thread_id = await _create_thread_v2(reborn_gateway_server)
+
+    # 6 MiB decoded > the 5 MiB per-file budget; base64 (~8 MiB) stays under
+    # the 14 MiB body limit, so the decode-time budget check is what fires.
+    oversize = _b64(b"x" * (6 * 1024 * 1024))
+    response = await _send_v2(
+        reborn_gateway_server,
+        thread_id,
+        "too big",
+        [{"mime_type": "text/plain", "filename": "big.txt", "data_base64": oversize}],
+    )
+    assert response.status_code in (400, 413, 422), response.text
+
+
+async def test_reborn_v2_attachment_card_renders_and_survives_refresh(reborn_gateway_server, browser):
+    """The SPA stages a file, renders its card in-thread, and keeps it after reload."""
+    # Skip only when the v2 SPA isn't mounted (runtime probe), like the sibling
+    # tests — never an unconditional skip. This test drives the reborn gateway
+    # fixture (not the default `page` fixture's server), so it owns its context.
+    await _require_v2(reborn_gateway_server)
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await page.goto(f"{reborn_gateway_server}/v2/?token={AUTH_TOKEN}")
+        # Stage a file through the composer's hidden picker, then send. Target
+        # the multi-file picker specifically — a bare `input[type=file]` is
+        # ambiguous on /v2 (the Settings toolbar has one too), which could attach
+        # the file to the wrong input.
+        await page.set_input_files(
+            "input[type=file][multiple]",
+            files=[{"name": "notes.txt", "mimeType": "text/plain", "buffer": b"hello from a file"}],
+        )
+        await expect(page.get_by_text("notes.txt")).to_be_visible()
+        await page.locator('[data-testid="chat-composer"]').fill("look at the attached file")
+        await page.get_by_role("button", name="Send message").click()
+
+        # The card renders in the thread bubble...
+        await expect(page.get_by_text("notes.txt")).to_be_visible(timeout=15000)
+        # ...and survives a full reload (re-projected from the v2 timeline).
+        await page.reload()
+        await expect(page.get_by_text("notes.txt")).to_be_visible(timeout=15000)
+    finally:
+        await context.close()

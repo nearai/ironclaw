@@ -33,15 +33,15 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// Credentials extracted from Codex's `auth.json`.
 #[derive(Debug, Clone)]
-pub struct CodexCredentials {
+pub(crate) struct CodexCredentials {
     /// The bearer token (API key or ChatGPT access_token).
-    pub token: SecretString,
+    pub(crate) token: SecretString,
     /// Whether this is a ChatGPT OAuth token (vs. an OpenAI API key).
-    pub is_chatgpt_mode: bool,
+    pub(crate) is_chatgpt_mode: bool,
     /// OAuth refresh token (only present in ChatGPT mode).
-    pub refresh_token: Option<SecretString>,
+    pub(crate) refresh_token: Option<SecretString>,
     /// Path to the auth.json file (for persisting refreshed tokens).
-    pub auth_path: Option<PathBuf>,
+    pub(crate) auth_path: Option<PathBuf>,
 }
 
 impl CodexCredentials {
@@ -49,7 +49,7 @@ impl CodexCredentials {
     ///
     /// - ChatGPT mode → `https://chatgpt.com/backend-api/codex`
     /// - API key mode → `https://api.openai.com/v1`
-    pub fn base_url(&self) -> &'static str {
+    pub(crate) fn base_url(&self) -> &'static str {
         if self.is_chatgpt_mode {
             CHATGPT_BACKEND_URL
         } else {
@@ -89,7 +89,7 @@ struct RefreshResponse {
 }
 
 /// Default path used by Codex CLI: `~/.codex/auth.json`.
-pub fn default_codex_auth_path() -> PathBuf {
+pub(crate) fn default_codex_auth_path() -> PathBuf {
     let home_dir = dirs::home_dir().unwrap_or_else(|| {
         tracing::warn!(
             "Could not determine home directory; falling back to current working directory for Codex auth.json path"
@@ -104,7 +104,7 @@ pub fn default_codex_auth_path() -> PathBuf {
 ///
 /// Returns `None` if the file is missing, unreadable, or contains
 /// no usable credentials.
-pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
+pub(crate) fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -175,7 +175,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
 ///
 /// Returns `None` if the refresh token is missing, the request fails,
 /// or the response is malformed.
-pub async fn refresh_access_token(
+pub(crate) async fn refresh_access_token(
     client: &reqwest::Client,
     refresh_token: &SecretString,
     auth_path: Option<&Path>,

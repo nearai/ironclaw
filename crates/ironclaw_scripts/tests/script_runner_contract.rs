@@ -18,15 +18,17 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_process_count: Some(10),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_process_count: Some(10),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
 
     let execution = runtime
@@ -87,13 +89,15 @@ fn script_runtime_denies_budget_before_backend_execution() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_output_bytes: Some(1),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_output_bytes: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
 
     let err = runtime
@@ -132,13 +136,15 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
 
     let err = runtime
@@ -210,13 +216,15 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
 
     let err = runtime
@@ -249,13 +257,15 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(0),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(0),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("echo.say").unwrap();
 
     let err = runtime
@@ -288,13 +298,15 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(0),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(0),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let capability_id = CapabilityId::new("script.missing").unwrap();
 
     let err = runtime
@@ -362,25 +374,30 @@ impl ReleaseFailingGovernor {
 }
 
 impl ResourceGovernor for ReleaseFailingGovernor {
-    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
-        self.inner.set_limit(account, limits);
+    fn set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve(scope, estimate)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
     fn reconcile(
@@ -397,6 +414,13 @@ impl ResourceGovernor for ReleaseFailingGovernor {
     ) -> Result<ResourceReceipt, ResourceError> {
         Err(ResourceError::UnknownReservation { id: reservation_id })
     }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
+    }
 }
 
 fn script_package() -> ExtensionPackage {
@@ -408,9 +432,23 @@ fn wasm_package() -> ExtensionPackage {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn sample_scope() -> ResourceScope {
@@ -425,7 +463,7 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -434,20 +472,28 @@ trust = "untrusted"
 
 [runtime]
 kind = "script"
-backend = "docker"
+runner = "docker"
 image = "alpine:latest"
 command = "script-echo"
 args = ["--json"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;
 
-const WASM_MANIFEST: &str = r#"
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
@@ -458,10 +504,18 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;

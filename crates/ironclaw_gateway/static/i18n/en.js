@@ -217,6 +217,7 @@ I18n.register('en', {
   'logs.clientLevel': 'Client Log Level',
   'logs.pause': 'Pause',
   'logs.resume': 'Resume',
+  'logs.download': 'Download',
   'logs.clear': 'Clear',
   'logs.autoScroll': 'Auto-scroll',
   'logs.filter': 'Filter logs...',
@@ -399,6 +400,23 @@ I18n.register('en', {
 
   // Tool Permissions Tab
   'settings.tools': 'Tools',
+  'settings.traceCommons': 'Trace Commons',
+  'traceCommons.empty': 'No Trace Commons contributions yet. Once you opt in and contribute redacted traces, your credits will appear here.',
+  'traceCommons.creditsTitle': 'Trace Commons Credits',
+  'traceCommons.recentExplanations': 'Recent Credit Explanations',
+  'traceCommons.pendingCredit': 'Pending credit',
+  'traceCommons.pendingCreditDesc': 'Earned but not yet finalized',
+  'traceCommons.finalCredit': 'Final credit',
+  'traceCommons.finalCreditDesc': 'Confirmed credit',
+  'traceCommons.delayedLedger': 'Delayed ledger',
+  'traceCommons.delayedLedgerDesc': 'Can still change after review',
+  'traceCommons.submissions': 'Submissions',
+  'traceCommons.submissionsSummary': '{submitted} submitted of {total} total',
+  'traceCommons.submissionsAcceptedSuffix': ', {accepted} accepted',
+  'traceCommons.lastSynced': 'Last synced',
+  'traceCommons.lastSyncedDesc': 'Local view as of last sync',
+  'traceCommons.never': 'never',
+  'traceCommons.caveat': 'Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.',
   'tools.alwaysAllow': 'Always Allow',
   'tools.askEachTime': 'Ask Each Time',
   'tools.disabled': 'Disabled',
@@ -532,8 +550,19 @@ I18n.register('en', {
   'config.alreadySet': '(already set — leave empty to keep)',
   'config.alreadyConfigured': 'Already configured',
   'config.autoGenerate': 'Auto-generated if empty',
+  'config.optionalSection': 'Optional settings',
+  'config.optionalSectionSummary': 'Optional settings ({count})',
+  'config.requiredFieldMissing': '{name} is required.',
+  'config.invalidField': '{name} has an invalid format.',
+  'config.controlCharsNotAllowed': '{name} cannot contain control characters.',
+  'config.requiredPlaceholder': 'Required',
+  'config.optionalPlaceholder': 'Optional',
   'config.save': 'Save',
   'config.cancel': 'Cancel',
+
+  // Setup fields
+  'setup.secret.wecom_bot_id': 'Bot ID',
+  'setup.secret.wecom_bot_secret': 'Bot Secret',
 
   // Settings toolbar
   'settings.export': 'Export',
@@ -820,6 +849,7 @@ I18n.register('en', {
   'chat.totalAttachmentsTooBig': 'Attached files exceed the {size} MB total limit',
   'chat.readOnlyThread': 'Read-only thread (external channel)',
   'chat.threadCreateFailed': 'Failed to create thread: {message}',
+  'chat.runFinishedWithoutReply': 'The run finished without producing a reply. Try again, or check logs if this keeps happening.',
 
   // Common (dynamic)
   'common.copyFailed': 'Failed',

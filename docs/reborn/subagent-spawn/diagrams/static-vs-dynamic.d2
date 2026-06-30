@@ -1,0 +1,61 @@
+# What is compiled into the binary vs created per-run. Render: d2 static-vs-dynamic.d2 static-vs-dynamic.svg
+direction: right
+
+title: "Subagent spawn — static (compiled-in) vs dynamic (per-run), by owning crate" {
+  near: top-center
+  shape: text
+  style.font-size: 22
+  style.bold: true
+}
+
+static: "STATIC — compiled into the binary\nidentical in every deployment · no plugin system · no runtime swapping" {
+  style.fill: "#e8f5e9"
+  style.font-size: 16
+
+  al: "ironclaw_agent_loop  (sealed framework)" {
+    style.fill: "#ffffff"
+    fam: "subagent LoopFamily\nsealed strategy composition"
+    gate: "GateKind::AwaitDependentRun"
+  }
+  turns: "ironclaw_turns  (contracts)" {
+    style.fill: "#ffffff"
+    types: "CapabilityOutcome spawn variants ·\nLoopGateKind / LoopBlockedKind /\nBlockedReason / TurnStatus variants ·\nchildren_of + get_run_record"
+  }
+  ls: "ironclaw_loop_support  (host glue)" {
+    style.fill: "#ffffff"
+    code: "spawn-handling code ·\nprompt composition ·\nattenuation logic"
+  }
+  reborn: "ironclaw_reborn  (composition)" {
+    style.fill: "#ffffff"
+    drv: "subagent PlannedDriver +\nrun-profile -> driver binding"
+    flavors: "flavor table — general, researcher\n(direction id, tool allowlist, model, budget)"
+    md: "direction .md files  (include_str!)"
+    surf: "spawn_subagent capability\nsurface declaration"
+  }
+}
+
+dynamic: "DYNAMIC — created per spawn at runtime\none set per child run · keyed by the coordinator-minted TurnRunId · durable" {
+  style.fill: "#fff3e0"
+  style.font-size: 16
+
+  turns_d: "ironclaw_turns" {
+    style.fill: "#ffffff"
+    scope: "child TurnScope + TurnRunId\n(coordinator-minted)"
+    rec: "SubmitTurnRequest + TurnRunRecord\nparent_run_id + subagent_depth"
+    gateinst: "AwaitDependentRun gate +\nawaited child-run set"
+  }
+  reborn_d: "ironclaw_reborn" {
+    style.fill: "#ffffff"
+    goal: "goal store entries\n(per child run id, durable)"
+    resstore: "gate-resolution store\n(collected child results)"
+  }
+  ls_d: "ironclaw_loop_support" {
+    style.fill: "#ffffff"
+    allow: "per-child CapabilityAllowSet\ninstance (surface ceiling)"
+  }
+}
+
+static -> dynamic: "a spawn resolves a STATIC flavor\nthen instantiates DYNAMIC per-run state" {
+  style.font-size: 16
+  style.bold: true
+}

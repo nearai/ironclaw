@@ -113,14 +113,20 @@ classify_risk() {
 # ─── contributor tier ───────────────────────────────────────────────────────
 
 classify_contributor() {
-  # Get PR author
-  local author
-  author=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json author --jq '.author.login')
-
-  # Count merged PRs by this author in this repo
+  author=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.user.login')
   local count
-  count=$(gh pr list --repo "$REPO" --state merged --author "$author" \
-    --limit 100 --json number --jq 'length')
+  if [ -z "$author" ] || [ "$author" = "null" ]; then
+    echo "Contributor: unable to resolve PR author; defaulting to new"
+    count=0
+  else
+    # Count merged PRs by this author in this repo
+    if ! count=$(gh api --method GET "search/issues" \
+      -f q="repo:${REPO} type:pr is:merged author:${author}" \
+      --jq '.total_count') || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+      echo "Contributor: unable to query merged PR count for ${author}; defaulting to new"
+      count=0
+    fi
+  fi
 
   local label
   if   (( count == 0 )); then label="contributor: new"

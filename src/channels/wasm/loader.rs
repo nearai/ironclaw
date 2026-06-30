@@ -327,6 +327,14 @@ impl LoadedChannel {
             .map(|f| f.webhook_secret_managed_by_host())
             .unwrap_or(true)
     }
+
+    /// Get the HTTP methods the host should expose for the default webhook.
+    pub fn webhook_methods(&self) -> Vec<String> {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_methods())
+            .unwrap_or_else(|| vec!["POST".to_string()])
+    }
 }
 
 /// Results from loading multiple channels.

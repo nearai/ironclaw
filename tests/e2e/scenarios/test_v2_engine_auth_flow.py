@@ -958,10 +958,17 @@ async def _remove_skill_via_settings(page, base_url: str, skill_name: str):
     if await card.count() == 0:
         await _wait_for_skill_absent(base_url, skill_name, timeout=30.0)
         return
-    await card.locator("button", has_text="Remove").click()
-    confirm_btn = page.locator(SEL["confirm_modal_btn"])
-    await confirm_btn.wait_for(state="visible", timeout=5000)
-    await confirm_btn.click()
+    delete_button = card.locator("button", has_text="Delete")
+    if await delete_button.count() > 0:
+        async with page.expect_dialog() as dialog_info:
+            await delete_button.click()
+        dialog = await dialog_info.value
+        await dialog.accept()
+    else:
+        await card.locator("button", has_text="Remove").click()
+        confirm_btn = page.locator(SEL["confirm_modal_btn"])
+        await confirm_btn.wait_for(state="visible", timeout=5000)
+        await confirm_btn.click()
     await _wait_for_skill_absent(base_url, skill_name, timeout=90.0)
     await card.wait_for(state="detached", timeout=20000)
 

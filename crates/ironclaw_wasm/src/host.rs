@@ -1,13 +1,31 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, LazyLock, Mutex, mpsc},
+};
 
 use ironclaw_host_api::{
     CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, is_sensitive_runtime_response_header,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle,
+    is_sensitive_runtime_response_header,
 };
 use serde_json::{Map, Value};
+use tokio::runtime::Handle;
 
 use crate::WasmHostError;
+
+static WASM_HTTP_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("wasm-http-egress")
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}"))
+            })
+    });
 
 /// HTTP request shape exposed through the WIT `host.http-request` import.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,9 +175,15 @@ impl WasmRuntimeCredentialProvider for EmptyWasmRuntimeCredentials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmStagedRuntimeCredential {
     pub handle: SecretHandle,
+    pub scope: WasmStagedRuntimeCredentialScope,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
-    exact_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmStagedRuntimeCredentialScope {
+    AnyRequest,
+    ExactUrl(String),
 }
 
 impl WasmStagedRuntimeCredential {
@@ -170,9 +194,9 @@ impl WasmStagedRuntimeCredential {
     ) -> Self {
         Self {
             handle,
+            scope: WasmStagedRuntimeCredentialScope::AnyRequest,
             target,
             required,
-            exact_url: None,
         }
     }
 
@@ -184,16 +208,16 @@ impl WasmStagedRuntimeCredential {
     ) -> Self {
         Self {
             handle,
+            scope: WasmStagedRuntimeCredentialScope::ExactUrl(exact_url),
             target,
             required,
-            exact_url: Some(exact_url),
         }
     }
 
     fn matches_request(&self, request: &WasmRuntimeCredentialRequest) -> bool {
-        match &self.exact_url {
-            Some(exact_url) => exact_url == &request.url,
-            None => true,
+        match &self.scope {
+            WasmStagedRuntimeCredentialScope::AnyRequest => true,
+            WasmStagedRuntimeCredentialScope::ExactUrl(exact_url) => exact_url == &request.url,
         }
     }
 }
@@ -222,17 +246,10 @@ impl WasmRuntimeCredentialProvider for WasmStagedRuntimeCredentials {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
-        let matched = self
+        Ok(self
             .credentials
             .iter()
             .filter(|credential| credential.matches_request(request))
-            .collect::<Vec<_>>();
-        if matched.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(matched
-            .into_iter()
             .map(|credential| RuntimeCredentialInjection {
                 handle: credential.handle.clone(),
                 source: RuntimeCredentialSource::StagedObligation {
@@ -300,7 +317,7 @@ where
 
 impl<E> WasmHostHttp for WasmRuntimeHttpAdapter<E>
 where
-    E: RuntimeHttpEgress,
+    E: RuntimeHttpEgress + Clone + Send + Sync + 'static,
 {
     fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
         let method = match wasm_network_method(&request.method) {
@@ -318,6 +335,7 @@ where
             }
         };
         let body = request.body.unwrap_or_default();
+        let redacted_url_origin = redacted_http_url_origin(&request.url);
         let credential_injections =
             match self
                 .credential_provider
@@ -328,29 +346,48 @@ where
                     url: request.url.clone(),
                     headers: headers.clone(),
                 }) {
-                Ok(injections) => injections,
+                Ok(injections) => {
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url_origin = %redacted_url_origin,
+                        injection_count = injections.len(),
+                        "WASM runtime credential provider returned injections"
+                    );
+                    injections
+                }
                 Err(error) => {
                     self.discard_staged_policy();
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url_origin = %redacted_url_origin,
+                        error_kind = %std::any::type_name_of_val(&error),
+                        "WASM runtime credential provider failed"
+                    );
                     return Err(wasm_credential_provider_error(error));
                 }
             };
 
-        let response = self
-            .egress
-            .execute(RuntimeHttpEgressRequest {
-                runtime: RuntimeKind::Wasm,
-                scope: self.scope.clone(),
-                capability_id: self.capability_id.clone(),
-                method,
-                url: request.url,
-                headers,
-                body,
-                network_policy: self.network_policy.clone(),
-                credential_injections,
-                response_body_limit: self.response_body_limit,
-                timeout_ms: request.timeout_ms,
-            })
-            .map_err(wasm_http_error)?;
+        let egress = self.egress.clone();
+        let egress_request = RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: self.scope.clone(),
+            capability_id: self.capability_id.clone(),
+            method,
+            url: request.url,
+            headers,
+            body,
+            network_policy: self.network_policy.clone(),
+            credential_injections,
+            response_body_limit: self.response_body_limit,
+            save_body_to: None,
+            timeout_ms: request.timeout_ms,
+        };
+        let response = block_on_runtime_http_egress(async move {
+            egress
+                .execute(egress_request)
+                .await
+                .map_err(wasm_http_error)
+        })?;
 
         Ok(WasmHttpResponse {
             status: response.status,
@@ -358,6 +395,67 @@ where
             body: response.body,
         })
     }
+}
+
+fn block_on_runtime_http_egress<F>(future: F) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
+{
+    // WASM guest execution runs on the blocking thread pool (the host runtime
+    // dispatches `WitToolRuntime::execute` via `spawn_blocking`). Driving egress
+    // with `block_in_place` is the wrong tool here: `block_in_place` is for
+    // tokio *worker* threads, and using it would either no-op or, on a worker,
+    // park that worker for the whole HTTP round-trip — the worker-pool wedge.
+    // Route every on-runtime case through the dedicated single-thread egress
+    // runtime instead, so the synchronous guest thread blocks only on a channel
+    // recv while the actual I/O runs on its own runtime, never on a turn worker.
+    match Handle::try_current() {
+        Ok(_) => run_runtime_http_egress_on_worker(future),
+        Err(_) => run_runtime_http_egress_future(future),
+    }
+}
+
+fn run_runtime_http_egress_on_worker<F>(
+    future: F,
+) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
+{
+    let runtime = WASM_HTTP_EGRESS_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    // Spawn on the worker runtime and recover the result via the join handle on
+    // a watchdog task, so a panicking egress future maps to the same
+    // `runtime_http_egress_panicked` error the previous `block_in_place` path
+    // produced via `catch_unwind`, rather than dropping the sender and
+    // surfacing a misleading "worker stopped" error.
+    let egress = runtime.spawn(future);
+    runtime.spawn(async move {
+        let result = egress
+            .await
+            .unwrap_or_else(|_| Err(runtime_http_egress_panicked()));
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv()
+        .map_err(|_| WasmHostError::Failed("WASM HTTP runtime worker stopped".to_string()))?
+}
+
+fn run_runtime_http_egress_future<F>(future: F) -> Result<RuntimeHttpEgressResponse, WasmHostError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>>,
+{
+    let runtime = WASM_HTTP_EGRESS_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    catch_unwind(AssertUnwindSafe(|| runtime.block_on(future)))
+        .map_err(|_| runtime_http_egress_panicked())?
+}
+
+fn runtime_http_egress_panicked() -> WasmHostError {
+    tracing::error!("WASM runtime HTTP egress future panicked");
+    WasmHostError::Failed("runtime_http_egress_panicked".to_string())
 }
 
 fn wasm_network_method(method: &str) -> Result<NetworkMethod, WasmHostError> {
@@ -452,6 +550,22 @@ fn wasm_http_error_reason(error: &RuntimeHttpEgressError) -> &'static str {
 
 fn wasm_credential_provider_error(_error: WasmHostError) -> WasmHostError {
     WasmHostError::Unavailable("credential_unavailable".to_string())
+}
+
+fn redacted_http_url_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<invalid-url>".to_string();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if host.trim().is_empty() {
+        "<missing-host>"
+    } else {
+        host.trim()
+    };
+    format!("{scheme}://{host}")
 }
 
 pub trait WasmHostWorkspace: Send + Sync {
@@ -576,5 +690,23 @@ impl WitToolHost {
 impl Default for WitToolHost {
     fn default() -> Self {
         Self::deny_all()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_http_url_origin;
+
+    #[test]
+    fn redacted_http_url_origin_drops_path_query_and_fragment() {
+        assert_eq!(
+            redacted_http_url_origin("https://api.example.test/v1/messages?token=secret#frag"),
+            "https://api.example.test"
+        );
+        assert_eq!(
+            redacted_http_url_origin("https://user:secret@example.com:8443/path"),
+            "https://example.com:8443"
+        );
+        assert_eq!(redacted_http_url_origin("not a url"), "<invalid-url>");
     }
 }

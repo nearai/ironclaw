@@ -5,17 +5,18 @@
 //! semantics, stream-key partitioning, redaction guarantees on event
 //! constructors, and best-effort sink delivery.
 
+use async_trait::async_trait;
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor,
-    EventError, EventSink, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
-    InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEvent, RuntimeEventKind,
-    parse_jsonl, replay_jsonl, sanitize_error_kind,
+    EventError, EventLogEntry, EventReplay, EventSink, EventStreamKey, InMemoryAuditSink,
+    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEvent,
+    RuntimeEventKind, parse_jsonl, replay_jsonl, sanitize_error_kind,
 };
 use ironclaw_host_api::{
-    Action, ActionSummary, AgentId, ApprovalRequest, ApprovalRequestId, AuditEnvelope,
-    CapabilityId, CorrelationId, DenyReason, ExecutionContext, ExtensionId, InvocationId,
-    MountView, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind, TenantId,
-    UserId,
+    Action, ActionSummary, AgentId, ApprovalDecisionKind, ApprovalRequest, ApprovalRequestId,
+    AuditEnvelope, CapabilityId, CorrelationId, DenyReason, ExecutionContext, ExtensionId,
+    InvocationId, MountView, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind,
+    TenantId, UserId,
 };
 
 fn capability_id() -> CapabilityId {
@@ -639,7 +640,7 @@ async fn approval_audit_records_partition_by_stream_key() {
         &alice_scope,
         &alice_request,
         Principal::User(alice_scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
     let bob_request = ApprovalRequest {
         id: ApprovalRequestId::new(),
@@ -657,7 +658,7 @@ async fn approval_audit_records_partition_by_stream_key() {
         &bob_scope,
         &bob_request,
         Principal::User(bob_scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
 
     log.append(alice_audit).await.expect("alice audit");
@@ -714,7 +715,7 @@ async fn approval_audit_envelope_serialization_excludes_raw_reason_and_fingerpri
         &scope,
         &request,
         Principal::User(scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
 
     let serialized = serde_json::to_string(&envelope).expect("serialize");
@@ -855,6 +856,19 @@ async fn replay_jsonl_with_zero_limit_is_rejected() {
 }
 
 #[tokio::test]
+async fn replay_jsonl_rejects_malformed_line_rather_than_silently_skipping() {
+    let scope = local_scope("alice", Some("default"));
+    let event = RuntimeEvent::dispatch_requested(scope, capability_id());
+    let mut bytes = serde_json::to_vec(&event).expect("serialize event");
+    bytes.push(b'\n');
+    bytes.extend_from_slice(b"something not even json\n");
+
+    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
+        replay_jsonl(&bytes, None, 1);
+    assert!(matches!(result, Err(EventError::Serialize { .. })));
+}
+
+#[tokio::test]
 async fn replay_jsonl_with_future_cursor_returns_replay_gap() {
     // Symmetric to the in-memory log: a JSONL-backed durable log must not
     // silently echo a cursor beyond the file head. Without this, a future
@@ -895,6 +909,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         timestamp: chrono::Utc::now(),
         kind: RuntimeEventKind::DispatchFailed,
         scope,
+        parent_invocation_id: None,
         capability_id: capability_id(),
         provider: Some(extension_id()),
         runtime: Some(RuntimeKind::Wasm),
@@ -903,6 +918,12 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         // Free-form raw text with a path-like fragment — exactly what the
         // redaction invariant forbids in durable storage.
         error_kind: Some("/Users/alice/token=secret raw error".to_string()),
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
     };
 
     let json = serde_json::to_string(&event).expect("serialize");
@@ -991,6 +1012,116 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
     );
 }
 
+// ─── default append_batch partial-failure contract ───────────────────────────
+
+/// Minimal [`DurableEventLog`] whose `append` succeeds for the first
+/// `succeed_count` calls and fails for every subsequent call.  `append_batch`
+/// is deliberately NOT overridden so the test exercises the default
+/// implementation in [`DurableEventLog`].
+struct PartialFailLog {
+    call_count: std::sync::atomic::AtomicUsize,
+    succeed_count: usize,
+}
+
+impl PartialFailLog {
+    fn new(succeed_count: usize) -> Self {
+        Self {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            succeed_count,
+        }
+    }
+}
+
+#[async_trait]
+impl DurableEventLog for PartialFailLog {
+    async fn append(&self, event: RuntimeEvent) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        let n = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.succeed_count {
+            Ok(EventLogEntry {
+                cursor: EventCursor::new(n as u64 + 1),
+                record: event,
+            })
+        } else {
+            Err(EventError::DurableLog {
+                reason: "injected failure".to_string(),
+            })
+        }
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        _after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "not implemented in test mock".to_string(),
+        })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        Err(EventError::DurableLog {
+            reason: "not implemented in test mock".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn durable_event_log_append_batch_keeps_prefix_on_mid_batch_error() {
+    // The default `append_batch` loops `append` one-at-a-time and collects a
+    // per-event Result in input order.  A failure at position K must not
+    // silently discard results[0..K]; the successful prefix must survive and
+    // results must cover the entire input.
+    const K: usize = 3; // first K appends succeed
+    const N: usize = 5; // total events in the batch
+
+    let log = PartialFailLog::new(K);
+    let scope = local_scope("alice", Some("default"));
+
+    let events: Vec<RuntimeEvent> = (0..N)
+        .map(|_| RuntimeEvent::dispatch_requested(scope.clone(), capability_id()))
+        .collect();
+    let event_ids: Vec<_> = events.iter().map(|e| e.event_id).collect();
+
+    let results = log.append_batch(events).await;
+
+    // Result vec must have one entry per input event.
+    assert_eq!(
+        results.len(),
+        N,
+        "result vec length must equal input length"
+    );
+
+    // Successful prefix [0..K]: Ok, in input order, records preserved.
+    for (i, result) in results[..K].iter().enumerate() {
+        let entry = result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("results[{i}] expected Ok, got Err: {e}"));
+        assert_eq!(
+            entry.record.event_id, event_ids[i],
+            "results[{i}] must carry the event at position {i} in input order"
+        );
+    }
+
+    // Position K is the first failure.
+    assert!(
+        results[K].is_err(),
+        "results[K={K}] must be Err (first injected failure)"
+    );
+
+    // Positions beyond K are also failures (mock returns Err for all n >= K).
+    for (i, result) in results.iter().enumerate().skip(K + 1) {
+        assert!(result.is_err(), "results[{i}] must be Err");
+    }
+}
+
 #[tokio::test]
 async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some() {
     // Filter is a tightening, never a permissive default: a record with
@@ -1028,5 +1159,116 @@ async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some(
     assert_eq!(
         replay.entries[0].record.scope.project_id,
         scope_with_project.project_id
+    );
+}
+
+// ─── head_cursor (PR #3931, Hole 1 replay/live boundary) ─────────────────────
+
+#[tokio::test]
+async fn head_cursor_reports_latest_appended_cursor() {
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    // Empty stream: head is origin.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head of empty stream"),
+        EventCursor::origin()
+    );
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append");
+    }
+
+    // Head is the cursor of the most recently appended record, regardless of
+    // any deeper-scope filtering (it is a whole-stream property).
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head after 3 appends"),
+        EventCursor::new(3)
+    );
+    // Probing from a valid mid-stream cursor still returns the true head.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::new(2))
+            .await
+            .expect("head from mid-stream cursor"),
+        EventCursor::new(3)
+    );
+}
+
+#[tokio::test]
+async fn head_cursor_snapshot_classifies_later_appends_as_live() {
+    // Atomicity contract (PR #3931, Hole 1): a record appended *after*
+    // `head_cursor` returns must receive a cursor strictly greater than the
+    // observed `startup_head`, so it is classified live and never folded into
+    // the replay window. A non-atomic draining head would race and risk
+    // absorbing the later append into the snapshot.
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("seed append");
+    }
+
+    // Snapshot the head at "subscription start".
+    let startup_head = log
+        .head_cursor(&stream, EventCursor::origin())
+        .await
+        .expect("head snapshot");
+    assert_eq!(startup_head, EventCursor::new(3));
+
+    // A record appended strictly after the snapshot is observed.
+    let live = log
+        .append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("live append");
+
+    assert!(
+        live.cursor.as_u64() > startup_head.as_u64(),
+        "post-snapshot append (cursor {}) must be strictly greater than startup_head ({}) so it is classified live, not replay",
+        live.cursor.as_u64(),
+        startup_head.as_u64()
+    );
+}
+
+#[tokio::test]
+async fn head_cursor_rejects_cursor_beyond_head_as_replay_gap() {
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability_id(),
+    ))
+    .await
+    .expect("append");
+
+    // Probing from a cursor past the head must surface a ReplayGap rather than
+    // silently echoing a head the stream never issued.
+    let err = log
+        .head_cursor(&stream, EventCursor::new(99))
+        .await
+        .expect_err("future cursor must be rejected");
+    assert!(
+        matches!(err, EventError::ReplayGap { .. }),
+        "expected ReplayGap, got {err:?}"
     );
 }

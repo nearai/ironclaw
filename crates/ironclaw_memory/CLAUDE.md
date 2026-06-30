@@ -1,13 +1,33 @@
 # ironclaw_memory guardrails
 
-- Own memory/workspace document repository seams, `/memory` virtual path grammar, memory backend plugin contracts, memory-document filesystem adapters, and indexer hook boundaries.
-- Depend on `ironclaw_host_api` and `ironclaw_filesystem`; do not move generic mount/catalog logic here.
-- Memory backends are plugins behind host-resolved scope. They must not infer broader tenant/user/project authority or bypass mount/scoped filesystem checks.
-- Do not depend on product workflow, dispatcher, concrete runtimes, approvals, run-state, secrets, network, process, events, or extension crates.
-- Keep semantic search, chunking, embeddings, and versioning behind memory-owned repository/indexer abstractions; do not put them in `ironclaw_filesystem`.
-- Reuse-first rule: port/adapt the current working workspace implementation (`src/workspace/*`, `src/db/libsql/workspace.rs`, migrations) rather than inventing parallel memory DB/chunk/version/search behavior.
-- PostgreSQL/libSQL repository adapters should preserve the existing `memory_documents`, `memory_chunks`, `memory_chunks_fts`, and `memory_document_versions` table shapes. Chunk/search/version updates remain explicit memory-owned indexer/service work.
-- Metadata/search behavior should stay reuse-first: preserve current `DocumentMetadata`, `.config` inheritance, `skip_indexing`, `skip_versioning`, schema validation, FTS query escaping, embedding vector storage, RRF/weighted hybrid search fusion, and version hash semantics unless deliberately changed with tests/docs.
-- Capability declarations (`MemoryBackendCapabilities`) are enforcement inputs: unsupported file/search behavior must fail closed before backend side effects.
-- Preserve tenant/user/project scope on every path parse and repository operation.
-- Treat `_none` as the virtual path sentinel for absent project ids; never store it as a real project id.
+This is the **provider-neutral memory contract** crate for IronClaw Reborn. It
+owns the host-facing memory vocabulary and nothing else:
+
+- The `MemoryService` trait and its operation request/response DTOs.
+- Memory document value types: `MemoryDocumentScope`, `MemoryDocumentPath`,
+  `MemoryContext`, and the `/memory` path grammar + validation.
+- Prompt-write-safety vocabulary (operation, source, severity, reason codes,
+  policy trait, event-sink contract).
+- Memory significant-event / audit contracts.
+
+Rules:
+
+- Keep this crate provider-neutral. Do **not** add a concrete provider
+  implementation, storage backend, filesystem adapter, chunking, search,
+  indexer, or the prompt-safety enforcement engine here — those live in
+  provider crates such as `ironclaw_memory_native`.
+- Among **internal IronClaw crates**, depend only on `ironclaw_host_api`. Neutral
+  third-party crates (`serde`, `serde_json`, `async-trait`, `chrono-tz`, `sha2`,
+  `tracing`) are fine — they are the contract's serialization / async-trait /
+  boundary-validation substrate, the same crates `ironclaw_host_api` itself
+  depends on. Do **not** depend on `ironclaw_filesystem`, `ironclaw_safety`, host
+  composition, dispatch, approvals, run-state, secrets, network, process, events,
+  or extension crates. A provider crate depends on this crate, never the reverse.
+- Value-type constructors validate at the boundary (e.g.
+  `MemoryDocumentPath::from_scope` re-validates the relative path). Do not add
+  unchecked public constructors that let a caller in another crate build a
+  malformed value.
+- Validation is fail-closed and stable: invalid scopes, paths, or context
+  values must error rather than be silently coerced.
+- Fast local check: `cargo test -p ironclaw_memory`. Boundary check after
+  dependency/API changes: `cargo test -p ironclaw_architecture`.

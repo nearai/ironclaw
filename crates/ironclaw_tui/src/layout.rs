@@ -2,6 +2,7 @@
 //!
 //! Layout is loaded from `tui/layout.json` in the workspace directory.
 //! If the file doesn't exist, sensible defaults are used.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -191,7 +192,7 @@ impl Default for ConversationConfig {
 
 /// Where widgets can be placed in the TUI layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TuiSlot {
+pub(crate) enum TuiSlot {
     Header,
     StatusBarLeft,
     StatusBarCenter,

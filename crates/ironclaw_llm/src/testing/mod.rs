@@ -42,7 +42,7 @@ pub fn nearai_test_config(model: impl Into<String>) -> crate::config::LlmConfig 
         provider: None,
         bedrock: None,
         gemini_oauth: None,
-        request_timeout_secs: 120,
+        request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
         cheap_model: None,
         smart_routing_cascade: true,
         openai_codex: None,
@@ -53,6 +53,24 @@ pub fn nearai_test_config(model: impl Into<String>) -> crate::config::LlmConfig 
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     }
+}
+
+/// Test-only public door to the internal decorator-chain assembler.
+///
+/// `apply_decorator_chain` is `pub(crate)` — production assembles the chain
+/// internally and it is not directly callable cross-crate. This wrapper function,
+/// gated to test builds (the `testing` feature or `cfg(test)`), is the sole
+/// cross-crate entry point: it forwards directly to `apply_decorator_chain`,
+/// letting a test harness inject a scripted raw provider beneath the real
+/// decorator chain without widening the production API. (A `pub use` re-export
+/// of a `pub(crate)` item fails E0364; hence a forwarding wrapper rather than a
+/// re-export.)
+pub async fn provider_chain_over(
+    raw: std::sync::Arc<dyn crate::provider::LlmProvider>,
+    config: &crate::config::LlmConfig,
+    session: std::sync::Arc<crate::session::SessionManager>,
+) -> Result<std::sync::Arc<dyn crate::provider::LlmProvider>, crate::error::LlmError> {
+    crate::apply_decorator_chain(raw, config, session).await
 }
 
 use std::sync::Arc;
@@ -230,6 +248,7 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -252,6 +271,7 @@ impl LlmProvider for StubLlm {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }

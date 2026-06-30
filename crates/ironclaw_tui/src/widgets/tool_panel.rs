@@ -12,12 +12,12 @@ use crate::theme::Theme;
 
 use super::{AppState, ToolStatus, TuiWidget};
 
-pub struct ToolPanelWidget {
+pub(crate) struct ToolPanelWidget {
     theme: Theme,
 }
 
 impl ToolPanelWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 }

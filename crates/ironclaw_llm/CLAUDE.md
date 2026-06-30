@@ -11,6 +11,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `error.rs` | `LlmError` enum used by all providers |
 | `provider.rs` | `LlmProvider` trait, `ChatMessage`, `ToolCall`, `CompletionRequest`, `sanitize_tool_messages` |
 | `nearai_chat.rs` | NEAR AI Chat Completions provider (dual auth: session token or API key) |
+| `nearai_tool_message_flattening.rs` | NEAR AI compatibility rewrite for tool-call history |
 | `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
 | `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
@@ -34,6 +35,8 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
+| `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
+| `tool_args.rs` | Shared sub-step primitives for provider tool-call parsing: fail-loud and silent-fallback JSON arg parsing, ordered reasoning-field probe (Layer 2 of RC3/M9 framework) |
 | `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
 | `image_models.rs` | Image-generation model metadata table |
@@ -63,6 +66,7 @@ Codex auth reuse:
 - If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
 - If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
+- In ChatGPT mode the `/models` list is gated by the reported Codex `client_version`. It is auto-detected from the installed `codex` binary (`codex --version`), falling back to a bundled default. A stale value silently hides newer models (e.g. `gpt-5.5`) the account is entitled to.
 
 ## AWS Bedrock Provider
 
@@ -104,13 +108,15 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Session renewal is interactive:** When `SessionExpired` triggers renewal, it blocks and prompts the user in the terminal (GitHub/Google OAuth or manual API key entry). This is unsuitable for headless/hosted deployments — set `NEARAI_SESSION_TOKEN` env var instead.
 
-**Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true`, converting tool results to user messages with `[Tool result from <name>]: <content>` format. Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
+**Tool message flattening:** Current NEAR AI cloud-api deployments support standard Chat Completions tool history, including assistant `tool_calls` followed by `role: "tool"` results. `nearai_chat.rs` therefore defaults `flatten_tool_messages = false`. The legacy compatibility rewrite remains opt-in via `NearAiChatProvider::new_with_options(..., true, ...)` for old OpenAI-compatible deployments that reject tool-role messages. That rewrite drops assistant messages that only carry provider tool-call protocol and turns tool results into user-side observations using the shared `ironclaw_common::provider_transcript` grammar (`Tool result from <name>: <content>`), which should not be used on compliant endpoints.
 
 **Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter::convert_tools` and `openai_codex_provider.rs` continue to use the stricter OpenAI policy.
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
-**HTTP request timeout:** The NEAR AI HTTP client has a 120-second timeout per request. Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
+**HTTP request timeout:** The NEAR AI HTTP client has a 60-second timeout per request (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). This is kept below the Reborn runner lease (90 s) so the HTTP layer fails a hung request before the lease reclaims the runner. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
+
+**Shared client timeout hygiene:** Every production reqwest client in this crate is built via `config::hardened_client_builder(request_timeout_secs)`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). The total request timeout stays a per-call argument so turn-model calls use `DEFAULT_REQUEST_TIMEOUT_SECS` (< lease) while auxiliary calls (OAuth/token exchange, transcription) keep their own budgets. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these four settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
 
 ## Circuit Breaker
 
@@ -220,16 +226,16 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log
 
-**Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.3-codex`), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
+**Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.5` — must be a model the ChatGPT account is entitled to; codex-only slugs like `gpt-5.3-codex` are rejected with HTTP 400 in subscription mode), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `mod.rs` is the single source of truth for assembling decorators. It creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then applies all decorators inline:
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider
   → RetryProvider           (per-provider backoff; wraps both primary and fallback)
-  → SmartRoutingProvider    (cheap/primary split when NEARAI_CHEAP_MODEL is set)
+  → SmartRoutingProvider    (cheap/primary split when `cheap_model_name()` is non-None; resolves `LLM_CHEAP_MODEL` first, then `NEARAI_CHEAP_MODEL` as NearAI-only fallback)
   → FailoverProvider        (fallback model; only when NEARAI_FALLBACK_MODEL is set)
   → CircuitBreakerProvider  (fast-fail; only when LLM_CIRCUIT_BREAKER_THRESHOLD is set)
   → CachedProvider          (response cache; only when LLM_RESPONSE_CACHE_ENABLED=true)

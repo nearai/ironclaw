@@ -14,6 +14,27 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
 
+## Testing Discipline
+
+Two rules are non-negotiable for **all** tests:
+
+1. **Test-first.** Every new feature and every bug fix starts in the
+   tests — write or update the test that pins the behavior, watch it
+   fail for the right reason, *then* change the implementation. Red,
+   then green. (The commit-msg hook already requires a regression test
+   with every fix; this is the ordering.)
+2. **Consolidate, don't proliferate.** Extensive coverage of every code
+   path, with minimal overlap. If a test already exercises most of the
+   path, **extend it** (a case, an assertion, a scripted turn) — do not
+   stand up a redundant new "extensive" test that overloads the suite.
+   Add a new test only for a genuinely distinct scenario, and say why an
+   existing one couldn't absorb it.
+
+Where to look: hard rules (tiers, test-through-the-caller,
+regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
+integration tests** authoring guide in `tests/support/reborn/CLAUDE.md`;
+Python/Playwright suite in `tests/e2e/CLAUDE.md`.
+
 ## Code Style
 
 - Prefer `crate::` for cross-module imports; `super::` is fine in tests and intra-module refs
@@ -232,10 +253,13 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/channels/web/` | `src/channels/web/CLAUDE.md` |
 | `src/db/` | `src/db/CLAUDE.md` |
 | `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
+| `crates/ironclaw_embeddings/` | `crates/ironclaw_embeddings/AGENTS.md` |
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
 | `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
+| `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
+| `tests/support/reborn/` | `tests/support/reborn/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

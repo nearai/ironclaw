@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub raw API output",
+  "description": "GitHub API JSON response returned by the capability. Shape depends on operation and GitHub endpoint.",
+  "type": [
+    "object",
+    "array",
+    "string",
+    "null"
+  ],
+  "additionalProperties": true
+}

@@ -431,7 +431,7 @@ pub async fn execute_action_calls(
                     .unwrap_or(crate::gate::ResumeKind::Approval {
                         allow_always: false,
                     }),
-                    resume_output: result.output.get("resume_output").cloned(),
+                    resume_output: result.output.get("resume_output").cloned().map(Box::new),
                     paused_lease: result
                         .output
                         .get("paused_lease")
@@ -940,6 +940,7 @@ mod tests {
             thread_goal: Some(thread.goal.clone()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: crate::gate::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -1095,7 +1096,10 @@ mod tests {
 
         if let Some(EventKind::ActionFailed { call_id, error, .. }) = result.events.first() {
             assert_eq!(call_id, "call_no_lease_123");
-            assert!(error.contains("no lease"));
+            assert!(
+                error.contains("no lease"),
+                "expected error message to mention 'no lease', got: {error}"
+            );
         } else {
             panic!("expected ActionFailed event");
         }

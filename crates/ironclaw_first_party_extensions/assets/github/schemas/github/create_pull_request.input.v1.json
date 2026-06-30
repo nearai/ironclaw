@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_pull_request input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Pull request title. Required unless issue is supplied to convert an existing issue into a pull request."
+    },
+    "head": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Head branch or ref."
+    },
+    "base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Base branch."
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Pull request body."
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Existing issue number to convert into a pull request."
+    },
+    "head_repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository where the head branch lives for same-organization cross-repository pull requests."
+    },
+    "maintainer_can_modify": {
+      "type": "boolean",
+      "description": "Whether maintainers may modify the pull request branch."
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "head",
+    "base"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "title"
+      ]
+    },
+    {
+      "required": [
+        "issue"
+      ]
+    }
+  ]
+}

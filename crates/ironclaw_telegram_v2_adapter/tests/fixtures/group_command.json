@@ -1,0 +1,11 @@
+{
+    "update_id": 500,
+    "message": {
+        "message_id": 70,
+        "date": 1700000000,
+        "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+        "chat": {"id": -42, "type": "supergroup"},
+        "text": "/help@ironclaw_bot",
+        "entities": [{"type": "bot_command", "offset": 0, "length": 18}]
+    }
+}

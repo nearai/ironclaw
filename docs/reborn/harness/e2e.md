@@ -51,7 +51,7 @@ Extension manifests
 
 Required assertions across the suite:
 
-- visible capability surfaces include expected descriptors and stable surface version;
+- visible capability surfaces include expected visible capabilities and stable surface version;
 - health reports missing runtime backends fail-closed and configured backends ready;
 - authorized invocations reach the selected runtime adapter;
 - resource reservations are reconciled or released;

@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets format_cells",
+  "description": "Format cells in a range.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "sheet_id",
+    "start_row",
+    "end_row",
+    "start_column",
+    "end_column"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "sheet_id": {
+      "type": "integer",
+      "description": "Numeric sheet ID."
+    },
+    "start_row": {
+      "type": "integer",
+      "description": "Start row, zero-indexed inclusive."
+    },
+    "end_row": {
+      "type": "integer",
+      "description": "End row, zero-indexed exclusive."
+    },
+    "start_column": {
+      "type": "integer",
+      "description": "Start column, zero-indexed inclusive."
+    },
+    "end_column": {
+      "type": "integer",
+      "description": "End column, zero-indexed exclusive."
+    },
+    "bold": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Bold text."
+    },
+    "italic": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Italic text."
+    },
+    "font_size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Font size."
+    },
+    "text_color": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Text color hex."
+    },
+    "background_color": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Background color hex."
+    },
+    "horizontal_alignment": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Horizontal alignment."
+    },
+    "number_format": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Number format pattern."
+    },
+    "number_format_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Number format type."
+    }
+  },
+  "additionalProperties": false
+}

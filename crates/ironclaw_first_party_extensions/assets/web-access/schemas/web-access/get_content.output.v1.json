@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "response_id": {
+      "type": "string"
+    },
+    "query": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string"
+    },
+    "content": {
+      "type": "string"
+    }
+  },
+  "required": ["response_id", "query", "title", "url", "content"],
+  "additionalProperties": false
+}

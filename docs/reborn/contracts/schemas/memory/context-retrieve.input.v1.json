@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/context-retrieve.input.v1.json",
+  "title": "Memory Context Retrieve Input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query", "limit"],
+  "properties": {
+    "query": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+    "scope": { "type": "object", "additionalProperties": true }
+  }
+}

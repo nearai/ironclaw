@@ -1,22 +1,20 @@
 name: Live Canary
+run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
-  # Every job's `if:` guard matches the one cron below. Adding a new
-  # scheduled slot means also updating those guards, so keep this
-  # block and the job conditions in lockstep.
+  # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
+  # Legacy canary lanes remain available through workflow_dispatch for
+  # manual diagnosis, but do not run on cron.
   schedule:
-    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
-    # jobs in the same workflow run; one run = one red dot on failure,
-    # one notification, one place to drill into per-lane status.
-    # Job-level `if:` guards below all match this cron.
-    - cron: "0 */6 * * *"
+    # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       lane:
         description: "Lane to run"
         type: choice
         required: true
-        default: public-smoke
+        default: reborn-webui-v2-live-qa
         options:
           - all
           - deterministic-replay
@@ -32,18 +30,34 @@ on:
           - auth-live-seeded
           - auth-browser-consent
           - workflow-canary
+          - reborn-webui-v2-live-qa
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
         type: string
         required: false
         default: ""
       cases:
-        description: "Optional comma-separated provider list for auth live lanes"
+        description: "Optional comma-separated case/provider list for Python live canary lanes. Use all for the full Reborn WebUI v2 QA suite."
         required: false
         default: ""
         type: string
       previous_ref:
         description: "Previous release/tag for upgrade-canary"
+        type: string
+        required: false
+        default: ""
+      target_ref:
+        description: "Optional ref/SHA for the Reborn WebUI v2 live QA checkout. Used by /canary PR comments."
+        type: string
+        required: false
+        default: ""
+      target_pr:
+        description: "Optional pull request number for validating target_ref before running Reborn WebUI v2 live QA with secrets."
+        type: string
+        required: false
+        default: ""
+      trigger_context:
+        description: "Optional run label supplied by ChatOps dispatchers."
         type: string
         required: false
         default: ""
@@ -66,8 +80,7 @@ jobs:
   auth-smoke:
     name: Auth Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -98,8 +111,7 @@ jobs:
   auth-full:
     name: Auth Full
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -130,8 +142,7 @@ jobs:
   auth-channels:
     name: Auth Channels
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -162,8 +173,7 @@ jobs:
   auth-live-seeded:
     name: Auth Live Seeded
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -252,8 +262,7 @@ jobs:
   auth-browser-consent:
     name: Auth Browser Consent
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -354,8 +363,7 @@ jobs:
   workflow-canary:
     name: Workflow Canary
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -409,9 +417,8 @@ jobs:
   deterministic-replay:
     name: Deterministic Replay
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' &&
-      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -450,8 +457,7 @@ jobs:
   public-smoke:
     name: Public Live Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -493,17 +499,261 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 14
 
+  reborn-webui-v2-live-qa:
+    name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_id: qa-2
+            shard_name: QA 2
+            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
+          - shard_id: qa-3
+            shard_name: QA 3
+            cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery
+          - shard_id: qa-4
+            shard_name: QA 4
+            cases: qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat,qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery
+          - shard_id: qa-5
+            shard_name: QA 5
+            cases: qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer
+          - shard_id: qa-6
+            shard_name: QA 6
+            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
+          - shard_id: qa-7
+            shard_name: QA 7
+            cases: qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery
+          - shard_id: qa-8
+            shard_name: QA 8
+            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+    env:
+      REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
+      REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
+      REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
+      IRONCLAW_REBORN_GOOGLE_CLIENT_ID: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID || secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI: ${{ vars.IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI || vars.GOOGLE_OAUTH_REDIRECT_URI }}
+      IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT: ${{ vars.IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT || vars.GOOGLE_ALLOWED_HD }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
+      LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
+      LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL || 'Qwen/Qwen3.5-122B-A10B' }}
+    steps:
+      - name: Resolve Reborn WebUI v2 live QA cases
+        id: resolve_reborn_webui_v2_cases
+        shell: bash
+        env:
+          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          SHARD_CASES: ${{ matrix.cases }}
+          ALL_SHARD_CASES: >-
+            qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
+            qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery,
+            qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat,qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery,
+            qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
+            qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
+            qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery,
+            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+        run: |
+          set -euo pipefail
+          cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
+          if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
+            echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=matrix-shard" >> "${GITHUB_ENV}"
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            echo "CASES=${cases:-<default>} requested; running shard cases: ${SHARD_CASES}"
+          else
+            selected=()
+            IFS=',' read -ra requested_cases <<< "${cases}"
+            IFS=',' read -ra shard_cases <<< "${SHARD_CASES}"
+            IFS=',' read -ra all_cases <<< "${ALL_SHARD_CASES}"
+            for requested in "${requested_cases[@]}"; do
+              requested="$(echo "${requested}" | xargs)"
+              [[ -n "${requested}" ]] || continue
+              known=0
+              for known_case in "${all_cases[@]}"; do
+                known_case="$(echo "${known_case}" | xargs)"
+                if [[ "${requested}" == "${known_case}" ]]; then
+                  known=1
+                  break
+                fi
+              done
+              if [[ ${known} -ne 1 ]]; then
+                echo "::error::Unknown Reborn WebUI v2 live QA case: ${requested}"
+                exit 1
+              fi
+              for shard_case in "${shard_cases[@]}"; do
+                if [[ "${requested}" == "${shard_case}" ]]; then
+                  selected+=("${requested}")
+                  break
+                fi
+              done
+            done
+            if [[ ${#selected[@]} -eq 0 ]]; then
+              echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested-not-in-shard" >> "${GITHUB_ENV}"
+              echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+              echo "Requested cases do not belong to this shard; skipping."
+            else
+              joined="$(IFS=,; echo "${selected[*]}")"
+              echo "CASES=${joined}" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested-filtered" >> "${GITHUB_ENV}"
+              echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+              echo "Running requested cases in this shard: ${joined}"
+            fi
+          fi
+      - name: Validate Reborn WebUI v2 live QA target ref
+        id: validate_reborn_webui_v2_target
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' && github.event_name == 'workflow_dispatch' && inputs.target_ref != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_PR: ${{ inputs.target_pr }}
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_ref must be a full commit SHA for reborn-webui-v2-live-qa."
+            exit 1
+          fi
+          if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ ]]; then
+            echo "::error::target_pr is required when target_ref is supplied for reborn-webui-v2-live-qa."
+            exit 1
+          fi
+          pr_json="$(gh pr view "${TARGET_PR}" --repo "${REPO}" --json isCrossRepository,headRefOid)"
+          is_cross_repository="$(jq -r '.isCrossRepository' <<< "${pr_json}")"
+          head_sha="$(jq -r '.headRefOid' <<< "${pr_json}")"
+          if [[ "${is_cross_repository}" == "true" ]]; then
+            echo "::error::Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR."
+            exit 1
+          fi
+          if [[ "${head_sha}" != "${TARGET_REF}" ]]; then
+            echo "::error::target_ref does not match PR #${TARGET_PR} head SHA."
+            exit 1
+          fi
+          echo "checkout_ref=${TARGET_REF}" >> "${GITHUB_OUTPUT}"
+      - name: Resolve default Reborn WebUI v2 live QA checkout ref
+        id: default_reborn_webui_v2_target
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' && (github.event_name != 'workflow_dispatch' || inputs.target_ref == '')
+        run: |
+          echo "checkout_ref=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        with:
+          persist-credentials: false
+          ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref || steps.default_reborn_webui_v2_target.outputs.checkout_ref }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        with:
+          targets: wasm32-wasip2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        with:
+          key: live-canary-reborn-webui-v2-live-qa
+      - name: Install cargo-component
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        run: ./scripts/build-wasm-extensions.sh --channels
+      - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        shell: bash
+        env:
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY || secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          LIVE_OPENAI_COMPATIBLE_API_KEY: ${{ secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          IRONCLAW_REBORN_SLACK_SIGNING_SECRET: ${{ secrets.IRONCLAW_REBORN_SLACK_SIGNING_SECRET }}
+          IRONCLAW_REBORN_SLACK_BOT_TOKEN: ${{ secrets.IRONCLAW_REBORN_SLACK_BOT_TOKEN }}
+          IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET || secrets.GOOGLE_CLIENT_SECRET || secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
+          AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
+          AUTH_LIVE_GITHUB_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN || secrets.LIVE_CANARY_GITHUB_TOKEN || github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.LIVE_CANARY_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET || secrets.LIVE_CANARY_TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          set +x
+          set -euo pipefail
+          secret_dir="${RUNNER_TEMP}/reborn-webui-v2-live-qa-secrets"
+          mkdir -p "${secret_dir}"
+          chmod 700 "${secret_dir}"
+          write_secret() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            local path="${secret_dir}/${name}"
+            printf '%s' "${value}" > "${path}"
+            chmod 600 "${path}"
+            echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
+          }
+          write_secret "NEARAI_API_KEY" "${NEARAI_API_KEY:-}"
+          write_secret "LIVE_OPENAI_COMPATIBLE_API_KEY" "${LIVE_OPENAI_COMPATIBLE_API_KEY:-}"
+          write_secret "IRONCLAW_REBORN_SLACK_SIGNING_SECRET" "${IRONCLAW_REBORN_SLACK_SIGNING_SECRET:-}"
+          write_secret "IRONCLAW_REBORN_SLACK_BOT_TOKEN" "${IRONCLAW_REBORN_SLACK_BOT_TOKEN:-}"
+          write_secret "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET" "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}"
+          write_secret "AUTH_LIVE_GOOGLE_ACCESS_TOKEN" "${AUTH_LIVE_GOOGLE_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_GOOGLE_REFRESH_TOKEN" "${AUTH_LIVE_GOOGLE_REFRESH_TOKEN:-}"
+          write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
+          write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
+          write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
+      - name: Run Reborn WebUI v2 live QA lane
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        env:
+          LANE: reborn-webui-v2-live-qa
+          PROVIDER: reborn-webui-v2-${{ matrix.shard_id }}
+          COMMAND_TIMEOUT: 90m
+          PLAYWRIGHT_INSTALL: with-deps
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-reborn-webui-v2-live-qa-${{ matrix.shard_id }}
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+          retention-days: 14
+
   persona-rotating:
     name: Rotating Persona Live
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
       LLM_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+      # Real third-party credentials forwarded into the persona harness.
+      # The harness reads these env vars per
+      # tests/e2e_live_personas.rs::PERSONA_CREDENTIALS — present →
+      # real API call lands; absent → dummy fallback satisfies the
+      # auth pre-flight and the agent recovers via workspace tools.
+      # Add each secret in repo settings (Settings → Secrets and
+      # variables → Actions) if you want the lane to exercise that
+      # integration end-to-end.
+      LIVE_CANARY_GITHUB_TOKEN: ${{ secrets.LIVE_CANARY_GITHUB_TOKEN }}
+      LIVE_CANARY_GOOGLE_OAUTH_TOKEN: ${{ secrets.LIVE_CANARY_GOOGLE_OAUTH_TOKEN }}
+      LIVE_CANARY_SLACK_BOT_TOKEN: ${{ secrets.LIVE_CANARY_SLACK_BOT_TOKEN }}
+      LIVE_CANARY_TELEGRAM_BOT_TOKEN: ${{ secrets.LIVE_CANARY_TELEGRAM_BOT_TOKEN }}
+      LIVE_CANARY_COMPOSIO_API_KEY: ${{ secrets.LIVE_CANARY_COMPOSIO_API_KEY }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -540,8 +790,7 @@ jobs:
   private-oauth:
     name: Private OAuth Live
     if: >
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')
     runs-on: [self-hosted, ironclaw-live]
     timeout-minutes: 120
     env:
@@ -550,6 +799,21 @@ jobs:
       COMMAND_TIMEOUT: 60m
       STRICT_ARTIFACT_SCRUB: "true"
     steps:
+      - name: Preflight disk space
+        # The only self-hosted runner the canary uses. Nothing in this
+        # workflow cleans ~/.cargo, ~/.rustup, or runner _diag between
+        # jobs, so a wedged disk shows up as opaque mid-build failures
+        # we can't see (test-output.log isn't uploaded). Fail loudly
+        # with a clear marker instead — at least 10 GiB free on /.
+        run: |
+          df -h /
+          avail_kb=$(df --output=avail / | tail -1 | tr -d ' ')
+          min_kb=$((10 * 1024 * 1024))
+          if [ "$avail_kb" -lt "$min_kb" ]; then
+            echo "::error::Self-hosted runner low on disk: ${avail_kb} KiB available, need ${min_kb} KiB (~10 GiB)."
+            exit 1
+          fi
+          echo "Disk OK: ${avail_kb} KiB available on /."
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
@@ -570,18 +834,22 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-canary-private-oauth-summary
+          # results.json is emitted by scripts/live-canary/emit_results_json.py
+          # and contains only test names + outcomes + bounded panic messages
+          # — no URLs, tokens, or payloads — so it is scrub-safe to upload
+          # even under STRICT_ARTIFACT_SCRUB=true.
           path: |
             artifacts/live-canary/**/summary.md
             artifacts/live-canary/**/env-summary.txt
             artifacts/live-canary/**/trace-fixture-status.txt
             artifacts/live-canary/**/scrub-matches.txt
+            artifacts/live-canary/**/results.json
           retention-days: 7
 
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
+      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -738,6 +1006,7 @@ jobs:
       - auth-live-seeded
       - auth-browser-consent
       - workflow-canary
+      - reborn-webui-v2-live-qa
       - deterministic-replay
       - public-smoke
       - persona-rotating

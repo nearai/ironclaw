@@ -28,31 +28,26 @@
 //! orchestration, built-in tool migration intent), `CLAUDE.md` for the
 //! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
+#![warn(unreachable_pub)]
 
-pub mod clock;
-pub mod decision;
-pub mod error;
-pub mod invalidation;
-pub mod policy;
-pub mod sources;
+mod clock;
+mod decision;
+mod error;
+mod invalidation;
+mod policy;
+mod sources;
 
 #[cfg(test)]
 mod fixtures;
 
-pub use clock::{Clock, FixedClock, SystemClock};
+pub use clock::Clock;
 pub use decision::{
     AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment, TrustDecision, TrustProvenance,
 };
 pub use error::TrustError;
-pub use invalidation::{
-    InvalidationBus, TrustChange, TrustChangeListener, authority_changed, grant_retention_eligible,
-    identity_changed,
-};
-pub use policy::{HostTrustPolicy, SourceMatch, SourceMutators, TrustPolicy, TrustPolicyInput};
-pub use sources::{
-    AdminConfig, AdminEntry, BundledEntry, BundledRegistry, LocalDevOverride, PolicySource,
-    SignedRegistry, SignerEntry,
-};
+pub use invalidation::{InvalidationBus, TrustChange, TrustChangeListener};
+pub use policy::{HostTrustPolicy, TrustPolicy, TrustPolicyInput};
+pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry, PolicySource};
 
 #[cfg(test)]
 mod tests {
@@ -69,9 +64,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_policy_returns_default_for_local_manifest() {
+    fn fail_closed_policy_returns_default_for_local_manifest() {
         use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
-        let policy = HostTrustPolicy::empty();
+        let policy = HostTrustPolicy::fail_closed();
         let identity = PackageIdentity::new(
             PackageId::new("any").unwrap(),
             PackageSource::LocalManifest {
@@ -88,7 +83,37 @@ mod tests {
             })
             .unwrap();
         assert!(!decision.effective_trust.is_privileged());
+        assert_eq!(
+            decision.effective_trust.class(),
+            ironclaw_host_api::TrustClass::Sandbox
+        );
+        assert!(decision.authority_ceiling.allowed_effects.is_empty());
         assert_eq!(decision.provenance, TrustProvenance::Default);
+    }
+
+    #[test]
+    fn empty_policy_alias_is_fail_closed() {
+        use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
+        let identity = PackageIdentity::new(
+            PackageId::new("any").unwrap(),
+            PackageSource::Admin,
+            None,
+            None,
+        );
+        let input = TrustPolicyInput {
+            identity,
+            requested_trust: RequestedTrustClass::FirstPartyRequested,
+            requested_authority: std::collections::BTreeSet::new(),
+        };
+        let fail_closed = HostTrustPolicy::fail_closed().evaluate(&input).unwrap();
+        let empty_alias = HostTrustPolicy::empty().evaluate(&input).unwrap();
+
+        assert_eq!(
+            empty_alias.effective_trust.class(),
+            fail_closed.effective_trust.class()
+        );
+        assert_eq!(empty_alias.authority_ceiling, fail_closed.authority_ceiling);
+        assert_eq!(empty_alias.provenance, fail_closed.provenance);
     }
 }
 

@@ -198,8 +198,8 @@ impl PerUserRateLimiter {
 /// avoiding a separate `PerUserWorkspaceResolver` with duplicated logic.
 pub struct WorkspacePool {
     db: Arc<dyn Database>,
-    embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
-    embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
+    embeddings: Option<Arc<dyn ironclaw_embeddings::EmbeddingProvider>>,
+    embedding_cache_config: ironclaw_embeddings::EmbeddingCacheConfig,
     search_config: crate::config::WorkspaceSearchConfig,
     workspace_config: crate::config::WorkspaceConfig,
     cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
@@ -211,8 +211,8 @@ pub struct WorkspacePool {
 impl WorkspacePool {
     pub fn new(
         db: Arc<dyn Database>,
-        embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
-        embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
+        embeddings: Option<Arc<dyn ironclaw_embeddings::EmbeddingProvider>>,
+        embedding_cache_config: ironclaw_embeddings::EmbeddingCacheConfig,
         search_config: crate::config::WorkspaceSearchConfig,
         workspace_config: crate::config::WorkspaceConfig,
     ) -> Self {
@@ -511,7 +511,7 @@ mod tests {
         let pool = WorkspacePool::new(
             db,
             None,
-            crate::workspace::EmbeddingCacheConfig::default(),
+            ironclaw_embeddings::EmbeddingCacheConfig::default(),
             crate::config::WorkspaceSearchConfig::default(),
             crate::config::WorkspaceConfig::default(),
         );

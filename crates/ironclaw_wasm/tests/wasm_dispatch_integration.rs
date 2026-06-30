@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -11,18 +12,22 @@ use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRuntime};
+use ironclaw_extensions::{
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
+    HostApiContractRegistry, ManifestSource,
+};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
+    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolLimits, WitToolRequest,
+    WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances() {
     let component = tool_component(COUNTER_TOOL_WAT);
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &component).await;
@@ -76,7 +81,7 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failure() {
     let component = tool_component(TRAP_TOOL_WAT);
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/trap.wasm", &component).await;
@@ -118,7 +123,7 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     let component = tool_component(&trap_after_http_wat());
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
@@ -129,6 +134,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         status: 200,
         headers: vec![],
         body: Vec::new(),
+        saved_body: None,
         request_bytes: 5,
         response_bytes: 0,
         redaction_applied: false,
@@ -191,7 +197,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     let fs = mounted_empty_extension_root();
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
@@ -237,7 +243,7 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("filesystem_denied"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", b"not wasm").await;
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
@@ -281,7 +287,7 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("manifest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     let invalid_output_wat = COUNTER_TOOL_WAT
         .replace(
@@ -339,6 +345,192 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reservation_leak() {
+    let raw_unsupported_import = wat::parse_str(UNSUPPORTED_IMPORT_MODULE_WAT).unwrap();
+    let fs =
+        filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &raw_unsupported_import)
+            .await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"sentinel":"UNSUPPORTED_IMPORT_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Manifest
+                | RuntimeDispatchErrorKind::MethodMissing
+                | RuntimeDispatchErrorKind::Executor
+        }
+    ));
+    assert_eq!(adapter.prepare_count(), 0);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(!serialized_events.contains("UNSUPPORTED_IMPORT_SENTINEL_3067"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
+    let memory_growth = COUNTER_TOOL_WAT.replace(
+        "global.get $count\n    i32.const 1\n    i32.add",
+        "i32.const 1\n    memory.grow\n    i32.const -1\n    i32.eq\n    if\n      unreachable\n    end\n\n    global.get $count\n    i32.const 1\n    i32.add",
+    );
+    assert_ne!(memory_growth, COUNTER_TOOL_WAT);
+    let component = tool_component(&memory_growth);
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let adapter = WasmRuntimeAdapter::with_config(WitToolRuntimeConfig {
+        default_limits: WitToolLimits::default()
+            .with_memory_bytes(64 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(Duration::from_secs(5)),
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"sentinel":"MEMORY_BOUND_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory
+            }
+        ),
+        "unexpected memory-growth-bound dispatch error: {err:?}"
+    );
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(!serialized_events.contains("MEMORY_BOUND_SENTINEL_3067"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
+    let component = tool_component(&trap_after_http_wat());
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_HTTP_TRAP_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let http = Arc::new(SlowRuntimeEgress::new(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: Vec::new(),
+        saved_body: None,
+        request_bytes: 5,
+        response_bytes: 0,
+        redaction_applied: false,
+    }));
+    let wasm_http = Arc::new(
+        WasmRuntimeHttpAdapter::new(
+            Arc::clone(&http),
+            sample_scope(),
+            CapabilityId::new("wasm-smoke.httptrap").unwrap(),
+            wasm_http_policy(),
+        )
+        .with_response_body_limit(Some(4096)),
+    );
+    let adapter = WasmRuntimeAdapter::with_host_and_config(
+        WitToolHost::deny_all().with_http(wasm_http),
+        WitToolRuntimeConfig {
+            default_limits: WitToolLimits::default()
+                .with_memory_bytes(1024 * 1024)
+                .with_fuel(100_000)
+                .with_timeout(Duration::from_millis(20)),
+        },
+    );
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.httptrap",
+            json!({"sentinel":"DEADLINE_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest
+        }
+    ));
+    assert_eq!(http.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()).network_egress_bytes,
+        5,
+        "overdue host import should preserve accountable request egress through dispatcher"
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
+    let serialized_events = serde_json::to_string(&recorded).unwrap();
+    assert!(!serialized_events.contains("DEADLINE_SENTINEL_3067"));
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeEgress {
     response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
@@ -354,13 +546,41 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct SlowRuntimeEgress {
+    response: RuntimeHttpEgressResponse,
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl SlowRuntimeEgress {
+    fn new(response: RuntimeHttpEgressResponse) -> Self {
+        Self {
+            response,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for SlowRuntimeEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        std::thread::sleep(Duration::from_millis(50));
+        self.requests.lock().unwrap().push(request);
+        Ok(self.response.clone())
     }
 }
 
@@ -377,9 +597,16 @@ impl WasmRuntimeAdapter {
     }
 
     fn with_host(host: WitToolHost) -> Self {
+        Self::with_host_and_config(host, WitToolRuntimeConfig::for_testing())
+    }
+
+    fn with_config(config: WitToolRuntimeConfig) -> Self {
+        Self::with_host_and_config(WitToolHost::deny_all(), config)
+    }
+
+    fn with_host_and_config(host: WitToolHost, config: WitToolRuntimeConfig) -> Self {
         Self {
-            runtime: WitToolRuntime::new(ironclaw_wasm::WitToolRuntimeConfig::for_testing())
-                .unwrap(),
+            runtime: WitToolRuntime::new(config).unwrap(),
             host,
             prepared: Mutex::new(HashMap::new()),
             prepare_count: AtomicUsize::new(0),
@@ -521,6 +748,7 @@ fn execute_prepared_wasm(
     };
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,
         receipt,
@@ -560,9 +788,23 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn mounted_empty_extension_root() -> LocalFilesystem {
@@ -590,15 +832,17 @@ async fn filesystem_with_wasm_component(
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
     let governor = InMemoryResourceGovernor::new();
-    governor.set_limit(
-        account,
-        ResourceLimits {
-            max_concurrency_slots: Some(10),
-            max_process_count: Some(10),
-            max_output_bytes: Some(100_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(10),
+                max_process_count: Some(10),
+                max_output_bytes: Some(100_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     governor
 }
 
@@ -686,6 +930,14 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
         .validate(true);
     encoder.encode().expect("component must encode")
 }
+
+const UNSUPPORTED_IMPORT_MODULE_WAT: &str = r#"
+(module
+  (import "near:agent/unsupported@0.3.0" "do-secret-thing" (func $unsupported))
+  (func (export "run")
+    call $unsupported)
+)
+"#;
 
 const COUNTER_TOOL_WAT: &str = r#"
 (module
@@ -876,7 +1128,7 @@ const TRAP_TOOL_WAT: &str = r#"
 )
 "#;
 
-const WASM_MANIFEST: &str = r#"
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM Smoke"
 version = "0.1.0"
@@ -887,15 +1139,23 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/counter.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.count"
 description = "Count through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/count.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/count.output.v1.json"
 "#;
 
-const WASM_TRAP_MANIFEST: &str = r#"
+const WASM_TRAP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM Trap"
 version = "0.1.0"
@@ -906,15 +1166,23 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/trap.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.trap"
 description = "Trap through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/trap.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/trap.output.v1.json"
 "#;
 
-const WASM_HTTP_TRAP_MANIFEST: &str = r#"
+const WASM_HTTP_TRAP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM HTTP Trap"
 version = "0.1.0"
@@ -925,10 +1193,18 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/http-trap.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.httptrap"
 description = "Trap after host HTTP through WASM"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/httptrap.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/httptrap.output.v1.json"
 "#;

@@ -92,12 +92,21 @@
                     "pages": [
                       "tunnel",
                       "channels/local",
-                      "channels/discord",
                       "channels/telegram",
-                      "channels/webhook",
-                      "channels/signal"
+                      "channels/signal",
+                      "channels/discord",
+                      "channels/wechat",
+                      "channels/wecom",
+                      "channels/webhook"
                     ]
                   }
+                ]
+              },
+              {
+                "group": "API",
+                "icon": "code",
+                "pages": [
+                  "api/responses"
                 ]
               },
               {
@@ -223,8 +232,10 @@
                     "pages": [
                       "zh/tunnel",
                       "zh/channels/local",
-                      "zh/channels/signal",
                       "zh/channels/telegram",
+                      "zh/channels/signal",
+                      "zh/channels/wechat",
+                      "zh/channels/wecom",
                       "zh/channels/webhook"
                     ]
                   }

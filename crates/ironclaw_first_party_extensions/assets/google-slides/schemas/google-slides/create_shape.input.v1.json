@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides create_shape",
+  "description": "Create a shape or text box.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "slide_object_id",
+    "x",
+    "y",
+    "width",
+    "height"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "slide_object_id": {
+      "type": "string",
+      "description": "Slide object ID."
+    },
+    "shape_type": {
+      "type": "string",
+      "description": "Shape type. Defaults to TEXT_BOX."
+    },
+    "x": {
+      "type": "number",
+      "description": "X position in points."
+    },
+    "y": {
+      "type": "number",
+      "description": "Y position in points."
+    },
+    "width": {
+      "type": "number",
+      "description": "Width in points."
+    },
+    "height": {
+      "type": "number",
+      "description": "Height in points."
+    }
+  },
+  "additionalProperties": false
+}

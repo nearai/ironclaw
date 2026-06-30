@@ -24,6 +24,7 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
 
     match id {
         // OpenAI — GPT-5.x / Codex
+        "gpt-5.5" | "gpt-5.5-codex" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5.3-codex" | "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5.2-codex" | "gpt-5.2-pro" | "gpt-5.2" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1" => Some((dec!(0.000002), dec!(0.000008))),
@@ -75,6 +76,15 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
 
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
+
+        // Family fallbacks: a new GPT-5.x minor release shouldn't need a table
+        // edit just to be budgeted. Exact arms above win for known per-model
+        // pricing; these only catch unrecognized `gpt-5*` slugs. `*-mini` /
+        // `*-nano` bill at the small tier, everything else at the standard tier.
+        _ if id.starts_with("gpt-5") && (id.ends_with("-mini") || id.ends_with("-nano")) => {
+            Some((dec!(0.0000003), dec!(0.0000012)))
+        }
+        _ if id.starts_with("gpt-5") => Some((dec!(0.000002), dec!(0.000008))),
 
         _ => None,
     }

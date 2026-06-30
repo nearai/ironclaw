@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import (
     AUTH_TOKEN,
     SEL,
+    _reserve_loopback_port,
     api_get,
     api_post,
     create_member_user,
@@ -341,12 +342,6 @@ async def _start_auth_matrix_server(
     existing_paths: dict | None = None,
     auto_approve_tools: bool = True,
 ):
-    reserved = []
-    for _ in range(2):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        reserved.append(sock)
-
     if existing_paths is None:
         db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-db-")
         home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-auth-matrix-home-")
@@ -368,10 +363,8 @@ async def _start_auth_matrix_server(
         tmpdirs = existing_paths["tmpdirs"]
 
     try:
-        gateway_port = reserved[0].getsockname()[1]
-        http_port = reserved[1].getsockname()[1]
-        for sock in reserved:
-            sock.close()
+        gateway_port = _reserve_loopback_port()
+        http_port = _reserve_loopback_port()
 
         skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
         os.makedirs(skills_dir, exist_ok=True)
@@ -486,11 +479,6 @@ async def _start_auth_matrix_server(
                 await _stop_process(proc, timeout=2)
             raise
     except Exception:
-        for sock in reserved:
-            try:
-                sock.close()
-            except Exception:
-                pass
         for tmpdir in [db_tmpdir, home_tmpdir, tools_tmpdir, channels_tmpdir]:
             if tmpdir is not None:
                 tmpdir.cleanup()

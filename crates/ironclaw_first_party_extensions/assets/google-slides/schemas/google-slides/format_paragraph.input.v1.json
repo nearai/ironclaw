@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides format_paragraph",
+  "description": "Set paragraph alignment.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "object_id",
+    "alignment"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "object_id": {
+      "type": "string",
+      "description": "Shape object ID."
+    },
+    "alignment": {
+      "type": "string",
+      "description": "Paragraph alignment."
+    },
+    "start_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Start index."
+    },
+    "end_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "End index."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,25 +1,39 @@
 //! Shared types, paths, and platform helpers used across the IronClaw workspace.
+#![warn(unreachable_pub)]
 
-pub mod attachment;
+mod attachment;
+pub mod attachment_format;
 pub mod env_helpers;
 mod event;
+pub mod hashing;
 mod identity;
 pub mod paths;
-pub mod platform;
+pub mod pkce;
+mod platform;
+pub mod provider_transcript;
 mod timezone;
+#[allow(dead_code)] // Trust-boundary scaffolding for the Reborn architecture; not yet consumed.
+mod trust_boundary;
 mod util;
 
-pub use attachment::{AttachmentKind, IncomingAttachment};
+pub use attachment::{AttachmentKind, AttachmentRef, IncomingAttachment, normalize_mime_type};
+// `attachment_format` is also a `pub mod`, but the registry query functions are
+// re-exported at the crate root because the whole attachment pipeline consumes
+// them as `ironclaw_common::is_supported_mime` / `kind_for_mime` / etc.
+pub use attachment_format::{
+    AttachmentFormat, ExtractorId, accept_attribute, accept_tokens, all_formats,
+    canonical_extension, extractor_for_mime, is_supported_mime, kind_for_mime, lookup,
+    mime_for_extension,
+};
 pub use event::{
-    AppEvent, CodeExecutionFailureCategory, JobResultStatus, JobResultStatusParseError,
-    OnboardingStateDto, PlanStepDto, SelfImprovementPhase, ToolDecisionDto,
+    AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
+    SelfImprovementPhase, ToolDecisionDto,
 };
 pub use identity::{
-    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, IdentityError,
-    MAX_EXTERNAL_THREAD_ID_LEN, MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
-    McpServerNameError,
+    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError,
+    MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
 };
-pub use paths::{compute_ironclaw_base_dir, ironclaw_base_dir};
+pub use paths::ironclaw_base_dir;
 pub use platform::PlatformInfo;
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::{truncate_for_preview, truncate_preview};
@@ -28,3 +42,24 @@ pub use util::{truncate_for_preview, truncate_preview};
 /// clamp in `create_job_inner`) and the worker runtime (`worker/job.rs`).
 /// A single source of truth prevents the two from drifting.
 pub const MAX_WORKER_ITERATIONS: u32 = 500;
+
+// ─── Reborn cost-based budget invariants ────────────────────────────────────
+//
+// These constants are the hard backstops behind the dollar-based budget
+// system. They guarantee that even a misconfigured per-thread limit cannot
+// let a runaway loop spend more than `HARD_CAP_BUDGET_USD` or run longer
+// than `HARD_CAP_WALL_CLOCK_SECS` / `HARD_CAP_ITERATIONS`. They are
+// invariants, not defaults: configuration that tries to exceed them must
+// fail validation at load time.
+
+/// Absolute per-thread wall-clock backstop (24h).
+pub const HARD_CAP_WALL_CLOCK_SECS: u64 = 86_400;
+
+/// Absolute per-thread iteration backstop. Catches infinite loops that
+/// somehow keep producing low-utilization steps under budget enforcement.
+pub const HARD_CAP_ITERATIONS: u32 = 10_000;
+
+/// Absolute per-thread USD ceiling. Represented as a string so callers
+/// can parse into their preferred Decimal type without forcing a
+/// workspace dep here.
+pub const HARD_CAP_BUDGET_USD: &str = "100.00";

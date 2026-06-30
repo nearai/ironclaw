@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive create_folder",
+  "description": "Create a folder.",
+  "type": "object",
+  "required": [
+    "name"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Folder name."
+    },
+    "parent_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Parent folder ID."
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Folder description."
+    }
+  },
+  "additionalProperties": false
+}

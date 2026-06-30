@@ -29,7 +29,7 @@ use crate::provider::{
 };
 
 /// GitHub Copilot provider with automatic token exchange.
-pub struct GithubCopilotProvider {
+pub(crate) struct GithubCopilotProvider {
     client: Client,
     token_manager: Arc<CopilotTokenManager>,
     model: String,
@@ -41,7 +41,7 @@ pub struct GithubCopilotProvider {
 }
 
 impl GithubCopilotProvider {
-    pub fn new(
+    pub(crate) fn new(
         config: &RegistryProviderConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
@@ -56,8 +56,7 @@ impl GithubCopilotProvider {
                 }
             })?;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "github_copilot".to_string(),
@@ -260,6 +259,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .as_ref()
                 .map(|u| u.completion_tokens)
                 .unwrap_or(0),
+            reasoning: None,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         })
@@ -348,6 +348,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
             cache_read_input_tokens: 0,
         })
     }
@@ -606,6 +607,7 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 })
                 .collect()
         })
@@ -640,6 +642,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let messages = vec![
             ChatMessage::user("Search"),

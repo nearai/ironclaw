@@ -112,9 +112,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
     let model =
         std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
 
-    Some(crate::config::embeddings::default_dimension_for_model(
-        &model,
-    ))
+    Some(ironclaw_embeddings::default_dimension_for_model(&model))
 }
 
 impl LibSqlBackend {
@@ -720,6 +718,9 @@ impl WorkspaceStore for LibSqlBackend {
         document_id: Uuid,
         chunks: &[ChunkWrite],
     ) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
+        let _write_guard = self.write_lock.lock().await;
         let conn = self
             .connect()
             .await
@@ -1067,6 +1068,8 @@ impl WorkspaceStore for LibSqlBackend {
         content_hash: &str,
         changed_by: Option<&str>,
     ) -> Result<i32, WorkspaceError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self
             .connect()
             .await

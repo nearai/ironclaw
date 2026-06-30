@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive get_file",
+  "description": "Get file metadata.",
+  "type": "object",
+  "required": [
+    "file_id"
+  ],
+  "properties": {
+    "file_id": {
+      "type": "string",
+      "description": "The file ID."
+    }
+  },
+  "additionalProperties": false
+}

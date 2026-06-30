@@ -21,7 +21,8 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use crate::workspace::Workspace;
+use ironclaw_embeddings::{EmbeddingCacheConfig, EmbeddingProvider};
 use ironclaw_llm::recording::HttpInterceptor;
 use ironclaw_llm::{LlmProvider, LlmReloadHandle, RecordingLlm, SessionManager};
 use ironclaw_safety::SafetyLayer;
@@ -557,19 +558,18 @@ impl AppBuilder {
                 .llm
                 .bedrock
                 .as_ref()
-                .map(|b| crate::workspace::BedrockEmbeddingSetup {
+                .map(|b| ironclaw_embeddings::BedrockEmbeddingSetup {
                     region: b.region.clone(),
                     profile: b.profile.clone(),
                 });
-        let embeddings = self
-            .config
-            .embeddings
-            .create_provider(
-                &self.config.llm.nearai.base_url,
-                self.session.clone(),
-                bedrock_setup.as_ref(),
-            )
-            .await;
+        let embeddings = ironclaw_embeddings::create_provider(
+            &self.config.embeddings,
+            ironclaw_embeddings::ProviderDeps {
+                session: self.session.clone(),
+                bedrock_setup,
+            },
+        )
+        .await;
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
@@ -1017,6 +1017,11 @@ impl AppBuilder {
             } else {
                 None
             };
+            // Wire the Reborn Telegram v2 feature flag so the manager
+            // can reject hot-activation of the legacy `telegram` WASM
+            // channel when v2 owns the webhook installation (Henry's
+            // review on PR #3356 — startup guard alone is not enough).
+            em.set_reborn_telegram_v2_enabled(self.config.channels.reborn_telegram_v2_enabled);
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
             if let Some(ps) = pairing_store {

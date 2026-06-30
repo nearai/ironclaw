@@ -5,6 +5,134 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 
 #[test]
+fn runtime_credential_targets_validate_declaration_shape() {
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "bad header".to_string(),
+            prefix: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer\r\nx-evil: ".to_string()),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: " ".to_string(),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "__credential__".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", ".", "..", "bad/placeholder", "bad\nplaceholder"] {
+        assert!(
+            RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn network_target_patterns_validate_declaration_shape() {
+    let pattern = NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: "*.example.test".to_string(),
+        port: Some(443),
+    };
+    assert!(pattern.validate_declaration().is_ok());
+    assert!(
+        NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+}
+
+#[test]
+fn network_target_patterns_reject_control_and_invalid_label_characters() {
+    for invalid in [
+        "api.example.test\0",
+        "api.example.test\n",
+        ".example.test",
+        "example.test.",
+        "api..example.test",
+        "api example.test",
+        "api/example.test",
+    ] {
+        assert!(
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: invalid.to_string(),
+                port: None,
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn runtime_credential_target_serializes_path_placeholder() {
+    let target = RuntimeCredentialTarget::PathPlaceholder {
+        placeholder: "__credential__".to_string(),
+    };
+    let wire = json!({
+        "type": "path_placeholder",
+        "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
+}
+
+#[test]
 fn extension_id_rejects_path_like_or_uppercase_values() {
     assert!(ExtensionId::new("github").is_ok());
     assert!(ExtensionId::new("github-mcp.v1").is_ok());
@@ -102,6 +230,137 @@ fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
 }
 
 #[test]
+fn dispatch_errors_preserve_typed_failure_kind() {
+    let capability = CapabilityId::new("test.cap").unwrap();
+    let provider = ExtensionId::new("test").unwrap();
+
+    assert_eq!(
+        DispatchError::UnknownCapability {
+            capability: capability.clone(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnknownCapability
+    );
+    assert_eq!(
+        DispatchError::UnknownProvider {
+            capability: capability.clone(),
+            provider,
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnknownProvider
+    );
+    assert_eq!(
+        DispatchError::RuntimeMismatch {
+            capability: capability.clone(),
+            descriptor_runtime: RuntimeKind::Wasm,
+            package_runtime: RuntimeKind::Mcp,
+        }
+        .failure_kind(),
+        DispatchFailureKind::RuntimeMismatch
+    );
+    assert_eq!(
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Script,
+        }
+        .failure_kind(),
+        DispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(
+        DispatchError::UnsupportedRuntime {
+            capability,
+            runtime: RuntimeKind::Wasm,
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnsupportedRuntime
+    );
+    assert_eq!(
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest,
+        }
+        .failure_kind(),
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
+    );
+    let required_secrets = vec![SecretHandle::new("google-access-token").unwrap()];
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: required_secrets.clone(),
+            credential_requirements: Vec::new(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+    // Empty required_secrets must classify the same way.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+}
+
+#[test]
+fn runtime_credential_injection_rejects_missing_source() {
+    let missing_source = json!({
+        "handle": "api-token",
+        "target": {
+            "type": "header",
+            "name": "authorization",
+            "prefix": "Bearer "
+        },
+        "required": true
+    });
+
+    let error = serde_json::from_value::<RuntimeCredentialInjection>(missing_source)
+        .expect_err("credential injection source is authority-bearing and must be explicit");
+
+    assert!(
+        error.to_string().contains("missing field `source`"),
+        "unexpected deserialization error: {error}"
+    );
+}
+
+#[test]
+fn dispatch_failure_kind_display_preserves_stable_literals() {
+    assert_eq!(
+        DispatchFailureKind::UnknownCapability.as_str(),
+        "UnknownCapability"
+    );
+    assert_eq!(
+        DispatchFailureKind::UnknownProvider.as_str(),
+        "UnknownProvider"
+    );
+    assert_eq!(
+        DispatchFailureKind::RuntimeMismatch.as_str(),
+        "RuntimeMismatch"
+    );
+    assert_eq!(
+        DispatchFailureKind::MissingRuntimeBackend.as_str(),
+        "MissingRuntimeBackend"
+    );
+    assert_eq!(
+        DispatchFailureKind::UnsupportedRuntime.as_str(),
+        "UnsupportedRuntime"
+    );
+    assert_eq!(DispatchFailureKind::AuthRequired.as_str(), "AuthRequired");
+    assert_eq!(
+        DispatchFailureKind::AuthRequired.to_string(),
+        "AuthRequired"
+    );
+    assert_eq!(
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).as_str(),
+        "NetworkDenied"
+    );
+    assert_eq!(
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).to_string(),
+        "NetworkDenied"
+    );
+}
+
+#[test]
 fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
     for (kind, token) in [
         (RuntimeDispatchErrorKind::Backend, "backend"),
@@ -123,9 +382,15 @@ fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
         (RuntimeDispatchErrorKind::Memory, "memory"),
         (RuntimeDispatchErrorKind::MethodMissing, "method_missing"),
         (RuntimeDispatchErrorKind::NetworkDenied, "network_denied"),
+        (
+            RuntimeDispatchErrorKind::OperationFailed,
+            "operation_failed",
+        ),
         (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
         (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::PolicyDenied, "policy_denied"),
         (RuntimeDispatchErrorKind::Resource, "resource"),
+        (RuntimeDispatchErrorKind::SecretDenied, "secret_denied"),
         (
             RuntimeDispatchErrorKind::UndeclaredCapability,
             "undeclared_capability",
@@ -227,6 +492,83 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
         assert!(
             ScopedPath::new(invalid).is_err(),
             "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn scoped_path_accepts_raw_host_path_only_when_mount_alias_matches() {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/Users/alice").unwrap(),
+        VirtualPath::new("/projects/host").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let path = view.scoped_path("/Users/alice/project/README.md").unwrap();
+    assert_eq!(path.as_str(), "/Users/alice/project/README.md");
+    assert_eq!(
+        view.resolve(&path).unwrap().as_str(),
+        "/projects/host/project/README.md"
+    );
+
+    assert!(view.scoped_path("/Users/bob/project/README.md").is_err());
+    assert!(view.scoped_path("/Users/alice2/private.txt").is_err()); // safety: test-only assertion.
+    assert!(view.scoped_path("/etc/passwd").is_err());
+}
+
+#[test]
+fn scoped_path_redacts_all_rejected_values_in_error_display() {
+    for invalid in [
+        "",
+        "relative/path",
+        "/workspace/../../secret",
+        "/workspace/has\0nul",
+        "\\server\\share\\private.txt",
+        "\\\\server\\share\\private.txt",
+        "file:///etc/passwd",
+        "https://example.com/private/file",
+        "/Users/alice/project/private.txt",
+        "/opt/ironclaw/project/private.txt",
+        "/tmp/ironclaw/project/private.txt",
+        "C:\\Users\\alice\\project\\private.txt",
+        "C:/Users/alice/project/private.txt",
+    ] {
+        let message = ScopedPath::new(invalid).unwrap_err().to_string();
+        assert!(
+            invalid.is_empty() || !message.contains(invalid),
+            "{invalid:?} must not be echoed in {message:?}"
+        );
+        assert!(
+            message.contains("<redacted path>"),
+            "{invalid:?} should use redacted placeholder in {message:?}"
+        );
+    }
+}
+
+#[test]
+fn virtual_path_accepts_all_frozen_v1_roots() {
+    for root in [
+        "/engine",
+        "/system/settings",
+        "/system/extensions",
+        "/system/skills",
+        "/users",
+        "/projects",
+        "/memory",
+        "/artifacts",
+        "/tmp",
+        "/secrets",
+        "/events",
+    ] {
+        assert!(
+            VirtualPath::new(root).is_ok(),
+            "frozen V1 root {root:?} should be accepted"
+        );
+        let child = format!("{root}/child");
+        assert!(
+            VirtualPath::new(child).is_ok(),
+            "children of frozen V1 root {root:?} should be accepted"
         );
     }
 }
@@ -630,6 +972,9 @@ fn obligations_are_unique_and_canonicalized() {
         Obligation::AuditAfter,
         Obligation::EnforceResourceCeiling { ceiling },
         Obligation::ReserveResources { reservation_id },
+        Obligation::FirstPartyCredentialStagedViaHostPort {
+            capability_id: CapabilityId::new("gmail.list_messages").unwrap(),
+        },
         Obligation::AuditBefore,
     ])
     .unwrap();
@@ -642,6 +987,7 @@ fn obligations_are_unique_and_canonicalized() {
             .collect::<Vec<_>>(),
         vec![
             ObligationKind::ReserveResources,
+            ObligationKind::FirstPartyCredentialStagedViaHostPort,
             ObligationKind::AuditBefore,
             ObligationKind::EnforceResourceCeiling,
             ObligationKind::AuditAfter,
@@ -649,6 +995,39 @@ fn obligations_are_unique_and_canonicalized() {
     );
 
     assert!(Obligations::new(vec![Obligation::AuditBefore, Obligation::AuditBefore]).is_err());
+    let first_secret = SecretHandle::new("first_token").unwrap();
+    let second_secret = SecretHandle::new("second_token").unwrap();
+    let multi_secret = Obligations::new(vec![
+        Obligation::InjectSecretOnce {
+            handle: second_secret.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: first_secret.clone(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        multi_secret.as_slice(),
+        &[
+            Obligation::InjectSecretOnce {
+                handle: second_secret.clone(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone(),
+            }
+        ]
+    );
+    assert!(
+        Obligations::new(vec![
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone()
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret
+            },
+        ])
+        .is_err()
+    );
 
     let duplicate_json = json!([
         {"type":"audit_before"},
@@ -672,6 +1051,86 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
     assert!(serde_json::from_value::<RuntimeKind>(json!("system")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("first_party")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+}
+
+#[test]
+fn runtime_http_egress_request_defaults_optional_body_controls() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope: sample_context().resource_scope,
+        capability_id: CapabilityId::new("http.fetch").unwrap(),
+        method: NetworkMethod::Get,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![],
+        body: vec![],
+        network_policy: sample_network_policy(),
+        credential_injections: vec![],
+        response_body_limit: Some(4096),
+        save_body_to: Some(RuntimeHttpSaveTarget {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            mount_grant: None,
+        }),
+        timeout_ms: None,
+    })
+    .unwrap();
+
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("response_body_limit");
+    fields.remove("save_body_to");
+
+    let request: RuntimeHttpEgressRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(request.response_body_limit, None);
+    assert_eq!(request.save_body_to, None);
+}
+
+#[test]
+fn runtime_http_save_target_skips_mount_grant_on_wire() {
+    let mount_grant = MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    );
+    let target = RuntimeHttpSaveTarget {
+        path: ScopedPath::new("/workspace/body.json").unwrap(),
+        mount_grant: Some(mount_grant),
+    };
+
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value, json!({ "path": "/workspace/body.json" }));
+
+    let decoded: RuntimeHttpSaveTarget = serde_json::from_value(json!({
+        "path": "/workspace/body.json",
+        "mount_grant": {
+            "alias": "/workspace",
+            "target": "/projects/workspace",
+            "permissions": { "read": true, "write": true }
+        }
+    }))
+    .unwrap();
+    assert_eq!(decoded.path.as_str(), "/workspace/body.json");
+    assert_eq!(decoded.mount_grant, None);
+}
+
+#[test]
+fn runtime_http_egress_response_defaults_optional_saved_body() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        saved_body: Some(RuntimeHttpSavedBody {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            bytes_written: 2,
+        }),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    })
+    .unwrap();
+
+    value.as_object_mut().unwrap().remove("saved_body");
+
+    let response: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(response.saved_body, None);
 }
 
 #[test]
@@ -776,6 +1235,407 @@ fn audit_envelope_serializes_redacted_summary_shape() {
     assert!(json.get("host_path").is_none());
 }
 
+#[test]
+fn host_port_ids_are_host_namespaced_and_serializable() {
+    let http_egress = HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).unwrap();
+    assert_eq!(http_egress.as_str(), "host.runtime.http_egress");
+
+    let id = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
+    assert_eq!(id.as_str(), "host.storage.sql_transaction.first_party");
+    assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));
+    assert_eq!(
+        serde_json::from_value::<HostPortId>(json!(id.as_str())).unwrap(),
+        id
+    );
+
+    for invalid in [
+        "",
+        "storage.sql_transaction",
+        "host",
+        "host.",
+        "host..storage",
+        "Host.storage",
+        "host/storage",
+        "host.storage\ntransaction",
+        "host.x",
+        "host.1.foo",
+        "host.storage.1tier",
+    ] {
+        assert!(
+            HostPortId::new(invalid).is_err(),
+            "{invalid:?} should be rejected"
+        );
+        assert!(
+            serde_json::from_value::<HostPortId>(json!(invalid)).is_err(),
+            "{invalid:?} should also be rejected when deserialized"
+        );
+    }
+}
+
+#[test]
+fn host_port_view_rejects_duplicate_ports_and_answers_membership() {
+    let storage = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
+    let audit = HostPortId::new("host.events.audit").unwrap();
+    let network = HostPortId::new("host.network.http").unwrap();
+
+    let view = HostPortView::new(vec![
+        HostPortGrant::new(storage.clone()),
+        HostPortGrant::new(audit.clone()),
+    ])
+    .unwrap();
+
+    assert!(view.allows(&storage));
+    assert!(view.allows(&audit));
+    assert!(!view.allows(&network));
+    assert!(view.allows_all([&storage, &audit]));
+    assert!(!view.allows_all([&storage, &network]));
+    assert_eq!(view.grants()[0].id(), &audit);
+    assert_eq!(view.grants()[1].id(), &storage);
+
+    assert!(
+        HostPortView::new(vec![
+            HostPortGrant::new(storage.clone()),
+            HostPortGrant::new(storage),
+        ])
+        .is_err(),
+        "duplicate host port grants must fail closed"
+    );
+}
+
+#[test]
+fn host_port_catalog_equality_is_order_independent() {
+    let storage = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
+    let audit = HostPortId::new("host.events.audit").unwrap();
+
+    let a = HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(storage.clone()),
+        HostPortCatalogEntry::new(audit.clone()),
+    ])
+    .unwrap();
+    let b = HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(audit),
+        HostPortCatalogEntry::new(storage),
+    ])
+    .unwrap();
+
+    assert_eq!(a, b);
+    assert_eq!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap(),
+    );
+}
+
+#[test]
+fn capability_profile_contract_equality_is_order_independent() {
+    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
+    let op1 = CapabilityProfileOperationContract::new(
+        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
+        "schemas/memory/context-retrieve.input.v1.json",
+        "schemas/memory/context-retrieve.output.v1.json",
+    )
+    .unwrap();
+    let op2 = CapabilityProfileOperationContract::new(
+        CapabilityProfileOperationId::new("memory.context.touch.v1").unwrap(),
+        "schemas/memory/context-touch.input.v1.json",
+        "schemas/memory/context-touch.output.v1.json",
+    )
+    .unwrap();
+
+    let a =
+        CapabilityProfileContract::new(profile_id.clone(), vec![op1.clone(), op2.clone()]).unwrap();
+    let b = CapabilityProfileContract::new(profile_id, vec![op2, op1]).unwrap();
+
+    assert_eq!(a, b);
+    assert_eq!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap(),
+    );
+}
+
+#[test]
+fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
+    let storage = "host.storage.sql_transaction.first_party";
+    let op_id = "memory.context.retrieve.v1";
+    let profile_id = "memory.context_retrieval.v1";
+    let in_ref = "schemas/memory/context-retrieve.input.v1.json";
+    let out_ref = "schemas/memory/context-retrieve.output.v1.json";
+    let ingress_policy = json!({
+        "listener_class": "local_gateway",
+        "auth": {
+            "type": "required",
+            "schemes": ["bearer_token"],
+        },
+        "scope_source": "authenticated_caller",
+        "body_limit": {
+            "type": "limited",
+            "max_bytes": 16384,
+        },
+        "rate_limit": {
+            "type": "limited",
+            "scope": "per_caller",
+            "max_requests": 30,
+            "window_seconds": 60,
+        },
+        "cors": "same_origin_only",
+        "websocket_origin": "not_applicable",
+        "streaming": "none",
+        "audit": "user_action",
+        "effect_path": {
+            "type": "product_workflow",
+        },
+    });
+
+    // Happy paths still parse.
+    assert!(serde_json::from_value::<HostPortGrant>(json!({ "id": storage })).is_ok());
+    assert!(serde_json::from_value::<HostPortCatalogEntry>(json!({ "id": storage })).is_ok());
+    assert!(
+        serde_json::from_value::<HostPortCatalog>(json!({ "entries": [{ "id": storage }] }))
+            .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage }] })).is_ok()
+    );
+    assert!(
+        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
+            "id": op_id,
+            "input_schema_ref": in_ref,
+            "output_schema_ref": out_ref,
+        }))
+        .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<CapabilityProfileContract>(json!({
+            "id": profile_id,
+            "required_operations": [{
+                "id": op_id,
+                "input_schema_ref": in_ref,
+                "output_schema_ref": out_ref,
+            }],
+        }))
+        .is_ok()
+    );
+    assert!(serde_json::from_value::<IngressPolicy>(ingress_policy.clone()).is_ok());
+    assert!(
+        serde_json::from_value::<IngressRouteDescriptor>(json!({
+            "route_id": "web_chat.send",
+            "method": "post",
+            "route_pattern": "/api/chat/v2/messages",
+            "policy": ingress_policy.clone(),
+        }))
+        .is_ok()
+    );
+    let mut ingress_policy_with_unknown = ingress_policy.clone();
+    ingress_policy_with_unknown["oops"] = json!(1);
+
+    // Unknown fields must fail closed at the wire boundary.
+    assert!(serde_json::from_value::<HostPortGrant>(json!({ "id": storage, "oops": 1 })).is_err());
+    assert!(
+        serde_json::from_value::<HostPortCatalogEntry>(json!({ "id": storage, "oops": 1 }))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<HostPortCatalog>(json!({
+            "entries": [{ "id": storage }],
+            "oops": 1,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<HostPortCatalog>(
+            json!({ "entries": [{ "id": storage, "oops": 1 }] })
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<HostPortView>(json!({
+            "grants": [{ "id": storage }],
+            "oops": 1,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage, "oops": 1 }] }))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
+            "id": op_id,
+            "input_schema_ref": in_ref,
+            "output_schema_ref": out_ref,
+            "oops": 1,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<CapabilityProfileContract>(json!({
+            "id": profile_id,
+            "required_operations": [{
+                "id": op_id,
+                "input_schema_ref": in_ref,
+                "output_schema_ref": out_ref,
+            }],
+            "oops": 1,
+        }))
+        .is_err()
+    );
+    assert!(serde_json::from_value::<IngressPolicy>(ingress_policy_with_unknown).is_err());
+    assert!(
+        serde_json::from_value::<IngressRouteDescriptor>(json!({
+            "route_id": "web_chat.send",
+            "method": "post",
+            "route_pattern": "/api/chat/v2/messages",
+            "policy": ingress_policy,
+            "oops": 1,
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn host_port_catalog_validates_required_ports_without_creating_implementations() {
+    let storage = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
+    let audit = HostPortId::new("host.events.audit").unwrap();
+    let network = HostPortId::new("host.network.http").unwrap();
+
+    let catalog = HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(storage.clone()),
+        HostPortCatalogEntry::new(audit.clone()),
+    ])
+    .unwrap();
+
+    assert!(catalog.contains(&storage));
+    assert!(catalog.contains(&audit));
+    assert!(!catalog.contains(&network));
+    catalog.validate_required([&storage, &audit]).unwrap();
+
+    let missing = catalog.validate_required([&storage, &network]).unwrap_err();
+    assert_eq!(
+        missing,
+        HostApiError::InvariantViolation {
+            reason: "unknown host ports host.network.http".to_string()
+        }
+    );
+
+    let inspector = HostPortId::new("host.network.inspector").unwrap();
+    let aggregated = catalog
+        .validate_required([&network, &inspector, &network])
+        .unwrap_err();
+    assert_eq!(
+        aggregated,
+        HostApiError::InvariantViolation {
+            reason: "unknown host ports host.network.http, host.network.inspector".to_string()
+        }
+    );
+    assert_eq!(
+        catalog.missing_required([&network, &inspector, &network]),
+        vec![network.clone(), inspector.clone()]
+    );
+
+    assert!(
+        HostPortCatalog::new(vec![
+            HostPortCatalogEntry::new(storage.clone()),
+            HostPortCatalogEntry::new(storage),
+        ])
+        .is_err(),
+        "duplicate host port catalog entries must fail closed"
+    );
+}
+
+#[test]
+fn capability_profile_ids_are_versioned_portable_contract_names() {
+    let id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
+    assert_eq!(id.as_str(), "memory.context_retrieval.v1");
+    assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));
+    assert_eq!(
+        serde_json::from_value::<CapabilityProfileId>(json!(id.as_str())).unwrap(),
+        id
+    );
+
+    for invalid in [
+        "",
+        "memory",
+        "memory.context_retrieval",
+        "memory.context_retrieval.version1",
+        "Memory.context_retrieval.v1",
+        "memory/context_retrieval/v1",
+        "memory..context_retrieval.v1",
+        "memory.context_retrieval.v1\n",
+        "1memory.context_retrieval.v1",
+        "memory.2context_retrieval.v1",
+    ] {
+        assert!(
+            CapabilityProfileId::new(invalid).is_err(),
+            "{invalid:?} should be rejected"
+        );
+        assert!(
+            serde_json::from_value::<CapabilityProfileId>(json!(invalid)).is_err(),
+            "{invalid:?} should also be rejected when deserialized"
+        );
+    }
+}
+
+#[test]
+fn capability_profile_contract_rejects_empty_or_duplicate_operations() {
+    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
+    let operation = CapabilityProfileOperationContract::new(
+        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
+        "schemas/memory/context-retrieve.input.v1.json",
+        "schemas/memory/context-retrieve.output.v1.json",
+    )
+    .unwrap();
+
+    let contract = CapabilityProfileContract::new(profile_id.clone(), vec![operation.clone()])
+        .expect("single-operation profile is valid");
+    assert_eq!(contract.id(), &profile_id);
+    assert_eq!(
+        contract.required_operations(),
+        std::slice::from_ref(&operation)
+    );
+
+    assert!(
+        CapabilityProfileContract::new(profile_id.clone(), Vec::new()).is_err(),
+        "profiles without required operations should fail closed"
+    );
+    assert!(
+        CapabilityProfileContract::new(profile_id, vec![operation.clone(), operation]).is_err(),
+        "duplicate profile operation contracts should fail closed"
+    );
+}
+
+#[test]
+fn capability_profile_schema_refs_are_relative_repository_paths() {
+    for valid in [
+        "schemas/memory/context-retrieve.input.v1.json",
+        "schemas/echo.output.v1.json",
+    ] {
+        assert!(
+            CapabilityProfileSchemaRef::new(valid).is_ok(),
+            "{valid:?} should be accepted"
+        );
+    }
+
+    for invalid in [
+        "",
+        "/schemas/memory/context.json",
+        "../schemas/memory/context.json",
+        "schemas/../context.json",
+        "https://example.com/schema.json",
+        "file:///tmp/schema.json",
+        "schemas/memory/context.json\n",
+        "data:text/plain,evil",
+        "mailto:foo",
+        "javascript:alert(1)",
+        "schemas/memory/with:colon.json",
+        "c:/win/schema.json",
+        "schemas/memory/contains space.json",
+    ] {
+        assert!(
+            CapabilityProfileSchemaRef::new(invalid).is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
 fn sample_context_with_agent(agent: Option<&str>) -> ExecutionContext {
     let mut ctx = sample_context();
     let agent_id = agent.map(|id| AgentId::new(id).unwrap());
@@ -822,4 +1682,130 @@ fn sample_context() -> ExecutionContext {
             invocation_id,
         },
     }
+}
+
+fn sample_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024 * 1024),
+    }
+}
+
+#[test]
+fn dispatch_error_event_kind_pins_auth_required_token() {
+    // "auth_required" is a stable observability token used in tracing and metrics.
+    // Regressions (typos, missing match arms) must be caught here.
+    let cap = || CapabilityId::new("test.cap").unwrap();
+    let handle = SecretHandle::new("google-access-token").unwrap();
+
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: vec![handle],
+            credential_requirements: Vec::new(),
+        }
+        .event_kind(),
+        "auth_required"
+    );
+    // Empty required_secrets must produce the same token.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        }
+        .event_kind(),
+        "auth_required"
+    );
+}
+
+#[test]
+fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
+    let old_payload = json!({
+        "provider": "github",
+        "requester_extension": "github",
+        "provider_scopes": []
+    });
+    let parsed: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(old_payload).expect("old auth requirement payload parses");
+    assert_eq!(parsed.setup, RuntimeCredentialAccountSetup::ManualToken);
+
+    let oauth = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let round_trip: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(serde_json::to_value(&oauth).expect("auth requirement serializes"))
+            .expect("oauth auth requirement parses");
+
+    assert_eq!(round_trip, oauth);
+}
+
+#[test]
+fn dispatch_error_auth_required_debug_redacts_required_secrets() {
+    let handle = SecretHandle::new("google-access-token").unwrap();
+    let error = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: vec![handle],
+        credential_requirements: Vec::new(),
+    };
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.contains("google-access-token"),
+        "handle name must not appear in Debug output; got: {debug}"
+    );
+    assert!(
+        debug.contains("1 handle(s) redacted"),
+        "redaction count must appear in Debug output; got: {debug}"
+    );
+    // Empty list variant.
+    let empty = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+        credential_requirements: Vec::new(),
+    };
+    let debug_empty = format!("{empty:?}");
+    assert!(
+        debug_empty.contains("0 handle(s) redacted"),
+        "zero redaction count must appear; got: {debug_empty}"
+    );
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let with_requirement = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+        credential_requirements: vec![requirement],
+    };
+    let debug_with_requirement = format!("{with_requirement:?}");
+    assert!(
+        debug_with_requirement.contains("1 requirement(s) redacted"),
+        "credential requirement redaction count must appear; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail"),
+        "requester extension must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail.readonly"),
+        "provider scope must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("google"),
+        "provider id must not appear in Debug output; got: {debug_with_requirement}"
+    );
 }

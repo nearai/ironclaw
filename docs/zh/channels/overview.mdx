@@ -5,24 +5,32 @@ description: "设置消息渠道以与您的智能体交互"
 
 频道定义了用户如何向您的智能体发送消息。开发阶段可以先从本地使用开始，之后再根据集成需求添加消息应用或 Webhook。
 
-<Card title="Tunnel" icon="link" href="/tunnel" horizontal>
+<Card title="Tunnel" icon="link" href="/zh/tunnel" horizontal>
   配置隧道，让基于 Webhook 的频道能够接收传入请求。
 </Card>
 
 <CardGroup cols={2}>
-  <Card title="Local" icon="terminal" href="/channels/local">
+  <Card title="Local" icon="terminal" href="/zh/channels/local">
     内置终端界面与 Web 网关，适合本地使用和测试。
   </Card>
 
-  <Card title="Telegram" icon="send" href="/channels/telegram">
+  <Card title="Telegram" icon="send" href="/zh/channels/telegram">
     在 Telegram 私聊和群聊中与您的智能体对话。
   </Card>
 
-  <Card title="Signal" icon="message" href="/channels/signal">
+  <Card title="Signal" icon="message" href="/zh/channels/signal">
     通过 signal-cli HTTP 守护进程将 IronClaw 接入 Signal。
   </Card>
 
-  <Card title="HTTP Webhook" icon="webhook" href="/channels/webhook">
+  <Card title="微信" icon="message" href="/zh/channels/wechat">
+    通过微信 iLink 机器人账号与智能体对话。
+  </Card>
+
+  <Card title="企业微信" icon="message" href="/zh/channels/wecom">
+    通过企业微信智能机器人与智能体对话。
+  </Card>
+
+  <Card title="HTTP Webhook" icon="webhook" href="/zh/channels/webhook">
     通过 REST 端点接收外部系统发送的消息。
   </Card>
 </CardGroup>

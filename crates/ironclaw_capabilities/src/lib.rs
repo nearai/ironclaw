@@ -3,13 +3,20 @@
 //! `ironclaw_capabilities` is the caller-facing capability invocation service.
 //! It coordinates authorization, approval resume, run-state transitions, and
 //! neutral runtime dispatch without depending on concrete runtime crates.
+#![warn(unreachable_pub)]
 
+mod conformance;
 mod error;
 mod helpers;
 mod host;
 mod obligations;
 mod requests;
 
+pub use conformance::{
+    CapabilityProfileClaim, CapabilityProfileClaimedOperation, CapabilityProfileConformanceFinding,
+    CapabilityProfileConformanceFindingKind, CapabilityProfileConformanceReport,
+    evaluate_profile_conformance,
+};
 pub use error::{CapabilityInvocationError, ResumeContextMismatchKind};
 pub use host::CapabilityHost;
 pub use obligations::{
@@ -18,6 +25,6 @@ pub use obligations::{
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 pub use requests::{
-    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityInvocationRequest, CapabilityInvocationResult,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };

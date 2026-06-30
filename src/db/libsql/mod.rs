@@ -24,6 +24,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use libsql::{Connection, Database as LibSqlDatabase};
 use rust_decimal::Decimal;
+use tokio::sync::Mutex;
+
+#[cfg(test)]
+pub(crate) static TEST_WRITE_LOCK: Mutex<()> = Mutex::const_new(());
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
@@ -56,6 +60,9 @@ pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
 /// create their own connections per-operation.
 pub struct LibSqlBackend {
     db: Arc<LibSqlDatabase>,
+    /// Serializes write transactions that libSQL/SQLite cannot safely run in
+    /// parallel on the same embedded database handle.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl LibSqlBackend {
@@ -73,7 +80,10 @@ impl LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open libSQL database: {}", e)))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     /// Create a new in-memory database (for testing).
@@ -85,7 +95,10 @@ impl LibSqlBackend {
                 DatabaseError::Pool(format!("Failed to create in-memory database: {}", e))
             })?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     /// Create with Turso cloud sync (embedded replica).
@@ -105,7 +118,10 @@ impl LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open remote replica: {}", e)))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     /// Get a shared reference to the underlying database handle.
@@ -114,6 +130,11 @@ impl LibSqlBackend {
     /// that need to create their own connections per-operation.
     pub fn shared_db(&self) -> Arc<LibSqlDatabase> {
         Arc::clone(&self.db)
+    }
+
+    #[cfg(test)]
+    fn shared_write_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write_lock)
     }
 
     /// Create a new connection to the database.
@@ -328,6 +349,9 @@ pub(crate) fn get_opt_ts(row: &libsql::Row, idx: i32) -> Option<DateTime<Utc>> {
 #[async_trait]
 impl Database for LibSqlBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        #[cfg(test)]
+        let _test_write_guard = TEST_WRITE_LOCK.lock().await;
+
         let conn = self.connect().await?;
         // WAL mode persists in the database file: all future connections benefit.
         // Readers no longer block writers and vice versa.
@@ -654,6 +678,7 @@ mod tests {
         for _ in 0..10 {
             let b = LibSqlBackend {
                 db: backend.shared_db(),
+                write_lock: backend.shared_write_lock(),
             };
             handles.push(tokio::spawn(async move { b.connect().await }));
         }

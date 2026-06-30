@@ -473,6 +473,17 @@ async fn handle_event(
                         ActiveTab::Logs => ActiveTab::Conversation,
                     };
                 }
+                InputAction::DownloadLogs => {
+                    let (message, kind) = match download_logs(state) {
+                        Ok(path) => (format!("Logs saved to {path}"), ToastKind::Success),
+                        Err(err) => (format!("Save logs failed: {err}"), ToastKind::Error),
+                    };
+                    state.toasts.push(Toast {
+                        message,
+                        kind,
+                        created_at: chrono::Utc::now(),
+                    });
+                }
                 InputAction::ScrollUp => match state.active_tab {
                     ActiveTab::Conversation => {
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
@@ -2379,23 +2390,14 @@ fn render_toasts(
 
     let theme = layout.resolve_theme();
     let max_toasts = 3usize;
-    let toast_width = 40u16.min(size.width.saturating_sub(2));
+    let icon_pad = 4u16; // " ICON "
+    let border_pad = 2u16; // left + right border
 
     // Stack toasts from bottom up, above status bar
-    let start_y = size.height.saturating_sub(3); // above status bar + input
-    let visible_toasts = state.toasts.iter().rev().take(max_toasts);
+    let mut next_bottom = size.height.saturating_sub(3);
+    let visible_toasts: Vec<_> = state.toasts.iter().rev().take(max_toasts).collect();
 
-    for (i, toast) in visible_toasts.enumerate() {
-        let y = start_y.saturating_sub((i as u16) * 3);
-        let x = size.width.saturating_sub(toast_width + 1);
-        let area = Rect::new(x, y, toast_width, 3);
-
-        if area.y == 0 {
-            continue;
-        }
-
-        Clear.render(area, frame.buffer_mut());
-
+    for toast in visible_toasts {
         let (icon, border_style) = match toast.kind {
             ToastKind::Info => ("\u{2139}", theme.accent_style()),
             ToastKind::Success => ("\u{2713}", theme.success_style()),
@@ -2403,21 +2405,39 @@ fn render_toasts(
             ToastKind::Error => ("\u{2717}", theme.error_style()),
         };
 
+        // Width fits the message in full (e.g. saved-log file paths), capped
+        // at the terminal width. If even the cap isn't enough, the paragraph
+        // wraps onto extra lines and the toast grows in height.
+        let max_outer_width = size.width.saturating_sub(1);
+        let message_chars = u16::try_from(toast.message.chars().count()).unwrap_or(u16::MAX);
+        let toast_width = message_chars
+            .saturating_add(icon_pad + border_pad)
+            .min(max_outer_width)
+            .max(20);
+
+        let inner_msg_width = toast_width.saturating_sub(border_pad + icon_pad).max(1) as usize;
+        let wrap_lines = toast
+            .message
+            .chars()
+            .count()
+            .div_ceil(inner_msg_width)
+            .max(1);
+        let toast_height = (wrap_lines as u16 + border_pad).min(size.height.saturating_sub(1));
+
+        if next_bottom < toast_height {
+            break;
+        }
+        let y = next_bottom.saturating_sub(toast_height);
+        let x = size.width.saturating_sub(toast_width + 1);
+        let area = Rect::new(x, y, toast_width, toast_height);
+
+        Clear.render(area, frame.buffer_mut());
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
-
-        let msg_width = inner.width as usize;
-        let display_msg = if toast.message.len() > msg_width.saturating_sub(3) {
-            format!(
-                "{}...",
-                &toast.message[..msg_width.saturating_sub(6).min(toast.message.len())]
-            )
-        } else {
-            toast.message.clone()
-        };
 
         let line = Line::from(vec![
             Span::styled(
@@ -2425,12 +2445,14 @@ fn render_toasts(
                 border_style.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                display_msg,
+                toast.message.clone(),
                 ratatui::style::Style::default().fg(theme.fg.to_color()),
             ),
         ]);
-        let paragraph = Paragraph::new(line);
+        let paragraph = Paragraph::new(line).wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(inner, frame.buffer_mut());
+
+        next_bottom = y;
     }
 }
 
@@ -2499,6 +2521,91 @@ fn try_paste_clipboard_image(_state: &AppState) -> Option<TuiAttachment> {
     None
 }
 
+/// Write the current log ring buffer to a timestamped file under `~/.ironclaw/logs/`
+/// (falls back to `$IRONCLAW_HOME/logs/` or the current directory). Returns the
+/// human-readable target path on success.
+fn download_logs(state: &AppState) -> Result<String, String> {
+    let dir = log_output_dir().ok_or_else(|| "could not resolve log directory".to_string())?;
+    download_logs_to_dir(state, &dir)
+}
+
+/// Inner write step, parameterized on output dir so tests can use a tempdir
+/// without racing `IRONCLAW_HOME` env mutation across threads.
+fn download_logs_to_dir(state: &AppState, dir: &std::path::Path) -> Result<String, String> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let (mut file, path) = open_unique_log_file(dir, &stamp)?;
+
+    for entry in state.log_entries.iter() {
+        writeln!(
+            file,
+            "{} {:<5} {} {}",
+            entry.timestamp, entry.level, entry.target, entry.message
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(path.display().to_string())
+}
+
+/// Open a new log file under `dir` with owner-only permissions on Unix and a
+/// collision-free name. Tries `tui-logs-<stamp>.log` first, then appends a
+/// numeric suffix on collision. Surfaces "already exists" as a hard error
+/// once the candidate budget is exhausted, instead of silently truncating —
+/// the timestamp has second precision, so two presses inside the same UTC
+/// second would otherwise destroy the earlier export.
+fn open_unique_log_file(
+    dir: &std::path::Path,
+    stamp: &str,
+) -> Result<(std::fs::File, std::path::PathBuf), String> {
+    /// Bound on the in-second retry budget. Realistically a user is not
+    /// pressing Ctrl-S a thousand times per second; this caps the loop.
+    const MAX_RETRIES: u32 = 1000;
+
+    for n in 0..MAX_RETRIES {
+        let path = if n == 0 {
+            dir.join(format!("tui-logs-{stamp}.log"))
+        } else {
+            dir.join(format!("tui-logs-{stamp}-{n}.log"))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only perms from creation, so a permissive umask on a
+        // shared host never produces group/world-readable log dumps.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "exhausted {MAX_RETRIES} candidate filenames in {} for stamp {stamp}",
+        dir.display()
+    ))
+}
+
+fn log_output_dir() -> Option<std::path::PathBuf> {
+    if let Ok(custom) = std::env::var("IRONCLAW_HOME") {
+        return Some(std::path::PathBuf::from(custom).join("logs"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(
+            std::path::PathBuf::from(home)
+                .join(".ironclaw")
+                .join("logs"),
+        );
+    }
+    std::env::current_dir().ok().map(|d| d.join("logs"))
+}
+
 /// Encode raw RGBA pixel data to PNG. Returns `None` on invalid dimensions or
 /// encoding failure.
 #[cfg(feature = "clipboard")]
@@ -2564,6 +2671,83 @@ mod tests {
         for (offset, ch) in text.chars().enumerate() {
             snapshot.buffer[(column + offset as u16, row)].set_symbol(&ch.to_string());
         }
+    }
+
+    fn push_log_entry(state: &mut AppState, message: &str) {
+        state.log_entries.push(crate::event::TuiLogEntry {
+            level: "INFO".to_string(),
+            target: "test".to_string(),
+            message: message.to_string(),
+            timestamp: "2026-05-15T00:00:00Z".to_string(),
+        });
+    }
+
+    /// Regression for serrrfirat's Medium #1 (PR #3658): exported log files
+    /// must not inherit umask. Two presses of Ctrl-S on a permissive host
+    /// previously produced 0664/0666 files containing every tracing line —
+    /// readable by anyone in the user's primary group.
+    #[cfg(unix)]
+    #[test]
+    fn download_logs_writes_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::default();
+        push_log_entry(&mut state, "hello");
+
+        let path = download_logs_to_dir(&state, dir.path()).expect("download");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "expected 0600, got {:o} for {path}",
+            mode & 0o777
+        );
+    }
+
+    /// Regression for serrrfirat's Medium #2 (PR #3658): the filename
+    /// timestamp has second precision and the writer used to call
+    /// `File::create`, which truncates. Two Ctrl-S presses in the same UTC
+    /// second silently overwrote the first export.
+    #[test]
+    fn download_logs_does_not_overwrite_on_same_second_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state_a = AppState::default();
+        push_log_entry(&mut state_a, "first");
+        let mut state_b = AppState::default();
+        push_log_entry(&mut state_b, "second");
+
+        let path_a = download_logs_to_dir(&state_a, dir.path()).expect("first write");
+        let path_b = download_logs_to_dir(&state_b, dir.path()).expect("second write");
+
+        assert_ne!(
+            path_a, path_b,
+            "second write must not collide with the first"
+        );
+        let body_a = std::fs::read_to_string(&path_a).expect("read a");
+        let body_b = std::fs::read_to_string(&path_b).expect("read b");
+        assert!(body_a.contains("first"), "first export was overwritten");
+        assert!(body_b.contains("second"));
+        assert!(
+            !body_a.contains("second"),
+            "first export must be untouched by the second call"
+        );
+    }
+
+    /// Direct check on the collision-resolution helper: feeding it the same
+    /// stamp repeatedly must keep yielding fresh paths until the budget runs
+    /// out, never reopening an existing file.
+    #[test]
+    fn open_unique_log_file_appends_suffix_on_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = "20260515T000000Z";
+
+        let (_f1, p1) = open_unique_log_file(dir.path(), stamp).expect("first");
+        let (_f2, p2) = open_unique_log_file(dir.path(), stamp).expect("second");
+        let (_f3, p3) = open_unique_log_file(dir.path(), stamp).expect("third");
+
+        assert_eq!(p1, dir.path().join("tui-logs-20260515T000000Z.log"));
+        assert_eq!(p2, dir.path().join("tui-logs-20260515T000000Z-1.log"));
+        assert_eq!(p3, dir.path().join("tui-logs-20260515T000000Z-2.log"));
     }
 
     #[cfg(feature = "clipboard")]

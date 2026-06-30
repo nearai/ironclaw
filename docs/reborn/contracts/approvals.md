@@ -3,7 +3,7 @@
 **Date:** 2026-04-25
 **Status:** V1 contract slice
 **Crate:** `crates/ironclaw_approvals`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
 ---
 
@@ -12,6 +12,8 @@
 `ironclaw_approvals` resolves durable approval requests into bounded authorization leases.
 
 It is a host control-plane service. It does not prompt users, render UI, execute capabilities, reserve resources, or route runtime work.
+
+Approval notification is separate from approval resolution and lease issuance. `ApprovalResolver` only resolves stored pending approvals into exact scoped leases; it does not choose a delivery target, render a prompt surface, or send the notification.
 
 The intended flow is:
 
@@ -23,7 +25,7 @@ CapabilityHost
 
 ApprovalResolver
   -> reads Pending ApprovalRecord under the same tenant/user/agent scope
-  -> approve: durably issues a scoped CapabilityLease carrying the invocation fingerprint, then marks Approved
+  -> approve: marks Approved as the durable decision, then issues a scoped CapabilityLease carrying the invocation fingerprint
   -> deny: marks Denied and issues no lease
   -> optionally emits metadata-only AuditEnvelope::approval_resolved records
 
@@ -36,6 +38,15 @@ CapabilityHost::resume_json
   -> compares the replayed invocation fingerprint
   -> claims the lease before runtime dispatch
   -> dispatches and consumes the claimed lease on success
+
+CapabilityHost::auth_resume_json
+  -> validates run record is BlockedAuth
+  -> when approval_request_id is Some: locates matching fingerprinted lease
+     (Active on first arrival, Claimed after a prior auth bounce claimed it)
+  -> transitions lease to Dispatching via begin_dispatch_claimed (single-winner CAS)
+  -> dispatches; on success consumes the Dispatching lease
+  -> on non-terminal BlockedAuth re-bounce: reverts Dispatching → Claimed via abort_dispatch_claimed
+     so the next auth_resume_json call can reuse the same lease without a second approval
 ```
 
 ---
@@ -120,14 +131,24 @@ The lease adds host-managed lifecycle state:
 pub enum CapabilityLeaseStatus {
     Active,
     Claimed,
+    Dispatching,
     Consumed,
     Revoked,
 }
 ```
 
+`Dispatching` is a transient state set by `begin_dispatch_claimed` during `auth_resume_json` to enforce single-winner concurrent reuse of a `Claimed` lease.  A second concurrent `auth_resume_json` call that finds the lease already in `Dispatching` receives `InactiveLease`, mirroring the loser of a concurrent `Active` `claim()` race.  `abort_dispatch_claimed` reverts `Dispatching` back to `Claimed` when a non-terminal auth re-bounce requires the lease to remain available for the next attempt.
+
+`CapabilityLeaseStore` exposes two new operations:
+
+- `begin_dispatch_claimed(scope, lease_id, fingerprint)` — atomically transitions a `Claimed`, fingerprint-matched, non-expired lease to `Dispatching`.
+- `abort_dispatch_claimed(scope, lease_id)` — reverts a `Dispatching` lease to `Claimed`; no-op-safe if the lease is already `Claimed`.
+
+`consume` and `revoke` treat both `Claimed` and `Dispatching` as valid source states (i.e., a terminal outcome can consume or revoke from either).
+
 V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/agent/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
-Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
+Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json` or `auth_resume_json`, which compare the fingerprint and claim the exact lease before dispatch.
 
 Claiming enforces that the lease is active, unexpired, not exhausted, and fingerprint-equal to the replayed request. A claimed lease is hidden from generic authorization so a second concurrent resume cannot also dispatch with the same one-shot approval lease.
 
@@ -148,7 +169,7 @@ Expiration is enforced during authorization, claim, and consumption using `Grant
 
 `ApprovalResolver` only resolves `Pending` records. Attempts to approve or deny an already-approved, denied, or expired record fail without changing that record.
 
-`ApprovalResolver` turns a pending dispatch approval into a lease:
+`ApprovalResolver` turns a pending dispatch or spawn approval into a lease:
 
 ```rust
 let lease = resolver
@@ -177,6 +198,14 @@ grant.constraints.max_invocations = LeaseApproval.max_invocations
 lease.invocation_fingerprint = ApprovalRequest.invocation_fingerprint
 ```
 
+For spawn approvals, `approve_spawn` applies the same lease fields but
+requires `ApprovalRequest.action = Action::SpawnCapability` and uses that
+capability id as `grant.capability`. The product/WebUI approval interaction
+service resumes the parked approval gate only after the spawn lease is issued;
+if a retry observes an already-approved spawn request while the turn is still
+parked on the same gate, it calls `retry_lease_issue_for_spawn` before resuming
+so a prior resolver-success/coordinator-failure remains recoverable.
+
 Denying a request only transitions the approval record and records the resolver actor:
 
 ```rust
@@ -196,11 +225,11 @@ No lease is issued for denied requests.
 Approval resolution is ordered fail-closed around lease persistence:
 
 1. Re-read the approval request and require `Pending`.
-2. Build and persist the exact fingerprinted lease.
-3. Only after lease persistence succeeds, mark the approval request `Approved`.
-4. If the approval status write fails after lease persistence, attempt to revoke the issued lease before returning the run-state error.
+2. Mark the approval request `Approved`; this approval record is the durable decision authority.
+3. Build and persist the exact fingerprinted lease.
+4. If lease persistence fails after the approval status write succeeds, leave the request `Approved` and return the lease error.
 
-This prevents an approval record from becoming `Approved` without durable resume authority, and with lease stores that can revoke the issued record it prevents an approval-write failure from leaving an active orphan lease. The resolver still spans separate stores, so this is a fail-closed coordination rule rather than a single database ACID transaction.
+This prevents a live lease from existing while the approval request still appears user-actionable as `Pending`. Because the resolver spans separate stores, an approval can become `Approved` before the lease write succeeds. Callers recover that window by invoking `retry_lease_issue_for_dispatch` or `retry_lease_issue_for_spawn` against the already-approved request with the same lease terms.
 
 Approval resolution can also emit best-effort audit records when configured with an `AuditSink`:
 
@@ -240,11 +269,26 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 
 This slice intentionally keeps approval resolution narrow:
 
-- no UI/user prompt implementation
-- no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate async stores
-- no approval support for non-dispatch actions yet
-- no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
-- no reusable approval-scope expansion yet; V1 leases are exact-invocation only
+- V1 leases are exact-invocation only; persistent approvals are represented as
+  separate Reborn approval-policy records, not as broadened V1 leases
+- no single-store ACID transaction across approval status update and lease issuance yet; an `Approved` request without a lease is recovered by retrying lease issuance against the durable approval decision
+- no approval support for actions other than dispatch and one-shot spawn yet
+- persistent approval policies cover dispatch and `Action::SpawnCapability`
+  approval interaction decisions at the current Reborn sandbox scope
+  (`tenant_id`, `user_id`, optional `agent_id`, and optional `project_id`);
+  `thread_id` never participates in the scope, so an "always allow" granted in
+  one thread applies to all of that user's threads with the same agent (and
+  project, when present) and is channel-agnostic — a WebUI grant is honored for
+  a Slack message resolving to the same `(user, agent)`. Existing local
+  thread-scoped approval-policy files from pre-DB testing are intentionally not
+  migrated or read through a compatibility fallback; wipe local approval state
+  when moving to this scope shape
+- persistent approval is fail-closed by manifest policy: the current default
+  only allows durable reuse for capabilities whose manifest
+  `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
+  gates and are re-checked before any stored policy is injected as authority
+- revoke is exposed at the policy-store layer for future product integration;
+  no user-facing revoke flow is defined in this slice
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
 

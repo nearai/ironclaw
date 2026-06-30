@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub list_repos input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "all",
+        "owner",
+        "public",
+        "private",
+        "member"
+      ],
+      "description": "Repository visibility/affiliation filter for the authenticated GitHub user repositories endpoint."
+    }
+  },
+  "required": []
+}

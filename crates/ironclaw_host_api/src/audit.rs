@@ -77,9 +77,8 @@ impl AuditEnvelope {
         scope: &crate::ResourceScope,
         request: &ApprovalRequest,
         resolved_by: Principal,
-        decision: impl Into<String>,
+        decision: ApprovalDecisionKind,
     ) -> Self {
-        let decision = decision.into();
         Self {
             event_id: AuditEventId::new(),
             correlation_id: request.correlation_id,
@@ -97,11 +96,43 @@ impl AuditEnvelope {
             extension_id: extension_from_principal(&request.requested_by),
             action: ActionSummary::from_action(request.action.as_ref()),
             decision: DecisionSummary {
-                kind: decision,
+                kind: decision.as_wire_str().to_string(),
                 reason: None,
                 actor: Some(resolved_by),
             },
             result: None,
+        }
+    }
+}
+
+/// Wire-stable enum for approval resolution outcomes.
+///
+/// This is the *typed* shape of `DecisionSummary::kind` produced by
+/// [`AuditEnvelope::approval_resolved`]. It is deliberately narrow —
+/// only the two outcomes an approval surface can emit — so callers can
+/// never drift on capitalization or spelling.
+///
+/// The wider `DecisionSummary::kind` field stays `String` because other
+/// audit producers emit values outside this enum (`"deny"` for
+/// authorization denials, `"obligation_satisfied"` for obligation
+/// handlers). Cross-decoding back into a single typed enum is a
+/// follow-up; today the enum-typed factory just locks the producer
+/// side of the contract for approvals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionKind {
+    Approved,
+    Denied,
+}
+
+impl ApprovalDecisionKind {
+    /// Canonical snake_case wire representation, matching the serde
+    /// derivation. Use this when stamping the `kind` field of the
+    /// untyped `DecisionSummary` so the producer side cannot drift.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
         }
     }
 }

@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::engine_actions::mission_capability_actions;
-use crate::bridge::llm_adapter::LlmBridgeAdapter;
+use crate::bridge::llm_adapter::{LlmBridgeAdapter, LlmUsageRecorder};
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
@@ -47,6 +47,27 @@ pub enum BridgeOutcome {
 }
 
 use std::collections::HashSet;
+
+/// Cadence of the external-tool catalog sweep. Backstop only — the
+/// per-thread terminal-state cleanup in `await_thread_outcome` is
+/// the primary cleanup path. Five minutes is short enough to keep
+/// memory bounded without producing visible churn for normal usage.
+const EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+/// Maximum age for a catalog entry before the periodic sweep evicts
+/// it. One hour matches typical pending-gate TTLs and gives callers
+/// plenty of headroom to resume a paused tool call.
+const EXTERNAL_TOOL_CATALOG_TTL: chrono::Duration = chrono::Duration::hours(1);
+/// Bound v1 conversation lookup before spawning Engine V2 work.
+///
+/// Two seconds keeps this optional enrichment below the normal interactive
+/// request budget while still giving cold libSQL/Postgres lookups room to
+/// complete. If it expires, the Engine V2 thread remains the durable source of
+/// truth and the v1 history mirror is skipped with a warning rather than
+/// blocking the user turn.
+const ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
@@ -512,6 +533,38 @@ fn resumed_action_result_message(
     ironclaw_engine::ThreadMessage::action_result(call_id, action_name, rendered)
 }
 
+/// Extract the tool output for `call_id` from a Responses API
+/// `function_call_output` resolution payload. The handler builds the
+/// payload as `{"outputs": [{"call_id": ..., "output": <string|json>}]}`.
+/// Falls back to:
+/// - the raw payload when no `outputs` array is present (defensive
+///   path for callers that pass a plain JSON value), and
+/// - `Value::Null` when the payload doesn't contain a matching call_id
+///   at all (lets the LLM see "the caller returned nothing for this
+///   call" rather than re-running the tool).
+fn extract_external_tool_output(payload: &serde_json::Value, call_id: &str) -> serde_json::Value {
+    let outputs = payload.get("outputs").and_then(|v| v.as_array());
+    if let Some(arr) = outputs {
+        for entry in arr {
+            let entry_call_id = entry.get("call_id").and_then(|v| v.as_str());
+            if entry_call_id == Some(call_id)
+                && let Some(out) = entry.get("output")
+            {
+                return out.clone();
+            }
+        }
+        // No matching call_id: surface a typed null so the LLM sees
+        // an explicit empty result rather than the (possibly stale)
+        // raw payload.
+        return serde_json::Value::Null;
+    }
+
+    // No `outputs` array at all — treat the whole payload as the
+    // result (matches OAuth callbacks that historically passed a
+    // raw value as the resolution).
+    payload.clone()
+}
+
 /// Resolve the assistant action `call_id` that a pending gate corresponds to.
 ///
 /// Returns `None` when neither the persisted `call_id` nor a history scan can
@@ -683,12 +736,51 @@ async fn notify_pending_gate(
     let extension_name =
         resolve_auth_gate_extension_name(auth_manager, extension_manager, tools, pending).await;
 
+    // External-tool gates (Responses API caller-executed tools) project
+    // to a dedicated `AppEvent::ExternalToolCall` so the Responses API
+    // accumulator can surface them as `function_call` items without
+    // re-rendering them as approval cards. OAuth/pairing callbacks
+    // (which also use `ResumeKind::External` but with a different
+    // callback_id prefix) keep flowing through the standard
+    // `AppEvent::GateRequired` path.
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
             gate = %pending.gate_name,
             callback = %callback_id,
             "GatePaused(External)"
         );
+        if crate::bridge::is_external_tool_callback_id(callback_id) {
+            if let Some(ref sse) = sse {
+                let arguments = serde_json::to_string(&pending.parameters)
+                    .unwrap_or_else(|_| pending.parameters.to_string());
+                let event = AppEvent::ExternalToolCall {
+                    request_id: pending.request_id.to_string(),
+                    call_id: pending.call_id.clone(),
+                    name: pending.action_name.clone(),
+                    arguments,
+                    thread_id: Some(pending.effective_wire_thread_id()),
+                };
+                sse.broadcast_for_user(&message.user_id, event); // projection-exempt: bridge dispatcher, ResumeKind::External(ext_tool) → Responses API function_call surface
+            } else {
+                // Today every external-tool flow runs through the
+                // gateway, which always wires SSE — so this branch
+                // means a future channel grew an external-tool surface
+                // without an SSE-equivalent fan-out, and the caller
+                // would never learn that the thread paused. Log so
+                // we can diagnose instead of silently hanging.
+                tracing::debug!(
+                    user_id = %message.user_id,
+                    callback = %callback_id,
+                    request_id = %pending.request_id,
+                    "external tool gate paused but no broadcaster is wired; \
+                     caller will not be notified"
+                );
+            }
+            // Don't run `send_pending_gate_status` — that path is for
+            // approval-card UX which doesn't apply to caller-executed
+            // tool calls.
+            return Ok(BridgeOutcome::Pending);
+        }
     }
 
     // Send the approval/auth card via the source channel. Each channel
@@ -1111,6 +1203,7 @@ async fn execute_pending_gate_action(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        conversation_scope: None,
         // Post-resolution replay: the gate has already been resolved
         // upstream, so a real controller is unnecessary. The inert
         // controller surfaces any unexpected re-gate as a typed denial
@@ -1284,6 +1377,40 @@ async fn resolve_user_project(
     Ok(pid)
 }
 
+/// Returns a clone of the live `ExternalToolCatalog` if the engine
+/// state has been initialized, or `None` if the engine has not started
+/// yet (engine_v2 disabled, or first message hasn't arrived). The
+/// Responses API handler uses this to register caller-supplied tools
+/// before sending the user message into the agent loop.
+pub async fn engine_external_tool_catalog() -> Option<Arc<crate::bridge::ExternalToolCatalog>> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    guard.as_ref().map(|s| Arc::clone(&s.external_tool_catalog))
+}
+
+/// Action names that are dispatchable via the engine v2 capability
+/// registry (`mission_*`, `skill_*`, `memory_*`, etc.). Used by the
+/// Responses API handler to reject caller-supplied tools whose names
+/// would shadow internal engine actions — the `tool_registry` check
+/// alone catches built-in and extension tools but misses capability
+/// actions, which can land in the catalog short-circuit even though
+/// the LLM-visible inventory dedup hides them.
+///
+/// Returns `None` if engine v2 is not initialised; callers treat that
+/// the same as "no engine v2 actions to collide with".
+pub async fn engine_capability_action_names() -> Option<Vec<String>> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    let names: Vec<String> = state
+        .capability_registry
+        .list()
+        .into_iter()
+        .flat_map(|cap| cap.actions.iter().map(|a| a.name.clone()))
+        .collect();
+    Some(names)
+}
+
 /// Persistent engine state that lives across messages.
 struct EngineState {
     thread_manager: Arc<ThreadManager>,
@@ -1305,6 +1432,17 @@ struct EngineState {
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
+    /// Per-thread catalog of caller-provided external tools (Responses
+    /// API). Shared by `Arc` clone with the effect adapter (which
+    /// reads it during action listing and dispatch) and the Responses
+    /// API handler (which writes to it before sending the request to
+    /// the agent loop).
+    external_tool_catalog: Arc<crate::bridge::ExternalToolCatalog>,
+    /// Engine v2 capability registry. Held here (in addition to the
+    /// `effect_adapter`'s internal handle) so the Responses API
+    /// handler can enumerate internal action names and reject
+    /// caller-supplied tools that would shadow them.
+    capability_registry: Arc<ironclaw_engine::CapabilityRegistry>,
     /// Inline gate-await controller. Lets the engine pause Tier 0 and
     /// Tier 1 executions in place on `Approval` and `Authentication`
     /// gates, rather than unwinding back to the orchestrator and
@@ -1335,6 +1473,54 @@ fn parse_engine_thread_id(scope: Option<&str>) -> Option<ironclaw_engine::Thread
 
 fn parse_scope_uuid(scope: Option<&str>) -> Option<uuid::Uuid> {
     scope.and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
+async fn resolve_v1_conversation_for_message(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+) -> Result<uuid::Uuid, crate::error::DatabaseError> {
+    if let Some(scope) = message.conversation_scope() {
+        return db
+            .get_or_create_scoped_conversation(&message.user_id, &message.channel, scope)
+            .await;
+    }
+
+    db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+        .await
+}
+
+async fn resolve_v1_conversation_for_engine_metadata(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+) -> Option<uuid::Uuid> {
+    match tokio::time::timeout(
+        ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT,
+        resolve_v1_conversation_for_message(db, message),
+    )
+    .await
+    {
+        Ok(Ok(cid)) => Some(cid),
+        Ok(Err(e)) => {
+            // silent-ok: v1 conversation resolution for engine metadata only enriches
+            // admin usage joins; engine v2 execution can proceed without this optional id.
+            tracing::warn!(
+                message_id = %message.id,
+                "failed to resolve v1 conversation for engine metadata: {e}"
+            );
+            None
+        }
+        Err(_) => {
+            // silent-ok: v1 conversation resolution for engine metadata is bounded so a
+            // slow DB cannot block engine v2 execution; the engine thread remains the
+            // durable source of truth and v1 history mirroring is skipped later.
+            tracing::warn!(
+                message_id = %message.id,
+                timeout_ms = ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT.as_millis(),
+                "timed out resolving v1 conversation for engine metadata"
+            );
+            None
+        }
+    }
 }
 
 async fn reconcile_pending_gate_state(
@@ -1600,9 +1786,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     debug!("engine v2: initializing engine state");
 
+    let usage_recorder = Arc::new(LlmUsageRecorder::new(
+        agent.deps.store.clone(),
+        Arc::clone(&agent.deps.cost_guard),
+        agent.deps.llm_backend.clone(),
+    ));
     let llm_adapter = Arc::new(LlmBridgeAdapter::new(
         agent.llm().clone(),
         Some(agent.cheap_llm().clone()),
+        usage_recorder,
     ));
 
     let effect_adapter = Arc::new(
@@ -1700,7 +1892,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         llm_adapter,
         effect_adapter.clone(),
         store_dyn.clone(),
-        capabilities,
+        Arc::clone(&capabilities),
         leases,
         policy,
     ));
@@ -1963,6 +2155,42 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: pending gate reconciliation failed: {e}");
     }
 
+    // Build the per-thread external tool catalog. Shared by Arc clone
+    // with the effect adapter (consults it on every action call) and
+    // exposed on the engine state so the Responses API handler can
+    // register/clear caller-supplied tools.
+    let external_tool_catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+    effect_adapter
+        .set_external_tool_catalog(Arc::clone(&external_tool_catalog))
+        .await;
+
+    // Backstop sweep: in addition to the per-thread terminal-state
+    // cleanup in `await_thread_outcome`, evict catalog entries that
+    // are older than `EXTERNAL_TOOL_CATALOG_TTL` to bound memory
+    // when a caller registers tools and then abandons the
+    // conversation (e.g. drops the connection without resuming a
+    // pending gate). Runs on a fixed cadence so a long-lived
+    // gateway doesn't accumulate stale entries.
+    {
+        let catalog = Arc::clone(&external_tool_catalog);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL);
+            // Skip the immediate first tick so we don't sweep
+            // freshly-registered entries on engine boot.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let evicted = catalog.sweep_older_than(EXTERNAL_TOOL_CATALOG_TTL).await;
+                if !evicted.is_empty() {
+                    debug!(
+                        evicted = evicted.len(),
+                        "engine v2: external tool catalog sweep evicted stale entries"
+                    );
+                }
+            }
+        });
+    }
+
     let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
     let gate_controller = Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
         Arc::clone(&pending_gates),
@@ -1990,6 +2218,8 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         auth_manager,
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
+        external_tool_catalog,
+        capability_registry: Arc::clone(&capabilities),
         gate_controller,
         gate_resolutions: resolutions,
     });
@@ -2511,13 +2741,16 @@ pub async fn handle_external_callback(
     agent: &Agent,
     message: &IncomingMessage,
     request_id: uuid::Uuid,
+    payload: Option<serde_json::Value>,
 ) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let resolution = ironclaw_engine::GateResolution::ExternalCallback {
-        payload: serde_json::Value::Null,
+        payload: payload.unwrap_or(serde_json::Value::Null),
     };
 
+    // Auth-flavored callback (legacy OAuth/pairing): consult the auth
+    // predicates first, including the conversation-scope hint shortcut.
     if let Some(thread_id) = hinted_pending_gate_thread_id(
         &message.user_id,
         message.conversation_scope(),
@@ -2536,13 +2769,23 @@ pub async fn handle_external_callback(
         return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
+    // Non-auth External callback (e.g. Responses API caller-executed tool
+    // result): the gate's resume_kind is `External` but it is not an
+    // authentication gate, so the auth predicates above don't match it.
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_resume_is_external)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
+    }
+
     debug!(
         user_id = %message.user_id,
         request_id = %request_id,
-        "engine v2: no matching pending auth gate for external callback"
+        "engine v2: no matching pending gate for external callback"
     );
     Ok(BridgeOutcome::Respond(
-        "No matching pending authentication gate found.".into(),
+        "No matching pending gate found.".into(),
     ))
 }
 
@@ -2602,6 +2845,17 @@ fn gate_is_authentication(gate: &PendingGate) -> bool {
     matches!(
         gate.resume_kind,
         ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+/// Matches any gate whose resume kind is `External`. Used as a fallback in
+/// `handle_external_callback` to resume non-auth tool-call pauses (e.g.
+/// the Responses API caller-executed tool result path) which never go
+/// through the authentication predicates.
+fn gate_resume_is_external(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::External { .. }
     )
 }
 
@@ -3494,7 +3748,7 @@ pub async fn resolve_gate(
             }
         }
 
-        ironclaw_engine::GateResolution::ExternalCallback { .. } => {
+        ironclaw_engine::GateResolution::ExternalCallback { ref payload } => {
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -3508,7 +3762,58 @@ pub async fn resolve_gate(
                     },
                 );
             }
-            if let Some(resume_output) = pending.resume_output.clone() {
+
+            // Caller-tool callbacks (Responses API) carry the tool's
+            // output in the resolution payload. The pending gate has
+            // `resume_output: None` because at gate-fire time the
+            // adapter doesn't have the output yet — so the legacy
+            // OAuth/pairing branch (which uses `pending.resume_output`)
+            // would re-run the action and re-pause forever. Instead,
+            // synthesize an `ActionResult`-shaped ThreadMessage from
+            // the resolution payload and resume directly.
+            //
+            // OAuth/pairing flows keep using the original
+            // `pending.resume_output` path (their callback_id has the
+            // `pairing:` prefix, not `ext_tool:`).
+            let is_external_tool_callback = matches!(
+                pending.resume_kind,
+                ironclaw_engine::ResumeKind::External { ref callback_id }
+                    if crate::bridge::is_external_tool_callback_id(callback_id)
+            );
+
+            if is_external_tool_callback {
+                let resolved_call_id =
+                    resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
+                let synthesized_output = extract_external_tool_output(payload, &resolved_call_id);
+                // External-tool payloads originate outside the
+                // EffectBridgeAdapter's sanitization pipeline. Run them
+                // through the same safety pass internal tool outputs
+                // get — leak detection, length cap, injection sanitizer,
+                // policy — before they reach the LLM. Caller is not a
+                // trust boundary; treat the payload like any other
+                // tool output.
+                let raw_rendered = serde_json::to_string_pretty(&synthesized_output)
+                    .unwrap_or_else(|_| synthesized_output.to_string());
+                let sanitized = state
+                    .effect_adapter
+                    .safety()
+                    .sanitize_tool_output(&pending.action_name, &raw_rendered);
+                state
+                    .thread_manager
+                    .resume_thread(
+                        pending.thread_id,
+                        message.user_id.clone(),
+                        Some(ironclaw_engine::ThreadMessage::action_result(
+                            &resolved_call_id,
+                            &pending.action_name,
+                            sanitized.content,
+                        )),
+                        None,
+                        Some(resolved_call_id),
+                    )
+                    .await
+                    .map_err(|e| engine_err("resume error", e))?;
+            } else if let Some(resume_output) = pending.resume_output.clone() {
                 let resolved_call_id =
                     resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 state
@@ -4423,6 +4728,41 @@ async fn handle_with_engine_inner(
         cfg
     };
 
+    // Stamp the conversation scope (parseable as a Uuid) into the
+    // thread's `initial_metadata`. The engine reads it back into
+    // `ThreadExecutionContext.conversation_scope`, which lets the
+    // bridge's `EffectBridgeAdapter` resolve per-conversation state
+    // (today: caller-supplied external tool catalog) by either the
+    // engine `thread_id` or the caller-side scope. Without this the
+    // executor task that starts immediately after spawn would race the
+    // bridge's post-spawn `transfer` and miss caller tools on the
+    // first turn.
+    let v1_conversation_id = if let Some(ref db) = state.db {
+        resolve_v1_conversation_for_engine_metadata(db, message).await
+    } else {
+        None
+    };
+
+    let scope_uuid = parse_engine_thread_id(scope);
+    let extra_metadata = if scope_uuid.is_some() || v1_conversation_id.is_some() {
+        let mut map = serde_json::Map::new();
+        if let Some(tid) = scope_uuid {
+            map.insert(
+                "conversation_scope".into(),
+                serde_json::Value::String(tid.0.to_string()),
+            );
+        }
+        if let Some(cid) = v1_conversation_id {
+            map.insert(
+                "v1_conversation_id".into(),
+                serde_json::Value::String(cid.to_string()),
+            );
+        }
+        Some(map)
+    } else {
+        None
+    };
+
     // Pre-bind per-execution context BEFORE the engine spawns the
     // thread. `handle_user_message` allocates and starts the engine
     // task internally; if a fast tool gate fires before
@@ -4461,6 +4801,7 @@ async fn handle_with_engine_inner(
             &message.user_id,
             thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
+            extra_metadata,
         )
         .await
     {
@@ -4483,6 +4824,18 @@ async fn handle_with_engine_inner(
         .set_execution_context(message.user_id.clone(), thread_id, per_exec_context)
         .await;
 
+    // Re-key the catalog onto the engine's allocated `thread_id` so
+    // the terminal-state cleanup hook in `await_thread_outcome` finds
+    // the entry under the canonical key. The race-window protection
+    // is the conversation_scope plumbing above; this transfer is the
+    // bookkeeping leg.
+    if let Some(scope_uuid) = scope_uuid {
+        state
+            .external_tool_catalog
+            .transfer(scope_uuid, thread_id)
+            .await;
+    }
+
     if !attachment_notes.is_empty() {
         save_attachment_index_notes(
             &state.store,
@@ -4495,32 +4848,26 @@ async fn handle_with_engine_inner(
     }
 
     // Dual-write to v1 database so the gateway history API shows messages.
-    // Use the thread-scoped conversation (from thread_id) when available,
-    // falling back to the default assistant conversation.
+    // Use the scoped conversation when available, falling back to the default
+    // assistant conversation. External channel scopes such as `wecom:group:*`
+    // are not UUIDs, so they are mapped to stable UUID conversation IDs while
+    // preserving the original scope in `conversations.thread_id`.
     if let Some(ref db) = state.db {
-        let v1_conv_id = if let Some(tid) = scope
-            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-        {
-            // Ensure the v1 conversation exists for this thread
-            let _ = db
-                .ensure_conversation(
-                    uuid,
-                    &message.channel,
-                    &message.user_id,
-                    Some(tid),
-                    Some(&message.channel),
-                )
-                .await;
-            Some(uuid)
-        } else {
-            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                .await
-                .ok()
-        };
-        if let Some(cid) = v1_conv_id {
-            let _ = db
-                .add_conversation_message(cid, "user", effective_content)
-                .await;
+        match v1_conversation_id {
+            Some(cid) => {
+                let _ = db
+                    .add_conversation_message(cid, "user", effective_content)
+                    .await;
+            }
+            None => {
+                // silent-ok: when the bounded v1 lookup fails, the Engine V2 thread
+                // store remains the durable source for this turn. The v1 gateway
+                // history mirror cannot attach the user message without a conversation id.
+                tracing::warn!(
+                    message_id = %message.id,
+                    "failed to persist user message because v1 conversation was not resolved"
+                );
+            }
         }
     }
 
@@ -4819,7 +5166,7 @@ fn spawn_post_park_continuation(
                     created_at: chrono::Utc::now(),
                     expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                     original_message: Some(message.content.clone()),
-                    resume_output: resume_output.clone(),
+                    resume_output: resume_output.as_deref().cloned(),
                     paused_lease: paused_lease.as_deref().cloned(),
                     approval_already_granted: false,
                 };
@@ -4933,18 +5280,16 @@ fn spawn_post_park_continuation(
             // Persist to v1 DB so the history API renders the final
             // assistant message.
             if let Some(ref db) = db {
-                let scope_uuid = message
-                    .conversation_scope()
-                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
-                let v1_conv_id = if let Some(uuid) = scope_uuid {
-                    Some(uuid)
-                } else {
-                    db.get_or_create_assistant_conversation(&user_id, &channel_name)
-                        .await
-                        .ok()
-                };
-                if let Some(cid) = v1_conv_id {
-                    let _ = db.add_conversation_message(cid, "assistant", text).await;
+                match resolve_v1_conversation_for_message(db, &message).await {
+                    Ok(cid) => {
+                        let _ = db.add_conversation_message(cid, "assistant", text).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "post-park continuation: failed to resolve v1 conversation for assistant response persist: {e}"
+                        );
+                    }
                 }
             }
         }
@@ -5168,6 +5513,16 @@ async fn await_thread_outcome(
         .await
         .map_err(|e| engine_err("join error", e))?;
 
+    // Drop the external-tool catalog entry on terminal outcomes —
+    // the thread can never resume from `Completed`, `Stopped`,
+    // `MaxIterations`, or `Failed`, so the entry would otherwise
+    // leak forever. `GatePaused` deliberately keeps the entry: a
+    // follow-up resume request needs the catalog to still know
+    // about this thread's caller-supplied tools.
+    if !matches!(outcome, ThreadOutcome::GatePaused { .. }) {
+        state.external_tool_catalog.clear(thread_id).await;
+    }
+
     state
         .conversation_manager
         .record_thread_outcome(conv_id, thread_id, &outcome)
@@ -5178,22 +5533,19 @@ async fn await_thread_outcome(
     // shows it correctly for all outcomes that produce a response.
     let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
         let db = Arc::clone(db);
-        let scope = message.conversation_scope().map(String::from);
-        let user_id = message.user_id.clone();
-        let channel = message.channel.clone();
+        let message = message.clone();
         let text = text.to_string();
         async move {
-            let v1_conv_id = if let Some(tid) = scope
-                && let Ok(uuid) = uuid::Uuid::parse_str(&tid)
-            {
-                Some(uuid)
-            } else {
-                db.get_or_create_assistant_conversation(&user_id, &channel)
-                    .await
-                    .ok()
-            };
-            if let Some(cid) = v1_conv_id {
-                let _ = db.add_conversation_message(cid, "assistant", &text).await;
+            match resolve_v1_conversation_for_message(&db, &message).await {
+                Ok(cid) => {
+                    let _ = db.add_conversation_message(cid, "assistant", &text).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        message_id = %message.id,
+                        "failed to resolve v1 conversation for assistant response persist: {e}"
+                    );
+                }
             }
         }
     };
@@ -5435,7 +5787,7 @@ async fn await_thread_outcome(
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                 original_message: Some(message.content.clone()),
-                resume_output,
+                resume_output: resume_output.map(|b| *b),
                 // Unbox: `ThreadOutcome::GatePaused.paused_lease` is
                 // `Option<Box<CapabilityLease>>` to keep the outcome
                 // enum compact; `PendingGate` stores it unboxed.
@@ -5449,6 +5801,46 @@ async fn await_thread_outcome(
                     error = %e,
                     "failed to store pending gate (may be duplicate)"
                 );
+            }
+
+            // Caller-supplied external tool from the Responses API:
+            // surface as `AppEvent::ExternalToolCall` so the
+            // /v1/responses handler can emit a `function_call`
+            // ResponseOutputItem and complete the turn. Without this
+            // emit the handler times out waiting for a never-arriving
+            // event and the user sees `response.failed`. The mid-exec
+            // path (`notify_pending_gate`) emits the same variant, but
+            // CodeAct converts the gate into a Python RuntimeError —
+            // the thread ends with a `ThreadOutcome::GatePaused` and
+            // never traverses `notify_pending_gate`, so we have to
+            // emit it here too.
+            if let ironclaw_engine::ResumeKind::External { ref callback_id } = pending.resume_kind
+                && crate::bridge::is_external_tool_callback_id(callback_id)
+            {
+                if let Some(ref sse) = state.sse {
+                    let arguments = serde_json::to_string(&pending.parameters)
+                        .unwrap_or_else(|_| pending.parameters.to_string());
+                    let event = AppEvent::ExternalToolCall {
+                        request_id: pending.request_id.to_string(),
+                        call_id: pending.call_id.clone(),
+                        name: pending.action_name.clone(),
+                        arguments,
+                        thread_id: Some(pending.effective_wire_thread_id()),
+                    };
+                    sse.broadcast_for_user(&message.user_id, event); // projection-exempt: bridge dispatcher, ThreadOutcome::GatePaused External-tool projection from CodeAct re-entry path
+                } else {
+                    tracing::debug!(
+                        user_id = %message.user_id,
+                        callback = %callback_id,
+                        request_id = %pending.request_id,
+                        "external tool gate paused (post-CodeAct) but no broadcaster is wired; \
+                         caller will not be notified"
+                    );
+                }
+                // Skip the approval-card delivery path below — that
+                // surface is for human-in-the-loop UX which doesn't
+                // apply to caller-executed tool calls.
+                return Ok(BridgeOutcome::Pending);
             }
 
             // Send the approval/auth card via the source channel. Each
@@ -5796,30 +6188,19 @@ async fn persist_v2_tool_calls(
         }
     };
 
-    // Resolve the v1 conversation ID
-    let v1_conv_id = if let Some(tid) = message.conversation_scope()
-        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-    {
-        Some(uuid)
-    } else {
-        match db
-            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
-            .await
-        {
-            Ok(cid) => Some(cid),
-            Err(e) => {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    "failed to resolve v1 conversation for tool_calls persist: {e}"
-                );
-                return;
-            }
+    let cid = match resolve_v1_conversation_for_message(db, message).await {
+        Ok(cid) => cid,
+        Err(e) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "failed to resolve v1 conversation for tool_calls persist: {e}"
+            );
+            return;
         }
     };
-    if let Some(cid) = v1_conv_id
-        && let Err(e) = db
-            .add_conversation_message(cid, "tool_calls", &content)
-            .await
+    if let Err(e) = db
+        .add_conversation_message(cid, "tool_calls", &content)
+        .await
     {
         tracing::warn!(thread_id = %thread_id, "failed to persist v2 tool_calls to v1 DB: {e}");
     }
@@ -7581,6 +7962,8 @@ pub(crate) mod test_support {
             )),
             gate_resolutions: test_gate_resolutions,
             project_root: super::resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         };
 
         let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
@@ -8195,6 +8578,7 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 0,
                     finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -8213,6 +8597,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
         }
@@ -8248,6 +8633,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let channels = Arc::new(crate::channels::ChannelManager::new());
@@ -9988,6 +10374,8 @@ mod tests {
             )),
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
@@ -10026,6 +10414,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(
@@ -10153,6 +10542,8 @@ mod tests {
             )),
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
@@ -10325,6 +10716,138 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router attachment persistence test");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn handle_with_engine_persists_non_uuid_channel_scopes_to_separate_v1_conversations() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("scoped-history.db"))
+                .await
+                .expect("local libsql"),
+        );
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn crate::db::Database> = backend.clone();
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: "done".to_string(),
+        });
+        let mut state = make_expected_test_state_with_llm(store, llm);
+        state.db = Some(Arc::clone(&db));
+
+        let dm_scope = "wecom:dm:ZhangSan";
+        let group_scope = "wecom:group:wr-t-7ZAAAM7uwzeRXYC2jrlq2JI6pxA";
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, _statuses) = make_test_agent_with_status_channel("wecom").await;
+
+            let dm_message =
+                IncomingMessage::new("wecom", "default", "hi").with_conversation_scope(dm_scope);
+            let dm_result = handle_with_engine_inner(&agent, &dm_message, &dm_message.content, 0)
+                .await
+                .expect("handle dm message");
+            assert!(matches!(dm_result, BridgeOutcome::Respond(_)));
+
+            let group_message =
+                IncomingMessage::new("wecom", "default", "@IronclawBot tell me a joke")
+                    .with_conversation_scope(group_scope);
+            let group_result =
+                handle_with_engine_inner(&agent, &group_message, &group_message.content, 0)
+                    .await
+                    .expect("handle group message");
+            assert!(matches!(group_result, BridgeOutcome::Respond(_)));
+
+            let conversations = db
+                .list_conversations_with_preview("default", "wecom", 10)
+                .await
+                .expect("list conversations");
+            assert_eq!(
+                conversations.len(),
+                2,
+                "private and group WeCom messages must not share one v1 history thread"
+            );
+
+            let dm_conv_id = crate::db::scoped_conversation_id("wecom", "default", dm_scope);
+            let group_conv_id = crate::db::scoped_conversation_id("wecom", "default", group_scope);
+            assert_ne!(
+                dm_conv_id, group_conv_id,
+                "different non-UUID channel scopes must map to different v1 conversations"
+            );
+
+            let dm_messages = db
+                .list_conversation_messages(dm_conv_id)
+                .await
+                .expect("list dm messages");
+            let group_messages = db
+                .list_conversation_messages(group_conv_id)
+                .await
+                .expect("list group messages");
+
+            assert!(
+                dm_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content == "hi"),
+                "DM conversation should contain the DM user message: {dm_messages:?}"
+            );
+            assert!(
+                !dm_messages
+                    .iter()
+                    .any(|msg| msg.content.contains("@IronclawBot")),
+                "DM conversation must not contain the group mention: {dm_messages:?}"
+            );
+            assert!(
+                group_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content.contains("@IronclawBot")),
+                "group conversation should contain the group user message: {group_messages:?}"
+            );
+            assert!(
+                !group_messages
+                    .iter()
+                    .any(|msg| msg.role == "user" && msg.content == "hi"),
+                "group conversation must not contain the DM message: {group_messages:?}"
+            );
+
+            let conn = backend.connect().await.expect("connect libsql");
+            let mut rows = conn
+                .query(
+                    "SELECT id, thread_id FROM conversations WHERE id IN (?1, ?2)",
+                    libsql::params![
+                        crate::db::scoped_conversation_id("wecom", "default", dm_scope).to_string(),
+                        crate::db::scoped_conversation_id("wecom", "default", group_scope)
+                            .to_string()
+                    ],
+                )
+                .await
+                .expect("query conversation scopes");
+            let mut stored_scopes = HashMap::new();
+            while let Some(row) = rows.next().await.expect("read conversation scope row") {
+                let id: String = row.get(0).expect("id");
+                let thread_id: Option<String> = row.get(1).expect("thread_id");
+                stored_scopes.insert(id, thread_id);
+            }
+            assert_eq!(
+                stored_scopes
+                    .get(&dm_conv_id.to_string())
+                    .and_then(|value| value.as_deref()),
+                Some(dm_scope)
+            );
+            assert_eq!(
+                stored_scopes
+                    .get(&group_conv_id.to_string())
+                    .and_then(|value| value.as_deref()),
+                Some(group_scope)
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("scoped WeCom history should stay separated");
     }
 
     #[tokio::test]
@@ -11916,6 +12439,8 @@ mod tests {
             )),
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
@@ -12711,6 +13236,77 @@ mod tests {
         );
         let info = thread_to_info(&thread);
         assert_eq!(info.title.as_deref(), Some("Short first line"));
+    }
+
+    /// `extract_external_tool_output` returns the tool result for the
+    /// matching call_id when the payload follows the canonical
+    /// `{"outputs": [...]}` shape the responses_api handler builds.
+    #[test]
+    fn extract_external_tool_output_matches_call_id() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_a", "output": "first result"},
+                {"call_id": "call_b", "output": {"weather": "sunny"}},
+            ]
+        });
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_a"),
+            serde_json::Value::String("first result".into())
+        );
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_b"),
+            serde_json::json!({"weather": "sunny"})
+        );
+    }
+
+    /// When the payload carries an `outputs` array but no entry
+    /// matches the requested call_id, the helper must surface a typed
+    /// `null` so the LLM sees an explicit empty result rather than
+    /// the (possibly stale) raw payload of some other call. Without
+    /// this, the bridge would echo back unrelated tool output to the
+    /// model, confusing the next turn.
+    #[test]
+    fn extract_external_tool_output_returns_null_when_call_id_missing() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_other", "output": "wrong call"},
+            ]
+        });
+        let result = extract_external_tool_output(&payload, "call_missing");
+        assert_eq!(
+            result,
+            serde_json::Value::Null,
+            "missing call_id must produce a typed null, got: {result:?}"
+        );
+    }
+
+    /// When the payload has no `outputs` array at all (defensive path
+    /// for legacy OAuth-style raw resolutions), the helper falls back
+    /// to returning the whole payload — preserving the historical
+    /// `Submission::ExternalCallback { payload: <raw value> }` shape.
+    #[test]
+    fn extract_external_tool_output_falls_back_to_raw_payload() {
+        let payload = serde_json::json!({"token": "abc123"});
+        let result = extract_external_tool_output(&payload, "any_call_id");
+        assert_eq!(result, payload);
+    }
+
+    /// An `outputs` entry without a matching call_id but a different
+    /// matching one further down the array must still be found —
+    /// guards against an early-return regression in the lookup loop.
+    #[test]
+    fn extract_external_tool_output_finds_match_after_misses() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_a", "output": "a"},
+                {"call_id": "call_b", "output": "b"},
+                {"call_id": "call_target", "output": "match"},
+            ]
+        });
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_target"),
+            serde_json::Value::String("match".into())
+        );
     }
 
     /// Regression test for #3317: when a user types a pairing claim into a

@@ -29,7 +29,9 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
-use ironclaw_llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
+use ironclaw_llm::{
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, ReasoningDetails, ResponseMetadata,
+};
 use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
@@ -159,7 +161,18 @@ Work independently to complete this job. When finished, your final message MUST 
             job.title, job.description
         )));
 
-        // Load tool definitions
+        // Load tool definitions.
+        //
+        // Scope-limited follow-up (#3243 HIGH iteration-2 gap): the container
+        // worker runs inside its own Docker sandbox and registers a *pre-
+        // attenuated* tool set via `register_container_tools()`, so the LLM's
+        // tool surface here is already narrower than the host-process surface
+        // by construction. Threading the resolved `EffectiveRuntimePolicy`
+        // through the orchestrator → worker HTTP handshake (so we could call
+        // `tool_definitions_visible_under(policy)` here) is intentionally
+        // deferred — the sandbox boundary itself is the primary
+        // security-property enforcer for the container path. Tracked alongside
+        // the orchestrator policy-propagation follow-up.
         reason_ctx.available_tools = self.tools.tool_definitions().await;
 
         // Shared iteration tracker — read after the loop to report accurate counts.
@@ -411,7 +424,10 @@ impl LoopDelegate for ContainerDelegate {
             tracing::warn!("Switching to text-only recovery after malformed tool completions");
             reason_ctx.available_tools.clear();
         } else {
-            // Refresh tools (in case WASM tools were built)
+            // Refresh tools (in case WASM tools were built). See the
+            // initial-load site above for the scope-limited rationale on
+            // skipping the policy-filtered variant inside the container
+            // sandbox (#3243 HIGH iteration-2 gap follow-up).
             reason_ctx.available_tools = self.tools.tool_definitions().await;
         }
 
@@ -511,6 +527,7 @@ impl LoopDelegate for ContainerDelegate {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
+        reasoning_details: Option<ReasoningDetails>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -532,6 +549,7 @@ impl LoopDelegate for ContainerDelegate {
         // Carry reasoning for the next turn — see #3201, #3225.
         reason_ctx.messages.push(
             ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning_details(reasoning_details)
                 .with_reasoning(reasoning),
         );
 

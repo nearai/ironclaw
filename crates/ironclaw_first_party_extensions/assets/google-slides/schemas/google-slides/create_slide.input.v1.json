@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides create_slide",
+  "description": "Create a new slide.",
+  "type": "object",
+  "required": [
+    "presentation_id"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "insertion_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Insertion index."
+    },
+    "layout": {
+      "type": "string",
+      "description": "Predefined layout. Defaults to BLANK."
+    }
+  },
+  "additionalProperties": false
+}

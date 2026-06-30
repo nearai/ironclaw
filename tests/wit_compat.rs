@@ -275,6 +275,12 @@ fn instantiate_channel_component(
         })
         .map_err(|e| format!("stub 'workspace-write': {e}"))?;
 
+        host.func_new("websocket-send-text", |_ctx, _ty, _args, results| {
+            results[0] = wasmtime::component::Val::Result(Ok(None));
+            Ok(())
+        })
+        .map_err(|e| format!("stub 'websocket-send-text': {e}"))?;
+
         host.func_new("pairing-upsert-request", |_ctx, _ty, _args, results| {
             results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
                 wasmtime::component::Val::String("stub".into()),
@@ -303,18 +309,22 @@ fn instantiate_channel_component(
         Ok(())
     }
 
-    {
+    let mut channel_host_interfaces = vec![
+        "near:agent/channel-host".to_string(),
+        "near:agent/channel-host@0.3.0".to_string(),
+        format!(
+            "near:agent/channel-host@{}",
+            ironclaw::tools::wasm::WIT_CHANNEL_VERSION
+        ),
+    ];
+    channel_host_interfaces.sort();
+    channel_host_interfaces.dedup();
+
+    for interface in channel_host_interfaces {
         let mut root = linker.root();
         let mut host = root
-            .instance("near:agent/channel-host")
-            .map_err(|e| format!("failed to create unversioned channel-host: {e}"))?;
-        stub_channel_host(&mut host)?;
-    }
-    {
-        let mut root = linker.root();
-        let mut host = root
-            .instance("near:agent/channel-host@0.3.0")
-            .map_err(|e| format!("failed to create versioned channel-host@0.3.0: {e}"))?;
+            .instance(&interface)
+            .map_err(|e| format!("failed to create {interface}: {e}"))?;
         stub_channel_host(&mut host)?;
     }
 

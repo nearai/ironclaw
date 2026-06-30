@@ -63,7 +63,8 @@ use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use crate::workspace::Workspace;
+use ironclaw_embeddings::{EmbeddingCacheConfig, EmbeddingProvider};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
@@ -113,10 +114,9 @@ impl GatewayChannel {
     /// Builds a single-user `MultiAuthState` from the config.
     pub fn new(config: GatewayConfig, owner_id: String) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
-            use rand::RngCore;
-            use rand::rngs::OsRng;
+            use rand::RngExt as _;
             let mut bytes = [0u8; 32];
-            OsRng.fill_bytes(&mut bytes);
+            rand::rng().fill(&mut bytes);
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 

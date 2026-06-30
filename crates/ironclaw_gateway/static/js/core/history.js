@@ -37,7 +37,7 @@ function loadHistory(before) {
     chatContainer.appendChild(renderSkeleton('message', 3));
   }
 
-  apiFetch(historyUrl).then((data) => {
+  return apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
     const pending = !isPaginating ? _pendingUserMessages.get(currentThreadId) : null;
     let freshPending = [];

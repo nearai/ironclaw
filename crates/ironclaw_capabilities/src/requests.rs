@@ -24,6 +24,23 @@ pub struct CapabilityResumeRequest {
     pub trust_decision: TrustDecision,
 }
 
+/// Caller-facing auth-resume capability request.
+///
+/// Used when an invocation was previously blocked at an auth gate and the
+/// credential has now been supplied.  When `approval_request_id` is `Some`
+/// the invocation also passed an earlier approval gate whose fingerprinted
+/// lease must be claimed before dispatch.  When `None` no lease step is
+/// needed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub trust_decision: TrustDecision,
+    pub approval_request_id: Option<ApprovalRequestId>,
+}
+
 /// Caller-facing capability spawn request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilitySpawnRequest {

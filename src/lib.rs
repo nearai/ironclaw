@@ -79,6 +79,8 @@ pub mod skills;
 pub mod tenant;
 pub mod timezone;
 pub mod tools;
+pub mod trace_client;
+pub mod trace_contribution;
 pub mod tracing_fmt;
 pub mod tunnel;
 pub mod util;

@@ -1,4 +1,5 @@
 //! Key handling and command parsing for the TUI.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -6,7 +7,7 @@ use crate::widgets::LogLevelFilter;
 
 /// Parsed user command from keyboard input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputAction {
+pub(crate) enum InputAction {
     /// Submit the current input text to the agent.
     Submit,
     /// Insert a newline into the input (Shift+Enter / Alt+Enter / Ctrl+J).
@@ -17,6 +18,8 @@ pub enum InputAction {
     ToggleSidebar,
     /// Toggle between Conversation and Logs tabs.
     ToggleLogs,
+    /// Write the current log buffer to a file on disk (Ctrl-S in Logs tab).
+    DownloadLogs,
     /// Scroll conversation up.
     ScrollUp,
     /// Scroll conversation down.
@@ -85,7 +88,7 @@ pub enum InputAction {
 
 /// Map a key event to an action, considering active modal/context state.
 #[allow(clippy::too_many_arguments)]
-pub fn map_key(
+pub(crate) fn map_key(
     key: KeyEvent,
     approval_active: bool,
     palette_active: bool,
@@ -122,6 +125,11 @@ pub fn map_key(
     // Log level filter keys only in logs tab
     if logs_active && let Some(action) = map_log_filter_key(key) {
         return action;
+    }
+
+    // Save logs only when the Logs tab is the focused view.
+    if logs_active && key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+        return InputAction::DownloadLogs;
     }
 
     match (key.code, key.modifiers) {
@@ -237,7 +245,7 @@ fn map_approval_key(key: KeyEvent) -> InputAction {
 }
 
 /// Parse a slash command from user input text.
-pub fn parse_slash_command(text: &str) -> Option<&str> {
+pub(crate) fn parse_slash_command(text: &str) -> Option<&str> {
     let trimmed = text.trim();
     if trimmed.starts_with('/') {
         Some(trimmed)
@@ -516,5 +524,14 @@ mod tests {
         assert_eq!(parse_slash_command("/help"), Some("/help"));
         assert_eq!(parse_slash_command("  /quit  "), Some("/quit"));
         assert_eq!(parse_slash_command("hello"), None);
+    }
+
+    #[test]
+    fn ctrl_s_triggers_download_only_in_logs_tab() {
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(map_logs(key), InputAction::DownloadLogs);
+        // Outside the Logs tab Ctrl-S must fall through to default text input,
+        // not silently dump the ring buffer from arbitrary contexts.
+        assert_eq!(map_default(key), InputAction::Forward);
     }
 }

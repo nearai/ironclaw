@@ -44,6 +44,14 @@ pub struct ThreadExecutionContext {
     pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
     /// Snapshot of the full action inventory visible to the current step.
     pub available_action_inventory_snapshot: Option<Arc<ActionInventory>>,
+    /// Originating conversation scope identifier supplied by the host
+    /// channel before the engine allocated `thread_id`. Lets the host's
+    /// effect executor look up per-conversation state (for example a
+    /// caller-supplied tool catalog) against the same key the host
+    /// registered under, without racing the engine task that started
+    /// running before the host could rebind the state onto the engine
+    /// `thread_id`.
+    pub conversation_scope: Option<uuid::Uuid>,
     /// Host-supplied callback that lets the executor pause inline on
     /// `Approval` gates instead of unwinding back to the orchestrator.
     ///
@@ -96,6 +104,7 @@ impl std::fmt::Debug for ThreadExecutionContext {
                 "available_action_inventory_snapshot",
                 &self.available_action_inventory_snapshot.is_some(),
             )
+            .field("conversation_scope", &self.conversation_scope)
             .field("gate_controller", &"<dyn GateController>")
             .field("call_approval_granted", &self.call_approval_granted)
             .field("conversation_id", &self.conversation_id)

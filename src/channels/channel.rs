@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
-// Channel-agnostic attachment types live in `ironclaw_common::attachment`.
+// Channel-agnostic attachment types live in `ironclaw_common`.
 // Re-exported here so the existing `crate::channels::AttachmentKind` /
 // `crate::channels::IncomingAttachment` import paths keep working.
-pub use ironclaw_common::attachment::{AttachmentKind, IncomingAttachment};
+pub use ironclaw_common::{AttachmentKind, IncomingAttachment};
 
 /// A message received from an external channel.
 #[derive(Debug, Clone)]

@@ -37,6 +37,9 @@ const I18n = {
       localStorage.setItem('ironclaw_language', lang);
       this.updateHtmlLang();
       this.updatePageContent();
+      window.dispatchEvent(new CustomEvent('ironclaw:language-changed', {
+        detail: { lang }
+      }));
       return true;
     }
     return false;

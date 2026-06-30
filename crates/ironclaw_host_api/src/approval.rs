@@ -66,7 +66,7 @@ impl InvocationFingerprint {
             input: &'a serde_json::Value,
         }
 
-        let canonical_input = canonical_json(input)?;
+        let canonical_input = canonical_json_v1(input)?;
         let payload = Payload {
             version: 1,
             kind,
@@ -77,8 +77,7 @@ impl InvocationFingerprint {
         };
         let bytes = serde_json::to_vec(&payload)
             .map_err(|error| HostApiError::invariant(error.to_string()))?;
-        let digest = Sha256::digest(bytes);
-        Ok(Self(format!("sha256:{}", to_lower_hex(&digest))))
+        Ok(Self(sha256_digest_token(&bytes)))
     }
 
     pub fn as_str(&self) -> &str {
@@ -88,8 +87,20 @@ impl InvocationFingerprint {
 
 const MAX_CANONICAL_JSON_DEPTH: usize = 64;
 
-fn canonical_json(value: &serde_json::Value) -> Result<serde_json::Value, HostApiError> {
+/// Canonicalize JSON values with recursively sorted object keys.
+///
+/// This helper is shared by host API fingerprints and host-runtime surface
+/// fingerprints so equivalent JSON inputs hash identically across process runs.
+/// Arrays preserve order; object keys sort lexicographically; scalar values are
+/// returned unchanged. Deeply nested inputs fail closed.
+pub fn canonical_json_v1(value: &serde_json::Value) -> Result<serde_json::Value, HostApiError> {
     canonical_json_at_depth(value, 0)
+}
+
+/// Return a stable `sha256:<lower-hex>` digest token for already-canonical bytes.
+pub fn sha256_digest_token(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", to_lower_hex(&digest))
 }
 
 fn canonical_json_at_depth(
