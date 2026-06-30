@@ -30,10 +30,12 @@ EMPTY_REPLY_RUN_ID = "22222222-3333-4444-5555-666666666666"
 def _preview_payload(message: dict) -> dict | None:
     if message.get("kind") != "capability_display_preview":
         return None
+    content = message.get("content")
+    assert isinstance(content, str), f"preview content must be a string: {message!r}"
     try:
-        return json.loads(message.get("content") or "{}")
-    except json.JSONDecodeError:
-        return None
+        return json.loads(content)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"preview content is not valid JSON: {content!r}") from error
 
 
 async def _wait_for_capability_preview(
@@ -227,9 +229,9 @@ async def _open_mocked_empty_reply_page(reborn_v2_server, reborn_v2_browser):
                 "features": {"reborn_projects": False},
                 "attachments": {
                     "accept": ["text/plain"],
-                    "max_files_per_message": 4,
-                    "max_bytes_per_file": 1048576,
-                    "max_bytes_per_message": 4194304,
+                    "max_count": 4,
+                    "max_file_bytes": 1048576,
+                    "max_total_bytes": 4194304,
                 },
             },
         )
@@ -522,7 +524,7 @@ async def test_reborn_legacy_empty_reply_failure_projection_is_visible(
             """
         )
 
-        error_message = page.locator("[data-testid='msg-error']").filter(
+        error_message = page.locator(SEL_V2["msg_error"]).filter(
             has_text="empty assistant response"
         )
         await expect(error_message).to_be_visible(timeout=5000)

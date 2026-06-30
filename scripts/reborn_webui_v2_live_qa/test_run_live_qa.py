@@ -404,6 +404,30 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                "https://near.ai responded with HTTP 200 - the endpoint is up and running fine.",
+                ["status|http|200|up|running|responded"],
+            )
+        )
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                "Trigger created. Schedule: every 5 minutes. Action: fetch latest releases.",
+                ["routine|trigger|automation|cron|schedule|created"],
+            )
+        )
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                "The email from firat.sertgoz@near.ai is already in the sheet.",
+                ["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
+            )
+        )
+        self.assertTrue(
+            run_live_qa._required_text_matches(
+                'Discussion thread "vibe coded eh" (id=47005839) mentions NEAR AI.',
+                ["news.ycombinator.com|hacker news|hn|discussion|id="],
+            )
+        )
 
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
@@ -825,7 +849,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(captured["required_text"], ["news.ycombinator.com"])
+        self.assertEqual(
+            captured["required_text"],
+            ["news.ycombinator.com|hacker news|hn|discussion|id="],
+        )
 
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
@@ -939,7 +966,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             captured["qa_6c_gmail_to_sheet_live_chat"]["required_text"],
-            ["ABC", "spreadsheet"],
+            ["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
         )
         self.assertTrue(
             extensions_by_case["qa_2f_calendar_prep_email_delivery"]["google-docs"].get(

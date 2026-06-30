@@ -680,6 +680,10 @@ export function useChat(threadId) {
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
         submitBusyRef.current = false;
+        if (err && typeof err === "object") {
+          err.optimisticMessageId = optimisticId;
+          err.optimisticThreadId = sendThreadId;
+        }
         throw err;
       } finally {
         // Release the re-entrancy guard once the send POST settles — that is
@@ -926,7 +930,12 @@ export function useChat(threadId) {
           setMessages(restoreFailedIfNoReplacement);
           if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
         }
-      } catch {
+      } catch (err) {
+        if (err?.optimisticMessageId) {
+          setMessages(removeFailed);
+          if (threadId) seedThreadMessages(threadId, removeFailed);
+          return;
+        }
         // `send` renders a replacement failed optimistic message after
         // admission. If admission failed before that point, restore the
         // original retryable error bubble.
