@@ -1080,6 +1080,59 @@ where
         )))
     }
 
+    /// Stamp `thread.updated_at = now` at a turn boundary (inbound accept,
+    /// finalized assistant append) so `list_threads_for_scope` orders by
+    /// genuine recency without scanning transcripts. This is the single
+    /// extra thread-record write per turn that the native (non-thread-
+    /// record) `reserve_sequence` path otherwise avoids — bounded to turn
+    /// boundaries, not per message or per token.
+    ///
+    /// Best-effort under contention: a `VersionMismatch` means a concurrent
+    /// activity write already advanced `updated_at` (the safe direction), so
+    /// after the bounded retry budget we return `Ok(())` rather than failing
+    /// the enclosing append — the message itself is already durably written.
+    /// A non-CAS backend error still propagates.
+    async fn touch_thread_updated_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            // The `?` propagates real read errors; the `else` handles only the
+            // genuine "thread deleted between append and stamp" case — there is
+            // nothing to order in the sidebar, so nothing to touch.
+            let Some((mut stored, version)) = self.read_thread_versioned(scope, thread_id).await?
+            else {
+                return Ok(());
+            };
+            stored.record.updated_at = Some(Utc::now());
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        // Retry budget exhausted purely on `VersionMismatch`: concurrent
+        // writers are advancing `updated_at` themselves, so the thread is
+        // already surfacing as recently-active. Don't fail the append over a
+        // best-effort ordering stamp.
+        tracing::debug!(
+            thread_id = %thread_id.as_str(),
+            "thread updated_at touch lost CAS race within retry budget; ordering stamp left to the concurrent writer",
+        );
+        Ok(())
+    }
+
     /// Read-modify-write a single message record with optimistic CAS and
     /// bounded retry. The `mutate` closure projects the staged record onto
     /// its new shape.
@@ -1399,6 +1452,10 @@ where
             }
         };
 
+        // Inbound user message is thread activity — stamp recency so the
+        // sidebar surfaces this thread first.
+        self.touch_thread_updated_at(&scope, &thread_id).await?;
+
         Ok(AcceptedInboundMessage {
             thread_id,
             message_id,
@@ -1561,7 +1618,7 @@ where
                 return Ok(existing);
             }
             let content = request.content.clone();
-            return self
+            let finalized = self
                 .apply_message_update(
                     &request.scope,
                     &request.thread_id,
@@ -1574,7 +1631,11 @@ where
                         Ok(())
                     },
                 )
-                .await;
+                .await?;
+            // Finalizing the in-flight draft is thread activity — stamp recency.
+            self.touch_thread_updated_at(&request.scope, &request.thread_id)
+                .await?;
+            return Ok(finalized);
         }
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
@@ -1608,6 +1669,9 @@ where
             )
             .await?;
         }
+        // Finalized assistant reply is thread activity — stamp recency.
+        self.touch_thread_updated_at(&request.scope, &request.thread_id)
+            .await?;
         Ok(message)
     }
 
@@ -2172,22 +2236,20 @@ where
         &self,
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-        // Per-request work scales with total thread count, not page
-        // size. Activity ordering (newest interaction first) requires
-        // every record's timestamp, so we read all records under the
-        // scope, sort by activity, then slice the requested page. The
-        // current `ScopedFilesystem` port exposes neither a
+        // Per-request work scales with thread *count*, not transcript
+        // *volume*. Activity ordering (newest interaction first) needs each
+        // thread's `updated_at`, so we read all records under the scope
+        // (one `get` per thread, concurrency-bounded), sort by that
+        // timestamp, then slice the requested page. Transcripts are never
+        // scanned here — `updated_at` is stamped at turn boundaries by
+        // `touch_thread_updated_at`, so it already reflects recency. The
+        // heavier title-derivation probes still run only for the sliced
+        // page. The current `ScopedFilesystem` port exposes neither a
         // cursor-paginated directory listing nor a timestamp index, and
-        // adding either belongs upstream of this crate. Acceptable today
-        // because:
-        //   * local-dev / single-tenant deployments keep the per-scope
-        //     thread count bounded (per agent + project + owner).
-        //   * the record-read fan-out is concurrency-bounded, and the
-        //     heavier title-derivation probes still run only for the
-        //     sliced page.
-        // When a tenant grows past low thousands of threads under a
-        // single scope, replace this with a storage-level paginator
-        // (e.g. a secondary index keyed by `(scope, updated_at)`).
+        // adding either belongs upstream of this crate. When a tenant grows
+        // past low thousands of threads under a single scope, replace this
+        // with a storage-level paginator (e.g. a secondary index keyed by
+        // `(scope, updated_at)`).
         let limit = request
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
@@ -2228,12 +2290,12 @@ where
             .await;
         // Keep present, scope-matching records paired with their
         // `next_sequence` (needed for page-scoped title derivation).
-        let mut listed: Vec<(SessionThreadRecord, u64, u64)> = Vec::with_capacity(reads.len());
+        let mut listed: Vec<(SessionThreadRecord, u64)> = Vec::with_capacity(reads.len());
         for (thread_id, result) in reads {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
                     let next_sequence = stored.next_sequence;
-                    listed.push((stored.record, next_sequence, 0));
+                    listed.push((stored.record, next_sequence));
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -2255,69 +2317,20 @@ where
                 }
             }
         }
-        let latest_sequence_results: Vec<(ThreadId, Result<u64, SessionThreadError>)> =
-            futures::stream::iter(
-                listed
-                    .iter()
-                    .map(|(record, _, _)| record.thread_id.clone())
-                    .collect::<Vec<_>>(),
-            )
-            .map(|thread_id| {
-                let scope = request.scope.clone();
-                async move {
-                    let result =
-                        self.list_thread_messages(&scope, &thread_id)
-                            .await
-                            .map(|messages| {
-                                messages
-                                    .into_iter()
-                                    .map(|message| message.sequence)
-                                    .max()
-                                    .unwrap_or(0)
-                            });
-                    (thread_id, result)
-                }
-            })
-            .buffer_unordered(LIST_THREADS_RECORD_READ_CONCURRENCY)
-            .collect()
-            .await;
-        for (thread_id, latest_sequence_result) in latest_sequence_results {
-            let latest_sequence = match latest_sequence_result {
-                Ok(latest_sequence) => latest_sequence,
-                Err(error) => {
-                    tracing::debug!(
-                        thread_id = %thread_id.as_str(),
-                        scope = ?request.scope,
-                        ?error,
-                        "skipping unreadable thread messages during list_threads_for_scope activity sort",
-                    );
-                    0
-                }
-            };
-            if let Some((_, _, sequence_slot)) = listed
-                .iter_mut()
-                .find(|(record, _, _)| record.thread_id == thread_id)
-            {
-                *sequence_slot = latest_sequence;
-            }
-        }
-        // Newest activity first. Native sequence allocation no longer rewrites
-        // `thread.updated_at` on every append, so message-bearing threads sort
-        // ahead of empty threads and then by latest per-thread sequence.
-        // Empty/legacy records fall back to `updated_at` then `created_at`.
-        // Tie-break on thread_id ascending so the order is stable and
-        // opaque cursors stay resumable — and to match the web sidebar's
-        // `byActivityDesc` comparator.
-        listed.sort_by(|(a, _, a_latest_sequence), (b, _, b_latest_sequence)| {
+        // Newest activity first, by `thread.updated_at` (falling back to
+        // `created_at`). The append paths stamp `updated_at` at turn
+        // boundaries via `touch_thread_updated_at` (inbound accept +
+        // finalized assistant append), so this is a true cross-thread
+        // recency signal — and it costs only the per-thread record read
+        // already done above, with no per-thread transcript scan. Tie-break
+        // on thread_id ascending so the order is stable and opaque cursors
+        // stay resumable — and to match the web sidebar's `byActivityDesc`
+        // comparator.
+        listed.sort_by(|(a, _), (b, _)| {
             let a_key = a.updated_at.or(a.created_at);
             let b_key = b.updated_at.or(b.created_at);
-            std::cmp::Reverse(*a_latest_sequence > 0)
-                .cmp(&std::cmp::Reverse(*b_latest_sequence > 0))
-                .then_with(|| {
-                    std::cmp::Reverse(*a_latest_sequence)
-                        .cmp(&std::cmp::Reverse(*b_latest_sequence))
-                })
-                .then_with(|| std::cmp::Reverse(a_key).cmp(&std::cmp::Reverse(b_key)))
+            std::cmp::Reverse(a_key)
+                .cmp(&std::cmp::Reverse(b_key))
                 .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
         });
         // Opaque cursor is the last thread_id of the previous page; find
@@ -2327,7 +2340,7 @@ where
         let start_index = match request.cursor.as_deref() {
             Some(cursor) => listed
                 .iter()
-                .position(|(record, _, _)| record.thread_id.as_str() == cursor)
+                .position(|(record, _)| record.thread_id.as_str() == cursor)
                 .map(|index| index + 1)
                 .unwrap_or(listed.len()),
             None => 0,
@@ -2340,7 +2353,7 @@ where
         // indices here and fan-out the indexed first-user reads below so
         // we don't serialize N transcript probes inline.
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
-        for (record, next_sequence, _) in listed.drain(start_index..end_index) {
+        for (record, next_sequence) in listed.drain(start_index..end_index) {
             let idx = page.len();
             if record.title.is_none() {
                 needs_title.push((idx, record.thread_id.clone(), next_sequence));

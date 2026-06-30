@@ -1506,7 +1506,7 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
     // The freshly-used thread now leads the Recent list.
     let after = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: scope_a,
+            scope: scope_a.clone(),
             limit: None,
             cursor: None,
         })
@@ -1518,6 +1518,79 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(after_ids, ["t-older", "t-newer"]);
+
+    // Cross-thread recency invariant the activity sort exists for: a
+    // *chattier but staler* thread must NOT outrank a *quieter but more
+    // recently touched* one. A per-thread-sequence sort (transcript length)
+    // would wrongly float `t-newer` above `t-older` after the steps below.
+    let older_stamp = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+        })
+        .await
+        .unwrap()
+        .updated_at
+        .expect("touched thread has activity stamp");
+    wait_until_after(older_stamp).await;
+
+    // Pile several messages onto `t-newer`, raising its per-thread sequence
+    // well above `t-older`'s — but at this earlier instant.
+    for i in 0..3 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope_a.clone(),
+                thread_id: ThreadId::new("t-newer").unwrap(),
+                actor_id: "actor-a".into(),
+                source_binding_id: Some(format!("binding-chatter-{i}")),
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-chatter-{i}")),
+                content: MessageContent::text("chatter on the new thread"),
+            })
+            .await
+            .unwrap();
+    }
+    let newer_stamp = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-newer").unwrap(),
+        })
+        .await
+        .unwrap()
+        .updated_at
+        .expect("touched thread has activity stamp");
+    wait_until_after(newer_stamp).await;
+
+    // Touch `t-older` once more, strictly later. It now has FEWER total
+    // messages than `t-newer` but the most recent activity.
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-activity-2".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-activity-2".into()),
+            content: MessageContent::text("ping the old thread again"),
+        })
+        .await
+        .unwrap();
+
+    let final_list = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let final_ids: Vec<&str> = final_list
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    // Recency wins over transcript length.
+    assert_eq!(final_ids, ["t-older", "t-newer"]);
 }
 
 #[tokio::test]
