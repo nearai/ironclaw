@@ -208,7 +208,11 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                     <div className="truncate font-mono text-[10px] text-[var(--v2-text-faint)]">
                       ${trace.submission_id}
                     </div>
-                    <div className="shrink-0 font-mono text-xs text-[var(--v2-text-strong)]">
+                    <div
+                      className="shrink-0 font-mono text-xs text-[var(--v2-text-strong)]"
+                      title=${t("traceCommons.traceStatus")}
+                      aria-label=${t("traceCommons.traceStatus")}
+                    >
                       ${trace.status}
                     </div>
                   </div>
@@ -228,7 +232,10 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                       </span>
                     </span>
                     <span className="ml-auto shrink-0">
-                      ${formatTimestamp(trace.received_at, t)}
+                      ${t("traceCommons.traceReceivedAt")}:${" "}
+                      <span className="font-mono text-[var(--v2-text-strong)]">
+                        ${formatTimestamp(trace.received_at, t)}
+                      </span>
                     </span>
                   </div>
                 </li>

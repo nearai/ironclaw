@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_reborn_traces::contribution::{
-    COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
+    AccountLoginLink, COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
     COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError, ContributionHttpMethod,
     ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
@@ -1104,15 +1104,85 @@ pub(super) async fn dispatch_account_login_link(
     )
     .await
     {
-        Ok(link) => Ok(json!({
-            "minted": true,
-            "account_id": link.account_id,
-            "url": link.url,
-            "message": "Use this link to log in to your Trace Commons account in a browser. \
-        It is one-time-use and expires shortly.",
-        })),
+        Ok(link) => match persist_account_login_link(scope.as_str(), &link) {
+            Ok(_) => Ok(format_account_login_link(&link)),
+            Err(error) => {
+                tracing::debug!(%error, "failed to persist Trace Commons account login link");
+                Ok(account_login_link_error_value(
+                    "could not write the account login link to local state".to_string(),
+                ))
+            }
+        },
         Err(error) => Ok(account_login_link_error_value(error.to_string())),
     }
+}
+
+/// Write the one-time login URL to a 0600 file in the scope's local state dir
+/// and return its path. The URL is a code-bearing account-access credential: it
+/// must NOT be returned in the model-visible tool result (that copies it into
+/// the LLM transcript/history and any downstream persistence). Delivering it
+/// out-of-band via a private file keeps the secret off the model surface while
+/// the local browser-login flow can still read it. Mirrors `persist_profile_token`.
+fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+
+    let dir = trace_contribution_dir_for_scope(Some(scope));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("account_login_link.url");
+
+    // Atomic write: a unique 0600 temp file (per-write uuid name so concurrent
+    // mints don't race on a fixed temp path), fsync, then rename onto the final
+    // path — the same temp+rename credential-write discipline as the profile
+    // token, so a reader only ever sees a complete URL.
+    let temp_path = dir.join(format!(
+        "account_login_link.url.{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    let write_temp = || -> std::io::Result<()> {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(link.url.as_bytes())?;
+        file.sync_all()
+    };
+    if let Err(error) = write_temp() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
+fn format_account_login_link(link: &AccountLoginLink) -> Value {
+    json!({
+        "minted": true,
+        "account_id": link.account_id,
+        // The one-time login URL is deliberately NOT included here — it is a
+        // code-bearing account-access credential and must not enter the model
+        // transcript. It is persisted (0600) for out-of-band retrieval by the
+        // local Trace Commons UI/CLI; `link_delivery` is an opaque marker (never
+        // a host path, which is itself a host detail that must not cross the
+        // model/user-visible surface).
+        "link_delivery": "local_private_account_login_link_file",
+        "message": "A one-time Trace Commons browser login link was minted but is not shown here \
+    because it is an account-access credential and must not appear in the conversation. Use the \
+    local Trace Commons UI or CLI to open the private account-login-link file in your browser. \
+    It is one-time-use and expires shortly.",
+    })
 }
 
 fn account_login_link_error_value(error: String) -> Value {

@@ -807,14 +807,56 @@ async fn account_login_link_through_dispatch() {
         result.get("error_code"),
         result.get("message"),
     );
-    let url = result["url"].as_str().expect("url must be a string");
-    assert!(
-        url.contains("/account/login?code="),
-        "url must contain the login-link path; got: {url}"
-    );
     assert_eq!(
         result["account_id"],
         json!("acc123"),
         "account_id must match mock response"
     );
+    // SECURITY: the one-time login URL is a code-bearing account-access
+    // credential. It must NOT be returned on the model-visible surface (that
+    // copies it into the LLM transcript and any downstream logging). The result
+    // delivers an opaque out-of-band marker instead — mirroring profile_token.
+    assert!(
+        result.get("url").is_none(),
+        "the login URL credential must not be returned on the model-visible surface; got: {result}"
+    );
+    assert_eq!(
+        result["link_delivery"],
+        json!("local_private_account_login_link_file"),
+        "out-of-band delivery must be signaled by an opaque marker"
+    );
+    assert!(
+        !result.to_string().contains("testcode123"),
+        "the one-time login code must never appear anywhere in the model-visible result"
+    );
+
+    // The URL is delivered out-of-band: persisted to a 0600 private
+    // `account_login_link.url` file in the caller scope's local state dir for the
+    // local UI/CLI to open. Locate it under the base dir without recomputing the
+    // exact scope path.
+    let persisted = find_persisted_login_link(setup_base_dir().path())
+        .expect("the login URL must be persisted to the private account-login-link file");
+    assert!(
+        persisted.contains("/account/login?code=testcode123"),
+        "the persisted private file must hold the one-time login URL; got: {persisted}"
+    );
+}
+
+/// Recursively search `dir` for an `account_login_link.url` file and return its
+/// contents. The file is written under the caller scope's trace-contribution
+/// state dir (`<base>/.../account_login_link.url`); the test asserts the secret
+/// URL is delivered there rather than on the model-visible surface.
+fn find_persisted_login_link(dir: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_persisted_login_link(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("account_login_link.url") {
+            return std::fs::read_to_string(&path).ok();
+        }
+    }
+    None
 }

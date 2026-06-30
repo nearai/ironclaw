@@ -100,19 +100,33 @@ pub struct RebornTraceHoldAuthorizeResponse {
     pub authorized: bool,
 }
 
+/// Typed failure for [`account_traces_for_user`]. Each variant names the backend
+/// operation that failed and carries the full cause chain (`{:#}`) so the WebUI
+/// boundary keeps a diagnosable cause instead of an undiscriminated `String`.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AccountTracesError {
+    /// `resolve_trace_credentials` failed to read local enrollment state.
+    #[error("resolve trace credentials: {0}")]
+    ResolveCredentials(String),
+    /// `fetch_account_traces` failed (transport / server / decode).
+    #[error("fetch account traces: {0}")]
+    Fetch(String),
+}
+
 /// Fetch the caller-scoped submitted traces from the Trace Commons server.
 ///
 /// Uses the crate-local hardened reqwest path (no host-egress sink) — the same
 /// network lane as the rest of the WebUI / facade surface. The `enrolled` flag
 /// is set from `resolve_trace_credentials`; a user who is not enrolled gets the
 /// unenrolled zero-state (`enrolled: false`, empty list) rather than an error.
-/// Transport failures surface as `Err` so the caller can return a sanitized 500.
+/// Transport failures surface as a typed `Err` (the operation is named and the
+/// cause chain preserved) so the caller can return a sanitized, diagnosable 500.
 pub(super) async fn account_traces_for_user(
     tenant_id: &str,
     user_id: &str,
-) -> Result<RebornAccountTracesResponse, String> {
+) -> Result<RebornAccountTracesResponse, AccountTracesError> {
     let enrolled = resolve_trace_credentials(tenant_id, user_id)
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| AccountTracesError::ResolveCredentials(format!("{e:#}")))?
         .is_some();
     if !enrolled {
         return Ok(RebornAccountTracesResponse {
@@ -120,9 +134,13 @@ pub(super) async fn account_traces_for_user(
             traces: vec![],
         });
     }
+    // `None` is not unbounded: `fetch_account_traces` defaults a missing limit to
+    // ACCOUNT_TRACES_DEFAULT_LIMIT (200), clamps any explicit value to
+    // [1, ACCOUNT_TRACES_MAX_LIMIT], and caps the buffered response bytes — so
+    // the initial settings-page slice can never scale with total account age.
     let items = fetch_account_traces(tenant_id, user_id, None)
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| AccountTracesError::Fetch(format!("{e:#}")))?;
     let traces = items
         .into_iter()
         .map(|item| RebornAccountTrace {
