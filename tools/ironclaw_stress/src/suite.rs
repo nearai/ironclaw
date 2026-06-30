@@ -270,6 +270,7 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
     case_args.suite = None;
     case_args.preset = case.preset;
     case_args.scenario = case.scenario;
+    case_args.suite_case_label = Some(case.label.to_string());
     case_args.repetitions = 1;
     case_args.ramp_concurrency = None;
     case_args.ramp_users = None;

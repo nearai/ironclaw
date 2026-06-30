@@ -329,6 +329,9 @@ pub(crate) struct Args {
 
     #[arg(long, hide = true, default_value_t = false)]
     pub(crate) warmup_phase: bool,
+
+    #[arg(long, hide = true)]
+    pub(crate) suite_case_label: Option<String>,
 }
 
 impl Args {
@@ -1120,6 +1123,9 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
         if let Some(preset) = args.preset {
             command.arg("--preset").arg(preset.as_str());
         }
+        if let Some(label) = &args.suite_case_label {
+            command.arg("--suite-case-label").arg(label);
+        }
         if args.span_log_failures {
             command.arg("--span-log-failures");
         }
@@ -1650,9 +1656,13 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
 }
 
 pub(crate) fn log_prefix(args: &Args) -> String {
-    match args.child_index {
-        Some(child_index) => format!("[ironclaw-stress child={child_index}]"),
-        None => "[ironclaw-stress]".to_string(),
+    match (args.child_index, args.suite_case_label.as_deref()) {
+        (Some(child_index), Some(label)) => {
+            format!("[ironclaw-stress child={child_index} case={label}]")
+        }
+        (Some(child_index), None) => format!("[ironclaw-stress child={child_index}]"),
+        (None, Some(label)) => format!("[ironclaw-stress case={label}]"),
+        (None, None) => "[ironclaw-stress]".to_string(),
     }
 }
 

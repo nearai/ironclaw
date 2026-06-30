@@ -162,6 +162,20 @@ fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
 }
 
 #[test]
+fn log_prefix_includes_suite_case_label() {
+    let mut args = test_args();
+    args.suite_case_label = Some("large-context".to_string());
+
+    assert_eq!(log_prefix(&args), "[ironclaw-stress case=large-context]");
+
+    args.child_index = Some(2);
+    assert_eq!(
+        log_prefix(&args),
+        "[ironclaw-stress child=2 case=large-context]"
+    );
+}
+
+#[test]
 fn soak_user_session_preset_uses_duration_mode() {
     let args = parse_test_args([
         "ironclaw_stress",
@@ -999,6 +1013,7 @@ fn test_args() -> Args {
         memory_hold_ms: 0,
         child_index: None,
         warmup_phase: false,
+        suite_case_label: None,
     }
 }
 
