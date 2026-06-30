@@ -155,15 +155,9 @@ impl SyntheticIds {
         worker_index: usize,
         operation_index: usize,
     ) -> (usize, usize, usize) {
-        let global_index = if args.uses_duration_mode() {
-            operation_index
-                .saturating_mul(args.concurrency)
-                .saturating_add(worker_index)
-        } else {
-            worker_index
-                .saturating_mul(args.operations)
-                .saturating_add(operation_index)
-        };
+        let global_index = operation_index
+            .saturating_mul(args.concurrency)
+            .saturating_add(worker_index);
         let user_index = global_index % self.users.len();
         let tenant_index = user_index % self.tenants.len();
         (tenant_index, user_index, global_index)

@@ -67,6 +67,26 @@ fn active_thread_count_reuses_hot_thread_but_keeps_actor_fanout() {
 }
 
 #[test]
+fn fixed_operation_mode_spreads_concurrent_workers_across_threads() {
+    let mut args = test_args();
+    args.users = 8;
+    args.concurrency = 8;
+    args.operations = 200;
+    args.active_thread_count = 0;
+    let ids = SyntheticIds::new(&args).expect("synthetic ids build");
+
+    let thread_ids = (0..args.concurrency)
+        .map(|worker_index| {
+            ids.user_turn_context(&args, worker_index, 0)
+                .expect("context")
+                .thread_id
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(thread_ids.len(), args.concurrency);
+}
+
+#[test]
 fn chat_turn_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ChatTurn;
