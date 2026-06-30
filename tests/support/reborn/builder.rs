@@ -35,7 +35,9 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
+use ironclaw_product_adapters::{
+    DeliveryStatus, ProductInboundAck, ProductTriggerReason, ProductWorkflow,
+};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
@@ -54,6 +56,7 @@ use super::harness::{
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
+use super::delivery::RecordingOutboundDeliverySink;
 use super::test_adapter::RebornTestIngress;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -231,6 +234,11 @@ impl RebornIntegrationHarnessBuilder {
             }
         };
 
+        // Routed through the group/thread builder (one assembly path for both
+        // groups and single-shot harnesses). `RebornIntegrationGroup::thread`
+        // defaults the new thread's `actor_id` to `HARNESS_ACTOR_ID`, so a
+        // single-shot harness always submits as the default actor; per-actor
+        // overrides are a group-thread concern (`RebornThreadBuilder::with_actor_id`).
         let group: RebornIntegrationGroup = RebornIntegrationGroup::builder()
             .storage(self.storage)
             .build_with_capability(group_capability)
@@ -249,6 +257,11 @@ pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
     pub(crate) workflow: DefaultProductWorkflow,
     pub(crate) conversation_id: String,
+    /// The actor/user id this harness submits turns as. Defaults to
+    /// [`HARNESS_ACTOR_ID`]; a group thread can override it via
+    /// `RebornThreadBuilder::with_actor_id` so distinct actors resolve to
+    /// distinct bindings (E-MULTIUSER seam).
+    pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
@@ -275,6 +288,11 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
+    /// Per-thread outbound-delivery sink (E-OUTBOUND seam). The in-process
+    /// `submit_turn` path does not drive outbound delivery itself; this sink is
+    /// the shared handle a delivery-driver test (C-OUTBOUND) feeds to
+    /// `prepare_and_render_product_outbound`. Unused in PR-E1.
+    pub(crate) delivery_sink: RecordingOutboundDeliverySink,
 }
 
 impl RebornIntegrationHarness {
@@ -298,6 +316,9 @@ impl RebornIntegrationHarness {
     /// Submit a user turn and wait for it to complete.
     pub async fn submit_turn(&self, text: &str) -> HarnessResult<TurnRunId> {
         let run_id = self.submit_turn_async(text).await?;
+        // Assert actor_user_id BEFORE the status wait so this is the first
+        // failure point when submit-side actor wiring regresses.
+        self.assert_submitted_actor_user_id(run_id).await?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
         Ok(run_id)
     }
@@ -309,7 +330,7 @@ impl RebornIntegrationHarness {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
-            HARNESS_ACTOR_ID,
+            &self.actor_id,
             &self.conversation_id,
             text,
             ProductTriggerReason::DirectChat,
@@ -345,6 +366,39 @@ impl RebornIntegrationHarness {
         Ok((run_id, gate_ref))
     }
 
+    /// Submit a user turn and wait until it blocks on an **auth** gate, returning
+    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
+    /// capability whose credential account resolves to `AuthRequired` blocks here
+    /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
+    pub async fn submit_turn_until_auth_blocked(
+        &self,
+        text: &str,
+    ) -> HarnessResult<(TurnRunId, GateRef)> {
+        let run_id = self.submit_turn_async(text).await?;
+        let state = self.wait_for_status(run_id, TurnStatus::BlockedAuth).await?;
+        let gate_ref = state.gate_ref.ok_or("blocked auth run missing gate ref")?;
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        Ok((run_id, gate_ref))
+    }
+
+    /// Snapshot of outbound delivery statuses recorded for this thread
+    /// (E-OUTBOUND seam). Unused in PR-E1; consumed by C-OUTBOUND's
+    /// delivery-driver tests once a turn drives `prepare_and_render_product_outbound`
+    /// through `delivery_sink()`.
+    pub fn delivery_statuses(&self) -> Vec<DeliveryStatus> {
+        self.delivery_sink.statuses()
+    }
+
+    /// The per-thread outbound-delivery sink (E-OUTBOUND seam). C-OUTBOUND passes
+    /// this into a delivery driver so a full turn's reply payload + reply target
+    /// are recorded for `delivery_statuses()` assertions.
+    pub(crate) fn delivery_sink(&self) -> &RecordingOutboundDeliverySink {
+        &self.delivery_sink
+    }
+
     /// Assert the finalized assistant reply in thread history contains `text`.
     ///
     /// (Co-located with the harness fields it reads. When the `assert_*` family
@@ -355,6 +409,49 @@ impl RebornIntegrationHarness {
             .assert_final_reply(self.binding.thread_id.clone(), text)
             .await
             .map_err(Into::into)
+    }
+
+    /// Assert the [`TurnActor::user_id`] stored on the submitted run matches
+    /// this harness's binding [`actor_user_id`](ResolvedBinding::actor_user_id).
+    ///
+    /// Called from [`submit_turn`] between `submit_turn_async` and
+    /// `wait_for_status` so it is the **first** failure point when the
+    /// submit-side actor wiring regresses: if `submit_turn_async` used
+    /// [`HARNESS_ACTOR_ID`] instead of `self.actor_id`, the workflow resolves
+    /// a binding for the wrong actor; the stored scope carries the wrong
+    /// `thread_owner`, which mismatches `self.turn_scope` in `get_run_state` →
+    /// [`TurnError::ScopeNotFound`] is returned and wrapped here with a message
+    /// that names the actor-wiring invariant.
+    pub async fn assert_submitted_actor_user_id(&self, run_id: TurnRunId) -> HarnessResult<()> {
+        let state = self
+            .turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!(
+                    "actor_user_id wiring: run not found in binding scope \
+                     (actor may have resolved to a different user-id; \
+                     expected actor_user_id {:?}): {e}",
+                    self.binding.actor_user_id
+                )
+                .into()
+            })?;
+        let actor_user_id = state
+            .actor
+            .map(|a| a.user_id)
+            .ok_or("run state has no actor; actor_user_id wiring cannot be verified")?;
+        if actor_user_id == self.binding.actor_user_id {
+            return Ok(());
+        }
+        Err(format!(
+            "actor_user_id wiring: submitted turn actor {:?} != binding actor_user_id {:?}; \
+             actor resolved to a different user-id (submit wiring broken)",
+            actor_user_id, self.binding.actor_user_id
+        )
+        .into())
     }
 
     /// Assert the finalized reply survives a close-and-reopen of the thread

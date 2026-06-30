@@ -88,8 +88,15 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   stays in `harness.rs` (it is a full `Self {..}` constructor co-located with its
   sibling constructors and would otherwise force every private field of the central
   harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
-  in `harness_mcp.rs`. `harness.rs` remains large (further `harness_auth.rs` /
-  `harness_hooks.rs` splits are tracked in the coverage roadmap).
+  in `harness_mcp.rs`. `harness.rs` remains large (a further `harness_auth.rs`
+  split is tracked in the coverage roadmap).
+- `harness_hooks.rs` — hook-framework scaffolding (E-HOOK-INFRA seam):
+  `RecordingObserverHook` (records each `ObservedKind` it observes, via the
+  `process.rs`/`delivery.rs` recording-double conventions) plus the `pub(super)`
+  `build_hook_dispatcher_builder_factory` that installs it as a Builtin Telemetry
+  observer at `AfterCapability`. Unused until C-HOOKS flips
+  `assemble_thread_runtime`'s `hook_dispatcher_builder_factory` from `None` to
+  `Some(..)` (that setter lands inline with C-HOOKS, not here).
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is

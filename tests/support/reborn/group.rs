@@ -83,8 +83,7 @@ use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
-    EmptyUserProfileSource, HostManagedModelGateway, JsonSpawnSubagentInputCodec,
-    SubagentSpawnLimits,
+    HostManagedModelGateway, JsonSpawnSubagentInputCodec, SubagentSpawnLimits,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
@@ -115,6 +114,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
+use super::delivery::RecordingOutboundDeliverySink;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -280,6 +280,20 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Group whose GitHub extension's credential account resolves to
+    /// `AuthRequired`, so a scripted `github.*` tool call raises a real
+    /// `TurnStatus::BlockedAuth` gate (E-AUTHGATE seam). Drive with
+    /// `submit_turn_until_auth_blocked`.
+    pub async fn live_auth_gate() -> HarnessResult<Self> {
+        Self::builder().live_auth_gate().await
+    }
+
+    /// Group with the local-dev synthetic `project_create` capability wired
+    /// (E-PROJ seam). Auto-approve is enabled.
+    pub async fn project_lifecycle() -> HarnessResult<Self> {
+        Self::builder().project_lifecycle().await
+    }
+
     /// Builder for advanced configuration (e.g. `StorageMode::LibSql`).
     /// Defaults to `StorageMode::InMemory`.
     pub fn builder() -> RebornIntegrationGroupBuilder {
@@ -299,6 +313,7 @@ impl RebornIntegrationGroup {
         RebornThreadBuilder {
             group: self,
             conversation_id: conversation_id.into(),
+            actor_id: HARNESS_ACTOR_ID.to_string(),
             replies: Vec::new(),
         }
     }
@@ -513,7 +528,17 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: None,
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
-            user_profile_source: Arc::new(EmptyUserProfileSource),
+            // E-PROFILE: in HostRuntime mode, back the profile source with the
+            // local-dev memory filesystem so `profile_set` writes can be read back;
+            // non-HostRuntime backends (and HostRuntime harnesses without a profile
+            // filesystem) fall back to `EmptyUserProfileSource`. `resolve_user_profile`
+            // returns `None` when no `context/profile.json` exists, so existing
+            // HostRuntime group tests are behavior-identical. Built once here (not
+            // per-thread) because the group's ONE planned runtime is assembled once.
+            user_profile_source:
+                ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
+                    capability_recorder.profile_filesystem(),
+                ),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
@@ -607,6 +632,26 @@ impl RebornIntegrationGroupBuilder {
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
+
+    /// Build an auth-gate group. See [`RebornIntegrationGroup::live_auth_gate`].
+    ///
+    /// No auto-approve disable and no approval-gate evidence: auth gates are
+    /// self-evidencing via the BeforeBlock checkpoint (loop_exit_applier.rs). Do
+    /// NOT add approval-gate evidence here — that store is only for approval gates.
+    pub async fn live_auth_gate(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools_auth_required().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        Ok(self.into_group(base, capability))
+    }
+
+    /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].
+    pub async fn project_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = HostRuntimeCapabilityHarness::project_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        Ok(self.into_group(base, capability))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +672,7 @@ impl RebornIntegrationGroupBuilder {
 pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
+    actor_id: String,
     replies: Vec<RebornScriptedReply>,
 }
 
@@ -635,6 +681,23 @@ impl<'g> RebornThreadBuilder<'g> {
     /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
+        self
+    }
+
+    /// Submit this thread's turns as a distinct actor id (E-MULTIUSER seam).
+    ///
+    /// The actor flows through binding resolution (the probe) and turn
+    /// submission, so two threads with different actor ids resolve to **distinct
+    /// bindings** — distinct `thread_id` and `subject_user_id`. This is
+    /// binding-scope isolation only.
+    ///
+    /// IMPORTANT: capability-scope isolation (per-actor memory / approvals /
+    /// projects / auto-approve keys) is NOT provided by this seam alone — the
+    /// group's capability harness is still constructed under the single
+    /// `resolve_canonical_subject_user(HARNESS_ACTOR_ID)` owner. Per-actor
+    /// capability ownership lands with the C-MULTIUSER coverage workstream.
+    pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
+        self.actor_id = actor_id.into();
         self
     }
 
@@ -663,7 +726,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let ingress = RebornTestIngress::new(adapter);
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
-            HARNESS_ACTOR_ID,
+            &self.actor_id,
             &self.conversation_id,
             "hi",
             ProductTriggerReason::DirectChat,
@@ -750,6 +813,7 @@ impl<'g> RebornThreadBuilder<'g> {
             ingress,
             workflow,
             conversation_id: self.conversation_id,
+            actor_id: self.actor_id,
             binding,
             turn_scope,
             turn_store: Arc::clone(&shared.turn_store),
@@ -762,6 +826,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_egress_count,
             baseline_result_count,
             baseline_process_count,
+            delivery_sink: RecordingOutboundDeliverySink::new(),
         })
     }
 }

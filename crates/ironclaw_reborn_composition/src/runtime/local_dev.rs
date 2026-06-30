@@ -66,13 +66,43 @@ pub(crate) use crate::outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
 #[cfg(test)]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
+
+/// Test-only bridge (E-PROJ seam): wrap `inner` with just the `project_create`
+/// local-dev synthetic capability, so the Reborn integration-test harness can
+/// inject it onto its host-runtime capability port the same way production does
+/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
+/// `project_create_capability` + `wrap_local_dev_synthetic_capabilities`, so the
+/// test path never hand-mirrors the production wrap.
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wrap_project_create_capability_for_test(
+    inner: Arc<dyn LoopCapabilityPort>,
+    project_service: Arc<dyn ProjectService>,
+    fallback_user_id: UserId,
+    run_context: LoopRunContext,
+    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+    synthetic_capability::wrap_local_dev_synthetic_capabilities(
+        inner,
+        vec![project_create::project_create_capability(
+            project_service,
+            fallback_user_id,
+        )?],
+        run_context,
+        input_resolver,
+        result_writer,
+        // trajectory_observer: None — not wired in the integration-test harness.
+        None,
+    )
+}
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,

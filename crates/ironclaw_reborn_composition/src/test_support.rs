@@ -840,3 +840,59 @@ pub fn build_local_dev_approval_gate_evidence_for_test(
 ) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
     crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
 }
+
+/// Capability id of the local-dev synthetic `project_create` capability
+/// (E-PROJ seam). Single owner is the production constant in
+/// `runtime::local_dev::project_create`; the harness references this so its
+/// `project_tools()` constructor and assertions never hardcode the string.
+#[cfg(feature = "test-support")]
+pub const PROJECT_CREATE_CAPABILITY_ID: &str = crate::runtime::PROJECT_CREATE_CAPABILITY_ID;
+
+/// Test-support entry point for the `project_create` synthetic-capability wrap
+/// (E-PROJ seam). Lets the integration-test harness inject the synthetic
+/// `project_create` capability onto its host-runtime capability port via the
+/// real production wrap (`wrap_local_dev_synthetic_capabilities` +
+/// `project_create_capability`), so the dispatch path never drifts from
+/// production.
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_arguments)]
+pub fn wrap_project_create_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    crate::runtime::wrap_project_create_capability_for_test(
+        inner,
+        project_service,
+        fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
+/// Build the `HostUserProfileSource` the Reborn integration harness wires into
+/// `assemble_thread_runtime` (E-PROFILE seam).
+///
+/// Reuses the production `MemoryBackedUserProfileSourceAdapter` (the single
+/// orphan-rule wrapper around `MemoryBackedUserProfileSource`) so the test path
+/// never drifts from production wiring (runtime.rs ~line 3167). When `filesystem`
+/// is `Some`, profile reads come from that raw local-dev memory filesystem;
+/// `None` (non-HostRuntime backends) falls back to `EmptyUserProfileSource`.
+#[cfg(feature = "test-support")]
+pub fn build_user_profile_source_for_test(
+    filesystem: Option<std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem>>,
+) -> std::sync::Arc<dyn ironclaw_loop_support::HostUserProfileSource> {
+    match filesystem {
+        Some(fs) => std::sync::Arc::new(crate::runtime::MemoryBackedUserProfileSourceAdapter(
+            ironclaw_host_runtime::MemoryBackedUserProfileSource::new(fs),
+        )),
+        None => std::sync::Arc::new(ironclaw_loop_support::EmptyUserProfileSource),
+    }
+}

@@ -162,7 +162,11 @@ const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 // `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
 // `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
 // lives in the crate that owns the *concrete type* and can see the trait.
-struct MemoryBackedUserProfileSourceAdapter(MemoryBackedUserProfileSource);
+//
+// `pub(crate)` so the `test_support::build_user_profile_source_for_test`
+// forwarder can reuse this single adapter instead of duplicating the orphan-rule
+// workaround in the test harness.
+pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUserProfileSource);
 
 #[async_trait::async_trait]
 impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
@@ -349,6 +353,8 @@ mod skills;
 
 #[cfg(test)]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
+#[cfg(feature = "test-support")]
+pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
 
 pub use skills::{
     RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
@@ -798,6 +804,33 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 ) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
+}
+
+/// Test-support forwarder for the `project_create` synthetic-capability wrap
+/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
+/// without widening any production type's visibility; mirrors the
+/// approval-gate-evidence forwarder above.
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wrap_project_create_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_project_create_capability_for_test(
+        inner,
+        project_service,
+        fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
 }
 
 #[async_trait::async_trait]
