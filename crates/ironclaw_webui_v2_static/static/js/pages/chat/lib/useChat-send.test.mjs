@@ -1220,7 +1220,7 @@ test("useChat.send: gate received after callback creation blocks before send", a
   assert.equal(stateSlots.get(4).value, pendingGate);
   assert.equal(renderedMessages.length, 0);
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 6).map((call) => call.value?.content),
+    stateUpdates.filter((call) => call.index === 5).map((call) => call.value?.content),
     [],
   );
 });
@@ -2970,7 +2970,7 @@ function createParallelSendContext({
   const initialByIndex = new Map();
   // State slot order: cooldownUntil(0), now(1), activeRun(2),
   // isProcessing(3), pendingGate(4),
-  // busyGateNotice(6), stateThreadId(7).
+  // busyGateNotice(5), stateThreadId(6).
   if (activeRun !== undefined) {
     initialByIndex.set(2, activeRun);
   }
