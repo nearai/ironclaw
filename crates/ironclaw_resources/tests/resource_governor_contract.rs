@@ -23,6 +23,16 @@ impl ResourceGovernorStore for AlwaysFailingStore {
             reason: "forced durable write failure".to_string(),
         })
     }
+
+    fn inspect<T, F>(&self, _inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        Err(ResourceError::Storage {
+            reason: "forced durable read failure".to_string(),
+        })
+    }
 }
 
 #[test]
@@ -720,6 +730,96 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
     ));
+}
+
+#[test]
+fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_limit() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    let reservation = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "unlimited fast path should not create the durable governor snapshot"
+    );
+
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks are still enforced"
+    );
+    assert!(
+        !path.exists(),
+        "reconcile on the unlimited fast path should not create the durable snapshot"
+    );
+
+    let active = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "active unlimited fast-path reservations should stay process-local before finite limits"
+    );
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let denied = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        ResourceError::LimitExceeded {
+            denial,
+            ..
+        } if denial.dimension == ResourceDimension::ConcurrencySlots
+    ));
+    governor.release(active.id).unwrap();
 }
 
 #[test]

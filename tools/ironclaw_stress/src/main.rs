@@ -955,6 +955,15 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.sweep_users.contains(&0) {
         return Err("--sweep-users values must be greater than 0".to_string());
     }
+    let max_concurrency = args
+        .sweep_concurrency
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(args.concurrency);
+    let max_concurrency = args
+        .ramp_concurrency
+        .map_or(max_concurrency, |ramp_max| max_concurrency.max(ramp_max));
     let min_user_count = args.sweep_users.iter().copied().min().unwrap_or(args.users);
     let max_active_thread_count = args
         .sweep_active_thread_count
@@ -968,6 +977,20 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if max_active_thread_count > min_user_count {
         return Err(
             "--active-thread-count and --sweep-active-thread-count values must be less than or equal to every --sweep-users value"
+                .to_string(),
+        );
+    }
+    if args.scenario.is_user_turn()
+        && args
+            .sweep_active_thread_count
+            .iter()
+            .copied()
+            .chain(std::iter::once(args.active_thread_count))
+            .any(|active_thread_count| active_thread_count == 0)
+        && max_concurrency > min_user_count
+    {
+        return Err(
+            "user-turn scenarios with --active-thread-count 0 require --users to be greater than or equal to --concurrency"
                 .to_string(),
         );
     }
@@ -1816,7 +1839,9 @@ where
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
     let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(PersistentResourceGovernor::new(store)))
+    Ok(Arc::new(
+        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
+    ))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {

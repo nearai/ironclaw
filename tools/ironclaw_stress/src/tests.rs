@@ -87,6 +87,56 @@ fn fixed_operation_mode_spreads_concurrent_workers_across_threads() {
 }
 
 #[test]
+fn user_turn_workers_keep_disjoint_thread_partitions() {
+    let mut args = test_args();
+    args.users = 10;
+    args.concurrency = 4;
+    args.operations = 100;
+    args.active_thread_count = 0;
+    let ids = SyntheticIds::new(&args).expect("synthetic ids build");
+
+    let mut seen_by_worker = Vec::new();
+    for worker_index in 0..args.concurrency {
+        let thread_ids = (0..args.operations)
+            .map(|operation_index| {
+                ids.user_turn_context(&args, worker_index, operation_index)
+                    .expect("context")
+                    .thread_id
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        seen_by_worker.push(thread_ids);
+    }
+
+    for worker_index in 0..seen_by_worker.len() {
+        for other_worker_index in worker_index + 1..seen_by_worker.len() {
+            assert!(
+                seen_by_worker[worker_index].is_disjoint(&seen_by_worker[other_worker_index]),
+                "workers {worker_index} and {other_worker_index} should not share target threads"
+            );
+        }
+    }
+    let all_threads = seen_by_worker
+        .iter()
+        .flat_map(|thread_ids| thread_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(all_threads.len(), args.users);
+}
+
+#[test]
+fn user_turn_default_rejects_more_workers_than_users() {
+    let mut args = test_args();
+    args.scenario = Scenario::ChatTurn;
+    args.users = 2;
+    args.concurrency = 3;
+    args.active_thread_count = 0;
+
+    let error =
+        validate_args(&args).expect_err("default user-turn mode should require enough users");
+
+    assert!(error.contains("--users to be greater than or equal to --concurrency"));
+}
+
+#[test]
 fn chat_turn_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::ChatTurn;
@@ -157,7 +207,7 @@ fn bottleneck_finder_suite_includes_core_pressure_cases() {
 
     assert!(labels.contains("resource-contention"));
     assert!(labels.contains("chat-baseline"));
-    assert!(labels.contains("hot-thread"));
+    assert!(!labels.contains("hot-thread"));
     assert!(labels.contains("large-context"));
     assert!(labels.contains("tool-heavy"));
     assert!(labels.contains("tool-wait"));
@@ -176,7 +226,7 @@ fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
         .collect::<std::collections::BTreeSet<_>>();
 
     assert!(labels.contains("postgres-chat-pool"));
-    assert!(labels.contains("postgres-hot-thread-pool"));
+    assert!(!labels.contains("postgres-hot-thread-pool"));
     assert!(labels.contains("postgres-context-pool"));
     assert!(labels.contains("postgres-tool-pool"));
 }
@@ -379,6 +429,18 @@ fn sweep_concurrency_rejects_zero_values() {
     let error = validate_args(&args).expect_err("zero sweep concurrency is invalid");
 
     assert!(error.contains("--sweep-concurrency values must be greater than 0"));
+}
+
+#[test]
+fn sweep_concurrency_validation_uses_sweep_max_not_base_concurrency() {
+    let mut args = test_args();
+    args.scenario = Scenario::MixedUserSession;
+    args.concurrency = 8;
+    args.sweep_concurrency = vec![2, 4];
+    args.users = 4;
+    args.active_thread_count = 0;
+
+    validate_args(&args).expect("sweep cases only require enough users for the sweep max");
 }
 
 #[test]
