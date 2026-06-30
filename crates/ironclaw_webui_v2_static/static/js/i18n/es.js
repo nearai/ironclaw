@@ -42,6 +42,17 @@ registerPack("es", {
   // Header
   "header.signOut": "Cerrar sesión",
 
+  // Notifications
+  "notifications.open": "Open notifications",
+  "notifications.close": "Close notifications",
+  "notifications.title": "Notifications",
+  "notifications.emptyTitle": "No notifications",
+  "notifications.emptyDescription": "New task activity will appear here.",
+  "notifications.allCaughtUp": "All caught up",
+  "notifications.unreadCount": "{count} new",
+  "notifications.unread": "Unread",
+  "notifications.automation.title": "Automation task started",
+
   // Status
   "status.online": "en línea",
   "status.offline": "sin conexión",

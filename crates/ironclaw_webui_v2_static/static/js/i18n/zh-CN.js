@@ -42,6 +42,17 @@ registerPack("zh-CN", {
   // Header
   "header.signOut": "退出登录",
 
+  // Notifications
+  "notifications.open": "打开通知",
+  "notifications.close": "关闭通知",
+  "notifications.title": "通知",
+  "notifications.emptyTitle": "暂无通知",
+  "notifications.emptyDescription": "新的任务活动会显示在这里。",
+  "notifications.allCaughtUp": "已全部查看",
+  "notifications.unreadCount": "{count} 条新通知",
+  "notifications.unread": "未读",
+  "notifications.automation.title": "自动化任务已开始",
+
   // Status
   "status.online": "在线",
   "status.offline": "离线",
