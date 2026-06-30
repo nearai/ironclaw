@@ -109,10 +109,20 @@ async fn file_size(path: &std::path::Path) -> Result<u64, std::io::Error> {
 
 #[cfg(feature = "postgres")]
 async fn capture_postgres(args: &Args) -> DbProbeSnapshot {
-    match try_capture_postgres(args).await {
+    let url = match crate::resolve_postgres_url(args) {
+        Ok(url) => url,
+        Err(error) => {
+            return DbProbeSnapshot {
+                error: Some(format!("postgres probe failed: {error}")),
+                ..DbProbeSnapshot::default()
+            };
+        }
+    };
+
+    match try_capture_postgres(&url).await {
         Ok(snapshot) => snapshot,
         Err(error) => DbProbeSnapshot {
-            error: Some(sanitize_postgres_error(args, error)),
+            error: Some(sanitize_postgres_error(&url, error)),
             ..DbProbeSnapshot::default()
         },
     }
@@ -120,10 +130,9 @@ async fn capture_postgres(args: &Args) -> DbProbeSnapshot {
 
 #[cfg(feature = "postgres")]
 async fn try_capture_postgres(
-    args: &Args,
+    url: &str,
 ) -> Result<DbProbeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let url = crate::resolve_postgres_url(args)?;
-    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls).await?;
     let connection_handle = tokio::spawn(async move {
         if let Err(error) = connection.await {
             eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
@@ -133,9 +142,9 @@ async fn try_capture_postgres(
         .query_one(
             "SELECT \
                 pg_database_size(current_database())::bigint, \
-                COUNT(*)::bigint, \
+                COUNT(*) FILTER (WHERE state = 'active' AND pid <> pg_backend_pid())::bigint, \
                 COUNT(*) FILTER (WHERE state = 'idle')::bigint, \
-                COUNT(*) FILTER (WHERE wait_event_type IS NOT NULL)::bigint \
+                COUNT(*) FILTER (WHERE wait_event_type IS NOT NULL AND pid <> pg_backend_pid())::bigint \
              FROM pg_stat_activity \
              WHERE datname = current_database()",
             &[],
@@ -162,11 +171,9 @@ async fn capture_postgres(_args: &Args) -> DbProbeSnapshot {
 }
 
 #[cfg(feature = "postgres")]
-fn sanitize_postgres_error(args: &Args, error: impl std::fmt::Display) -> String {
+pub(crate) fn sanitize_postgres_error(resolved_url: &str, error: impl std::fmt::Display) -> String {
     let mut message = format!("postgres probe failed: {error}");
-    if let Some(url) = &args.postgres_url {
-        message = message.replace(url, &redact_postgres_url(url));
-    }
+    message = message.replace(resolved_url, &redact_postgres_url(resolved_url));
     message
 }
 

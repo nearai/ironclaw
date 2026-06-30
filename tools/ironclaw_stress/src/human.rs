@@ -459,12 +459,15 @@ fn push_db_count_metric(output: &mut String, name: &str, before: Option<u64>, af
 
 fn push_db_probe_error(output: &mut String, name: &str, snapshot: &DbProbeSnapshot) {
     if let Some(error) = &snapshot.error {
+        let (before, after) = match name {
+            "before_error" => (truncate(error, 48), "-".to_string()),
+            "after_error" => ("-".to_string(), truncate(error, 48)),
+            _ => ("-".to_string(), truncate(error, 48)),
+        };
         let _ = writeln!(
             output,
             "{name:<36} {:>12} {:>12} {:>12}",
-            "-",
-            truncate(error, 48),
-            "-"
+            before, after, "-"
         );
     }
 }

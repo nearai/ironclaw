@@ -698,6 +698,53 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
 }
 
 #[test]
+fn human_summary_places_db_probe_errors_in_matching_columns() {
+    let mut summary = run_summary_with_bottlenecks();
+    summary.db_probe = Some(db_probe::DbProbeSummary {
+        before: db_probe::DbProbeSnapshot {
+            error: Some("before_failed".to_string()),
+            ..db_probe::DbProbeSnapshot::default()
+        },
+        after: db_probe::DbProbeSnapshot {
+            error: Some("after_failed".to_string()),
+            ..db_probe::DbProbeSnapshot::default()
+        },
+        delta: db_probe::DbProbeDelta::default(),
+    });
+
+    let rendered = human::render_run_summary(&summary);
+    let before_line = rendered
+        .lines()
+        .find(|line| line.contains("before_error"))
+        .expect("before error line");
+    let after_line = rendered
+        .lines()
+        .find(|line| line.contains("after_error"))
+        .expect("after error line");
+
+    assert_eq!(
+        before_line.split_whitespace().collect::<Vec<_>>(),
+        ["before_error", "before_failed", "-", "-"]
+    );
+    assert_eq!(
+        after_line.split_whitespace().collect::<Vec<_>>(),
+        ["after_error", "-", "after_failed", "-"]
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_probe_error_redacts_resolved_url() {
+    let url = "postgresql://postgres:secret@localhost:5432/app";
+    let error = format!("connection failed for {url}");
+
+    let sanitized = db_probe::sanitize_postgres_error(url, error);
+
+    assert!(sanitized.contains("postgresql://<redacted>@localhost:5432/app"));
+    assert!(!sanitized.contains("secret"));
+}
+
+#[test]
 fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     let args = test_args();
     let captured = capture::CapturedRun::Single(Box::new(run_summary_with_bottlenecks()));
