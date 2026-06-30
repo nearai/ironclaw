@@ -1118,8 +1118,7 @@ where
                     (record, CasExpectation::Version(versioned.version))
                 }
                 None => {
-                    let Some(events) =
-                        self.read_message_append_events(scope, thread_id).await?
+                    let Some(events) = self.read_message_append_events(scope, thread_id).await?
                     else {
                         return Err(SessionThreadError::UnknownMessage { message_id });
                     };
