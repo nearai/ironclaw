@@ -574,8 +574,10 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
     // does NOT fire. The helper enters the loop, `get` returns `Ok(None)`,
     // `increment` returns a real change (`Counter { value: 1 }`), and `cas_update`
     // attempts the write. The backend's `put` then returns
-    // `FilesystemError::Unsupported { operation: WriteFile }`, which the loop maps
-    // to `CasUpdateError::CasUnsupported` (cas.rs ~lines 337-340).
+    // `FilesystemError::Unsupported { operation: WriteFile }`, which the
+    // `Unsupported { operation: FilesystemOperation::WriteFile, .. } =>
+    // return Err(CasUpdateError::CasUnsupported)` arm of `cas_update_loop` maps
+    // to `CasUpdateError::CasUnsupported`.
     //
     // This is the composite-router fallback path: a backend without CAS support
     // is not always detectable at pre-flight but must still fail closed.
@@ -613,8 +615,9 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
 
 /// CAS-capable backend whose `get` always returns a [`FilesystemError::Backend`]
 /// error — not a not-found / `Ok(None)`, not a `VersionMismatch`. Used to
-/// exercise the `Err(error) => return Err(CasUpdateError::Backend(error))` arm in
-/// `cas_update_loop` when the read itself fails (cas.rs ~line 298). The pre-flight
+/// exercise the `get`-error arm of `cas_update_loop` — the
+/// `Err(error) => return Err(CasUpdateError::Backend(error))` branch of the
+/// `match filesystem.get(...)` — when the read itself fails. The pre-flight
 /// gate passes because full capabilities are declared; `get` then fails before any
 /// decode or apply runs.
 struct GetErrorBackend;
@@ -661,9 +664,9 @@ impl RootFilesystem for GetErrorBackend {
 /// CAS-capable backend whose `get` always returns a [`VersionedEntry`] whose
 /// body is not valid JSON — simulating a corrupted or schema-incompatible
 /// snapshot. Used to exercise the
-/// `decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?` arm in
-/// `cas_update_loop` (cas.rs ~line 294): the record is present so decode runs,
-/// `serde_json` fails, and the error is wrapped as `CasUpdateError::Apply`.
+/// `decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?` step of the
+/// `Ok(Some(versioned))` arm in `cas_update_loop`: the record is present so decode
+/// runs, `serde_json` fails, and the error is wrapped as `CasUpdateError::Apply`.
 struct MalformedBodyBackend;
 
 #[async_trait]
@@ -761,9 +764,11 @@ impl RootFilesystem for PutTrackingBackend {
 /// a plain [`FilesystemError::Backend`] — neither `VersionMismatch` nor
 /// `Unsupported { operation: WriteFile }`. Used to exercise the catch-all
 /// `Err(error) => Err(CasUpdateError::Backend(error))` arm in `cas_update_loop`
-/// (cas.rs ~line 341). The pre-flight gate passes because full capabilities are
-/// declared; `get` returns absent so the loop attempts a first write; `put`
-/// then returns the generic error the loop must forward as-is.
+/// — the fallback after the `VersionMismatch` and `Unsupported { operation:
+/// WriteFile, .. }` arms on the `match filesystem.put(...)`. The pre-flight gate
+/// passes because full capabilities are declared; `get` returns absent so the
+/// loop attempts a first write; `put` then returns the generic error the loop
+/// must forward as-is.
 struct GenericPutErrorBackend;
 
 #[async_trait]
@@ -806,8 +811,10 @@ impl RootFilesystem for GenericPutErrorBackend {
 
 #[tokio::test]
 async fn backend_put_error_maps_to_backend() {
-    // Regression for the catch-all `put` error arm in `cas_update_loop`
-    // (cas.rs ~line 341): `Err(error) => Err(CasUpdateError::Backend(error))`.
+    // Regression for the catch-all `Err(error) => Err(CasUpdateError::Backend(error))`
+    // arm in `cas_update_loop` — the fallback on the `match filesystem.put(...)`
+    // after the `VersionMismatch` (retry) and `Unsupported { operation: WriteFile,
+    // .. }` (CasUnsupported) arms.
     //
     // The backend advertises full CAS capability so the pre-flight gate passes
     // and the helper enters the loop. `get` returns `Ok(None)` so the loop
@@ -838,8 +845,9 @@ async fn backend_put_error_maps_to_backend() {
 
 #[tokio::test]
 async fn backend_get_error_maps_to_backend() {
-    // Regression for the `get`-error arm in `cas_update_loop` (cas.rs ~line 298):
-    // `Err(error) => return Err(CasUpdateError::Backend(error))`.
+    // Regression for the `get`-error arm in `cas_update_loop`:
+    // `Err(error) => return Err(CasUpdateError::Backend(error))` on the
+    // `match filesystem.get(...)`.
     //
     // The backend advertises full CAS capability so the pre-flight gate passes
     // and the helper enters the loop. `get` then returns a plain infrastructure
@@ -866,8 +874,9 @@ async fn backend_get_error_maps_to_backend() {
 
 #[tokio::test]
 async fn malformed_snapshot_decode_maps_to_apply() {
-    // Regression for the decode-error arm in `cas_update_loop` (cas.rs ~line 294):
-    // `decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?`.
+    // Regression for the decode-error step in `cas_update_loop`'s
+    // `Ok(Some(versioned))` arm: `decode(&versioned.entry.body)
+    // .map_err(CasUpdateError::Apply)?`.
     //
     // The backend advertises full CAS capability so the pre-flight gate passes
     // and the helper enters the loop. `get` returns a present record whose body
@@ -898,8 +907,8 @@ async fn malformed_snapshot_decode_maps_to_apply() {
 
 #[tokio::test]
 async fn encode_failure_maps_to_apply_without_write() {
-    // Regression for the encode-error arm in `cas_update_loop` (cas.rs ~line 327):
-    // `encode(&snapshot).map_err(CasUpdateError::Apply)?`.
+    // Regression for the encode-error step in `cas_update_loop`, after the
+    // equality fast-path: `encode(&snapshot).map_err(CasUpdateError::Apply)?`.
     //
     // The backend advertises full CAS capability so the pre-flight gate passes
     // and the helper enters the loop. `get` returns `Ok(None)` so `apply`

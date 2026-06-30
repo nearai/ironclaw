@@ -16,9 +16,13 @@
 //!   [`cas_update`](ironclaw_filesystem::cas_update) helper: an optimistic
 //!   CAS-retry loop (`CasExpectation::Version` precondition) with bounded
 //!   retries, jittered backoff, and an overall timeout. No per-record
-//!   `tokio::sync::Mutex` is held across the backend awaits, so same-scope
-//!   writers overlap instead of convoying. The helper fails closed on a
-//!   non-CAS backend rather than blind-overwriting.
+//!   `tokio::sync::Mutex` is held across the backend awaits, so cross-process
+//!   contention on one scope's snapshot is resolved lock-free rather than
+//!   convoyed. Same-process writers sharing a cloned store handle still
+//!   serialize one job at a time on the dedicated `AsyncStorageWorker`
+//!   below — #5470 tracks making the store async so they can overlap too.
+//!   The helper fails closed on a non-CAS backend rather than
+//!   blind-overwriting.
 //! - A dedicated current-thread tokio worker bridging the sync trait
 //!   surface to the async [`ScopedFilesystem`] API.
 //!
