@@ -99,8 +99,10 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
      a local `put_with_cas` + `cas_retry_backoff` retry loop; the main
      turn-state snapshot RMW already goes through `cas_update`. Migration
      tracked as follow-up #5274 (runner-lease CAS consolidation).
-   - `ironclaw_threads::filesystem_service` drives `reserve_sequence`,
-     `apply_message_update`, `append_capability_display_preview`,
+   - `ironclaw_threads::filesystem_service` drives `write_new_message`,
+     `reserve_sequence_via_thread_record` (the legacy fallback for backends
+     without native sequence reservation; `reserve_sequence` itself is now
+     row-native), `apply_message_update`, `append_capability_display_preview`,
      `create_summary_artifact`, and the
      `message_sequence_index.rs`/`message_lookup_index.rs` writers through a
      local `put_with_cas` retry loop (only `ensure_thread` was migrated onto
