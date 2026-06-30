@@ -723,6 +723,78 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
 }
 
 #[test]
+fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_limit() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    let reservation = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "unlimited fast path should not create the durable governor snapshot"
+    );
+
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks are still enforced"
+    );
+    assert!(
+        !path.exists(),
+        "reconcile on the unlimited fast path should not create the durable snapshot"
+    );
+
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let _durable = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        path.exists(),
+        "finite limits should force the durable governor path"
+    );
+}
+
+#[test]
 fn persistent_governor_serializes_concurrent_reservations_across_handles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("resource-governor.json");

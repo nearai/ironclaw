@@ -1760,6 +1760,7 @@ fn build_local_dev_store_graph(
         PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
             &scoped_filesystem,
         )))
+        .with_unlimited_fast_path()
         .with_event_sink(Arc::clone(&budget_event_sink)),
     );
     let skill_mounts =
@@ -3524,7 +3525,8 @@ where
     )
     .await?;
     let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
-    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+    let governor =
+        Arc::new(PersistentResourceGovernor::new(resource_store).with_unlimited_fast_path());
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -3788,6 +3790,7 @@ where
         PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
             &stores.scoped_filesystem,
         )))
+        .with_unlimited_fast_path()
         .with_event_sink(Arc::clone(&budget_event_sink)),
     );
     let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();

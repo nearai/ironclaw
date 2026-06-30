@@ -804,6 +804,14 @@ pub trait ResourceGovernorStore: Send + Sync + 'static {
     where
         T: Send + 'static,
         F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
+
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.update(move |snapshot| inspect(snapshot))
+    }
 }
 
 /// File-backed resource-governor store using a stable sidecar lock file around
@@ -842,6 +850,33 @@ impl ResourceGovernorStore for JsonFileResourceGovernorStore {
         lock_file.lock_exclusive().map_err(storage_error)?;
 
         let result = update_file_snapshot(&self.path, update);
+        let unlock_result = lock_file.unlock().map_err(storage_error);
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        let lock_path = lock_path_for(&self.path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(storage_error)?;
+        }
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(storage_error)?;
+        lock_file.lock_shared().map_err(storage_error)?;
+
+        let result = read_file_snapshot(&self.path).and_then(|snapshot| inspect(&snapshot));
         let unlock_result = lock_file.unlock().map_err(storage_error);
         match (result, unlock_result) {
             (Ok(value), Ok(())) => Ok(value),
@@ -1065,6 +1100,8 @@ where
 {
     store: S,
     clock: Arc<dyn Clock>,
+    unlimited_fast_path: bool,
+    unlimited_state: Mutex<ResourceState>,
     /// Optional sink that receives `BudgetEvent`s as reservations,
     /// reconciliations, warnings, and denials happen. Wired by
     /// composition; defaults to [`NoOpBudgetEventSink`] so the
@@ -1081,6 +1118,8 @@ where
         Self {
             store,
             clock: Arc::new(SystemClock),
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(ResourceState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1092,8 +1131,23 @@ where
         Self {
             store,
             clock,
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(ResourceState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
+    }
+
+    /// Keep unlimited/no-quota reservation bookkeeping process-local.
+    ///
+    /// When no finite resource limits are configured, the persistent governor
+    /// does not need durable snapshot writes to enforce limits. This opt-in
+    /// path preserves same-process reservation lifecycle checks while avoiding
+    /// synchronous writes on reserve/reconcile/release. As soon as any finite
+    /// limit is present in the durable snapshot, new reservations use the
+    /// durable path again.
+    pub fn with_unlimited_fast_path(mut self) -> Self {
+        self.unlimited_fast_path = true;
+        self
     }
 
     /// Plug in an audit/SSE sink. Every `reserve`, `reconcile`,
@@ -1122,6 +1176,15 @@ where
     pub fn reserved_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
+        if self.can_use_unlimited_fast_path()? {
+            let mut state = self.lock_unlimited_state();
+            advance_period_if_rolled_over(&mut state, &account, now);
+            return Ok(state
+                .reserved_by_account
+                .get(&account)
+                .cloned()
+                .unwrap_or_default());
+        }
         self.store.update(move |snapshot| {
             advance_period_if_rolled_over(&mut snapshot.state, &account, now);
             Ok(snapshot
@@ -1136,6 +1199,15 @@ where
     pub fn usage_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
+        if self.can_use_unlimited_fast_path()? {
+            let mut state = self.lock_unlimited_state();
+            advance_period_if_rolled_over(&mut state, &account, now);
+            return Ok(state
+                .usage_by_account
+                .get(&account)
+                .cloned()
+                .unwrap_or_default());
+        }
         self.store.update(move |snapshot| {
             advance_period_if_rolled_over(&mut snapshot.state, &account, now);
             Ok(snapshot
@@ -1145,6 +1217,26 @@ where
                 .cloned()
                 .unwrap_or_default())
         })
+    }
+
+    fn has_finite_limits(&self) -> Result<bool, ResourceError> {
+        self.store.inspect(|snapshot| {
+            Ok(snapshot
+                .state
+                .limits
+                .values()
+                .any(|limits| !limits.is_unlimited()))
+        })
+    }
+
+    fn can_use_unlimited_fast_path(&self) -> Result<bool, ResourceError> {
+        Ok(self.unlimited_fast_path && !self.has_finite_limits()?)
+    }
+
+    fn lock_unlimited_state(&self) -> MutexGuard<'_, ResourceState> {
+        self.unlimited_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -1181,6 +1273,17 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
+        if self.can_use_unlimited_fast_path()? {
+            let result = reserve_with_outcome_in_state(
+                &mut self.lock_unlimited_state(),
+                scope,
+                estimate,
+                reservation_id,
+                now,
+            );
+            emit_reserve_events(self.event_sink.as_ref(), &result, now);
+            return result;
+        }
         let result = self.store.update(move |snapshot| {
             reserve_with_outcome_in_state(&mut snapshot.state, scope, estimate, reservation_id, now)
         });
@@ -1194,6 +1297,26 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
+        if self.unlimited_fast_path {
+            let result = reconcile_in_state(
+                &mut self.lock_unlimited_state(),
+                reservation_id,
+                actual.clone(),
+                now,
+            );
+            match result {
+                Ok(receipt) => {
+                    self.event_sink.emit(BudgetEvent::Reconciled {
+                        account: most_specific_account(&receipt.scope),
+                        receipt: receipt.clone(),
+                        at: now,
+                    });
+                    return Ok(receipt);
+                }
+                Err(ResourceError::UnknownReservation { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let result = self.store.update(move |snapshot| {
             reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
         });
@@ -1212,6 +1335,21 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
+        if self.unlimited_fast_path {
+            let result = release_in_state(&mut self.lock_unlimited_state(), reservation_id, now);
+            match result {
+                Ok(receipt) => {
+                    self.event_sink.emit(BudgetEvent::Released {
+                        account: most_specific_account(&receipt.scope),
+                        receipt: receipt.clone(),
+                        at: now,
+                    });
+                    return Ok(receipt);
+                }
+                Err(ResourceError::UnknownReservation { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let result = self
             .store
             .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now));
@@ -1231,6 +1369,13 @@ where
     ) -> Result<Option<AccountSnapshot>, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
+        if self.can_use_unlimited_fast_path()? {
+            return Ok(account_snapshot_in_state(
+                &mut self.lock_unlimited_state(),
+                &account,
+                now,
+            ));
+        }
         self.store.update(move |snapshot| {
             Ok(account_snapshot_in_state(
                 &mut snapshot.state,

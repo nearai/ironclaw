@@ -1754,7 +1754,9 @@ where
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
     let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(PersistentResourceGovernor::new(store)))
+    Ok(Arc::new(
+        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
+    ))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
