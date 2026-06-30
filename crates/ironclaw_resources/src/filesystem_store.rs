@@ -100,6 +100,15 @@ where
         self.store
             .update::<ResourceGovernorSnapshot, T, ResourceError, _>(update)
     }
+
+    fn inspect<T, U>(&self, inspect: U) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        U: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.store
+            .inspect::<ResourceGovernorSnapshot, T, ResourceError, _>(inspect)
+    }
 }
 
 // ---------------------------------------------------------------------------
