@@ -11,7 +11,7 @@ COPY --from=trinity_client package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --from=trinity_client t3n-sdk/package.json ./t3n-sdk/package.json
 COPY --from=trinity_client mcp/t3n-mcp/package.json ./mcp/t3n-mcp/package.json
 
-RUN pnpm install --frozen-lockfile --filter @terminal-3/t3n-mcp...
+RUN pnpm install --frozen-lockfile --filter @terminal3/t3n-mcp...
 
 COPY --from=trinity_client t3n-sdk ./t3n-sdk
 COPY --from=trinity_client mcp/t3n-mcp ./mcp/t3n-mcp
@@ -21,7 +21,7 @@ COPY --from=trinity_client shared ./shared
 # falls back to `npx tsx src/index.ts` when dist/ is missing; t3n-mcp imports
 # @terminal3/t3n-sdk (workspace package under client/t3n-sdk/), so both must build.
 RUN pnpm --filter @terminal3/t3n-sdk build \
-    && pnpm --filter @terminal-3/t3n-mcp build \
+    && pnpm --filter @terminal3/t3n-mcp build \
     && test -f t3n-sdk/dist/index.esm.js \
     && test -f mcp/t3n-mcp/dist/esm/index.js
 
