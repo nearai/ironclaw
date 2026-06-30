@@ -1,6 +1,6 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 #[cfg(test)]
-use std::sync::Mutex;
+use std::cell::RefCell;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -241,10 +241,10 @@ type LocalDevResourceGovernor =
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
 #[cfg(test)]
-static RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
-
-#[cfg(test)]
-static RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE: RefCell<Option<String>> =
+        const { RefCell::new(None) };
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres", test))]
 const RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV: &str =
@@ -1749,12 +1749,8 @@ fn resource_governor_unlimited_fast_path_enabled_from_env() -> Result<bool, Stri
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn resource_governor_unlimited_fast_path_env_value() -> Result<Option<String>, String> {
     #[cfg(test)]
-    if let Some(value) = RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-        .lock()
-        .map_err(|_| {
-            format!("{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} test override lock poisoned")
-        })?
-        .clone()
+    if let Some(value) =
+        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE.with(|value| value.borrow().clone())
     {
         return Ok(Some(value));
     }
@@ -1772,12 +1768,8 @@ fn resource_governor_unlimited_fast_path_env_value() -> Result<Option<String>, S
 fn set_resource_governor_unlimited_fast_path_env_override_for_test(
     value: impl Into<String>,
 ) -> Result<ResourceGovernorFastPathEnvOverrideGuard, String> {
-    let mut override_value = RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-        .lock()
-        .map_err(|_| {
-            format!("{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} test override lock poisoned")
-        })?;
-    *override_value = Some(value.into());
+    RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
+        .with(|override_value| *override_value.borrow_mut() = Some(value.into()));
     Ok(ResourceGovernorFastPathEnvOverrideGuard)
 }
 
@@ -1787,9 +1779,8 @@ struct ResourceGovernorFastPathEnvOverrideGuard;
 #[cfg(test)]
 impl Drop for ResourceGovernorFastPathEnvOverrideGuard {
     fn drop(&mut self) {
-        if let Ok(mut override_value) = RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE.lock() {
-            *override_value = None;
-        }
+        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
+            .with(|override_value| *override_value.borrow_mut() = None);
     }
 }
 
@@ -4258,9 +4249,6 @@ mod tests {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
     fn build_reborn_services_rejects_invalid_resource_governor_fast_path_env() {
-        let _serial = RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_TEST_LOCK
-            .lock()
-            .expect("resource governor env test lock");
         let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("maybe")
             .expect("resource governor env override");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4283,9 +4271,6 @@ mod tests {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
     fn build_reborn_services_applies_resource_governor_fast_path_env() {
-        let _serial = RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_TEST_LOCK
-            .lock()
-            .expect("resource governor env test lock");
         let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("true")
             .expect("resource governor env override");
         let dir = tempfile::tempdir().expect("tempdir");
