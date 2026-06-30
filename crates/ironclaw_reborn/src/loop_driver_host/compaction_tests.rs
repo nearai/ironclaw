@@ -63,6 +63,11 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
     /// back the distinct `RecordingScopedGateway` above.
     struct LoudFallbackGateway {
         scoped: Arc<RecordingScopedGateway>,
+        /// Every scope `resolve_for_scope` is called with, in order. Lets the
+        /// test pin that compaction resolves the CURRENT run scope — not a
+        /// stale/empty/wrong one — rather than only proving *some* scope-aware
+        /// gateway was used.
+        resolved_scopes: Mutex<Vec<TurnScope>>,
     }
 
     #[async_trait]
@@ -78,10 +83,8 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
             );
         }
 
-        fn resolve_for_scope(
-            &self,
-            _scope: &TurnScope,
-        ) -> Option<Arc<dyn HostManagedModelGateway>> {
+        fn resolve_for_scope(&self, scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> {
+            self.resolved_scopes.lock().unwrap().push(scope.clone());
             Some(Arc::clone(&self.scoped) as Arc<dyn HostManagedModelGateway>)
         }
     }
@@ -127,6 +130,9 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         Some(project_id),
         thread_id.clone(),
     );
+    // Keep the run scope for the post-assertion: compaction must resolve the
+    // gateway for THIS exact scope.
+    let expected_scope = turn_scope.clone();
     let resolved = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
@@ -136,7 +142,11 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
     let scoped_gateway = Arc::new(RecordingScopedGateway::default());
     let model_gateway = Arc::new(LoudFallbackGateway {
         scoped: Arc::clone(&scoped_gateway),
+        resolved_scopes: Mutex::new(Vec::new()),
     });
+    // Hold a handle so we can read the resolved scopes after the factory takes
+    // ownership of `model_gateway`.
+    let fallback = Arc::clone(&model_gateway);
 
     let factory = RebornLoopDriverHostFactory::new(
         thread_service,
@@ -172,5 +182,14 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         *scoped_gateway.calls.lock().unwrap(),
         1,
         "compaction must dispatch exactly once through the scope-resolved gateway"
+    );
+    // Pin the scope: compaction must have resolved the gateway for the CURRENT
+    // run scope exactly once. A regression that passes a wrong/stale/empty
+    // scope into `resolve_for_scope` would change this value and fail here,
+    // where ignoring the scope argument would not.
+    assert_eq!(
+        fallback.resolved_scopes.lock().unwrap().as_slice(),
+        std::slice::from_ref(&expected_scope),
+        "build_compaction_ports must resolve the gateway for the current run scope"
     );
 }
