@@ -72,37 +72,50 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    `.await`: it is a redundant in-process serializer over a backend that
    already does versioned CAS, and under burst it convoys every same-scope
    writer behind one stalled writer (the 2026-06-24 runtime wedge). It also
-   tends to leak (a strong-`Arc` map that is never pruned). All NEW durable
-   read-modify-write code must go through `cas_update`; do not re-copy the
-   retry/backoff loop into a store. The tracked exceptions below are
-   pre-existing lock-free loops pending migration, not a precedent for new
-   code. `cas_update` fails **closed** on a non-CAS backend
+   tends to leak (a strong-`Arc` map that is never pruned). A handful of
+   pre-existing stores still guard their CAS loop with a per-key mutex map
+   instead of going lock-free; those are tracked for the same migration and
+   are not a model to copy. All NEW mount-backed durable read-modify-write
+   code — and every store already brought under the `cas_update` migration
+   — must go through `cas_update`; do not re-copy the retry/backoff loop
+   into a store. `cas_update` fails **closed** on a non-CAS backend
    (`CasUpdateError::CasUnsupported`) rather than falling back to a blind
    `CasExpectation::Any` overwrite; all production store mounts resolve to
    CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
    structurally unreachable from those mounts), so fail-closed is correct.
    See `docs/plans/2026-06-25-cas-migration.md`.
 
-   **Known scoped exception (tracked):** the `ironclaw_turns` runner-lease
-   sidecar (`filesystem_store/runner_lease.rs`, landed independently in
-   #5232) still drives its per-run lease records through a local
-   `put_with_cas` + `cas_retry_backoff` retry loop rather than
-   `cas_update`. This predates the migration on this branch and is not yet
-   re-homed; the main turn-state snapshot RMW *does* go through
-   `cas_update`. Do not copy the sidecar's loop as a precedent — migrate
-   it onto `cas_update` per follow-up #5274 (runner-lease CAS
-   consolidation). New stores must still use `cas_update` directly.
+   **Pre-existing lock-free CAS retry loops (illustrative, not exhaustive):**
+   several stores predate the `cas_update` helper and still drive their own
+   local `put_with_cas` retry loop instead of calling it. The entries below
+   are the ones actively tracked for migration today — they exist to orient
+   you to the pattern, not as a complete inventory of every such site in the
+   workspace. Do not copy any of these loops as a precedent for new code,
+   and do not treat a store's absence from this list as license to write a
+   new local retry loop instead of calling `cas_update`.
 
-   **Second tracked scoped exception:** `ironclaw_threads::filesystem_service`
-   still drives `reserve_sequence`, `apply_message_update`,
-   `append_capability_display_preview`, `create_summary_artifact`, and the
-   `message_sequence_index.rs`/`message_lookup_index.rs` writers through a
-   local `put_with_cas` retry loop (only `ensure_thread` was migrated onto
-   `cas_update`). These loops are already lock-free (no per-path mutex), so
-   they are not the convoy hazard `cas_update` was introduced to fix; their
-   migration to `cas_update`'s fail-closed semantics is a deferred follow-up
-   tracked as a sibling to #5274. See `docs/plans/2026-06-25-cas-migration.md`.
-   Do not copy this loop as a precedent for new code.
+   - `ironclaw_turns` runner-lease sidecar (`filesystem_store/runner_lease.rs`,
+     landed independently in #5232) drives its per-run lease records through
+     a local `put_with_cas` + `cas_retry_backoff` retry loop; the main
+     turn-state snapshot RMW already goes through `cas_update`. Migration
+     tracked as follow-up #5274 (runner-lease CAS consolidation).
+   - `ironclaw_threads::filesystem_service` drives `reserve_sequence`,
+     `apply_message_update`, `append_capability_display_preview`,
+     `create_summary_artifact`, and the
+     `message_sequence_index.rs`/`message_lookup_index.rs` writers through a
+     local `put_with_cas` retry loop (only `ensure_thread` was migrated onto
+     `cas_update`). These loops are already lock-free (no per-path mutex),
+     so they are not the convoy hazard `cas_update` was introduced to fix;
+     migration to `cas_update`'s fail-closed semantics is a deferred
+     follow-up tracked as a sibling to #5274.
+   - `ironclaw_conversations::filesystem_store::save_state`,
+     `ironclaw_reborn::local_trigger_access::filesystem::deactivate_stale_record`
+     (via `put_record`), and `ironclaw_product_workflow_storage::filesystem_ledger`
+     (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
+     are further pre-existing examples of the same lock-free retry-loop
+     pattern, pending the same migration.
+
+   See `docs/plans/2026-06-25-cas-migration.md` for the migration tracker.
 3. **Capabilities are declared, not discovered.** A backend that cannot
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.

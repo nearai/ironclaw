@@ -287,15 +287,7 @@ where
 
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
-        let body = serialize_secret(lease)?;
-        let kind = RecordKind::new(SECRET_LEASE_KIND).map_err(|error| {
-            SecretStoreError::StoreUnavailable {
-                reason: format!("invalid secret lease record kind: {error}"),
-            }
-        })?;
-        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
-        base_entry.kind = Some(kind);
-        let entry = tag_entry_with_tenant(base_entry, &lease.scope);
+        let entry = serialize_lease_entry(lease)?;
         ensure_tenant_id_index_secret(&self.filesystem, &lease.scope, &lease_root(&lease.scope)?)
             .await?;
         self.filesystem
@@ -479,7 +471,7 @@ where
             scope,
             &path,
             deserialize_secret::<StoredLease>,
-            |lease: &StoredLease| serialize_lease_entry(lease, &lease.scope),
+            |lease: &StoredLease| serialize_lease_entry(lease),
             |current: Option<StoredLease>| {
                 let scope_iter = scope.clone();
                 let self_ref = self;
@@ -562,7 +554,7 @@ where
             scope,
             &path,
             deserialize_secret::<StoredLease>,
-            |lease: &StoredLease| serialize_lease_entry(lease, &lease.scope),
+            |lease: &StoredLease| serialize_lease_entry(lease),
             |current: Option<StoredLease>| {
                 let outcome = (|| {
                     let lease = current.ok_or_else(|| unknown_lease(&scope_clone, lease_id))?;
@@ -848,15 +840,7 @@ where
             uses: 0,
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
-        let body = serialize_credential(&stored)?;
-        let kind = RecordKind::new(CREDENTIAL_SESSION_KIND).map_err(|error| {
-            CredentialBrokerError::BrokerUnavailable {
-                reason: format!("invalid credential session record kind: {error}"),
-            }
-        })?;
-        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
-        base_entry.kind = Some(kind);
-        let entry = tag_entry_with_tenant(base_entry, session.scope());
+        let entry = serialize_session_entry(&stored, session.scope())?;
         ensure_tenant_id_index_broker(
             &self.filesystem,
             session.scope(),
@@ -1130,10 +1114,7 @@ fn ensure_stored_session_usable(
 
 // -- CAS error mapping helpers ----------------------------------------------
 
-fn serialize_lease_entry(
-    lease: &StoredLease,
-    _scope: &ResourceScope,
-) -> Result<Entry, SecretStoreError> {
+fn serialize_lease_entry(lease: &StoredLease) -> Result<Entry, SecretStoreError> {
     let body = serialize_secret(lease)?;
     let kind =
         RecordKind::new(SECRET_LEASE_KIND).map_err(|error| SecretStoreError::StoreUnavailable {
@@ -2179,6 +2160,75 @@ mod tests {
         }
     }
 
+    /// Sibling of [`VersionRacingBackend`]/[`AlwaysRacingBackend`] for the
+    /// fail-closed CAS-unsupported test (#5234 review follow-up): advertises
+    /// a *known* capability shape without `TxnCapability::Cas` so
+    /// `cas_update`'s pre-flight gate refuses up front with
+    /// `CasUpdateError::CasUnsupported`, while every actual op still
+    /// delegates to `inner` unchanged. `BackendCapabilities::bytes_only()`
+    /// is the right shape here — it sets enough flags to be "known"
+    /// (`capabilities_known` compares against the all-zero default) while
+    /// leaving `txn` at its `TxnCapability::None` default, so the op-time
+    /// CAS-support check fails.
+    struct CasUnsupportedBackend {
+        inner: StdArc<InMemoryBackend>,
+    }
+
+    impl CasUnsupportedBackend {
+        fn new(inner: StdArc<InMemoryBackend>) -> Self {
+            Self { inner }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for CasUnsupportedBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::bytes_only()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn query(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            self.inner.query(path, filter, page).await
+        }
+
+        async fn ensure_index(
+            &self,
+            path: &VirtualPath,
+            spec: &IndexSpec,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_index(path, spec).await
+        }
+    }
+
     #[tokio::test]
     async fn filesystem_secret_store_consume_retries_on_version_mismatch() {
         // First write the lease through a plain backend so the lease and
@@ -2779,5 +2829,108 @@ mod tests {
             version_after_promotion.get(),
             version_after_second.get(),
         );
+    }
+
+    /// `consume` must fail closed — not blind-overwrite — when the mounted
+    /// backend cannot honor compare-and-swap. Bootstraps a real lease through
+    /// a CAS-capable `InMemoryBackend`, then drives `consume` through
+    /// `CasUnsupportedBackend` (same inner store, capabilities overridden to
+    /// a known non-CAS shape) so `cas_update`'s pre-flight gate fires
+    /// `CasUpdateError::CasUnsupported` deterministically before any read or
+    /// write. #5234 review follow-up: `map_cas_error_secret`'s
+    /// `CasUnsupported -> StoreUnavailable` arm was untested.
+    #[tokio::test]
+    async fn filesystem_secret_store_consume_fails_closed_on_cas_unsupported_backend() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        bootstrap_store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret-cas-unsupported"),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease = bootstrap_store.lease_once(&scope, &handle).await.unwrap();
+
+        let unsupported = StdArc::new(CasUnsupportedBackend::new(StdArc::clone(&inner)));
+        let unsupported_scoped = default_scoped_fs(StdArc::clone(&unsupported));
+        let unsupported_store = FilesystemSecretStore::new(unsupported_scoped, test_crypto());
+
+        let error = unsupported_store
+            .consume(&scope, lease.id)
+            .await
+            .unwrap_err();
+        match error {
+            SecretStoreError::StoreUnavailable { reason } => {
+                assert!(
+                    reason.contains("compare-and-swap"),
+                    "expected CAS-unsupported reason, got: {reason}"
+                );
+            }
+            other => panic!("expected StoreUnavailable, got {other:?}"),
+        }
+    }
+
+    /// `consume_session_use` must fail closed for the same reason as
+    /// `filesystem_secret_store_consume_fails_closed_on_cas_unsupported_backend`,
+    /// via the broker's `map_cas_error_broker` mapping. #5234 review
+    /// follow-up: the `CasUnsupported -> BrokerUnavailable` arm was untested.
+    #[tokio::test]
+    async fn filesystem_broker_consume_session_use_fails_closed_on_cas_unsupported_backend() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_cas_unsupported").unwrap();
+        let account = sample_account(
+            scope.clone(),
+            account_id.clone(),
+            SecretHandle::new("openai_cas_unsupported_key").unwrap(),
+        );
+        bootstrap_broker.put_account(account.clone()).await.unwrap();
+
+        let in_memory = InMemoryCredentialBroker::new();
+        in_memory.put_account(account).unwrap();
+        let session = in_memory
+            .create_session(crate::CredentialSessionRequest {
+                scope: scope.clone(),
+                invocation_id: scope.invocation_id,
+                capability_id: CapabilityId::new("openai.chat").unwrap(),
+                extension_id: ExtensionId::new("openai").unwrap(),
+                account_id: account_id.clone(),
+                method: NetworkMethod::Get,
+                url: "https://api.example.com/v1/models".to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+                max_uses: Some(3),
+            })
+            .unwrap();
+        bootstrap_broker
+            .issue_session(session.clone())
+            .await
+            .unwrap();
+        let correlation = session.correlation_id();
+
+        let unsupported = StdArc::new(CasUnsupportedBackend::new(StdArc::clone(&inner)));
+        let unsupported_scoped = default_scoped_fs(StdArc::clone(&unsupported));
+        let unsupported_broker = FilesystemCredentialBroker::new(unsupported_scoped, test_crypto());
+
+        let error = unsupported_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap_err();
+        match error {
+            CredentialBrokerError::BrokerUnavailable { reason } => {
+                assert!(
+                    reason.contains("compare-and-swap"),
+                    "expected CAS-unsupported reason, got: {reason}"
+                );
+            }
+            other => panic!("expected BrokerUnavailable, got {other:?}"),
+        }
     }
 }

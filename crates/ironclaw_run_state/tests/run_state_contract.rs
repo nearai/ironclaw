@@ -488,6 +488,39 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
+/// Regression test (PR #5234 review): `discard_pending` writes a `Discarded`
+/// tombstone rather than deleting the record, specifically to block a later
+/// `save_pending` from reusing the same request id. The existing discard
+/// tests only assert that `get`/`records_for_scope` hide the discarded
+/// record — that would pass equally well if `discard_pending` deleted the
+/// file outright. This test pins the actual reuse-blocking invariant: a
+/// `save_pending` for an id that was previously discarded must fail with
+/// `ApprovalRequestAlreadyExists`, not silently succeed.
+#[tokio::test]
+async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
+    let fs = Arc::new(engine_filesystem());
+    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.discard_pending(&scope, request_id).await.unwrap();
+
+    let mut second = approval_request(invocation_id);
+    second.id = request_id;
+
+    let err = store.save_pending(scope, second).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {err:?}",
+    );
+}
+
 /// Regression test for the TOCTOU race: a concurrent `approve()` that wins its
 /// CAS between `discard_pending`'s read and write must not have its record
 /// clobbered.  The fix routes discard through `cas_update` so a lost CAS race
