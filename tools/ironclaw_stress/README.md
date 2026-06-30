@@ -115,8 +115,10 @@ Operation attribution groups those stages into broader bottleneck classes:
 - `context_reads`: context-window loads.
 - `turn_store`: turn submission, claim, and completion transitions.
 - `resource_governor`: reserve, reconcile, and release operations.
-- `synthetic_wait`: synthetic model and tool waits. If this dominates, storage
-  is probably not the current p95 ceiling.
+- `model_tool_wait`: model and tool waits. By default these are synthetic
+  sleeps; with `--model-latency-source provider`, `model_wait` is a real LLM
+  provider request. If this dominates, storage is probably not the current p95
+  ceiling.
 
 ## Scenarios
 
@@ -127,7 +129,7 @@ Use `--scenario` for a single workload.
 | `reserve-release` | Resource governor reserve/release pressure. |
 | `reserve-reconcile` | Resource governor reserve/reconcile/release pressure. |
 | `chat-turn` | One realistic user turn with thread writes, turn state, assistant write, and context load. |
-| `mixed-user-session` | Realistic user turn with configurable synthetic model latency. |
+| `mixed-user-session` | Realistic user turn with configurable synthetic or provider-backed model latency. |
 | `context-growth` | Sequentially grows history, then loads context to expose context read amplification. |
 | `tool-session` | Realistic turn with synthetic tool calls, tool previews, tool results, and optional tool wait/failure paths. |
 | `cpu-burn` | Process-local CPU pressure control. |
@@ -335,7 +337,55 @@ cargo run -p ironclaw_stress --release -- \
   --bottleneck-report
 ```
 
-If `synthetic_wait` dominates, tool latency is the current p95 ceiling.
+If `model_tool_wait` dominates, tool latency is the current p95 ceiling.
+
+### Test real LLM provider latency
+
+Provider latency mode sends a small completion request through
+`ironclaw_llm`'s provider chain during the `model_wait` stage of
+`mixed-user-session`. This measures provider latency plus the runtime/storage
+work that happens around it.
+
+Configure the provider the same way the runtime does. Examples:
+
+```bash
+export LLM_BACKEND=openai
+export OPENAI_API_KEY=...
+```
+
+```bash
+export LLM_BACKEND=nearai
+export NEARAI_API_KEY=...
+```
+
+Then run a bounded probe:
+
+```bash
+cargo run -p ironclaw_stress --release -- \
+  --backend libsql \
+  --scenario mixed-user-session \
+  --model-latency-source provider \
+  --provider-max-tokens 8 \
+  --concurrency 4 \
+  --operations 20 \
+  --users 100 \
+  --human-read \
+  --bottleneck-report
+```
+
+Look at:
+
+- `model_latency_source`: confirms the run used `provider`.
+- `provider_model`: optional per-request model override; omit it to use the
+  configured provider default.
+- `model_wait`: real provider request latency.
+- `thread_store_writes`, `turn_store`, `resource_governor`, and
+  `context_reads`: runtime/storage latency while provider calls are in flight.
+- error buckets such as `model_provider_rate_limited`, `model_provider_auth`,
+  `model_provider_model_unavailable`, and `model_provider_error`.
+
+Keep early runs small. Provider mode can spend real tokens, hit rate limits,
+and exercise retries/circuit breakers.
 
 ### Test failed tool-result paths
 
@@ -486,7 +536,7 @@ Then map `top_group` to the next probe:
 | `context_reads` | Context window loading dominates. | Increase/decrease prefill and `--context-max-messages`. |
 | `turn_store` | Turn submission/claim/complete state dominates. | Compare `chat-turn` to `reserve-reconcile`. |
 | `resource_governor` | Reservation/reconcile/release writes dominate. | Run `resource-contention` and compare concurrency. |
-| `synthetic_wait` | Synthetic model/tool wait dominates. | Lower model/tool latency to reveal storage overhead. |
+| `model_tool_wait` | Model/tool wait dominates. | Lower synthetic model/tool latency, or inspect provider latency when using provider mode, to reveal storage overhead. |
 
 Failure buckets:
 
@@ -589,6 +639,9 @@ cargo run -p ironclaw_stress -- \
   bottlenecks, not to perfectly replay production traffic.
 - Synthetic model and tool waits are controlled sleeps. They help separate
   external latency from storage/runtime overhead.
+- Provider model latency is opt-in with `--model-latency-source provider` and
+  requires live provider credentials. It is intentionally blocked from suite,
+  ramp, sweep, and repeated-run modes to avoid accidental token spend.
 - Failed synthetic tool results do not necessarily fail the whole operation.
   They exercise the failed-tool transcript path.
 - `turn_thread_busy` is often expected in hot-thread tests because the same

@@ -592,6 +592,49 @@ fn tail_spike_model_latency_spikes_every_nth_operation() {
 }
 
 #[test]
+fn provider_model_latency_requires_mixed_user_session() {
+    let matches = Args::command()
+        .try_get_matches_from([
+            "ironclaw_stress",
+            "--backend",
+            "libsql",
+            "--scenario",
+            "chat-turn",
+            "--model-latency-source",
+            "provider",
+        ])
+        .expect("parse args");
+
+    let args = parse_args_from_matches(&matches).expect("parse stress args");
+    let error = validate_args(&args).expect_err("provider mode validation");
+
+    assert!(
+        error.contains("--model-latency-source provider requires --scenario mixed-user-session")
+    );
+}
+
+#[test]
+fn provider_model_latency_args_are_reported() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--scenario",
+        "mixed-user-session",
+        "--model-latency-source",
+        "provider",
+        "--provider-model",
+        "gpt-test",
+        "--provider-max-tokens",
+        "8",
+    ]);
+
+    assert_eq!(args.model_latency_source, ModelLatencySource::Provider);
+    assert_eq!(args.provider_model.as_deref(), Some("gpt-test"));
+    assert_eq!(args.provider_max_tokens, 8);
+}
+
+#[test]
 fn synthetic_tool_failure_cadence_is_deterministic() {
     let mut args = test_args();
     args.operations = 10;
@@ -684,7 +727,7 @@ fn human_summary_includes_stage_latency_and_failure_tables() {
 
     assert!(rendered.contains("Operation attribution"));
     assert!(rendered.contains("thread_store_writes"));
-    assert!(rendered.contains("synthetic_wait"));
+    assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("Stage latency"));
     assert!(rendered.contains("submit_turn"));
     assert!(rendered.contains("resource_reserve"));
@@ -756,7 +799,7 @@ fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     assert!(rendered.contains("turn_thread_busy"));
     assert!(rendered.contains("top_stage_p95"));
     assert!(rendered.contains("top_operation_group"));
-    assert!(rendered.contains("synthetic_wait"));
+    assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("libsql_growth"));
 }
@@ -959,6 +1002,9 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         prefill_turns_per_thread: 2,
         prefill_concurrency: 1,
         model_latency_ms: 0,
+        model_latency_source: ModelLatencySource::Synthetic,
+        provider_model: None,
+        provider_max_tokens: 16,
         model_latency_profile: ModelLatencyProfile::Fixed,
         model_latency_jitter_ms: 0,
         model_latency_spike_every: 0,
@@ -1060,6 +1106,9 @@ fn test_args() -> Args {
         max_rss_mb: None,
         max_cpu_ms: None,
         model_latency_ms: 0,
+        model_latency_source: ModelLatencySource::Synthetic,
+        provider_model: None,
+        provider_max_tokens: 16,
         model_latency_profile: ModelLatencyProfile::Fixed,
         model_latency_jitter_ms: 0,
         model_latency_spike_every: 0,
