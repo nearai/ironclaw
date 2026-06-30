@@ -2643,13 +2643,21 @@ fn summary_covers_redacted_or_deleted_content(
 
 // ── CAS-aware put with `Unsupported`→`Any` fallback ────────────
 //
-// Mirrors the run-state / authorization / outbound stores: every
-// multi-step transition is implemented with
-// `put(_, _, CasExpectation::Version)` + retry on
-// `FilesystemError::VersionMismatch`. Byte-only backends (LocalFilesystem)
-// reject anything but `Any`; we fall back to `Any` so the existing
-// single-instance guarantee from the per-path lock map carries the safety
-// invariant.
+// Local, lock-free CAS-retry loop that predates the shared
+// `ironclaw_filesystem::cas_update` helper (`reserve_sequence`,
+// `apply_message_update`, `append_capability_display_preview`,
+// `create_summary_artifact`, and the message-sequence/message-lookup
+// index writers). On CAS-capable production backends it always issues
+// `put(_, _, CasExpectation::Version)` and retries on
+// `FilesystemError::VersionMismatch` — that's correct and matches
+// `cas_update`'s contract. The `Unsupported` → `CasExpectation::Any`
+// fallback below only triggers on byte-only backends (e.g.
+// `LocalFilesystem`), which production does not mount for these
+// stores; it is not protected by any lock map. Migrating these
+// single-record RMWs onto `cas_update` (fail-closed on a non-CAS
+// backend) is a tracked, deferred follow-up sibling to the
+// `ironclaw_turns` runner-lease migration (#5274) — see
+// `docs/plans/2026-06-25-cas-migration.md`.
 
 /// Local error classification for the CAS-aware put helper.
 enum PutError {

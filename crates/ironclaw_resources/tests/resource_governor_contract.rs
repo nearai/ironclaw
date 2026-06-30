@@ -1274,6 +1274,123 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
     ));
 }
 
+/// Regression: a byte-only `RootFilesystem` (one that rejects `put` when
+/// `Entry::kind` is set) must surface `CasUpdateError::CasUnsupported` ->
+/// `ResourceError::Storage` via `map_cas_error` (cas_snapshot.rs:243-258)
+/// rather than silently succeeding with a blind overwrite. Today this
+/// crate's filesystem-store tests only exercise `InMemoryBackend`, which
+/// supports versioned CAS and therefore never takes the
+/// `CasUnsupported` branch.
+///
+/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `RootFilesystem`: its `put` impl rejects entries with
+/// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
+/// Mirrors `ironclaw_run_state`'s
+/// `filesystem_approval_store_fails_closed_on_byte_only_backend`
+/// regression
+/// (crates/ironclaw_run_state/tests/run_state_contract.rs:1027-1048) for
+/// the resources crate's CAS snapshot stores.
+#[tokio::test]
+async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
+    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(local_fs),
+        mounts,
+    ));
+
+    let governor = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped));
+
+    let err = governor
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
+            ResourceLimits::default(),
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, ResourceError::Storage { reason } if reason.contains("compare-and-swap")),
+        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
+/// Mirrors `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
+/// for `FilesystemBudgetGateStore`. Both stores route through the same
+/// shared `CasSnapshotStore` encoder (cas_snapshot.rs:221-227) and
+/// `map_cas_error` (cas_snapshot.rs:243-258), so a byte-only backend must
+/// fail closed for budget-gate writes too rather than blind-overwriting a
+/// pending gate.
+#[tokio::test]
+async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
+    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(local_fs),
+        mounts,
+    ));
+
+    let store = FilesystemBudgetGateStore::new(scoped);
+    let scope = sample_scope("tenant1", "user1", None);
+    let gate = BudgetApprovalGate {
+        id: BudgetGateId::new(),
+        needed: ResourceApprovalNeeded {
+            account: ResourceAccount::tenant(scope.tenant_id.clone()),
+            dimension: ResourceDimension::Usd,
+            limit: ResourceValue::Decimal(dec!(10)),
+            current_usage: ResourceValue::Decimal(dec!(0)),
+            active_reserved: ResourceValue::Decimal(dec!(0)),
+            requested: ResourceValue::Decimal(dec!(9)),
+            utilization: 0.91,
+            period_end: None,
+        },
+        opened_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        status: BudgetGateStatus::Pending,
+    };
+
+    let err = store.open(&scope, gate).unwrap_err();
+    assert!(
+        matches!(&err, BudgetGateError::Storage { reason } if reason.contains("compare-and-swap")),
+        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
 fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).unwrap(),

@@ -72,9 +72,11 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    `.await`: it is a redundant in-process serializer over a backend that
    already does versioned CAS, and under burst it convoys every same-scope
    writer behind one stalled writer (the 2026-06-24 runtime wedge). It also
-   tends to leak (a strong-`Arc` map that is never pruned). There is exactly
-   ONE CAS implementation — `cas_update`; do not re-copy the retry/backoff
-   loop into a store. `cas_update` fails **closed** on a non-CAS backend
+   tends to leak (a strong-`Arc` map that is never pruned). All NEW durable
+   read-modify-write code must go through `cas_update`; do not re-copy the
+   retry/backoff loop into a store. The tracked exceptions below are
+   pre-existing lock-free loops pending migration, not a precedent for new
+   code. `cas_update` fails **closed** on a non-CAS backend
    (`CasUpdateError::CasUnsupported`) rather than falling back to a blind
    `CasExpectation::Any` overwrite; all production store mounts resolve to
    CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
@@ -90,6 +92,17 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    `cas_update`. Do not copy the sidecar's loop as a precedent — migrate
    it onto `cas_update` per follow-up #5274 (runner-lease CAS
    consolidation). New stores must still use `cas_update` directly.
+
+   **Second tracked scoped exception:** `ironclaw_threads::filesystem_service`
+   still drives `reserve_sequence`, `apply_message_update`,
+   `append_capability_display_preview`, `create_summary_artifact`, and the
+   `message_sequence_index.rs`/`message_lookup_index.rs` writers through a
+   local `put_with_cas` retry loop (only `ensure_thread` was migrated onto
+   `cas_update`). These loops are already lock-free (no per-path mutex), so
+   they are not the convoy hazard `cas_update` was introduced to fix; their
+   migration to `cas_update`'s fail-closed semantics is a deferred follow-up
+   tracked as a sibling to #5274. See `docs/plans/2026-06-25-cas-migration.md`.
+   Do not copy this loop as a precedent for new code.
 3. **Capabilities are declared, not discovered.** A backend that cannot
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.

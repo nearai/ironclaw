@@ -1047,6 +1047,41 @@ async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
     );
 }
 
+/// Caller-level mirror of `filesystem_approval_store_fails_closed_on_byte_only_backend`
+/// for `FilesystemRunStateStore::start`: a regression that drops
+/// `RUN_STATE_RECORD_KIND` from the run-record encoder (`record_entry`), or
+/// breaks the `CasUnsupported` mapping, would let `start` silently succeed
+/// against a byte-only backend instead of failing closed.
+#[tokio::test]
+async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/engine").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /engine at temp dir");
+    let scoped = scoped_run_state_fs(Arc::new(local_fs));
+    let store = FilesystemRunStateStore::new(scoped);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "test-tenant", "test-user");
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+
+    let err = store
+        .start(RunStart {
+            invocation_id,
+            capability_id,
+            scope,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
 /// A `RootFilesystem` decorator that, when armed, fires a concurrent
 /// `approve()` inside the first `get` call for an approval record.
 ///

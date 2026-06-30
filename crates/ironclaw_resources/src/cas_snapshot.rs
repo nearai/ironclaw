@@ -115,15 +115,26 @@ where
     /// Run a read-modify-write transaction against the underlying
     /// snapshot using the store's default scope.
     ///
-    /// Concurrency: routed through the shared, lock-free
-    /// [`cas_update`](ironclaw_filesystem::cas_update) helper — an
-    /// optimistic CAS-retry loop with bounded retries, jittered backoff,
-    /// and an overall timeout. No per-record `tokio::sync::Mutex` is held
-    /// across the backend `get`/`put` awaits, so a burst of same-scope
-    /// writers overlaps instead of convoying behind one stalled writer.
-    /// The `update` closure is re-run against a freshly read snapshot on
-    /// every CAS retry, so it must be idempotent / re-runnable (the
-    /// store closures are pure field mutations).
+    /// Concurrency: the write is lock-free at the backend/cross-process
+    /// layer — routed through the shared
+    /// [`cas_update`](ironclaw_filesystem::cas_update) helper, an
+    /// optimistic CAS-retry loop (bounded retries, jittered backoff,
+    /// overall timeout) with no per-record `tokio::sync::Mutex` held
+    /// across the backend `get`/`put` awaits, so no update is silently
+    /// lost to a stale read. For *this* store, that future is posted to
+    /// a dedicated `AsyncStorageWorker` thread (its own current-thread
+    /// runtime, separate from the main tokio executor — see below) and
+    /// run via `block_on`. That worker has a single consumer, so
+    /// same-process writers sharing a cloned store handle today
+    /// serialize one job at a time rather than overlapping; overlap
+    /// requires making this trait method async so `cas_update` can be
+    /// awaited directly on the caller's task instead of bridged onto a
+    /// worker thread. What the separate thread/runtime *does* buy: a
+    /// slow backend op there can never wedge the main executor or stall
+    /// the runner lease heartbeat. The `update` closure is re-run
+    /// against a freshly read snapshot on every CAS retry, so it must
+    /// be idempotent / re-runnable (the store closures are pure field
+    /// mutations).
     pub(crate) fn update<S, T, E, U>(&self, update: U) -> Result<T, E>
     where
         S: Snapshot + Clone + PartialEq,
@@ -177,9 +188,13 @@ where
     ///
     /// The `ScopedFilesystem` rewrites the snapshot path under the
     /// supplied scope's tenant/user mount view, so two distinct scopes
-    /// hit separate snapshot files. Cross-process and same-process
-    /// contention are both resolved by the shared `cas_update` helper's
-    /// CAS-retry loop (see [`Self::update`]).
+    /// hit separate snapshot files. Cross-process contention on one
+    /// scope's file is resolved lock-free by the shared `cas_update`
+    /// helper's CAS-retry loop; same-process contention against a
+    /// shared store handle is serialized by the dedicated storage
+    /// worker thread — see [`Self::update`] for what that buys
+    /// (the main executor/lease heartbeat can't be wedged) and what it
+    /// doesn't (same-process writers don't yet overlap).
     pub(crate) fn update_with_scope<S, T, E, U>(
         &self,
         scope: ResourceScope,
@@ -523,6 +538,14 @@ mod tests {
     /// `update` calls actually run on different runtimes — otherwise the
     /// shared current-thread worker would serialize them itself and mask the
     /// race we want to exercise.
+    ///
+    /// Because of that, the storm test below validates backend-level
+    /// no-lost-updates under the shared `cas_update` CAS-retry loop, NOT
+    /// shared-store concurrency: a production `CasSnapshotStore::clone()`
+    /// shares one `AsyncStorageWorker`, so writers going through a
+    /// cloned/shared handle serialize on that worker today. A contention
+    /// test shaped around a single shared store handle belongs with the
+    /// worker-async follow-up (see `docs/plans/2026-06-25-cas-migration.md`).
     fn store(
         filesystem: Arc<ScopedFilesystem<SlowGetBackend>>,
         worker_name: &'static str,

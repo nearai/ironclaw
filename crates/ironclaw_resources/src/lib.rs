@@ -798,9 +798,10 @@ fn current_resource_governor_snapshot_schema_version() -> u32 {
 
 /// Transactional storage primitive for [`PersistentResourceGovernor`].
 ///
-/// Implementations must serialize the whole closure with any other readers or
-/// writers over the same account-wide ledger before writing the updated
-/// snapshot back durably.
+/// Implementations must keep the account-wide snapshot durably consistent
+/// under concurrent writers — typically via optimistic compare-and-swap
+/// rather than a mandatory exclusive lock — and re-run `update`'s closure
+/// against a fresh snapshot on each retry.
 pub trait ResourceGovernorStore: Send + Sync + 'static {
     /// Run a read-modify-write transaction against the governor snapshot.
     ///
@@ -813,9 +814,9 @@ pub trait ResourceGovernorStore: Send + Sync + 'static {
         T: Send + 'static,
         F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
 
-    /// Lock-free read of the governor snapshot. Implementations must not
-    /// take the same exclusive lock used by `update`'s read-modify-write
-    /// transaction.
+    /// Lock-free read of the governor snapshot. Implementations should skip
+    /// the write path's CAS/retry overhead where possible — this is a
+    /// read-only lookup, not a read-modify-write transaction.
     fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,

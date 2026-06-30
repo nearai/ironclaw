@@ -149,3 +149,27 @@ Per touched crate:
 
 Only the existing `cas_update` helper. No new traits, no new wrappers. Commit
 per-crate as each migrates + gates green.
+
+## Follow-up: resources worker concurrency
+
+`ironclaw_resources` stores (`ResourceGovernorStore`, `BudgetGateStore`) now
+route writes through `cas_update`, but `cas_update`'s future is executed on
+`CasSnapshotStore`'s dedicated `AsyncStorageWorker` thread because
+`ResourceGovernorStore`/`BudgetGateStore` are *sync* trait methods bridging
+into the *async* `ScopedFilesystem` via `block_on`. That worker has a single
+mpsc consumer, so same-process writers sharing a cloned/shared store handle
+still serialize one job at a time — `cas_update`'s lock-free CAS-retry loop
+guarantees no lost updates across those serialized writers and across
+cross-process contention, but it does not let same-process writers on one
+store handle overlap. This is a per-process throughput limit, not the
+cross-system wedge this plan removes (that wedge was a `tokio::sync::Mutex`
+held across `.await` on the *main* tokio executor; the worker thread is a
+separate runtime, so a slow op there cannot stall the main executor or the
+runner lease heartbeat).
+
+The code-judo fix is to make `ResourceGovernorStore`/`BudgetGateStore` async
+so `cas_update` is awaited directly on the caller's task and the
+`AsyncStorageWorker`/`block_on` bridge is deleted entirely, letting
+same-store writers overlap like any other `cas_update` caller. That's a
+trait-signature change touching every call site and is its own PR — out of
+scope here. Track it via this note (no GitHub issue filed yet).
