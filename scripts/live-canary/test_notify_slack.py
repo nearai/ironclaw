@@ -272,6 +272,16 @@ class RebornQaSlackReportTests(unittest.TestCase):
             report.reborn_qa_cases[1].message,
             "requires live Google runtime access",
         )
+        self.assertEqual(
+            report.reborn_qa_cases[1].debug_paths,
+            [
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+            ],
+        )
+        self.assertEqual(report.reborn_qa_cases[0].debug_paths, [])
 
     def test_slack_payload_renders_each_reborn_qa_row(self):
         report = notify.LaneReport(
@@ -304,6 +314,12 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     success=False,
                     latency_ms=0,
                     message="requires live Google runtime access",
+                    debug_paths=[
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+                    ],
                     tool_calls=[
                         notify.RebornQaToolCall(
                             name="google-calendar.list_events",
@@ -326,7 +342,11 @@ class RebornQaSlackReportTests(unittest.TestCase):
             ],
         )
 
-        payload = notify.slack_payload([report], None, "abcdef0123456789")
+        payload = notify.slack_payload(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "abcdef0123456789",
+        )
         section_texts = [
             block["text"]["text"]
             for block in payload["blocks"]
@@ -354,10 +374,19 @@ class RebornQaSlackReportTests(unittest.TestCase):
             qa_text,
         )
         self.assertIn(
+            "*Debug `2D`:* <https://github.com/nearai/ironclaw/actions/runs/123|GitHub run artifacts> → "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json`",
+            qa_text,
+        )
+        self.assertIn(
             "*Failure `2E`:* assistant returned success but routine scope "
             "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record",
             qa_text,
         )
+        self.assertNotIn("*Debug `2A`", qa_text)
         self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
         self.assertNotIn("in#1234567890", qa_text)
         self.assertNotIn("out#9876543210", qa_text)
