@@ -157,8 +157,9 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
     /// composite (no `/engine` prefix), so they are visible through the
     /// `/tenants` mount that `mount_local_dev_database_roots` installs.
     /// `root` keeps the composite's `TempDir` alive; the same `Arc` is also
-    /// held by `RebornIntegrationHarness::_turn_root` so `reopened()` can
-    /// reuse the live SQLite file on disk.
+    /// held by `GroupSharedStorage::turn_root` so on-disk libsql data persists
+    /// across calls to `reopened()`, which rebuilds the scoped service from
+    /// the same composite backend.
     pub fn filesystem_shared_composite(
         scope: ThreadScope,
         backend: Arc<CompositeRootFilesystem>,

@@ -512,6 +512,23 @@ impl RebornServices {
             local_runtime.auto_approve_settings.clone();
         Some(auto_approve_settings)
     }
+
+    /// Test-support access to the extension installation store for this
+    /// composition. Returns `None` for production-profile compositions that did
+    /// not wire up local-dev extension management.
+    ///
+    /// Mirrors the `installation_store` that `build_local_runtime` wires into
+    /// `RebornLocalExtensionManagementPort`. For tests only — zero bytes
+    /// shipped in production builds.
+    #[cfg(feature = "test-support")]
+    pub fn extension_installation_store_for_test(
+        &self,
+    ) -> Option<Arc<dyn ExtensionInstallationStore>> {
+        self.local_runtime
+            .as_ref()
+            .and_then(|rt| rt.extension_management.as_ref())
+            .map(|em| em.installation_store_for_test())
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -2427,7 +2444,7 @@ fn mount_local_dev_project_roots(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn build_local_dev_secret_store<F>(
+pub(crate) fn build_local_dev_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,

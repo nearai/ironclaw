@@ -71,16 +71,22 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
 - `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
-- `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, the
-  slice-1/2 asserts (`assert_reply_contains` / `assert_tool_invoked` /
-  `assert_egress_request_matching`, co-located with the harness fields) plus the
-  slice-5 asserts (`assert_shell_command_recorded` / `assert_shell_ran_through_inert_port`)
+- `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, core assertions
+  (`assert_reply_contains` / `assert_tool_invoked` / `assert_egress_request_matching`,
+  co-located with the harness fields), shell assertions
+  (`assert_shell_command_recorded` / `assert_shell_ran_through_inert_port`),
+  MCP assertion (`assert_mcp_tool_called`), approval methods
+  (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results`) the assertion file reads.
-- **`harness.rs` split follow-up** — the MCP/process-port wiring block (`LoopbackMcpRuntimeHttpEgress`, `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`) is a tracked follow-up to extract into a `harness_mcp.rs` sub-module (the file exceeds 4000 lines; see arch-exempt annotation near `LoopbackMcpRuntime`).
-
-- `process.rs` — `RecordingProcessPort`, the inert process port (slice 5): records
-  every `CommandExecutionRequest.command` and returns exit 0 / empty output without
+- **`harness.rs` split follow-up** — the MCP/process-port wiring block
+  (`LoopbackMcpRuntimeHttpEgress`, `mock_mcp_extension_package`,
+  `local_dev_host_runtime_with_registry_egress_and_mcp`,
+  `HostRuntimeCapabilityHarness::mock_mcp_tools`, and the `LoopbackMcpRuntime`
+  type alias) is a tracked follow-up to extract into a `harness_mcp.rs` sub-module
+  (the file exceeds 4000 lines; see arch-exempt annotation near `LoopbackMcpRuntime`).
+- `process.rs` — `RecordingProcessPort`, the inert process port: records every
+  `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
   `LocalHostProcessPort` executes instead.
@@ -92,122 +98,254 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   / `assert_egress_body_contains` / `assert_tool_result_contains`).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
-Slice 6 MCP support lives in `harness.rs` (the `LoopbackMcpRuntimeHttpEgress`,
-`LoopbackMcpRuntime` type alias, `mock_mcp_extension_package`,
-`local_dev_host_runtime_with_registry_egress_and_mcp`, and
-`HostRuntimeCapabilityHarness::mock_mcp_tools`) and `builder.rs`
-(`MockMcp` variant, `.with_mock_mcp(mcp_url)`, `assert_mcp_tool_called`).
-
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
 
-Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md`.
+Design rationale: see git history.
 
-## Implemented now vs planned
+## Capabilities
 
-Slice 1 ships the spine + one text-reply test. Slice 2 ships
-`RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping
-+ `RecordingRuntimeHttpEgress` (FIFO body) + `assert_tool_invoked` /
-`assert_egress_request_matching` (substring). Slice 4 ships the §3.6
-P1-ergonomics **URL/method/capability-keyed HTTP matcher**
-(`ScriptedHttpResponse` + `.with_keyed_http_responses([..])` — different scripted
-body per URL for a multi-step tool-HTTP flow) and the richer **egress assertion
-API** in the now-extracted `assertions.rs` (count / URL order / method order /
-per-URL body / surfaced tool result). The keyed matcher is the canonical
-HTTP-matcher API; an MCP/OAuth interceptor with per-URL response needs folds
-into `ScriptedHttpResponse` rather than adding a parallel matcher.
+Capabilities are opt-in. The default harness is text-only (no tools, no storage,
+no process, no MCP). Wire only what your scenario crosses.
 
-Slice 3 ships `StorageMode { InMemory, LibSql }` (design spec §3.2, §3.8):
-- `RebornIntegrationHarness::builder(..).storage(mode)` selects the backend.
-- Both modes ride **one** `CompositeRootFilesystem` at the production path layout
-  `/tenants/<tenant>/users/<user>/...` — the only difference is the `RootFilesystem`
-  mounted under `/tenants`, `/memory`, and `/events`.
-- Integration tier: threads at `/tenants/.../threads`; turns at `/tenants/.../turns`.
-  **Binary-E2E tier is unchanged**: `RebornThreadHarness<LocalFilesystem>` still uses
-  `/engine/tenants/...`; `scoped_turns_fs` in `harness.rs` keeps `/engine` prefix.
-- `assert_reply_persists_after_reopen(text)` reopens the thread service over the same
-  composite backend and asserts the reply survives (SQLite durability for LibSql;
-  in-process re-instantiation for InMemory).
-- `reborn_integration_backend_matrix.rs`: `backend_parity_replies_to_greeting`
-  (`#[rstest] #[case(InMemory)] #[case(LibSql)]`) + `libsql_persists_reply_across_reopen`.
-- Product / auth / approval / install / skill / secret stores join the same composite in
-  their own §3.8 coverage slices; this slice covers thread + turn only.
+### Storage
 
-Slice 5 ships the **inert process port + `.with_live_shell()` opt-in** (design spec §3.6):
-- `RecordingProcessPort` (`process.rs`): impl `RuntimeProcessPort`, records every
-  `command` string, returns exit 0 / empty output, never spawns a real OS process.
-- Injected by default when `with_builtin_http_tools()` is used: the
-  `local_dev_host_runtime_with_http_egress` helper calls
-  `HostRuntimeServices::with_runtime_process_port_dyn(port)` — the existing pub builder
-  method. **No production change was needed** (the injection seam was already public).
-- `SHELL_CAPABILITY_ID` added to `core_builtin_tools_from_runtime`'s `capability_ids`
-  so scripted `builtin.shell` calls surface to the model.
-- `assert_shell_command_recorded(substr)` + `assert_shell_ran_through_inert_port()` on
-  `RebornIntegrationHarness` (in `builder.rs`).
-- `.with_live_shell()` builder opt-in skips recording-port injection so the real
-  `LocalHostProcessPort` executes instead (use only for hermetic commands).
-- `reborn_integration_process_port.rs`: `shell_call_recorded_not_executed` (end-to-end
-  safety invariant) + `shell_assertions_fail_when_no_shell_call_ran` (guard).
+`StorageMode` selects the durable backend mounted into the harness's
+`CompositeRootFilesystem`. Both modes use one composite at the production path
+layout `/tenants/<tenant>/users/<user>/...`.
 
-Slice 6 ships the **real MCP runtime wired to a loopback mock MCP server** (design spec §3.6):
-- `LoopbackMcpRuntimeHttpEgress`: test-only `RuntimeHttpEgress` making real HTTP
-  connections to a loopback `MockMcpServer`; injects `Authorization: Bearer mock-mcp-test-token`;
-  hermetic guard rejects any URL not prefixed by the configured `mcp_url`.
-- `LoopbackMcpRuntime` type alias: the concrete `McpRuntime<...>` parameterisation used
-  in test compositions.
-- `mock_mcp_extension_package`: builds an `ExtensionPackage` via
-  `from_host_bundled_manifest_with_inline_dynamic_schemas` so `parameters_schema` is the
-  inline `{"type":"object"}` (not a `$ref`); this prevents `surface_descriptor` from
-  attempting a filesystem read of a schema file that doesn't exist for a test-only extension.
-- `local_dev_host_runtime_with_registry_egress_and_mcp`: wires the above into
-  `HostRuntimeServices` with both first-party egress and the MCP runtime.
-- `HostRuntimeCapabilityHarness::mock_mcp_tools`: convenience constructor for the above.
-- `.with_mock_mcp(mcp_url)` on `RebornIntegrationHarnessBuilder`: switches to the MCP backend.
-- `assert_mcp_tool_called(tool_name)` on `RebornIntegrationHarness`: asserts `"<provider>.<tool_name>"` was invoked.
-- `reborn_integration_mcp.rs`: `mcp_tool_call_reaches_mock_server` (positive) +
-  `assert_mcp_tool_called_fails_when_no_mcp_call_ran` (guard).
+| Mode | What it provides | Opt-in |
+|---|---|---|
+| `InMemory` (default) | Fast, no filesystem I/O; supports service re-instantiation. | Default — no builder call needed. |
+| `LibSql` | Real SQLite on a per-test `TempDir`; full SQL migrations + CAS. | `.storage(StorageMode::LibSql)` |
 
-Slice 7 ships the **real OAuth connect-flow against real product-auth stores** (design spec §3.8):
-- `ScriptedOAuthTokenEgress` (`ironclaw_reborn_composition::test_support`, `#[cfg(feature = "test-support")]`):
-  `RuntimeHttpEgress` impl returning a fixed token-exchange JSON body (`access_token` /
-  `token_type` / `expires_in`) and recording all calls; injected into `HostOAuthProviderClient`
-  so the token-exchange HTTP is captured without any network.
-- `OAuthProductAuthTestBundle` (same module): bundles `Arc<RebornProductAuthServices>` wired over
-  real `FilesystemAuthProductServices<InMemoryBackend>` with a fixed-view `ScopedFilesystem`
-  (via `ScopedFilesystem::with_fixed_view` — bypasses `invocation_mount_view` which requires
-  libsql/postgres features) alongside the `ScriptedOAuthTokenEgress`.
-- `build_oauth_product_auth_for_test()` (same module): public factory constructing the full
-  `RebornProductAuthServices` — `FilesystemAuthProductServices<InMemoryBackend>` as the durable
-  store, `HostOAuthProviderClient` with a real HTTPS `token_endpoint` + the scripted egress,
-  `TestNoopObligationHandler`, `TestNoopContinuationDispatcher`. No production code was changed.
-- `reborn_integration_oauth_connect.rs`: `oauth_connect_flow_persists_credential_account` (drives
-  `create_flow` → `handle_oauth_callback` → `get_account`, asserts `CredentialAccount` persisted
-  with correct `id`/`provider` and exactly one token-exchange call captured) +
-  `oauth_callback_without_prior_flow_fails` (guard: missing flow → `UnknownOrExpiredFlow`,
-  zero egress calls).
+**`assert_reply_persists_after_reopen(text)`** — reopens the thread service over
+the same composite backend and asserts the reply survives. For `LibSql`: opens a
+genuinely fresh `libsql::Database` connection to the on-disk `.db` file
+(independent of the live `Arc`) — data not serialized to disk will not appear,
+proving real on-disk durability. For `InMemory`: re-instantiates the service over
+the same in-process handle (no disk involved; proves service re-instantiation, not
+durability).
 
-Slice 8 ships **OAuth credential-refresh sweep + clock injection** (design spec §9, step 8):
-- `sweep_once` in `credential_refresh_worker.rs` now accepts `now: DateTime<Utc>` so callers
-  can inject a frozen instant. `tick_once` (production caller) still passes `Utc::now()`.
-- `ScriptedOAuthTokenEgress::with_access_and_refresh_token()`: variant that includes a
-  `refresh_token` field in the scripted response so the initial exchange stores a refresh
-  secret handle the keepalive worker can load later.
-- `FixedCandidateSource` (crate-private): `CredentialRefreshCandidateSource` impl that
-  returns a caller-supplied `Vec<CredentialAccount>`, bypassing the filesystem tenant-path
-  walk so tests inject accounts directly into `sweep_once`.
-- `OAuthProductAuthTestBundle::sweep_for_refresh(candidates, settings, now)`: drives one
-  sweep tick with the always-leader lock and a frozen clock, exercising the full
-  `sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
-  `HostOAuthProviderClient::refresh_token` → scripted egress path.
-- `build_google_oauth_product_auth_for_test()`: Google-flavoured bundle
-  (`provider_id = "google"`, refresh_token in egress body, `.with_provider_client()`
-  so `refresh_credential_account` does not short-circuit to `BackendUnavailable`).
-- All slice-8 test-support items gated on `any(feature = "libsql", feature = "postgres")`.
-- `reborn_integration_oauth_refresh.rs` (requires `--features libsql`):
-  `credential_refresh_sweep_refreshes_idle_google_account` (positive: frozen clock 3 days
-  ahead → egress.captured_count() == 2) +
-  `credential_refresh_sweep_skips_fresh_google_account` (guard: real clock → count stays 1).
+### Tool calls
 
-**Planned (do not assume present; add behind a test that exercises it — no dead code):**
-`StorageMode::Postgres` (CI container lane); approval/install/skill/secret
-stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets capture wiring;
-the pre-commit test-style check.
+Script a tool call with `RebornScriptedReply::tool_call(capability_id, args)`,
+where `capability_id` is the full id (e.g. `"builtin.http"`). Enable the real
+first-party runtime with `.with_builtin_http_tools()`. The recording
+`RuntimeHttpEgress` intercepts every outbound HTTP call at the runtime boundary
+(no real network); responses come from the script.
+
+Core assertions in `builder.rs`:
+- `assert_tool_invoked(capability_id)` — proves the named capability was dispatched through the real capability path.
+- `assert_egress_request_matching(url_substr)` — proves a runtime HTTP egress crossed the recording boundary (URL contains the substring).
+
+Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thread):
+- `assert_egress_count(n)` — exact count of captured egress requests.
+- `assert_egress_url_order(&[substrings])` — URLs in call order, each containing the matching substring; also checks count.
+- `assert_egress_method_order(&[methods])` — HTTP methods in call order (case-insensitive).
+- `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
+- `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model).
+
+### Keyed HTTP responses
+
+For multi-step tool flows where each `builtin.http` call to a different URL
+needs a different scripted body, install keyed responses via
+`.with_keyed_http_responses([..])`. This implies `.with_builtin_http_tools()`.
+
+`ScriptedHttpResponse` — first-match-wins in scripted order:
+
+- `ScriptedHttpResponse::for_url(url_substr, body)` — matches any request whose URL contains the substring.
+- `.with_method(method)` — narrow to a specific HTTP method (lowercase, e.g. `"post"`).
+- `.with_capability(capability_id)` — narrow to a specific capability id (e.g. `"builtin.http"`).
+
+Requests that match no scripted response fall back to the recording egress default body. The keyed matcher is the canonical HTTP-scripting API; new per-URL response needs fold into `ScriptedHttpResponse` rather than adding a parallel matcher.
+
+### Shell / process
+
+When `.with_builtin_http_tools()` is active, `builtin.shell` turns are dispatched
+through the inert `RecordingProcessPort` by default. It records every
+`CommandExecutionRequest.command` string and returns exit 0 / empty output without
+spawning any OS process.
+
+- `assert_shell_command_recorded(substr)` — the recorded command string contains `substr`.
+- `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
+
+**`.with_live_shell()`** — opt-in; skips recording-port injection so the real
+`LocalHostProcessPort` executes instead. Use only for hermetic commands
+(no network, no external state, reproducible on any machine).
+Implies `.with_builtin_http_tools()`.
+
+### MCP
+
+`.with_mock_mcp(mcp_url)` wires the real MCP runtime to a loopback
+`MockMcpServer`. `LoopbackMcpRuntimeHttpEgress` makes real HTTP connections to
+the mock server on a loopback port, injecting `Authorization: Bearer mock-mcp-test-token`
+so the mock's OAuth gate passes; it rejects any URL not prefixed by the configured
+`mcp_url`. A single MCP capability `"mock-mcp.search"` is registered.
+
+Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
+
+- `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
+
+### OAuth / product-auth
+
+Available from crate `ironclaw_reborn_composition::test_support`, gated on
+`#[cfg(feature = "test-support")]`.
+
+**`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
+token-exchange JSON body and recording all calls. Ignores the actual URL;
+every call consumes the next scripted response.
+
+Constructors:
+- `ScriptedOAuthTokenEgress::with_access_token(token)` — default scripted `200` response with `access_token`.
+- `ScriptedOAuthTokenEgress::with_access_and_refresh_token(access, refresh)` — scripted `200` with both tokens; required for refresh-sweep tests that need a `refresh_token` in the initial exchange body.
+- `ScriptedOAuthTokenEgress::with_error_response(status, error_code)` — scripted non-200 body (e.g. `400`, `"invalid_grant"`) as the default for every call.
+- `push_response(status, body)` — enqueue a per-call FIFO override; consumed before the default response.
+
+Assertion accessors: `captured_count()` / `captured_grant_types()` (returns only the non-secret `grant_type` discriminator — e.g. `"authorization_code"` or `"refresh_token"` — extracted from each captured request body, never raw secrets).
+
+**`OAuthProductAuthTestBundle`** — bundles `Arc<RebornProductAuthServices>` wired
+over real `FilesystemAuthProductServices<InMemoryBackend>` alongside a
+`ScriptedOAuthTokenEgress`. Construct via:
+
+- `build_oauth_product_auth_for_test()` — generic provider; no refresh token in egress body.
+- `build_google_oauth_product_auth_for_test()` — `provider_id = "google"`, includes `refresh_token` in the egress body; wires the provider client so `refresh_credential_account` does not short-circuit.
+
+**`OAuthProductAuthTestBundle::sweep_for_refresh(candidates, settings, now)`** —
+drives one sweep tick with an always-leader lock and a frozen clock, exercising
+`sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
+`HostOAuthProviderClient::refresh_token` → scripted egress. Requires
+`--features libsql`.
+
+### Approvals (group tests only)
+
+`RebornIntegrationGroup::live_approvals()` constructs a group with real file-tool
+approval stores (`write_file`/`read_file` at `PermissionMode::Ask`). Auto-approve
+is disabled for the group scope at construction so gated tool calls raise real
+`BlockedApproval` gates.
+
+On a harness built from a `live_approvals` group:
+
+- `submit_turn_until_blocked(text)` — submits a turn and waits for `TurnStatus::BlockedApproval`, returning `(run_id, gate_ref)`.
+- `approve_gate(run_id, &gate_ref)` — resolves the persisted approval request to an issued lease and resumes the run.
+- `deny_gate(run_id, &gate_ref)` — resolves to `Denied` and resumes with `GateResumeDisposition::Denied`; the executor surfaces a non-retryable authorization failure to the model.
+- `wait_for_status(run_id, expected)` — polls the turn-state store until the run reaches `expected`; fails fast on a different terminal status.
+- `enable_auto_approve()` — flips the per-`(tenant, user)` CAS-persisted auto-approve toggle ON; the flip persists across threads in the group because the store is shared.
+
+### Test-support crate accessors
+
+`HostRuntimeCapabilityHarness` (in `harness.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
+
+- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
+
+`ironclaw_reborn_composition::test_support` exposes:
+
+- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+
+Both are zero-byte in production builds (gated on the `test-support` feature).
+
+## Group tests
+
+`RebornIntegrationGroup` (in `group.rs`) owns shared storage and a shared
+capability backend once; each `.thread(conv_id)` builds a per-thread turn
+runtime over those shared pieces. Cross-thread persistence is real — thread A
+writes, thread B sees it. Single-shot `test_default()` is a degenerate
+one-thread group (its own storage, baseline = 0); all existing tests are
+byte-identical after this refactor.
+
+### When to use a group (vs a flat test)
+
+Use a group **only** when the scenario needs cross-thread persistence — e.g.,
+thread A submits a tool call that raises an approval gate; thread B resolves
+the gate; thread A resumes. A scenario that submits + asserts in one thread
+belongs in a flat `tests/reborn_integration_*.rs` test as always.
+
+### Group test binary layout
+
+Group tests live in subdirectories under `tests/`:
+
+```
+tests/reborn_group_approvals/
+    main.rs                              # one #[tokio::test], drives scenarios in order
+    scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
+    scenario_approve_always_persists.rs
+```
+
+Cargo discovers multi-file integration test binaries via `[[test]]` entries in
+`Cargo.toml`:
+
+```toml
+[[test]]
+name = "reborn_group_approvals"
+path = "tests/reborn_group_approvals/main.rs"
+```
+
+### `main.rs` boilerplate (required)
+
+```rust
+#[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
+#[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
+
+mod scenario_gate_then_resolve;
+mod scenario_approve_always_persists;
+
+use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::{HarnessResult, RebornIntegrationGroup, ScenarioReport};
+use reborn_support::reply::RebornScriptedReply;
+
+#[tokio::test]
+async fn approvals_group() {
+    let g = RebornIntegrationGroup::live_approvals().await.expect("group builds");
+    let mut report = ScenarioReport::new();
+    // dependent: must pass before subsequent scenarios consume its side-effect
+    scenario_gate_then_resolve::run(&g).await.expect("gate+resolve");
+    // independent: failure recorded, driver continues
+    report.record("approve_always_persists", scenario_approve_always_persists::run(&g).await);
+    report.assert_all_passed();
+}
+```
+
+Both `#[path]` declarations with `#[allow(dead_code)]` are mandatory — bare
+`mod support;` resolves relative to the source file, not `tests/`.
+
+### Scenario shape
+
+```rust
+// scenario_gate_then_resolve.rs
+use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::reborn_support::reply::RebornScriptedReply;
+
+pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let h = g.thread("conv-gate-resolve")
+        .script([RebornScriptedReply::tool_call("builtin.write_file", serde_json::json!({}))])
+        .build().await?;
+    let (run_id, gate_ref) = h.submit_turn_until_blocked("write something").await?;
+    h.approve_gate(run_id, &gate_ref).await?;
+    h.wait_for_status(run_id, ironclaw_turns::TurnStatus::Completed).await?;
+    Ok(())
+}
+```
+
+### Available constructors
+
+| Constructor | Capability | Auto-approve |
+|---|---|---|
+| `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
+| `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
+| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Key accessors on `RebornIntegrationGroup`
+
+- `turn_composite()` — the thread/turn `CompositeRootFilesystem`; use for
+  thread-history and turn-state read-back only.
+- `capability_harness()` — `Option<&Arc<HostRuntimeCapabilityHarness>>`; use
+  for capability stores (memory, projects, extensions, approval, auto-approve).
+  Returns `None` for the Echo backend.
+
+### Per-thread baseline (R2)
+
+Each `RebornIntegrationHarness` records `baseline_invocation_count`,
+`baseline_egress_count`, and `baseline_result_count` at construction from the
+shared recorder's current lengths. All assertion methods (`assert_tool_invoked`,
+`assert_egress_request_matching`, etc.) slice `[baseline..]` so a thread never
+spuriously passes on a prior thread's entries.

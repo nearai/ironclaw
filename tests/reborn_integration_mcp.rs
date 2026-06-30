@@ -28,7 +28,10 @@ async fn mcp_tool_call_reaches_mock_server() {
 
     let h = RebornIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({})),
+            RebornScriptedReply::tool_call(
+                "mock-mcp.search",
+                serde_json::json!({"query": "needle-xyz-42"}),
+            ),
             RebornScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
@@ -73,6 +76,17 @@ async fn mcp_tool_call_reaches_mock_server() {
             .and_then(|n| n.as_str()),
         Some("search"),
         "tools/call params did not name the expected tool 'search'; params: {:?}",
+        tools_call.params
+    );
+    assert_eq!(
+        tools_call
+            .params
+            .as_ref()
+            .and_then(|p| p.get("arguments"))
+            .and_then(|a| a.get("query"))
+            .and_then(|q| q.as_str()),
+        Some("needle-xyz-42"),
+        "tools/call did not carry the scripted arguments intact; params: {:?}",
         tools_call.params
     );
 }

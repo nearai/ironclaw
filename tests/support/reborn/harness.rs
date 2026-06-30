@@ -25,7 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -268,7 +268,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
+    pub(crate) fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => Some(harness.workspace_file_path(relative)),
@@ -305,12 +305,48 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())
             }
             Self::HostRuntime(harness) => harness.approve_local_dev_gate(gate_ref).await,
+        }
+    }
+
+    pub(crate) async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev approvals".into())
+            }
+            Self::HostRuntime(harness) => harness.deny_local_dev_gate(gate_ref).await,
+        }
+    }
+
+    pub(crate) async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev auto-approve settings".into())
+            }
+            Self::HostRuntime(harness) => harness.disable_global_auto_approve(scope).await,
+        }
+    }
+
+    pub(crate) async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev auto-approve settings".into())
+            }
+            Self::HostRuntime(harness) => harness.enable_global_auto_approve(scope).await,
+        }
+    }
+
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.approval_requests_store(),
         }
     }
 }
@@ -1574,7 +1610,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
-    async fn file_tools_requiring_approval() -> HarnessResult<Self> {
+    pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<Self> {
         let harness = Self::file_tools_with_runtime_policy(None).await?;
         // Global auto-approve now defaults ON, so disable it explicitly to keep
         // this constructor's per-tool approval gate behavior.
@@ -1750,7 +1786,7 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
-    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+    pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<Self> {
         let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
         capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
         let mut harness = Self::new_with_options(
@@ -1848,7 +1884,10 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    async fn enable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn enable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
         let store = self
             .auto_approve_settings
             .as_ref()
@@ -1878,7 +1917,10 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    async fn disable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+    pub(crate) async fn disable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
         let store = self
             .auto_approve_settings
             .as_ref()
@@ -2381,7 +2423,7 @@ impl HostRuntimeCapabilityHarness {
         let scope = self
             .pending_approval_scopes
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&request_id)
             .cloned()
             .ok_or("approval gate was not recorded by the host runtime harness")?;
@@ -2413,6 +2455,77 @@ impl HostRuntimeCapabilityHarness {
             other => return Err(format!("unsupported approval action: {other:?}").into()),
         }
         Ok(())
+    }
+
+    /// Deny a pending local-dev approval gate (the model-declined path). Mirrors
+    /// [`approve_local_dev_gate`](Self::approve_local_dev_gate) but resolves the
+    /// persisted request to `Denied` (no lease issued) via `ApprovalResolver::deny`.
+    /// The caller then resumes the run with `GateResumeDisposition::Denied` so the
+    /// executor surfaces a non-retryable authorization failure to the model.
+    async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        let approval_parts = self
+            .approval_parts
+            .as_ref()
+            .ok_or("host runtime harness has no local-dev approval stores")?;
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let scope = self
+            .pending_approval_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&request_id)
+            .cloned()
+            .ok_or("approval gate was not recorded by the host runtime harness")?;
+        let resolver = ApprovalResolver::new(
+            approval_parts.approval_requests.as_ref(),
+            approval_parts.capability_leases.as_ref(),
+        );
+        resolver
+            .deny(
+                &scope,
+                request_id,
+                DenyApproval {
+                    denied_by: Principal::User(scope.user_id.clone()),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The persisted approval-request store, when this harness wires the real
+    /// local-dev approval stores (`file_tools_requiring_approval`). The
+    /// integration runtime builds an [`ApprovalGateEvidenceStore`] over it so a
+    /// `BlockedApproval` run is verified at loop exit (mirrors production
+    /// `runtime.rs:2799`) and genuinely pauses instead of failing.
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        self.approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.approval_requests))
+    }
+
+    /// The user id this capability harness's first-party tools execute under.
+    /// The dispatch-time auto-approve check is keyed `(tenant, user)` on THIS
+    /// user (not the run's binding owner), so the group derives the auto-approve
+    /// scope from it — see `GroupSharedStorage::auto_approve_scope`.
+    pub(crate) fn user_id(&self) -> &UserId {
+        &self.user_id
+    }
+
+    /// Override the user this capability harness executes first-party tools under.
+    /// The dispatch ResourceScope, approval-request persistence, auto-approve
+    /// keying, and the approval-gate-evidence lookup are ALL keyed on this user
+    /// (`HostRuntimeHarnessCapabilityPortFactory` builds the authority from
+    /// `self.user_id`). The integration harness sets it to the run's binding owner
+    /// so capability dispatch and the turn run under the SAME `(tenant, user)` —
+    /// matching production (where the run owner *is* the capability user) instead
+    /// of the constructor's fixed test user. Without this, a `BlockedApproval`
+    /// run's request persists under the capability user but the gate-evidence
+    /// lookup uses the turn owner, so the gate is never verified and the run goes
+    /// terminal `Failed`.
+    pub(crate) fn with_user_id(mut self, user_id: UserId) -> Self {
+        self.user_id = user_id;
+        self
     }
 
     fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
@@ -2566,7 +2679,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)
@@ -2581,7 +2694,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)
