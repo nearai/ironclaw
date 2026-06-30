@@ -680,14 +680,12 @@ impl RebornProductAuthServices {
         // the generic `ProductAuthRuntimeCredentialAccountSelector` stays
         // provider-agnostic and this composition layer supplies the one
         // provider/extension pair that may fall back to it.
-        // safety: "nearai" is a fixed literal that satisfies both newtypes'
-        // validation (non-empty ASCII text under the length cap) — these
-        // can only fail if the literal itself is changed to something invalid.
-        let fallback = HostManagedCredentialFallbackRule::new(
-            AuthProviderId::new("nearai").expect("\"nearai\" is a valid AuthProviderId literal"),
-            ExtensionId::new("nearai").expect("\"nearai\" is a valid ExtensionId literal"),
-            host_scope,
-        );
+        let nearai_provider =
+            AuthProviderId::new("nearai").expect("\"nearai\" is a valid AuthProviderId literal"); // safety: fixed literal, validation cannot fail
+        let nearai_requester =
+            ExtensionId::new("nearai").expect("\"nearai\" is a valid ExtensionId literal"); // safety: fixed literal, validation cannot fail
+        let fallback =
+            HostManagedCredentialFallbackRule::new(nearai_provider, nearai_requester, host_scope);
         Arc::new(HostManagedRuntimeCredentialAccountSelector::new(
             selector, fallback,
         ))
