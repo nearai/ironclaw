@@ -258,16 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_connect_action_assets_render_slack_pairing_and_extensions_channel_picker() {
+    fn chat_omits_connect_action_while_extensions_render_slack_setup_ui() {
         let chat = asset_text("js/pages/chat/chat.js");
-        assert!(chat.contains("ChannelConnectCard"));
-        assert!(chat.contains("channelConnectAction"));
-        assert!(chat.contains("dismissChannelConnectAction"));
-
-        let card = asset_text("js/pages/chat/components/channel-connect-card.js");
-        assert!(card.contains("SlackPairingSection"));
-        assert!(card.contains("isSlackStrategy(connectAction, \"inbound_proof_code\")"));
-        assert!(card.contains("action=${connectAction.action}"));
+        assert!(!chat.contains("ChannelConnectCard"));
+        assert!(!chat.contains("channelConnectAction"));
+        assert!(!chat.contains("dismissChannelConnectAction"));
 
         let picker = asset_text("js/components/slack-channel-picker.js");
         assert!(picker.contains("listSlackAllowedChannels"));
@@ -288,9 +283,9 @@ mod tests {
         assert!(channels_tab.contains("action=${action.action}"));
 
         let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
-        assert!(regression.contains("channel connect requests return an action"));
-        assert!(regression.contains("without submitting a prompt"));
-        assert!(regression.contains("unmatched channel connect requests submit the prompt"));
+        assert!(regression.contains("slash connect text submits to the model"));
+        assert!(regression.contains("does not fetch connectable channels before submitting chat"));
+        assert!(regression.contains("ordinary Slack chat prompts submit to the model"));
     }
 
     #[test]
