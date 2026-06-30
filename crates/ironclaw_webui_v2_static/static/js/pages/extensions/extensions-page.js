@@ -30,6 +30,10 @@ export function ExtensionsPage() {
   } = useExtensions();
 
   const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
+  const handleInstall = React.useCallback(
+    (payload) => install({ ...payload, onNeedsSetup: handleConfigure }),
+    [handleConfigure, install]
+  );
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
   const handleActivateFromModal = React.useCallback(
@@ -79,7 +83,7 @@ export function ExtensionsPage() {
       onActivate=${activate}
       onConfigure=${handleConfigure}
       onRemove=${remove}
-      onInstall=${install}
+      onInstall=${handleInstall}
       isBusy=${isBusy}
     />`,
     mcp: html`<${McpTab}
@@ -88,12 +92,12 @@ export function ExtensionsPage() {
       onActivate=${activate}
       onConfigure=${handleConfigure}
       onRemove=${remove}
-      onInstall=${install}
+      onInstall=${handleInstall}
       isBusy=${isBusy}
     />`,
     registry: html`<${RegistryTab}
       catalogEntries=${catalogEntries}
-      onInstall=${install}
+      onInstall=${handleInstall}
       onActivate=${activate}
       onConfigure=${handleConfigure}
       onRemove=${remove}

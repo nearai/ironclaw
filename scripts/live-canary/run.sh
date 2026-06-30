@@ -106,6 +106,7 @@ write_env_summary() {
     echo "playwright_install=${PLAYWRIGHT_INSTALL}"
     echo "python_bin=${PYTHON_BIN}"
     echo "cases=${CASES:-<default>}"
+    echo "reborn_webui_v2_live_qa_harness_ref=${REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF:-<checkout>}"
     echo "skip_build=${SKIP_BUILD:-0}"
     echo "skip_python_bootstrap=${SKIP_PYTHON_BOOTSTRAP:-0}"
   } > "${ENV_FILE}"

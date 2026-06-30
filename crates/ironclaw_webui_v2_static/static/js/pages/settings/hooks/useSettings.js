@@ -83,6 +83,7 @@ export function useSettings() {
     needsRestart,
     importSettings,
     isImporting: importMutation.isPending,
-    saveError: mutation.error || importMutation.error,
+    saveError: mutation.error,
+    importError: importMutation.error,
   };
 }

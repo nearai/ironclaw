@@ -20,6 +20,26 @@ import {
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
+function isHttpsAuthUrl(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function openAuthUrl(url, popup = null) {
+  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    return { ok: true, popup };
+  }
+  return {
+    ok: true,
+    popup: window.open(url, "_blank", "noopener,noreferrer"),
+  };
+}
+
 function packageId(item) {
   return item?.package_ref?.id || null;
 }
@@ -52,16 +72,19 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    refetchOnMount: "always",
   });
 
   const connectableChannelsQuery = useQuery({
     queryKey: ["connectable-channels"],
     queryFn: listConnectableChannels,
+    refetchOnMount: "always",
   });
 
   const invalidate = React.useCallback(() => {
@@ -77,7 +100,7 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName }) => {
+    onSuccess: (res, { displayName, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         setActionResult({
           type: "success",
@@ -88,8 +111,23 @@ export function useExtensions() {
               name: displayName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
+        } else if (
+          !res.auth_url &&
+          configureAfterInstall &&
+          typeof onNeedsSetup === "function"
+        ) {
+          onNeedsSetup({
+            packageRef,
+            displayName,
+            active: false,
+            activationStatus: "setup_required",
+            onboardingState: "setup_required",
+          });
         }
       } else {
         setActionResult({ type: "error", message: res.message || t("extensions.installFailed") });
@@ -115,12 +153,21 @@ export function useExtensions() {
               name: displayName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
         }
       } else if (res.auth_url) {
-        window.open(res.auth_url, "_blank", "noopener,noreferrer");
-        setActionResult({ type: "info", message: t("extensions.openingAuth") });
+        if (openAuthUrl(res.auth_url).ok) {
+          setActionResult({ type: "info", message: t("extensions.openingAuth") });
+        } else {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
+        }
       } else if (res.awaiting_token) {
         setActionResult({ type: "info", message: t("extensions.configurationRequired") });
       } else {
@@ -203,6 +250,14 @@ export function useExtensions() {
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
+  const remove = React.useCallback(
+    (extension) => {
+      const name = extension?.displayName || extension?.packageRef?.id || "this extension";
+      if (!window.confirm(`Remove ${name}?`)) return;
+      removeMutation.mutate(extension);
+    },
+    [removeMutation]
+  );
 
   return {
     status,
@@ -222,7 +277,7 @@ export function useExtensions() {
     clearResult,
     install: installMutation.mutate,
     activate: activateMutation.mutate,
-    remove: removeMutation.mutate,
+    remove,
     invalidate,
   };
 }
@@ -248,7 +303,13 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secrets, fields }) => submitExtensionSetup(packageRef, secrets, fields),
+    mutationFn: ({ secrets, fields }) =>
+      submitExtensionSetup(packageRef, secrets, fields).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "Setup failed");
+        }
+        return res;
+      }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
@@ -312,13 +373,19 @@ export function useOauthSetup(packageRef) {
 
   return useMutation({
     mutationFn: ({ secret, popup }) =>
-      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+      startExtensionOauth(packageRef, secret).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "OAuth setup failed");
+        }
+        if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
+          throw new Error("Authorization URL must use HTTPS.");
+        }
+        return { res, popup };
+      }),
     onSuccess: ({ res, popup }) => {
       let authPopup = popup;
-      if (res.authorization_url && popup && !popup.closed) {
-        popup.location.href = res.authorization_url;
-      } else if (res.authorization_url) {
-        authPopup = window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      if (res.authorization_url) {
+        authPopup = openAuthUrl(res.authorization_url, popup).popup;
       } else if (popup && !popup.closed) {
         popup.close();
       }

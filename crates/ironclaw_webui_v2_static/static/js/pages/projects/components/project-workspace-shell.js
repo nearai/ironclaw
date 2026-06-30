@@ -23,10 +23,14 @@ export function ProjectWorkspaceShell({
   const fsThreadId = representativeThreadId(threads);
 
   return html`
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+    <div
+      data-testid="project-workspace"
+      data-project-id=${project.id}
+      className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]"
+    >
       <div className="space-y-5">
         <div className="min-w-0">
-          <h2 className="text-2xl font-semibold tracking-tight text-white">${project.name}</h2>
+          <h2 data-testid="project-workspace-title" className="text-2xl font-semibold tracking-tight text-white">${project.name}</h2>
           ${project.description
             ? html`<p className="mt-1 text-sm leading-6 text-iron-300">${project.description}</p>`
             : null}

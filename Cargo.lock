@@ -4520,6 +4520,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
+ "url",
 ]
 
 [[package]]
