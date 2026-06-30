@@ -47,6 +47,13 @@
         "rebase"
       ],
       "default": "merge"
+    },
+    "sha": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 40,
+      "pattern": "^[a-f0-9]{40}$",
+      "description": "Expected pull request HEAD SHA. GitHub refuses the merge if the branch advanced."
     }
   },
   "required": [

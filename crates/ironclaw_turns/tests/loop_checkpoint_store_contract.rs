@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    BackendId, BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
+    MountDescriptor, RootFilesystem, ScopedFilesystem, StorageClass,
+};
 use ironclaw_host_api::{
-    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-    ThreadId, VirtualPath,
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
+    VirtualPath,
 };
 use ironclaw_turns::{
     CheckpointSchemaId, FilesystemTurnStateStore, GetLoopCheckpointRequest,
@@ -126,31 +129,41 @@ async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&reopened).await;
 }
 
-/// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir; the
-/// `/turns` alias on the outer [`ScopedFilesystem`] resolves under
-/// `/engine/...`.
-fn engine_filesystem() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
+/// Build the CAS-capable backend shape used by `/turns` in local-dev and
+/// production composition.
+fn engine_filesystem() -> InMemoryBackend {
+    InMemoryBackend::new()
 }
 
-fn scoped_turns_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+fn engine_mount_descriptor<F>(backend: &F) -> MountDescriptor
 where
     F: RootFilesystem,
 {
+    MountDescriptor {
+        virtual_root: VirtualPath::new("/engine").unwrap(),
+        backend_id: BackendId::new("test-loop-checkpoint").unwrap(),
+        backend_kind: BackendKind::MemoryDocuments,
+        storage_class: StorageClass::StructuredRecords,
+        content_kind: ContentKind::StructuredRecord,
+        index_policy: IndexPolicy::NotIndexed,
+        capabilities: backend.capabilities(),
+    }
+}
+
+fn scoped_turns_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<CompositeRootFilesystem>>
+where
+    F: RootFilesystem + 'static,
+{
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(engine_mount_descriptor(backend.as_ref()), backend)
+        .unwrap();
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("alias"),
         VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns").expect("target"),
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(Arc::new(root), mounts))
 }
 
 #[tokio::test]

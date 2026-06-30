@@ -15,10 +15,10 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::VirtualPath;
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,
-    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError,
-    OpenAiCompatRefLookup, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface,
+    OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatPublicId,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError, OpenAiCompatRefLookup,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -285,6 +285,31 @@ impl FilesystemOpenAiCompatRefStore {
         }
         Err(OpenAiCompatRefError::StoreUnavailable)
     }
+
+    async fn mark_external_tool_resume_completed_with_cas(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        for _ in 0..=self.cas_retries {
+            let Some((mut mapping, version)) = self.load_mapping_entry(&request.public_id).await?
+            else {
+                return Ok(None);
+            };
+            if !mapping.is_authorized_for(&request.owner) {
+                return Ok(None);
+            }
+            mapping.external_tool_resume_completed = true;
+            match self
+                .put_mapping(&mapping, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(Some(mapping)),
+                Err(SaveRecordError::CasConflict) => continue,
+                Err(SaveRecordError::Ref(error)) => return Err(error),
+            }
+        }
+        Err(OpenAiCompatRefError::StoreUnavailable)
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -330,6 +355,16 @@ impl OpenAiCompatRefStore for RebornLibSqlOpenAiCompatRefStore {
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
         self.inner.record_accepted_ack(request).await
     }
+
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.inner
+            .mark_external_tool_resume_completed(request)
+            .await
+    }
+
     async fn lookup_authorized(
         &self,
         request: OpenAiCompatRefLookup,
@@ -382,6 +417,15 @@ impl OpenAiCompatRefStore for RebornPostgresOpenAiCompatRefStore {
         self.inner.record_accepted_ack(request).await
     }
 
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.inner
+            .mark_external_tool_resume_completed(request)
+            .await
+    }
+
     async fn lookup_authorized(
         &self,
         request: OpenAiCompatRefLookup,
@@ -411,6 +455,14 @@ impl OpenAiCompatRefStore for FilesystemOpenAiCompatRefStore {
         request: OpenAiCompatRecordAcceptedAck,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
         self.record_accepted_ack_with_cas(request).await
+    }
+
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.mark_external_tool_resume_completed_with_cas(request)
+            .await
     }
 
     async fn lookup_authorized(
@@ -481,6 +533,7 @@ fn new_pending_mapping(request: &OpenAiCompatRefReservation) -> OpenAiCompatReso
         created_at: ironclaw_reborn_openai_compat::unix_timestamp_now(),
         idempotency_key: request.idempotency_key.clone(),
         accepted_ack: None,
+        external_tool_resume_completed: false,
         binding: OpenAiCompatResourceBinding::Pending,
     };
     debug_assert!(mapping.validate().is_ok());

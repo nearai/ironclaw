@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, ResourceUsage,
-    RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    MountGrant, MountPermissions, MountView, PermissionMode, ProviderToolName, ResourceEstimate,
+    ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -29,7 +29,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-        VisibleCapabilityRequest,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
 
@@ -179,17 +179,17 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         "message": "hello\nfrom provider\r\n\twith tab"
     });
     let candidate = port
-        .register_provider_tool_call(ProviderToolCall {
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
             provider_id: "provider".to_string(),
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
+            name: ProviderToolName::new("demo__echo").expect("provider tool name"),
             arguments: arguments.clone(),
             response_reasoning: None,
             reasoning: None,
             signature: None,
-        })
+        }))
         .await
         .expect("provider tool call should stage input");
 
@@ -213,6 +213,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     );
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,

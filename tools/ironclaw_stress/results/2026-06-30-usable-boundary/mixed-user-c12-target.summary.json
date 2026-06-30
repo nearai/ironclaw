@@ -1,0 +1,333 @@
+{
+  "backend": "libsql",
+  "preset": null,
+  "scenario": "mixed-user-session",
+  "run_id": "d7e29fdd2a3142d883d47477245bca17",
+  "target": "libsql://<redacted-local-path>",
+  "child_index": null,
+  "processes": 1,
+  "concurrency": 12,
+  "operations_per_thread": 10,
+  "duration_seconds": 0,
+  "warmup_seconds": 0,
+  "trace_jsonl_enabled": false,
+  "trace_interval_seconds": 1,
+  "users": 1000,
+  "active_thread_count": 0,
+  "tenants": 1,
+  "prefill_threads": 0,
+  "prefill_turns_per_thread": 0,
+  "prefill_concurrency": 4,
+  "model_latency_ms": 0,
+  "model_latency_profile": "fixed",
+  "model_latency_jitter_ms": 0,
+  "model_latency_spike_every": 0,
+  "model_latency_spike_ms": 0,
+  "user_message_bytes": 0,
+  "assistant_message_bytes": 0,
+  "context_max_messages": 20,
+  "context_growth_turns_per_operation": 4,
+  "tool_calls_per_turn": 2,
+  "tool_latency_ms": 0,
+  "tool_output_bytes": 1024,
+  "tool_failure_every": 0,
+  "attempted": 120,
+  "succeeded": 119,
+  "failed": 1,
+  "duration_ms": 4193,
+  "throughput_ops_sec": 28.61837718955552,
+  "latency": {
+    "min_us": 6430,
+    "p50_us": 366850,
+    "p95_us": 1046269,
+    "p99_us": 2112826,
+    "max_us": 2145852
+  },
+  "process": {
+    "start": {
+      "rss_kb": 11328,
+      "peak_rss_kb": 11328,
+      "user_cpu_ms": 139,
+      "system_cpu_ms": 86,
+      "threads": null,
+      "open_fds": 10
+    },
+    "end": {
+      "rss_kb": 25136,
+      "peak_rss_kb": 25200,
+      "user_cpu_ms": 1186,
+      "system_cpu_ms": 1335,
+      "threads": null,
+      "open_fds": 10
+    },
+    "delta_user_cpu_ms": 1047,
+    "delta_system_cpu_ms": 1249,
+    "delta_cpu_ms": 2296,
+    "peak_rss_kb": 25200,
+    "peak_threads": null,
+    "peak_open_fds": 26
+  },
+  "db_probe": {
+    "before": {
+      "libsql_file_bytes": 32768,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "after": {
+      "libsql_file_bytes": 3633152,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "delta": {
+      "libsql_file_bytes": 3600384,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    }
+  },
+  "operation_attribution": {
+    "thread_store_writes": {
+      "count": 120,
+      "latency": {
+        "min_us": 6397,
+        "p50_us": 43218,
+        "p95_us": 694388,
+        "p99_us": 1617892,
+        "max_us": 1831408
+      }
+    },
+    "context_reads": {
+      "count": 119,
+      "latency": {
+        "min_us": 349,
+        "p50_us": 590,
+        "p95_us": 40767,
+        "p99_us": 163865,
+        "max_us": 282914
+      }
+    },
+    "turn_store": {
+      "count": 119,
+      "latency": {
+        "min_us": 3468,
+        "p50_us": 11804,
+        "p95_us": 168879,
+        "p99_us": 262811,
+        "max_us": 530884
+      }
+    },
+    "resource_governor": {
+      "count": 119,
+      "latency": {
+        "min_us": 6486,
+        "p50_us": 199232,
+        "p95_us": 389032,
+        "p99_us": 396029,
+        "max_us": 479282
+      }
+    },
+    "synthetic_wait": {
+      "count": 114,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    }
+  },
+  "stage_latency": {
+    "ensure_thread": {
+      "count": 120,
+      "latency": {
+        "min_us": 555,
+        "p50_us": 800,
+        "p95_us": 64724,
+        "p99_us": 1599758,
+        "max_us": 1753202
+      }
+    },
+    "accept_inbound": {
+      "count": 120,
+      "latency": {
+        "min_us": 1971,
+        "p50_us": 5036,
+        "p95_us": 215230,
+        "p99_us": 673767,
+        "max_us": 677796
+      }
+    },
+    "submit_turn": {
+      "count": 119,
+      "latency": {
+        "min_us": 553,
+        "p50_us": 818,
+        "p95_us": 24522,
+        "p99_us": 144255,
+        "max_us": 243309
+      }
+    },
+    "mark_submitted": {
+      "count": 119,
+      "latency": {
+        "min_us": 539,
+        "p50_us": 768,
+        "p95_us": 38450,
+        "p99_us": 96282,
+        "max_us": 118028
+      }
+    },
+    "mark_rejected_busy": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "claim_run": {
+      "count": 119,
+      "latency": {
+        "min_us": 1145,
+        "p50_us": 1899,
+        "p95_us": 134724,
+        "p99_us": 258392,
+        "max_us": 476991
+      }
+    },
+    "append_assistant": {
+      "count": 119,
+      "latency": {
+        "min_us": 2472,
+        "p50_us": 6578,
+        "p95_us": 177422,
+        "p99_us": 473133,
+        "max_us": 935519
+      }
+    },
+    "finalize_assistant": {
+      "count": 119,
+      "latency": {
+        "min_us": 1055,
+        "p50_us": 1498,
+        "p95_us": 53180,
+        "p99_us": 205563,
+        "max_us": 212017
+      }
+    },
+    "complete_run": {
+      "count": 119,
+      "latency": {
+        "min_us": 1510,
+        "p50_us": 3198,
+        "p95_us": 50908,
+        "p99_us": 159607,
+        "max_us": 164649
+      }
+    },
+    "load_context": {
+      "count": 119,
+      "latency": {
+        "min_us": 349,
+        "p50_us": 590,
+        "p95_us": 40767,
+        "p99_us": 163865,
+        "max_us": 282914
+      }
+    },
+    "resource_reserve": {
+      "count": 119,
+      "latency": {
+        "min_us": 3208,
+        "p50_us": 97177,
+        "p95_us": 252351,
+        "p99_us": 274755,
+        "max_us": 297619
+      }
+    },
+    "model_wait": {
+      "count": 119,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "tool_wait": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "append_tool_result": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "append_tool_preview": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "update_assistant_draft": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "resource_reconcile": {
+      "count": 119,
+      "latency": {
+        "min_us": 3118,
+        "p50_us": 102156,
+        "p95_us": 229501,
+        "p99_us": 309735,
+        "max_us": 311809
+      }
+    },
+    "resource_release": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    }
+  },
+  "errors": {
+    "thread_backend": 1
+  },
+  "failure_causes": {
+    "thread_backend": {
+      "count": 1,
+      "stages": {
+        "accept_inbound": 1
+      },
+      "sample_detail": "thread backend error: filesystem backend error during write_file at /engine/ironclaw-stress/d7e29fdd2a3142d883d47477245bca17/tenants/tenant-0000/users/user-000059/threads/agents/ironclaw-stress/projects/ironclaw-stress/owners/user-000059/threads/thread-0000-000059/thread.json: SQLite failure: `bad parameter or other API misuse`"
+    }
+  }
+}

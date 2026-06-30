@@ -14,6 +14,10 @@ async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
             "/v1/chat/completions",
             http::StatusCode::UNAUTHORIZED,
         ),
+        // `/v1/models` enforces auth before consulting the catalog, so a
+        // caller-less request fails closed with 401 (like chat completions).
+        ("GET", "/v1/models", http::StatusCode::UNAUTHORIZED),
+        ("GET", "/api/v1/models", http::StatusCode::UNAUTHORIZED),
         (
             "POST",
             "/api/v1/responses",

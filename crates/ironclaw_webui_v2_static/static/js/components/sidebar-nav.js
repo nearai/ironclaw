@@ -14,6 +14,7 @@ const ROUTE_ICONS = {
   automations: "calendar",
   missions: "flag",
   extensions: "plug",
+  logs: "list",
   settings: "settings",
   admin: "shield",
 };
@@ -112,6 +113,7 @@ export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate 
   return html`
     <div className="flex flex-col px-3 py-2">
       <button
+        data-testid="new-chat"
         onClick=${onNewChat}
         disabled=${isCreating}
         className=${cn(

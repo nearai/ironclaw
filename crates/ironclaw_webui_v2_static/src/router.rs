@@ -15,7 +15,7 @@ use axum::extract::Path as AxumPath;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use rand::RngCore;
+use rand::RngExt as _;
 
 use crate::assets::{self, INDEX_HTML_TEMPLATE};
 
@@ -256,7 +256,7 @@ fn asset_response(bytes: &'static [u8], content_type: &'static str) -> Response 
 
 fn generate_nonce() -> String {
     let mut buf = [0u8; NONCE_BYTES];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill(&mut buf);
     let mut out = String::with_capacity(NONCE_BYTES * 2);
     for byte in &buf {
         out.push_str(&format!("{byte:02x}"));

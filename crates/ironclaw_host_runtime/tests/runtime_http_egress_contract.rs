@@ -366,6 +366,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-staged-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -1924,6 +1925,7 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("sk-direct-lease"),
+        None,
     ))
     .unwrap();
     let service = services.host_http_egress(network);
@@ -2470,6 +2472,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
             source_scope,
             account_access_handle,
             SecretMaterial::from("sk-account-scope-mcp-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -2568,6 +2571,7 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-direct-lease"),
+            None,
         )
         .await
         .unwrap();
@@ -4599,6 +4603,7 @@ async fn stage_secret(
             scope.clone(),
             handle.clone(),
             SecretMaterial::from(material),
+            None,
         )
         .await
         .unwrap();

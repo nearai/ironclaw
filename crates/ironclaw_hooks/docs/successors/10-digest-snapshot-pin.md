@@ -32,6 +32,7 @@ actually observe:
 #[test]
 fn invocation_arguments_digest_is_stable_for_known_inputs() {
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("snapshot:v1").unwrap(),
         capability_id: CapabilityId::new("cap.snapshot.fixture").unwrap(),
         input_ref: CapabilityInputRef::new("input:cap.snapshot.fixture").unwrap(),

@@ -928,17 +928,89 @@ impl RootFilesystem for LibSqlRootFilesystem {
         seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        // One multi-row INSERT per chunk collapses N appends into one round-trip.
+        // `seq` is INTEGER PRIMARY KEY AUTOINCREMENT, assigned in VALUES order;
+        // `RETURNING seq` then sorted ASC recovers payload order
+        // deterministically. Chunk the batch so the bound parameter count
+        // (2 per row) stays well under SQLite's default 999-parameter limit.
+        // All chunks run inside a single transaction handle that auto-rolls-back
+        // on drop if not committed, making this cancellation-safe.
+        const ROWS_PER_STATEMENT: usize = 256;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let mut seqs: Vec<i64> = Vec::with_capacity(payloads.len());
+        let mut iter = payloads.into_iter().peekable();
+        while iter.peek().is_some() {
+            let mut sql =
+                String::from("INSERT INTO root_filesystem_events (path, payload) VALUES ");
+            let mut params: Vec<libsql::Value> = Vec::new();
+            for (row_idx, payload) in (&mut iter).take(ROWS_PER_STATEMENT).enumerate() {
+                if row_idx > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?)");
+                params.push(libsql::Value::Text(path.as_str().to_string()));
+                params.push(libsql::Value::Blob(payload));
+            }
+            sql.push_str(" RETURNING seq");
+            let mut rows = tx.query(&sql, params).await.map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+            })?;
+            while let Some(row) = rows.next().await.map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+            })? {
+                let seq_raw: i64 = row.get(0).map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                })?;
+                seqs.push(seq_raw);
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        seqs.sort_unstable();
+        seqs.into_iter()
+            .map(|seq_raw| seq_no_from_i64(path, seq_raw, FilesystemOperation::Append))
+            .collect()
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_bounded(path, from, usize::MAX).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        if max_records == 0 {
+            return Ok(Vec::new());
+        }
         let conn = self.connect().await?;
-        let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
+        let from_raw = i64::try_from(from.get()).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::Tail,
-            reason: "tail cursor exceeds i64".to_string(),
+            reason: format!("tail cursor exceeds i64: {error}"),
         })?;
+        // silent-ok: callers can request an unbounded tail; saturating keeps the
+        // SQL LIMIT representable without changing the public trait contract.
+        let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
         let mut rows = conn
             .query(
                 r#"
@@ -946,8 +1018,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 FROM root_filesystem_events
                 WHERE path = ?1 AND seq > ?2
                 ORDER BY seq ASC
+                LIMIT ?3
                 "#,
-                libsql::params![path.as_str(), from_raw],
+                libsql::params![path.as_str(), from_raw, limit_raw],
             )
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;

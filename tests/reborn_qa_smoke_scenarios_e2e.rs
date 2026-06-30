@@ -3,7 +3,7 @@
 mod reborn_support;
 mod support;
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{
@@ -23,6 +23,7 @@ use reborn_support::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     },
+    github as github_support,
     harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
@@ -201,8 +202,11 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-heartbeat-smoke",
                     "prompt": "reborn heartbeat smoke",
-                    "cron": "*/2 * * * *",
-                    "timezone": "UTC"
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "*/2 * * * *",
+                        "timezone": "UTC"
+                    }
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -222,8 +226,11 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-cron-smoke",
                     "prompt": "summarize repo status",
-                    "cron": "0 9 * * 1",
-                    "timezone": "UTC"
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "0 9 * * 1",
+                        "timezone": "UTC"
+                    }
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -298,6 +305,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
@@ -323,7 +331,7 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
             expected_tool_results: Vec::new(),
         },
     ]);
-    let mut harness = RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+    let mut harness = RebornBinaryE2EHarness::with_harness_blocked_evidence(
         "room-qa-subagent",
         model_gateway,
         RecordingTestCapabilityPort::echo_with_spawn_subagent(),
@@ -441,8 +449,15 @@ async fn qa_skill_discovery_and_invocation_smokes_are_read_only_until_invoked() 
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn qa_error_process_repo_patch_and_cleanup_smokes() {
+#[test]
+fn qa_error_process_repo_patch_and_cleanup_smokes() {
+    run_async_test_with_stack(
+        "qa_error_process_repo_patch_and_cleanup_smokes",
+        qa_error_process_repo_patch_and_cleanup_smokes_impl,
+    );
+}
+
+async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
     let json = cap(JSON_CAPABILITY_ID);
     let shell = cap(SHELL_CAPABILITY_ID);
     let write_file = cap(WRITE_FILE_CAPABILITY_ID);
@@ -663,11 +678,7 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
             expected_tool_results: Vec::new(),
         },
         RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
-            capability_ids: capability_ids(&[
-                "github.get_issue",
-                "github.comment_issue",
-                "github.search_issues",
-            ]),
+            capability_ids: github_support::capability_ids().expect("github capability ids"),
             calls: vec![call(
                 &remove,
                 "qa_extension_remove_github",
@@ -888,17 +899,9 @@ async fn qa_plugin_browser_mcp_artifact_and_image_capability_surface_smokes() {
 
 #[tokio::test]
 async fn qa_github_capability_smoke_discovers_actions_without_live_github() {
-    let expected = [
-        "github.get_repo",
-        "github.list_issues",
-        "github.create_issue",
-        "github.get_pull_request",
-        "github.create_pr_review",
-        "github.get_workflow_runs",
-    ];
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenResponse {
-            capability_ids: expected.iter().map(|id| cap(id)).collect(),
+            capability_ids: github_support::capability_ids().expect("github capability ids"),
             response: HostManagedModelResponse::assistant_reply("qa github smoke complete"),
             expected_tool_results: Vec::new(),
         },
@@ -976,6 +979,27 @@ fn qa_wait() -> WaitConfig {
     WaitConfig {
         timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(20),
+    }
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
     }
 }
 

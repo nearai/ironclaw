@@ -1,7 +1,8 @@
 //! Google Drive WASM Tool for IronClaw.
 //!
 //! Provides Google Drive integration for searching, accessing, uploading,
-//! sharing, and organizing files and folders. Supports both personal and
+//! sharing, and organizing files and folders, including finding Google Sheets/
+//! spreadsheets, Docs, and Slides by name/title. Supports both personal and
 //! shared (organizational) drives.
 //!
 //! # Capabilities Required
@@ -28,6 +29,7 @@
 //!
 //! ```json
 //! {"action": "list_files", "query": "name contains 'report' and mimeType = 'application/pdf'"}
+//! {"action": "list_files", "query": "name = '<spreadsheet title>' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"}
 //! {"action": "list_files", "corpora": "drive", "drive_id": "0ABcd...", "query": "trashed = false"}
 //! {"action": "share_file", "file_id": "abc123", "email": "alice@company.com", "role": "writer"}
 //! ```
@@ -70,7 +72,8 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
 
     fn description() -> String {
         "Google Drive integration for searching, accessing, uploading, sharing, and organizing \
-         files and folders. Supports personal drives and shared (organizational) drives via the \
+         files and folders, including finding Google Sheets/spreadsheets, Docs, and Slides by \
+         name or title. Supports personal drives and shared (organizational) drives via the \
          corpora parameter. Can search with Drive query syntax, download text files, upload new \
          files, manage folder structure, and control sharing permissions. The host injects a \
          Google product-auth credential with the Drive scope. \

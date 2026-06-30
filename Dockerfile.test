@@ -9,7 +9,7 @@
 #   docker run --rm -p 3005:3003 ironclaw-test
 
 # Stage 1: Build (libsql only — no PostgreSQL dependency)
-FROM rust:1.92-slim-bookworm AS builder
+FROM rust:1.96-slim-bookworm@sha256:4732ca96fd086cb9be682050c3f0176288eebaac2b80aa2bcefccfaf198e1950 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ \
@@ -21,6 +21,7 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/

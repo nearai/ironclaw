@@ -16,7 +16,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -51,6 +52,8 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     SKILL_REMOVE_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID,
@@ -151,15 +154,15 @@ async fn reborn_trace_process_first_party_tools_parity() {
             .any(|message| message.content.contains(shell.as_str())),
         "shell must be advertised on the Reborn model-facing first-party surface"
     );
-    // Subagent spawning is a special loop path covered by
-    // tests/reborn_subagent_spawn_e2e.rs; this first-party tool trace only
-    // verifies it remains advertised on the model-facing surface.
+    // TEMP(disable-spawn-subagents): spawn_subagent is temporarily disabled via
+    // the outermost capability deny filter in the default planned runtime, so it
+    // must NOT appear on the model-facing surface.
     assert!(
-        requests[0]
+        !requests[0]
             .messages
             .iter()
             .any(|message| message.content.contains(spawn_subagent.as_str())),
-        "spawn_subagent must be advertised on the Reborn model-facing first-party surface"
+        "spawn_subagent must NOT be advertised while temporarily disabled"
     );
     assert_eq!(tool_result_count(&requests[1]), 1);
     assert_milestone_order(
@@ -173,6 +176,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
     let spawn_subagent =
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");
@@ -395,18 +399,33 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     let trigger_create =
         CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("valid capability id");
     let trigger_list = CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("valid capability id");
+    let trigger_pause =
+        CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID).expect("valid capability id");
+    let trigger_resume =
+        CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID).expect("valid capability id");
     let trigger_remove =
         CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID).expect("valid capability id");
+    let missing_trigger_id = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
+            capability_ids: vec![
+                trigger_create.clone(),
+                trigger_list.clone(),
+                trigger_remove.clone(),
+                trigger_pause.clone(),
+                trigger_resume.clone(),
+            ],
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_create.clone(),
                 "call_trigger_create_first_party",
                 serde_json::json!({
                     "name": "Daily trace summary",
                     "prompt": "Summarize trace state",
-                    "cron": "0 8 * * *",
-                    "timezone": "UTC"
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "0 8 * * *",
+                        "timezone": "UTC"
+                    }
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -422,8 +441,8 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_remove.clone(),
-                "call_trigger_remove_first_party",
-                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
+                "call_trigger_remove_missing",
+                serde_json::json!({ "trigger_id": missing_trigger_id }),
             )],
             expected_tool_results: Vec::new(),
         },
@@ -480,6 +499,10 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     );
     assert_eq!(results[2].capability_id, trigger_remove);
     assert_eq!(results[2].output["removed"], serde_json::json!(false));
+    assert!(
+        results[2].output["trigger"].is_null(),
+        "missing trigger removal must return a null trigger payload"
+    );
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 4);

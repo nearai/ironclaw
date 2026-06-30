@@ -359,6 +359,7 @@ mod tests {
                 user_id: UserId::new("user:alice").unwrap(),
                 agent_id: None,
                 project_id: None,
+                operator_webui_config: false,
             })
             .body(Body::from(body))
             .unwrap()
@@ -416,6 +417,7 @@ mod tests {
                 challenge: Some(SlackPersonalBindingPairingChallenge {
                     installation_id: installation("install-a"),
                     slack_user_id: SlackUserId::new("U123"),
+                    setup_revision: None,
                 }),
             }
         }

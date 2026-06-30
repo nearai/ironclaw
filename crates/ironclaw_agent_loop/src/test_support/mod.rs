@@ -423,6 +423,13 @@ pub enum ScriptedModelResponse {
         /// Host error kind to return.
         kind: AgentLoopHostErrorKind,
     },
+    /// Return a sanitized host error with an explicit safe summary.
+    ErrorWithSummary {
+        /// Host error kind to return.
+        kind: AgentLoopHostErrorKind,
+        /// Safe summary exposed to loop recovery.
+        safe_summary: &'static str,
+    },
 }
 
 /// Scripted capability call candidate.
@@ -1033,6 +1040,9 @@ fn scripted_model_response(
         ScriptedModelResponse::Error { kind } => {
             return Err(AgentLoopHostError::new(kind, "scripted model failure"));
         }
+        ScriptedModelResponse::ErrorWithSummary { kind, safe_summary } => {
+            return Err(AgentLoopHostError::new(kind, safe_summary));
+        }
     };
     Ok(LoopModelResponse {
         chunks: vec![ModelStreamChunk {
@@ -1048,6 +1058,7 @@ fn scripted_model_response(
 
 fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
@@ -1142,6 +1153,7 @@ fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
         "backend" => CapabilityFailureKind::Backend,
         "cancelled" => CapabilityFailureKind::Cancelled,
         "dispatcher" => CapabilityFailureKind::Dispatcher,
+        "gate_declined" => CapabilityFailureKind::GateDeclined,
         "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
         "invalid_output" => CapabilityFailureKind::InvalidOutput,
         "missing_runtime" => CapabilityFailureKind::MissingRuntime,

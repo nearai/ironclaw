@@ -57,6 +57,17 @@ export function useHistory(threadId, options = {}) {
     // silently swallowed.
     loadError: null,
   });
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
+  if (stateThreadId !== threadId) {
+    const entry = threadId ? historyCache.get(cacheKey(threadId)) : null;
+    setStateThreadId(threadId);
+    setState({
+      messages: entry?.messages || [],
+      nextCursor: entry?.nextCursor || null,
+      isLoading: Boolean(threadId) && !entry,
+      loadError: null,
+    });
+  }
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
   // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
   // refetch can fire in the same tick). It must be per-thread, not a single
@@ -77,7 +88,10 @@ export function useHistory(threadId, options = {}) {
       // reload replaces the list. A settle-triggered reload (any terminal
       // run status) uses this so recovering tool input/output previews from
       // the durable timeline doesn't erase a visible failure notice.
-      const { preserveClientOnly = false } = loadOptions;
+      const {
+        preserveClientOnly = false,
+        finalReplyTimestampByRun = null,
+      } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
@@ -119,6 +133,7 @@ export function useHistory(threadId, options = {}) {
           const cachedMessages = historyCache.get(key)?.messages || [];
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
+            finalReplyTimestampByRun,
           });
           putCache(key, { messages: cacheMerged, nextCursor });
         }
@@ -133,6 +148,7 @@ export function useHistory(threadId, options = {}) {
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
               preserveClientOnly,
+              finalReplyTimestampByRun,
             });
           }
           putCache(key, { messages: merged, nextCursor });
@@ -180,6 +196,26 @@ export function useHistory(threadId, options = {}) {
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
 
+  const seedThreadMessages = React.useCallback((targetThreadId, updater) => {
+    if (!targetThreadId) return;
+    const key = cacheKey(targetThreadId);
+    const apply = (messages) =>
+      typeof updater === "function" ? updater(messages || []) : updater;
+
+    if (threadIdRef.current === targetThreadId) {
+      setState((s) => {
+        const messages = apply(s.messages || []);
+        putCache(key, { messages, nextCursor: s.nextCursor || null });
+        return { ...s, messages };
+      });
+      return;
+    }
+
+    const entry = historyCache.get(key) || { messages: [], nextCursor: null };
+    const messages = apply(entry.messages || []);
+    putCache(key, { messages, nextCursor: entry.nextCursor || null });
+  }, []);
+
   return {
     messages: state.messages,
     hasMore: Boolean(state.nextCursor),
@@ -187,6 +223,7 @@ export function useHistory(threadId, options = {}) {
     isLoading: state.isLoading,
     loadError: state.loadError,
     loadHistory,
+    seedThreadMessages,
     setMessages: (updater) =>
       setState((s) => {
         const messages =
@@ -207,18 +244,143 @@ function mergePage(older, current) {
 }
 
 function mergeFullRefresh(fresh, current, options = {}) {
-  const { preserveClientOnly = false } = options;
-  const ids = new Set(fresh.map((m) => m?.id).filter(Boolean));
+  const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
+  const hydratedFresh = hydrateFreshMessages(fresh, current, {
+    finalReplyTimestampByRun,
+  });
+  const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
     }
     if (isRuntimeActivityMessage(message)) return true;
+    if (
+      typeof message.timelineMessageId === "string" &&
+      ids.has(`msg-${message.timelineMessageId}`)
+    ) {
+      return false;
+    }
+    if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return preserved.length > 0 ? [...fresh, ...preserved] : fresh;
+  return preserved.length > 0
+    ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
+    : hydratedFresh;
+}
+
+function isSeededOptimisticMessage(message) {
+  return (
+    message?.isOptimistic === true &&
+    typeof message.id === "string" &&
+    message.id.startsWith("pending-") &&
+    (message.role === "user" || message.role === "assistant")
+  );
+}
+
+function hydrateFreshMessages(fresh, current, options = {}) {
+  const { finalReplyTimestampByRun = null } = options;
+  const currentByConfirmedId = new Map();
+  const finalAssistantByRun = new Map();
+  for (const message of current || []) {
+    if (!message || !message.timestamp) continue;
+    if (typeof message.id === "string") {
+      currentByConfirmedId.set(message.id, message);
+    }
+    if (typeof message.timelineMessageId === "string") {
+      currentByConfirmedId.set(`msg-${message.timelineMessageId}`, message);
+    }
+    if (isFinalAssistantMessage(message) && typeof message.turnRunId === "string") {
+      finalAssistantByRun.set(message.turnRunId, message);
+    }
+  }
+
+  if (
+    currentByConfirmedId.size === 0 &&
+    finalAssistantByRun.size === 0 &&
+    !finalReplyTimestampByRun
+  ) {
+    return fresh;
+  }
+  return fresh.map((message) => {
+    if (!message || message.timestamp || typeof message.id !== "string") {
+      return message;
+    }
+    const turnRunId = typeof message.turnRunId === "string" ? message.turnRunId : null;
+    const currentMessage =
+      currentByConfirmedId.get(message.id) ||
+      (isFinalAssistantMessage(message) && turnRunId
+        ? finalAssistantByRun.get(turnRunId)
+        : null);
+    const fallbackTimestamp =
+      isFinalAssistantMessage(message) && turnRunId
+        ? finalReplyTimestampByRun?.[turnRunId]
+        : null;
+    const timestamp = currentMessage?.timestamp || fallbackTimestamp;
+    return timestamp
+      ? { ...message, timestamp }
+      : message;
+  });
+}
+
+function isFinalAssistantMessage(message) {
+  return message?.role === "assistant" && message?.isFinalReply === true;
 }
 
 function isRuntimeActivityMessage(message) {
   return message?.role === "tool_activity" || message?.role === "thinking";
+}
+
+function insertPreservedAtOriginalPositions(fresh, preserved, current) {
+  const freshIndexById = new Map();
+  for (const [index, message] of fresh.entries()) {
+    if (typeof message?.id === "string") freshIndexById.set(message.id, index);
+  }
+  const currentAnchors = current.map((message) =>
+    freshIndexForCurrentMessage(message, freshIndexById),
+  );
+  const after = new Map();
+  const append = [];
+
+  for (const message of preserved) {
+    if (!isRuntimeActivityMessage(message)) {
+      append.push(message);
+      continue;
+    }
+    const originalIndex = current.indexOf(message);
+    let previousAnchor = null;
+    for (let index = originalIndex - 1; index >= 0; index -= 1) {
+      if (currentAnchors[index] !== null) {
+        previousAnchor = currentAnchors[index];
+        break;
+      }
+    }
+    if (previousAnchor !== null) {
+      const group = after.get(previousAnchor) || [];
+      group.push(message);
+      after.set(previousAnchor, group);
+    } else {
+      append.push(message);
+    }
+  }
+
+  const merged = [];
+  for (const [index, message] of fresh.entries()) {
+    merged.push(message);
+    const group = after.get(index);
+    if (group) merged.push(...group);
+  }
+  merged.push(...append);
+  return merged;
+}
+
+function freshIndexForCurrentMessage(message, freshIndexById) {
+  if (!message) return null;
+  if (typeof message.id === "string" && freshIndexById.has(message.id)) {
+    return freshIndexById.get(message.id);
+  }
+  if (typeof message.timelineMessageId === "string") {
+    const timelineId = `msg-${message.timelineMessageId}`;
+    if (freshIndexById.has(timelineId)) return freshIndexById.get(timelineId);
+  }
+  return null;
 }

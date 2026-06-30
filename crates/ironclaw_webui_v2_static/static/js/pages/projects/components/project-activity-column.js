@@ -1,19 +1,34 @@
 import { html } from "../../../lib/html.js";
 import { Panel, StatusPill } from "../../../design-system/primitives.js";
+import { Button } from "../../../design-system/button.js";
 import {
   formatProjectRelativeTime,
   threadPresentation,
   threadTone,
 } from "../lib/projects-presenters.js";
 
-export function ProjectActivityColumn({ threads, selectedThreadId, onSelectThread }) {
+export function ProjectActivityColumn({
+  threads,
+  selectedThreadId,
+  onSelectThread,
+  onNewConversation,
+  isStartingConversation,
+}) {
   const sortedThreads = [...threads].sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
 
   return html`
     <${Panel} className="p-4 sm:p-5">
-      <div>
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Activity</div>
-        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Recent project runs</h2>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Conversations</div>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Project conversations</h2>
+        </div>
+        ${onNewConversation &&
+        html`
+          <${Button} onClick=${onNewConversation} disabled=${isStartingConversation}>
+            ${isStartingConversation ? "Starting…" : "New conversation"}
+          <//>
+        `}
       </div>
 
       <div className="mt-5 space-y-3">
@@ -51,7 +66,7 @@ export function ProjectActivityColumn({ threads, selectedThreadId, onSelectThrea
             })
           : html`
               <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                No project threads yet. When a mission runs or you open scoped chat work inside this project, activity will appear here.
+                No project threads yet. When an automation runs or scoped chat work happens inside this project, activity will appear here.
               </div>
             `}
       </div>

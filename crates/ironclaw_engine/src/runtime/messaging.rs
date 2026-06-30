@@ -50,7 +50,7 @@ pub enum ThreadOutcome {
         resume_kind: crate::gate::ResumeKind,
         /// Completed action output that should be injected on resume instead
         /// of re-running the action.
-        resume_output: Option<serde_json::Value>,
+        resume_output: Option<Box<serde_json::Value>>,
         /// Lease snapshot captured when the gate paused the action.
         /// Boxed to keep `ThreadOutcome::GatePaused` under clippy's
         /// `large_enum_variant` threshold — `CapabilityLease` is ~360

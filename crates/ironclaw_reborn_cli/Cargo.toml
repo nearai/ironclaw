@@ -2,7 +2,7 @@
 name = "ironclaw_reborn_cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Standalone IronClaw Reborn binary"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -42,8 +42,9 @@ webui-v2-beta = [
     "dep:async-trait",
 ]
 # Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
-# Still requires `[slack].enabled = true` at runtime before the route is
-# mounted; ambient Slack env vars alone do not enable it.
+# Still requires effective Slack enablement at runtime before the route is
+# mounted: either `[slack].enabled = true` or
+# `IRONCLAW_REBORN_SLACK_ENABLED=true`.
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
@@ -55,6 +56,10 @@ openai-compat-beta = [
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
+]
+# Enable embedded libSQL storage composition for volume-backed hosted previews.
+libsql = [
+    "ironclaw_reborn_composition/libsql",
 ]
 [dependencies]
 anyhow = "1"
@@ -72,7 +77,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

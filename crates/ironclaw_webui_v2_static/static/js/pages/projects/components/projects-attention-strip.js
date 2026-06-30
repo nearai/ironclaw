@@ -38,7 +38,7 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
             </div>
             <p className="mt-3 text-sm leading-6 text-iron-200">${item.message}</p>
             <div className="mt-4 text-xs uppercase tracking-[0.16em] text-signal group-hover:text-white">
-              Open workspace
+              Open project
             </div>
           </button>
         `)}

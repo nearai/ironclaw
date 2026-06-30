@@ -1,7 +1,7 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
+import { SlackAdminManagedSection } from "../../../components/slack-setup-panel.js";
 import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
@@ -46,7 +46,7 @@ export function SlackConnectActionSections({
   const sections = actions
     .map((action) => {
       if (isSlackAdminManagedAction(action)) {
-        return html`<${SlackChannelPicker} action=${action.action} />`;
+        return html`<${SlackAdminManagedSection} action=${action.action} />`;
       }
       if (isSlackInboundProofCodeAction(action)) {
         return html`<${SlackPairingSection} action=${action.action} />`;
@@ -75,7 +75,7 @@ export function ChannelsTab({
   const enabledChannels = status.enabled_channels || [];
   const slackConnectActions = findSlackConnectActions(connectableChannels);
   const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
-  const showLegacySlackConnectActions =
+  const showBuiltinSlackConnectActions =
     slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return html`
@@ -87,8 +87,8 @@ export function ChannelsTab({
           ${t("channels.builtIn")}
         </h3>
         <${BuiltinRow}
-          name="Web Gateway"
-          description=${t("channels.webGatewayDesc") || "Browser-based chat with SSE streaming"}
+          name=${t("channels.webGateway")}
+          description=${t("channels.webGatewayDesc")}
           enabled=${true}
           detail=${"SSE: " +
           (status.sse_connections || 0) +
@@ -96,32 +96,32 @@ export function ChannelsTab({
           (status.ws_connections || 0)}
         />
         <${BuiltinRow}
-          name="HTTP Webhook"
-          description=${t("channels.httpWebhookDesc") || "Inbound webhook endpoint for external integrations"}
+          name=${t("channels.httpWebhook")}
+          description=${t("channels.httpWebhookDesc")}
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
         <${BuiltinRow}
-          name="CLI"
-          description=${t("channels.cliDesc") || "Terminal interface with TUI or simple REPL"}
+          name=${t("channels.cli")}
+          description=${t("channels.cliDesc")}
           enabled=${enabledChannels.includes("cli")}
           detail="ironclaw run --cli"
         />
         <${BuiltinRow}
-          name="REPL"
-          description=${t("channels.replDesc") || "Minimal read-eval-print loop for testing"}
+          name=${t("channels.repl")}
+          description=${t("channels.replDesc")}
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
-        ${showLegacySlackConnectActions &&
+        ${showBuiltinSlackConnectActions &&
         html`
           <${BuiltinRow}
-            name=${t("channels.slack") || "Slack"}
-            description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
+            name=${t("channels.slack")}
+            description=${t("channels.slackDesc")}
             enabled=${false}
-            statusLabel="legacy"
+            statusLabel=${t("channels.setup")}
             statusTone="muted"
-            detail=${t("channels.slackDetail") || "Tenant Slack app install"}
+            detail=${t("channels.slackDetail")}
           >
             <${SlackConnectActionSections}
               slackConnectActions=${slackConnectActions}

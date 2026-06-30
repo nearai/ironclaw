@@ -46,13 +46,12 @@ export function PairingSection({
   );
 
   const handleManualSubmit = React.useCallback(() => {
-    const trimmed = manualCode.trim();
-    if (!trimmed) return;
+    const normalizedCode = manualCode.trim().toUpperCase();
+    if (!normalizedCode) return;
     if (customRedeem) {
-      redeemMutation.mutate({ code: trimmed });
+      redeemMutation.mutate({ code: normalizedCode });
     } else {
-      pairing.approve({ code: trimmed });
-      setManualCode("");
+      pairing.approve({ code: normalizedCode });
     }
   }, [customRedeem, manualCode, pairing.approve, redeemMutation]);
 
@@ -66,6 +65,10 @@ export function PairingSection({
     ? redeemMutation.isError ? redeemMutation.error : null
     : pairing.error;
 
+  React.useEffect(() => {
+    if (result?.success) setManualCode("");
+  }, [result?.success]);
+
   if (isLoading) {
     return html`
       <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
@@ -75,7 +78,10 @@ export function PairingSection({
   }
 
   return html`
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div
+      data-testid="pairing-section"
+      className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
+    >
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${pairingCopy.title}
       </h4>
@@ -88,6 +94,7 @@ export function PairingSection({
           onChange=${(e) => setManualCode(e.target.value)}
           onKeyDown=${(e) => e.key === "Enter" && handleManualSubmit()}
           placeholder=${pairingCopy.placeholder}
+          data-testid="pairing-code-input"
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
@@ -95,21 +102,22 @@ export function PairingSection({
           className="h-9 shrink-0 px-3 text-xs"
           onClick=${handleManualSubmit}
           disabled=${isApproving || !manualCode.trim()}
+          data-testid="pairing-submit"
         >
           ${pairingCopy.action}
         <//>
       </div>
 
       ${result?.success &&
-      html`<p className="mb-3 text-xs text-emerald-300">
+      html`<p data-testid="pairing-success" className="mb-3 text-xs text-emerald-300">
         ${result.message || pairingCopy.success}
       </p>`}
       ${result && !result.success &&
-      html`<p className="mb-3 text-xs text-red-300">
+      html`<p data-testid="pairing-error" className="mb-3 text-xs text-red-300">
         ${result.message || pairingCopy.error}
       </p>`}
       ${error &&
-      html`<p className="mb-3 text-xs text-red-300">
+      html`<p data-testid="pairing-error" className="mb-3 text-xs text-red-300">
         ${pairingErrorMessage(error, pairingCopy.error)}
       </p>`}
 

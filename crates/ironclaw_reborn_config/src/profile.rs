@@ -15,6 +15,13 @@ pub enum RebornProfile {
     /// Trusted single-user local development mode with full host shell
     /// environment inheritance. Never selected by default.
     LocalDevYolo,
+    /// Hosted single-tenant startup. Uses the local-runtime product surface
+    /// with durable PostgreSQL storage.
+    HostedSingleTenant,
+    /// Single-tenant hosted preview using the local-runtime substrate on a
+    /// persistent volume. Intended for SSO-only Railway-style deployments while
+    /// the full PostgreSQL production composition continues to mature.
+    HostedSingleTenantVolume,
     /// Production startup. Future runtime composition must fail closed here if
     /// required durable services are absent.
     Production,
@@ -24,9 +31,11 @@ pub enum RebornProfile {
 }
 
 impl RebornProfile {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::LocalDev,
         Self::LocalDevYolo,
+        Self::HostedSingleTenant,
+        Self::HostedSingleTenantVolume,
         Self::Production,
         Self::MigrationDryRun,
     ];
@@ -47,9 +56,45 @@ impl RebornProfile {
         match self {
             Self::LocalDev => "local-dev",
             Self::LocalDevYolo => "local-dev-yolo",
+            Self::HostedSingleTenant => "hosted-single-tenant",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
+    }
+
+    pub fn starts_hosted_single_tenant_listener(self) -> bool {
+        matches!(
+            self,
+            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn uses_standalone_local_runtime_volume(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn local_runtime_storage_subdir(self) -> &'static str {
+        match self {
+            Self::HostedSingleTenant => "hosted-single-tenant",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::LocalDev | Self::LocalDevYolo | Self::Production | Self::MigrationDryRun => {
+                "local-dev"
+            }
+        }
+    }
+
+    pub fn supports_local_runtime_skill_management(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+        )
     }
 }
 
@@ -60,6 +105,8 @@ impl FromStr for RebornProfile {
         match value {
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
+            "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             other => Err(RebornConfigError::InvalidProfile {

@@ -49,6 +49,10 @@ pub enum AuthProductError {
     TokenExchangeFailed,
     #[error("token refresh failed")]
     RefreshFailed,
+    /// The provider returned `error: invalid_grant` — the refresh token is
+    /// revoked or permanently expired. This is a non-retryable reauth signal.
+    #[error("OAuth refresh token revoked (invalid_grant)")]
+    InvalidGrant,
     #[error("credential is missing")]
     CredentialMissing,
     #[error("account selection required")]
@@ -84,6 +88,7 @@ impl AuthProductError {
             Self::ProviderDenied => AuthErrorCode::ProviderDenied,
             Self::TokenExchangeFailed => AuthErrorCode::TokenExchangeFailed,
             Self::RefreshFailed => AuthErrorCode::RefreshFailed,
+            Self::InvalidGrant => AuthErrorCode::RefreshFailed,
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,

@@ -32,7 +32,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
-lru = "0.16"
+lru = "0.18"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,11 +40,11 @@ thiserror = "2"
 tokio = { version = "1", features = ["time", "rt", "sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
-wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime = { version = "46.0.1", features = ["component-model"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-toml = "0.8"
+toml = "1.1"
 wat = "1"
 
 [lints]

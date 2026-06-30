@@ -1,3 +1,4 @@
+import { useOutletContext } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { useLogs } from "./hooks/useLogs.js";
@@ -37,9 +38,25 @@ function LogEntry({ entry }) {
     <div data-testid="logs-entry" className=${rowBg}>
       <div
         data-testid="logs-entry-row"
-        onClick=${() => setExpanded((v) => !v)}
+        onClick=${(event) => {
+          // Don't toggle when the click ends a text selection *within this row*
+          // — otherwise selecting log text to copy it would also expand/collapse
+          // the row. The selection is document-global, so scope the check to
+          // event.currentTarget; a selection elsewhere on the page must not
+          // block this row's toggle.
+          const selection = typeof window !== "undefined" && window.getSelection?.();
+          if (
+            selection &&
+            !selection.isCollapsed &&
+            event.currentTarget.contains(selection.anchorNode) &&
+            event.currentTarget.contains(selection.focusNode)
+          ) {
+            return;
+          }
+          setExpanded((v) => !v);
+        }}
         className=${[
-          "grid cursor-pointer select-none gap-x-3 px-4 py-1 font-mono text-xs hover:bg-[var(--v2-surface-muted)]",
+          "grid cursor-pointer select-text gap-x-3 px-4 py-1 font-mono text-xs hover:bg-[var(--v2-surface-muted)]",
           "grid-cols-[7rem_3rem_minmax(10rem,18rem)_1fr]",
         ].join(" ")}
       >
@@ -113,6 +130,7 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
+  const { isAdmin = false, threadsState } = useOutletContext() || {};
   const {
     entries,
     totalCount,
@@ -130,7 +148,11 @@ export function LogsPage() {
     scope,
     isLoading,
     error,
-  } = useLogs();
+    needsThreadScope,
+  } = useLogs({
+    isAdmin,
+    defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
+  });
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
@@ -149,7 +171,7 @@ export function LogsPage() {
   const activeScope = scope?.active || [];
 
   return html`
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <!-- Toolbar -->
       <div
         className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-2"
@@ -269,7 +291,16 @@ export function LogsPage() {
               </div>
             `
           : null}
-        ${error && !hasEntries
+        ${needsThreadScope
+          ? html`
+              <div
+                data-testid="logs-select-thread-state"
+                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+              >
+                ${t("chat.selectConversation")}
+              </div>
+            `
+          : error && !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"

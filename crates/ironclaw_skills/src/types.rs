@@ -148,6 +148,12 @@ pub struct SkillManifest {
     /// Skill version.
     #[serde(default = "default_version")]
     pub version: String,
+    /// Whether this skill participates in automatic (keyword/criteria)
+    /// activation. When `false`, the selector excludes it from auto-selection,
+    /// but it can still be force-activated by an explicit `$name` / `/name`
+    /// mention. Defaults to `true` so existing skills are unaffected.
+    #[serde(default = "default_auto_activate")]
+    pub auto_activate: bool,
     /// Short description of the skill.
     #[serde(default)]
     pub description: String,
@@ -165,6 +171,10 @@ pub struct SkillManifest {
 
 fn default_version() -> String {
     "0.0.0".to_string()
+}
+
+fn default_auto_activate() -> bool {
+    true
 }
 
 /// Requirements that must be satisfied for a skill to load.
@@ -515,6 +525,7 @@ requires:
             manifest: SkillManifest {
                 name: "test".to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
