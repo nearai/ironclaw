@@ -25,12 +25,15 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{ExtensionId, UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
 use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
+use crate::product_auth_runtime_credentials::host_managed_fallback::{
+    HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
+};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
@@ -664,14 +667,27 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
-        let mut selector = ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
-            self.credential_account_record_source(),
-            Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+        let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
+                self.credential_account_record_source(),
+                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            ),
         );
-        if let Some(scope) = self.host_managed_nearai_credential_scope.clone() {
-            selector = selector.with_host_managed_nearai_credential_scope(scope);
-        }
-        Arc::new(selector)
+        let Some(host_scope) = self.host_managed_nearai_credential_scope.clone() else {
+            return selector;
+        };
+        // The host-managed NEAR AI MCP key is the only fallback rule today;
+        // the generic `ProductAuthRuntimeCredentialAccountSelector` stays
+        // provider-agnostic and this composition layer supplies the one
+        // provider/extension pair that may fall back to it.
+        let fallback = HostManagedCredentialFallbackRule::new(
+            AuthProviderId::new("nearai").expect("provider id"),
+            ExtensionId::new("nearai").expect("extension id"),
+            host_scope,
+        );
+        Arc::new(HostManagedRuntimeCredentialAccountSelector::new(
+            selector, fallback,
+        ))
     }
 
     pub(crate) fn runtime_credential_account_refresh_service(

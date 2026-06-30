@@ -23,9 +23,6 @@ use ironclaw_host_runtime::{
 pub(crate) const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 
-const HOST_MANAGED_NEARAI_PROVIDER_ID: &str = "nearai";
-const HOST_MANAGED_NEARAI_REQUESTER_EXTENSION_ID: &str = "nearai";
-
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
     accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
@@ -180,7 +177,6 @@ async fn runtime_credential_auth_requirement_configured(
 pub(crate) struct ProductAuthRuntimeCredentialAccountSelector {
     accounts: Arc<dyn CredentialAccountRecordSource>,
     visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
-    host_managed_nearai_credential_scope: Option<AuthProductScope>,
 }
 
 impl ProductAuthRuntimeCredentialAccountSelector {
@@ -189,7 +185,6 @@ impl ProductAuthRuntimeCredentialAccountSelector {
         Self {
             accounts,
             visibility_policy: Arc::new(DefaultRuntimeCredentialAccountVisibilityPolicy),
-            host_managed_nearai_credential_scope: None,
         }
     }
 
@@ -200,16 +195,7 @@ impl ProductAuthRuntimeCredentialAccountSelector {
         Self {
             accounts,
             visibility_policy,
-            host_managed_nearai_credential_scope: None,
         }
-    }
-
-    pub(crate) fn with_host_managed_nearai_credential_scope(
-        mut self,
-        scope: AuthProductScope,
-    ) -> Self {
-        self.host_managed_nearai_credential_scope = Some(scope);
-        self
     }
 }
 
@@ -257,10 +243,6 @@ impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
         formatter
             .debug_struct("ProductAuthRuntimeCredentialAccountSelector")
             .field("accounts", &"<credential_account_record_source>")
-            .field(
-                "host_managed_nearai_credential_scope",
-                &self.host_managed_nearai_credential_scope.is_some(),
-            )
             .finish()
     }
 }
@@ -353,63 +335,6 @@ impl ProductAuthRuntimeCredentialAccountSelector {
                 .ok_or(AuthProductError::AccountSelectionRequired),
         }
     }
-
-    fn host_managed_nearai_runtime_request(
-        &self,
-        request: &RuntimeCredentialAccountSelectionRequest,
-    ) -> Option<RuntimeCredentialAccountSelectionRequest> {
-        let requester_extension = request.lookup.requester_extension.as_ref()?;
-        if request.lookup.provider.as_str() != HOST_MANAGED_NEARAI_PROVIDER_ID
-            || requester_extension.as_str() != HOST_MANAGED_NEARAI_REQUESTER_EXTENSION_ID
-        {
-            return None;
-        }
-        let host_scope = self.host_managed_nearai_credential_scope.clone()?;
-        if !host_managed_nearai_scope_matches_runtime_scope(&host_scope, &request.runtime_scope) {
-            return None;
-        }
-        Some(RuntimeCredentialAccountSelectionRequest::new(
-            CredentialAccountSelectionRequest::new(
-                host_scope.clone(),
-                request.lookup.provider.clone(),
-            )
-            .for_extension(requester_extension.clone()),
-            host_scope,
-            request.setup.clone(),
-            request.provider_scopes.clone(),
-        ))
-    }
-
-    async fn select_host_managed_nearai_runtime_account(
-        &self,
-        request: &RuntimeCredentialAccountSelectionRequest,
-    ) -> Result<CredentialAccount, AuthProductError> {
-        let Some(host_request) = self.host_managed_nearai_runtime_request(request) else {
-            return Err(AuthProductError::CredentialMissing);
-        };
-        let configured = self
-            .configured_accounts_for_requester(
-                &host_request.lookup,
-                &host_request.runtime_scope,
-                AccountSelectionPurpose::Runtime {
-                    setup: &host_request.setup,
-                    provider_scopes: &host_request.provider_scopes,
-                },
-            )
-            .await?;
-        self.finalize_selection(configured, &host_request.lookup)
-    }
-}
-
-fn host_managed_nearai_scope_matches_runtime_scope(
-    host_scope: &AuthProductScope,
-    runtime_scope: &AuthProductScope,
-) -> bool {
-    host_scope.surface == runtime_scope.surface
-        && host_scope.resource.tenant_id == runtime_scope.resource.tenant_id
-        && host_scope.resource.agent_id == runtime_scope.resource.agent_id
-        && (host_scope.resource.project_id.is_none()
-            || host_scope.resource.project_id == runtime_scope.resource.project_id)
 }
 
 #[async_trait]
@@ -428,13 +353,7 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
                 },
             )
             .await?;
-        match self.finalize_selection(configured, &request.lookup) {
-            Err(AuthProductError::CredentialMissing) => {
-                self.select_host_managed_nearai_runtime_account(&request)
-                    .await
-            }
-            result => result,
-        }
+        self.finalize_selection(configured, &request.lookup)
     }
 
     async fn select_configured_account_for_binding(
@@ -740,6 +659,8 @@ fn map_account_error(error: AuthProductError) -> CredentialStageError {
         _ => CredentialStageError::Backend,
     }
 }
+
+pub(crate) mod host_managed_fallback;
 
 #[cfg(test)]
 mod tests;

@@ -32,12 +32,23 @@ fn resolver_with_host_managed_nearai_scope(
     accounts: Arc<InMemoryAuthProductServices>,
     host_scope: AuthProductScope,
 ) -> ProductAuthRuntimeCredentialResolver {
-    ProductAuthRuntimeCredentialResolver::new(Arc::new(
+    use super::host_managed_fallback::{
+        HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
+    };
+
+    let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
         ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
             accounts,
             Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
-        )
-        .with_host_managed_nearai_credential_scope(host_scope),
+        ),
+    );
+    let fallback = HostManagedCredentialFallbackRule::new(
+        AuthProviderId::new("nearai").unwrap(),
+        ExtensionId::new("nearai").unwrap(),
+        host_scope,
+    );
+    ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        HostManagedRuntimeCredentialAccountSelector::new(selector, fallback),
     ))
 }
 
