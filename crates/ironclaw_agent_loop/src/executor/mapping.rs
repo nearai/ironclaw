@@ -148,19 +148,32 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         | CapabilityFailureKind::OperationFailed
         | CapabilityFailureKind::OutputTooLarge
         | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
+        | CapabilityFailureKind::Resource
+        // Dispatcher/InvalidOutput/Unknown are dispositioned as model-visible
+        // (run-continuing) by the host_runtime layer
+        // (`capability_failure_disposition`). Map them to OperationFailed so the
+        // recovery strategy turns them into a model-visible ToolErrorResult
+        // instead of aborting the run — e.g. the model calling a nonexistent
+        // tool (UnknownCapability/UnknownProvider -> InvalidOutput) becomes a
+        // recoverable tool error the model can correct.
+        | CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::OperationFailed,
         CapabilityFailureKind::Authorization
         | CapabilityFailureKind::GateDeclined
         | CapabilityFailureKind::PolicyDenied => CapabilityErrorClass::PolicyDenied,
         CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
-        CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::Permanent
-        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
-        // CapabilityFailureKind is #[non_exhaustive]; treat unrecognised future variants as
-        // permanent failures so callers do not retry indefinitely on unknown error kinds.
-        &_ => CapabilityErrorClass::Permanent,
+        // Cancelled is intercepted upstream as cancellation; Permanent is an
+        // explicit non-retryable signal. Both stay terminal.
+        CapabilityFailureKind::Cancelled | CapabilityFailureKind::Permanent => {
+            CapabilityErrorClass::Permanent
+        }
+        // CapabilityFailureKind is #[non_exhaustive]. Treat unrecognised future
+        // variants as recoverable (OperationFailed) to match the host_runtime
+        // disposition layer's recoverable default: by design no capability
+        // failure should abort the run, so an unknown kind becomes a
+        // model-visible tool error rather than killing the run.
+        &_ => CapabilityErrorClass::OperationFailed,
     }
 }
 
@@ -253,6 +266,44 @@ mod tests {
         assert_eq!(
             capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
+        );
+    }
+
+    #[test]
+    fn model_recoverable_capability_failures_are_operation_failed_not_permanent() {
+        // The host_runtime disposition layer treats Dispatcher, InvalidOutput,
+        // and Unknown as model-visible (run-continuing) errors. The recovery
+        // class mapping must agree: these become OperationFailed (a
+        // model-visible tool error) rather than Permanent (which aborts the
+        // run). E.g. the model calling a nonexistent tool becomes a recoverable
+        // tool error, not a run-ending protocol failure.
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::Dispatcher),
+            CapabilityErrorClass::OperationFailed
+        );
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::InvalidOutput),
+            CapabilityErrorClass::OperationFailed
+        );
+        let unknown = CapabilityFailureKind::unknown("some_future_kind".to_string())
+            .expect("valid unknown kind");
+        assert_eq!(
+            capability_error_class(&unknown),
+            CapabilityErrorClass::OperationFailed
+        );
+    }
+
+    #[test]
+    fn terminal_capability_failures_remain_permanent() {
+        // Cancelled is intercepted upstream as cancellation; Permanent is an
+        // explicit non-retryable signal. Both must stay terminal.
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::Cancelled),
+            CapabilityErrorClass::Permanent
+        );
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::Permanent),
+            CapabilityErrorClass::Permanent
         );
     }
 
