@@ -69,16 +69,6 @@ pub struct McpToolAnnotations {
     /// Hint about the expected execution time category.
     #[serde(default)]
     pub execution_time_hint: Option<ExecutionTimeHint>,
-
-    /// When `true`, the t3-claw client injects the per-user Trinity delegation
-    /// credential into this tool's arguments before forwarding the call to the
-    /// t3n-mcp sidecar. Tools that do not require a delegation credential
-    /// (read-only queries, tools that accept both delegated and direct callers)
-    /// must leave this absent or set it to `false`.
-    ///
-    /// Absent → `false` via `#[serde(default)]`.
-    #[serde(default)]
-    pub requires_delegation: bool,
 }
 
 /// Hint about how long a tool typically takes to execute.
