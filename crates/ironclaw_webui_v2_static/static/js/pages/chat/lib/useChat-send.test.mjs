@@ -17,6 +17,20 @@ import {
   resetToolActivityState,
 } from "./tool-activity-state.js";
 
+const STATE_SLOT = Object.freeze({
+  cooldownUntil: 0,
+  now: 1,
+  activeRun: 2,
+  isProcessing: 3,
+  pendingGate: 4,
+  busyGateNotice: 5,
+  stateThreadId: 6,
+});
+
+function stateUpdatesFor(updates, slot) {
+  return updates.filter((update) => update.index === slot);
+}
+
 function useChatSourceForTest() {
   const source = readFileSync(
     new URL("../hooks/useChat.js", import.meta.url),
@@ -412,8 +426,8 @@ test("useChat.send: target-thread send does not append into active thread", asyn
     seededByThread.get(targetThreadId)[0].timelineMessageId,
     "target-message-1",
   );
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 3), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.activeRun), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing), []);
 });
 
 test("useChat.send: target-thread rejected_busy updates seeded cache", async () => {
@@ -489,8 +503,8 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
   assert.equal(targetMessages[0].status, "error");
   assert.equal(targetMessages[1].role, "system");
   assert.equal(targetMessages[1].content, "Thread is busy, please try again.");
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 3), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.activeRun), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing), []);
 });
 
 test("useChat.send: target-thread thrown errors update seeded cache", async () => {
@@ -567,8 +581,8 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
   assert.equal(targetMessages[0].isOptimistic, false);
   assert.equal(targetMessages[0].status, "error");
   assert.equal(targetMessages[0].error, "network unavailable");
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
-  assert.deepEqual(stateUpdates.filter((update) => update.index === 3), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.activeRun), []);
+  assert.deepEqual(stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing), []);
 });
 
 test("useChat.send: pending approval blocks before sendMessage", async () => {
@@ -591,8 +605,8 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, pendingGate],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, pendingGate],
       ]),
       setCalls: stateUpdates,
     }),
@@ -679,8 +693,8 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [4, false],
-        [5, pendingGate],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, pendingGate],
       ]),
     }),
     addPending,
@@ -692,10 +706,6 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("approval gate should block before channel discovery");
-    },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("approval gate should block before channel discovery");
@@ -704,7 +714,6 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
     },
     recordAcceptedMessageRef,
     removePending,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
       sendCalls += 1;
@@ -772,8 +781,8 @@ test("useChat.send: accepted send does not clear a gate received while in flight
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, null],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -834,11 +843,11 @@ test("useChat.send: accepted send does not clear a gate received while in flight
   await chat.send("accepted after gate changed");
 
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 4).map((call) => call.value),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.pendingGate).map((call) => call.value),
     [replacementGate],
     "non-busy success must not clear a gate received while send was in flight",
   );
-  assert.equal(stateSlots.get(4).value, replacementGate);
+  assert.equal(stateSlots.get(STATE_SLOT.pendingGate).value, replacementGate);
 });
 
 test("useChat.send: rejected busy attaches notice to a gate received while in flight", async () => {
@@ -862,8 +871,8 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, null],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -924,14 +933,15 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
   await chat.send("busy after gate changed");
 
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 4).map((call) => call.value),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.pendingGate).map((call) => call.value),
     [replacementGate],
     "busy rejection must leave a concurrently received gate untouched",
   );
-  assert.equal(stateSlots.get(4).value, replacementGate);
-  const busyNoticeUpdates = stateUpdates
-    .filter((call) => call.index === 5)
-    .map((call) => call.value);
+  assert.equal(stateSlots.get(STATE_SLOT.pendingGate).value, replacementGate);
+  const busyNoticeUpdates = stateUpdatesFor(
+    stateUpdates,
+    STATE_SLOT.busyGateNotice,
+  ).map((call) => call.value);
   assert.equal(busyNoticeUpdates.length, 1);
   assert.equal(busyNoticeUpdates[0].content, "Thread is busy, please try again.");
   assert.match(busyNoticeUpdates[0].gateKey, /run-replacement\ngate-replacement$/);
@@ -961,8 +971,8 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, null],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -1029,7 +1039,7 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
   await chat.send("busy after thread switch");
 
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.stateThreadId).map((call) => call.value),
     [],
     "a busy gate notice must not be written into a thread that became active later",
   );
@@ -1057,8 +1067,8 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, null],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -1118,13 +1128,13 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("busy after gate resolved");
 
-  assert.equal(stateSlots.get(5).value, null);
+  assert.equal(stateSlots.get(STATE_SLOT.busyGateNotice).value, null);
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].status, "error");
   assert.equal(renderedMessages[1].role, "system");
   assert.equal(renderedMessages[1].content, "Thread is busy, please try again.");
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.stateThreadId).map((call) => call.value),
     [],
     "a resolved gate should not get a lingering card-level busy notice",
   );
@@ -1151,8 +1161,8 @@ test("useChat.send: gate received after callback creation blocks before send", a
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, null],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -1213,14 +1223,14 @@ test("useChat.send: gate received after callback creation blocks before send", a
   );
 
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 4).map((call) => call.value),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.pendingGate).map((call) => call.value),
     [pendingGate],
     "send must read the latest gate from SSE instead of a stale null callback closure",
   );
-  assert.equal(stateSlots.get(4).value, pendingGate);
+  assert.equal(stateSlots.get(STATE_SLOT.pendingGate).value, pendingGate);
   assert.equal(renderedMessages.length, 0);
   assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 5).map((call) => call.value?.content),
+    stateUpdatesFor(stateUpdates, STATE_SLOT.busyGateNotice).map((call) => call.value?.content),
     [],
   );
 });
@@ -1245,8 +1255,8 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [3, false],
-        [4, pendingGate],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, pendingGate],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1324,9 +1334,9 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
       // useChat state call order: cooldownUntil, now, activeRun,
       // isProcessing, pendingGate.
       initialByIndex: new Map([
-        [2, { runId: "run-1", threadId, status: "running" }],
-        [3, true],
-        [4, { runId: "run-1", gateRef: "gate-1" }],
+        [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+        [STATE_SLOT.isProcessing, true],
+        [STATE_SLOT.pendingGate, { runId: "run-1", gateRef: "gate-1" }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1401,11 +1411,11 @@ test("useChat clears transient run and gate state during thread switch render", 
       // isProcessing, pendingGate, busyGateNotice,
       // stateThreadId.
       initialByIndex: new Map([
-        [2, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
-        [3, true],
-        [4, { runId: "run-old", gateRef: "gate-old" }],
-        [5, { gateKey: "thread-old\nrun-old\ngate-old", content: "busy" }],
-        [6, "thread-old"],
+        [STATE_SLOT.activeRun, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
+        [STATE_SLOT.isProcessing, true],
+        [STATE_SLOT.pendingGate, { runId: "run-old", gateRef: "gate-old" }],
+        [STATE_SLOT.busyGateNotice, { gateKey: "thread-old\nrun-old\ngate-old", content: "busy" }],
+        [STATE_SLOT.stateThreadId, "thread-old"],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1480,9 +1490,9 @@ test("useChat.approve deny marks the current gated tool declined before resume",
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId, threadId, status: "awaiting_gate" }],
-        [3, false],
-        [4, {
+        [STATE_SLOT.activeRun, { runId, threadId, status: "awaiting_gate" }],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, {
           runId,
           gateRef,
           kind: "gate",
@@ -1571,9 +1581,9 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId, threadId, status: "awaiting_gate" }],
-        [3, false],
-        [4, {
+        [STATE_SLOT.activeRun, { runId, threadId, status: "awaiting_gate" }],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, {
           runId,
           gateRef,
           kind: "gate",
@@ -1645,9 +1655,9 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId, threadId, status: "awaiting_gate" }],
-        [3, false],
-        [4, {
+        [STATE_SLOT.activeRun, { runId, threadId, status: "awaiting_gate" }],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, {
           runId,
           gateRef,
           kind: "gate",
@@ -1729,9 +1739,9 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId, threadId, status: "awaiting_gate" }],
-        [3, false],
-        [4, {
+        [STATE_SLOT.activeRun, { runId, threadId, status: "awaiting_gate" }],
+        [STATE_SLOT.isProcessing, false],
+        [STATE_SLOT.pendingGate, {
           runId,
           gateRef,
           kind: "gate",
@@ -1788,12 +1798,14 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
   assert.equal(renderedMessages[0].toolStatus, "ok");
   assert.equal(renderedMessages[0].toolError, undefined);
   assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
-    { index: 4, value: null },
-    { index: 3, value: false },
-    { index: 2, value: null },
+    { index: STATE_SLOT.pendingGate, value: null },
+    { index: STATE_SLOT.isProcessing, value: false },
+    { index: STATE_SLOT.activeRun, value: null },
   ]);
   assert.equal(
-    stateUpdates.some((update) => update.index === 3 && update.value === true),
+    stateUpdates.some(
+      (update) => update.index === STATE_SLOT.isProcessing && update.value === true,
+    ),
     false,
     "already_terminal gate resolution must not turn processing back on",
   );
@@ -1812,8 +1824,8 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId: "run-1", threadId, status: "running" }],
-        [3, true],
+        [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+        [STATE_SLOT.isProcessing, true],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1867,7 +1879,8 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   await chat.send("next request");
 
   const newerRunUpdate = stateUpdates.find(
-    (update) => update.index === 2 && update.value?.runId === "run-2",
+    (update) =>
+      update.index === STATE_SLOT.activeRun && update.value?.runId === "run-2",
   );
   assert.equal(newerRunUpdate?.value.threadId, threadId);
   assert.equal(newerRunUpdate?.value.status, "queued");
@@ -1878,72 +1891,6 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   await cancelPromise;
 
   assert.deepEqual(stateUpdates.slice(updatesBeforeCancelResolution), []);
-});
-
-test("useChat.send: slash connect text submits to the model", async () => {
-  let createThreadCalled = false;
-  let sentContent = null;
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub(),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      createThreadCalled = true;
-      return { thread: { thread_id: "thread-created" } };
-    },
-    globalThis: {},
-    queryClient: {
-      fetchQuery: async () => {
-        throw new Error("chat send should not fetch connectable channels");
-      },
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: async ({ content, threadId }) => {
-      sentContent = content;
-      return {
-        accepted_message_ref: "msg:message-2",
-        run_id: "run-2",
-        status: "queued",
-        thread_id: threadId,
-      };
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(null);
-  const response = await chat.send("/connect my Slack account");
-
-  assert.equal(createThreadCalled, true);
-  assert.equal(sentContent, "/connect my Slack account");
-  assert.equal(response.channel_connect_action, undefined);
-  assert.equal(response.thread_id, "thread-created");
 });
 
 test("useChat.send: ordinary Slack chat prompts submit to the model", async () => {
@@ -2079,8 +2026,8 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
   assert.equal(userMessages[0].isOptimistic, false);
   assert.equal(userMessages[0].status, "error");
 
-  // (c) isProcessing is cleared (index 4 set to false)
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  // (c) isProcessing is cleared.
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing?.value, false);
 });
@@ -2150,8 +2097,8 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
   assert.equal(userMessages.length, 1);
   assert.equal(userMessages[0].status, "error");
 
-  // isProcessing is cleared (index 4 set to false)
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  // isProcessing is cleared.
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing?.value, false);
 });
@@ -2167,7 +2114,7 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex: new Map([[3, true]]) }),
+    React: createReactStub({ initialByIndex: new Map([[STATE_SLOT.isProcessing, true]]) }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -2325,10 +2272,6 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
       return { thread: { thread_id: createdThreadId } };
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -2338,7 +2281,6 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
@@ -2426,10 +2368,6 @@ test("useChat.send: clears local busy when run settles before send response", as
       thread: { thread_id: createdThreadId },
     }),
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -2439,7 +2377,6 @@ test("useChat.send: clears local busy when run settles before send response", as
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
@@ -2522,10 +2459,6 @@ test("useChat.send: clears local admission when navigating away before settlemen
       throw new Error("threads already exist in this scenario");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
-    looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -2535,7 +2468,6 @@ test("useChat.send: clears local admission when navigating away before settlemen
     recordAcceptedMessageRef,
     removePending,
     timelineMessageIdFromAcceptedRef,
-    resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
@@ -2691,7 +2623,7 @@ test("useChat.send: a send to another thread is not blocked by an unsettled run 
   assert.equal(sendCalls, 2, "sendMessage must be called for the second, different-thread send");
 });
 
-test("useChat.send: does not fetch connectable channels before submitting chat", async () => {
+test("useChat.send: slash connect text submits to the model without fetching connectable channels", async () => {
   let createThreadCalled = false;
   let sentContent = null;
   const loggedErrors = [];
@@ -2786,9 +2718,9 @@ function createResolveGateContext({
     Math,
     React: createReactStub({
       initialByIndex: new Map([
-        [2, { runId: "run-1", threadId: "thread-1", status: "running" }],
-        [3, true],
-        [4, pendingGate],
+        [STATE_SLOT.activeRun, { runId: "run-1", threadId: "thread-1", status: "running" }],
+        [STATE_SLOT.isProcessing, true],
+        [STATE_SLOT.pendingGate, pendingGate],
       ]),
       setCalls: stateUpdates,
     }),
@@ -2840,21 +2772,22 @@ test("useChat.resolveGate: denied keeps isProcessing true and does not clear act
   const chat = context.globalThis.__testExports.useChat("thread-1");
   await chat.resolveGate("denied");
 
-  // pendingGate (index 4) is cleared
-  const pendingGateUpdates = stateUpdates.filter((u) => u.index === 4);
+  // pendingGate is cleared.
+  const pendingGateUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.pendingGate);
   assert.equal(pendingGateUpdates.length, 1);
   assert.equal(pendingGateUpdates[0].value, null);
 
-  // isProcessing (index 3) is set to true — run continues
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  // isProcessing is set to true — run continues.
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing.value, true);
 
-  // activeRun (index 2) is NOT cleared by resolveGate
-  const activeRunClears = stateUpdates.filter(
-    (u) => u.index === 2 && u.value === null,
-  );
+  // activeRun is NOT cleared by resolveGate.
+  const activeRunClears = stateUpdatesFor(
+    stateUpdates,
+    STATE_SLOT.activeRun,
+  ).filter((u) => u.value === null);
   assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
   assert.deepEqual(
     JSON.parse(JSON.stringify(
@@ -2873,16 +2806,17 @@ test("useChat.resolveGate: resumed cancelled auth keeps processing until follow-
   const chat = context.globalThis.__testExports.useChat("thread-1");
   await chat.resolveGate("cancelled");
 
-  // isProcessing (index 3) is set to true — run continues
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  // isProcessing is set to true — run continues.
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing.value, true);
 
-  // activeRun (index 2) is NOT cleared
-  const activeRunClears = stateUpdates.filter(
-    (u) => u.index === 2 && u.value === null,
-  );
+  // activeRun is NOT cleared.
+  const activeRunClears = stateUpdatesFor(
+    stateUpdates,
+    STATE_SLOT.activeRun,
+  ).filter((u) => u.value === null);
   assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
   assert.deepEqual(
     JSON.parse(JSON.stringify(
@@ -2909,14 +2843,14 @@ test("useChat.resolveGate: terminal cancelled clears processing and activeRun", 
   const chat = context.globalThis.__testExports.useChat("thread-1");
   await chat.resolveGate("cancelled");
 
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
   assert.equal(isProcessingUpdates[isProcessingUpdates.length - 1].value, false);
 
-  const pendingGateUpdates = stateUpdates.filter((u) => u.index === 4);
+  const pendingGateUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.pendingGate);
   assert.equal(pendingGateUpdates[pendingGateUpdates.length - 1].value, null);
 
-  const activeRunUpdates = stateUpdates.filter((u) => u.index === 2);
+  const activeRunUpdates = stateUpdates.filter((u) => u.index === STATE_SLOT.activeRun);
   assert.equal(activeRunUpdates[activeRunUpdates.length - 1].value, null);
   assert.deepEqual(
     JSON.parse(JSON.stringify(
@@ -2935,7 +2869,7 @@ test("useChat.resolveGate: approved also keeps isProcessing true", async () => {
   const chat = context.globalThis.__testExports.useChat("thread-1");
   await chat.resolveGate("approved");
 
-  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
+  const isProcessingUpdates = stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing);
   assert.ok(isProcessingUpdates.length > 0);
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing.value, true);
@@ -2968,18 +2902,15 @@ function createParallelSendContext({
   let currentMessages = [];
   const seededByThread = new Map();
   const initialByIndex = new Map();
-  // State slot order: cooldownUntil(0), now(1), activeRun(2),
-  // isProcessing(3), pendingGate(4),
-  // busyGateNotice(5), stateThreadId(6).
   if (activeRun !== undefined) {
-    initialByIndex.set(2, activeRun);
+    initialByIndex.set(STATE_SLOT.activeRun, activeRun);
   }
   // A thread with an in-flight run carries BOTH activeRun and isProcessing.
   // Seeding isProcessing for the viewed-thread cases is what makes these
   // fixtures reproduce the real busy state rather than a half-state the
   // `isProcessing` early-return would never trip.
   if (isProcessing !== undefined) {
-    initialByIndex.set(3, isProcessing);
+    initialByIndex.set(STATE_SLOT.isProcessing, isProcessing);
   }
 
   const context = {

@@ -283,8 +283,9 @@ mod tests {
         assert!(channels_tab.contains("action=${action.action}"));
 
         let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
-        assert!(regression.contains("slash connect text submits to the model"));
-        assert!(regression.contains("does not fetch connectable channels before submitting chat"));
+        assert!(regression.contains(
+            "slash connect text submits to the model without fetching connectable channels"
+        ));
         assert!(regression.contains("ordinary Slack chat prompts submit to the model"));
     }
 
