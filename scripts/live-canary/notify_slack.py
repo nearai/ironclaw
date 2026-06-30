@@ -75,6 +75,7 @@ class RebornQaCaseReport:
     latency_ms: int | float | None = None
     message: str = ""
     tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
+    debug_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -351,6 +352,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 manifest_by_case[case_data["case"]] = case_data
 
     cases: list[RebornQaCaseReport] = []
+    artifact_path_prefix = "/".join(lane_dir.parts[-3:])
     for entry in results:
         if not isinstance(entry, dict):
             continue
@@ -379,6 +381,14 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
         )
         latency = entry.get("latency_ms")
         tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
+        debug_paths = []
+        if not entry.get("success"):
+            debug_paths = [
+                f"{artifact_path_prefix}/results.json",
+                f"{artifact_path_prefix}/test-output.log",
+                f"{artifact_path_prefix}/traces/{case}.json",
+                f"{artifact_path_prefix}/traces/index.json",
+            ]
         cases.append(
             RebornQaCaseReport(
                 rows=row_tuple,
@@ -388,6 +398,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
                 message=_reborn_failure_message(entry),
                 tool_calls=tool_calls,
+                debug_paths=debug_paths,
             )
         )
     report.reborn_qa_cases = cases
@@ -608,7 +619,10 @@ def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     return lines
 
 
-def _format_reborn_failure_lines(cases: list[RebornQaCaseReport]) -> list[str]:
+def _format_reborn_failure_lines(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None,
+) -> list[str]:
     lines: list[str] = []
     for case in cases:
         if case.success:
@@ -616,10 +630,20 @@ def _format_reborn_failure_lines(cases: list[RebornQaCaseReport]) -> list[str]:
         rows = _qa_case_rows(case)
         message = case.message or "failed"
         lines.append(f"*Failure `{rows}`:* {message}")
+        if case.debug_paths:
+            paths = ", ".join(f"`{path}`" for path in case.debug_paths)
+            if run_url:
+                lines.append(f"*Debug `{rows}`:* <{run_url}|GitHub run artifacts> → {paths}")
+            else:
+                lines.append(f"*Debug `{rows}`:* artifacts → {paths}")
     return lines
 
 
-def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list[dict]:
+def _format_reborn_qa_group(
+    group: str,
+    cases: list[RebornQaCaseReport],
+    run_url: str | None = None,
+) -> list[dict]:
     passed = sum(1 for case in cases if case.success)
     failed = len(cases) - passed
     status = ":white_check_mark:" if failed == 0 else ":x:"
@@ -636,7 +660,7 @@ def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list
         f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
-    lines.extend(_format_reborn_failure_lines(cases))
+    lines.extend(_format_reborn_failure_lines(cases, run_url))
     lines.extend(_format_reborn_tool_summary(cases))
     blocks: list[dict] = []
     current: list[str] = []
@@ -669,13 +693,16 @@ def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list
     return blocks
 
 
-def _format_reborn_qa_groups(cases: list[RebornQaCaseReport]) -> list[dict]:
+def _format_reborn_qa_groups(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None = None,
+) -> list[dict]:
     grouped: dict[str, list[RebornQaCaseReport]] = {}
     for case in cases:
         grouped.setdefault(_qa_group_key(case), []).append(case)
     blocks: list[dict] = []
     for group in sorted(grouped, key=_qa_group_sort_key):
-        blocks.extend(_format_reborn_qa_group(group, grouped[group]))
+        blocks.extend(_format_reborn_qa_group(group, grouped[group], run_url))
     return blocks
 
 
@@ -728,7 +755,7 @@ def slack_payload(
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         if renders_reborn_qa_groups:
             remaining = max(0, SLACK_MAX_BLOCKS - len(blocks))
-            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases)[:remaining])
+            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases, run_url)[:remaining])
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
