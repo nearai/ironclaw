@@ -27,10 +27,15 @@ function renderApprovalCard({
   expandedPayload = false,
   gate = defaultApprovalGate(),
   globalAutoApproveEnabled = null,
+  onAlways,
+  onApprove,
+  onDeny,
 } = {}) {
   let stateCalls = 0;
   const effects = [];
   const expandedPayloadUpdates = [];
+  const resolvingUpdates = [];
+  const refs = [];
   const context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -40,6 +45,11 @@ function renderApprovalCard({
         effects.push({ fn, deps });
       },
       useMemo: (fn) => fn(),
+      useRef: (initial) => {
+        const ref = { current: initial };
+        refs.push(ref);
+        return ref;
+      },
       useState: (initial) => {
         stateCalls += 1;
         if (stateCalls === 2) {
@@ -47,6 +57,14 @@ function renderApprovalCard({
             expandedPayload,
             (value) => {
               expandedPayloadUpdates.push(value);
+            },
+          ];
+        }
+        if (stateCalls === 3) {
+          return [
+            typeof initial === "function" ? initial() : initial,
+            (value) => {
+              resolvingUpdates.push(value);
             },
           ];
         }
@@ -74,8 +92,18 @@ function renderApprovalCard({
   const rendered = context.globalThis.__testExports.ApprovalCard({
     gate,
     globalAutoApproveEnabled,
+    onAlways,
+    onApprove,
+    onDeny,
   });
-  return { rendered, effects, expandedPayloadUpdates, Link: context.Link };
+  return {
+    rendered,
+    effects,
+    expandedPayloadUpdates,
+    resolvingUpdates,
+    refs,
+    Link: context.Link,
+  };
 }
 
 function defaultApprovalGate() {
@@ -111,6 +139,24 @@ function findComponent(node, component) {
   if (node.values.includes(component)) return node;
   for (const value of node.values) {
     const found = findComponent(value, component);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findPrimaryOnClick(node) {
+  if (!node || typeof node !== "object") return null;
+  if (
+    Array.isArray(node.strings) &&
+    node.strings.some((value) => value.includes('variant="primary" onClick='))
+  ) {
+    const index = node.strings.findIndex((value) =>
+      value.includes('variant="primary" onClick='),
+    );
+    return node.values[index];
+  }
+  for (const value of node.values || []) {
+    const found = findPrimaryOnClick(value);
     if (found) return found;
   }
   return null;
@@ -194,4 +240,33 @@ test("ApprovalCard hides the global settings link when global auto-approve is on
 
   assert.doesNotMatch(text, /Automatically approve and execute all actions/);
   assert.equal(findComponent(rendered, Link), null);
+});
+
+test("ApprovalCard leaves a newer gate resolving when an older resolution finishes", async () => {
+  let finishApproval;
+  const gate = defaultApprovalGate();
+  const { rendered, refs, resolvingUpdates } = renderApprovalCard({
+    gate,
+    onApprove,
+  });
+  const primaryOnClick = findPrimaryOnClick(rendered);
+
+  assert.equal(typeof primaryOnClick, "function");
+  const resolution = primaryOnClick();
+  assert.deepEqual(resolvingUpdates, [true]);
+
+  const currentGateRef = refs[1];
+  currentGateRef.current = { ...gate, toolName: "builtin.other" };
+  refs[0].current = true;
+  resolvingUpdates.push(true);
+  finishApproval();
+  await resolution;
+
+  assert.deepEqual(resolvingUpdates, [true, true]);
+
+  function onApprove() {
+    return new Promise((resolve) => {
+      finishApproval = resolve;
+    });
+  }
 });

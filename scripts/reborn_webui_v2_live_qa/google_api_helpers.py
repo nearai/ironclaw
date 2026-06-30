@@ -101,6 +101,82 @@ async def _google_drive_file_id_by_name(
     return None
 
 
+async def _create_google_spreadsheet_fixture(
+    *,
+    access_token: str,
+    title: str,
+    values: list[list[str]],
+    sheet_name: str = "Sheet1",
+) -> dict[str, object]:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        create_response = await client.post(
+            "https://sheets.googleapis.com/v4/spreadsheets",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "spreadsheetId,spreadsheetUrl"},
+            json={
+                "properties": {"title": title},
+                "sheets": [{"properties": {"title": sheet_name}}],
+            },
+        )
+        try:
+            create_payload: object = create_response.json()
+        except ValueError:
+            create_payload = {}
+        if create_response.status_code < 200 or create_response.status_code >= 300:
+            error = create_payload.get("error") if isinstance(create_payload, dict) else None
+            message = (
+                error.get("message") if isinstance(error, dict) else str(create_payload)[:300]
+            )
+            raise AssertionError(
+                "Google Sheets fixture create returned HTTP "
+                f"{create_response.status_code}: {message}"
+            )
+        if not isinstance(create_payload, dict):
+            raise AssertionError(f"Google Sheets fixture create returned {create_payload!r}")
+        spreadsheet_id = str(create_payload.get("spreadsheetId") or "").strip()
+        if not spreadsheet_id:
+            raise AssertionError(
+                f"Google Sheets fixture create omitted spreadsheetId: {create_payload!r}"
+            )
+
+        values_written = False
+        if values:
+            update_response = await client.put(
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                f"{spreadsheet_id}/values/"
+                f"{urllib.parse.quote(f'{sheet_name}!A1', safe='!:$')}",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"valueInputOption": "RAW"},
+                json={"majorDimension": "ROWS", "values": values},
+            )
+            try:
+                update_payload: object = update_response.json()
+            except ValueError:
+                update_payload = {}
+            if update_response.status_code < 200 or update_response.status_code >= 300:
+                error = update_payload.get("error") if isinstance(update_payload, dict) else None
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else str(update_payload)[:300]
+                )
+                raise AssertionError(
+                    "Google Sheets fixture value update returned HTTP "
+                    f"{update_response.status_code}: {message}"
+                )
+            values_written = True
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_url": str(create_payload.get("spreadsheetUrl") or ""),
+        "title": title,
+        "sheet_name": sheet_name,
+        "values_written": values_written,
+    }
+
+
 async def _google_sheet_contains_marker(
     *,
     access_token: str,

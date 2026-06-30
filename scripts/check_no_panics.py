@@ -213,10 +213,42 @@ def is_test_only_path(path: str) -> bool:
     sub-modules, typically included behind ``#[cfg(test)]`` and never compiled
     in production. Top-level ``tests/*.rs`` integration test files are already
     outside ``src/`` / ``crates/`` and therefore never checked.
+
+    ``src/**/test_support.rs`` is the repo-wide convention for a
+    ``#[cfg(feature = "test-support")] pub mod test_support;`` module
+    (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
+    ``ironclaw_product_adapters``, ``ironclaw_product_workflow``,
+    ``ironclaw_reborn_composition``). The ``test-support`` feature is enabled
+    only via ``[dev-dependencies]``, so these modules ship zero bytes in
+    production binaries — the same "never compiled in production" rationale that
+    exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant
+    literals, so they are exempt whether the module is a single
+    ``src/test_support.rs`` file or a ``src/test_support/**`` directory module
+    (so growing test-support coverage needs no further changes here). **The
+    ``src/`` path component is required**: a ``bin/test_support.rs`` or any
+    ``test_support`` outside ``src/`` would be compiled into production binaries
+    and must NOT be exempt. A file merely *containing* the substring, e.g.
+    ``my_test_support.rs``, is NOT exempt — the match is on the exact filename
+    or an exact path component.
+
+    NOTE: the scanner only ever looks at ``src/`` and ``crates/`` (see
+    ``changed_rust_files``). Top-level ``tests/**`` integration tests and their
+    support trees are never scanned at all, so they need no exemption here.
     """
     posix_path = pathlib.PurePosixPath(path)
     parts = posix_path.parts
-    return "tests" in parts or posix_path.name == "tests.rs"
+    if "tests" in parts or posix_path.name == "tests.rs":
+        return True
+    # Exempt only the canonical feature-gated module root: `.../src/test_support.rs`
+    # or `.../src/test_support/**`. The component immediately after `src` must be
+    # `test_support` — `src/bin/test_support.rs` (compiled into a binary) and a
+    # nested `src/foo/test_support.rs` are NOT exempt.
+    try:
+        src_idx = parts.index("src")
+    except ValueError:
+        return False
+    suffix = parts[src_idx + 1 :]
+    return bool(suffix) and (suffix[0] == "test_support" or suffix == ("test_support.rs",))
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -385,6 +417,27 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
+        # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
+        # gated, ships zero bytes in production. Exempt by exact filename only.
+        self.assertTrue(
+            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+        )
+        # Directory-module form: src/test_support/**.rs is also exempt, so
+        # growing a test_support module never needs another change here.
+        self.assertTrue(is_test_only_path("crates/foo/src/test_support/oauth.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/test_support/mod.rs"))
+        self.assertFalse(is_test_only_path("src/channels/web/my_test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/test_supportish/x.rs"))
+        # test_support outside src/ (e.g. bin/) is NOT exempt — it is compiled
+        # into production binaries and must be checked for panics.
+        self.assertFalse(is_test_only_path("crates/foo/bin/test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/bin/test_support/x.rs"))
+        # `src/bin/test_support*` IS compiled into a binary — must not be exempt.
+        self.assertFalse(is_test_only_path("crates/foo/src/bin/test_support.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/bin/test_support/mod.rs"))
+        # A nested test_support.rs (not the canonical `src/test_support.rs` root)
+        # is not the blessed feature-gated module either.
+        self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
