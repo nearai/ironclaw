@@ -12,7 +12,7 @@ pub struct PromptContextTokenBudget {
 }
 
 impl PromptContextTokenBudget {
-    pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 128_000;
+    pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 64_000;
     pub const DEFAULT_RESERVE_TOKENS: u64 = 20_000;
     pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
 
