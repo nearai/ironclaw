@@ -7,6 +7,7 @@
 // behind the project mount, the cards render from the refs).
 
 import { attachmentKindFromMime, formatBytes } from "./attachments.js";
+import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel.js";
 import { attachmentUrl } from "../../../lib/api.js";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
@@ -83,11 +84,18 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     const isBusyRejected =
       role === "user" &&
       (record.status === "rejected_busy" || record.status === "deferred_busy");
+    const attachments = attachmentsFromRecord(record, threadId);
+    const content =
+      role === "user" &&
+      attachments?.length > 0 &&
+      record.content === ATTACHMENTS_ONLY_CONTENT
+        ? ""
+        : record.content || "";
     messages.push({
       id,
       role,
-      content: record.content || "",
-      attachments: attachmentsFromRecord(record, threadId),
+      content,
+      attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: isBusyRejected ? "error" : record.status,

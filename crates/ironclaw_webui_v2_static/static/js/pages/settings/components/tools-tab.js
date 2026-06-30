@@ -8,6 +8,12 @@ import { matchesSearch } from "../lib/settings-search.js";
 
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 
+function translatedToolDescription(t, tool) {
+  const key = `tools.description.${tool.name}`;
+  const translated = t(key);
+  return translated && translated !== key ? translated : tool.description || "";
+}
+
 function SavedIndicator({ visible }) {
   const t = useT();
   if (!visible) return null;
@@ -79,6 +85,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
 
 function ToolRow({ tool, onPermissionChange, isSaved }) {
   const t = useT();
+  const description = translatedToolDescription(t, tool);
   const permissionStates = [
     { value: "default", label: t("tools.followDefault"), tone: "neutral" },
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
@@ -100,14 +107,18 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
 
   return html`
     <div
+      data-testid="settings-tool-row"
+      data-tool-name=${tool.name}
       className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0"
     >
       <div className="flex min-w-0 items-center gap-3">
         ${isLocked &&
-        html`<${Icon}
-          name="lock"
-          className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]"
-        />`}
+        html`<span data-testid="settings-tool-lock" className="shrink-0">
+          <${Icon}
+            name="lock"
+            className="h-3.5 w-3.5 text-[var(--v2-text-faint)]"
+          />
+        </span>`}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate font-mono text-sm text-[var(--v2-text)]"
@@ -127,10 +138,10 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
               ${sourceLabels[effectiveSource] || sourceLabels.default}
             </span>
           </div>
-          ${tool.description &&
+          ${description &&
           html`
             <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">
-              ${tool.description}
+              ${description}
             </div>
           `}
         </div>
@@ -220,16 +231,18 @@ export function ToolsTab({
     `;
   }
 
-  const filtered = tools.filter((tool) =>
-    matchesSearch(searchQuery, [
+  const filtered = tools.filter((tool) => {
+    const description = translatedToolDescription(t, tool);
+    return matchesSearch(searchQuery, [
       tool.name,
       tool.description,
+      description,
       tool.state,
       tool.default_state,
       tool.effective_source,
-      tool.locked ? t("tools.disabled") : "",
-    ])
-  );
+      tool.state === "disabled" ? t("tools.disabled") : "",
+    ]);
+  });
 
   return html`
     <div className="space-y-4">

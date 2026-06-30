@@ -1,0 +1,106 @@
+    Finished `release` profile [optimized] target(s) in 0.21s
+     Running `target/release/ironclaw_stress --backend libsql --scenario mixed-user-session --concurrency 10 --operations 10 --users 1000 --progress-interval-seconds 0 --human-read --bottleneck-report`
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=e338bd612d8d4d858acc6878eea91fa4
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=10 operations_per_task=10 total_operations=100 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=100 succeeded=100 failed=0 duration_ms=3457 throughput_ops_sec=28.9
+
+Run summary
+field                    value
+------------------------ --------------------------------
+backend                  libsql
+preset                   -
+scenario                 mixed-user-session
+run_id                   e338bd612d8d4d858acc6878eea91fa4
+target                   libsql://<redacted-local-path>
+processes                1
+concurrency              10
+operations_per_thread    10
+duration_seconds         0
+warmup_seconds           0
+trace_jsonl_enabled      false
+trace_interval_seconds   1
+users                    1000
+active_thread_count      per-user (1000)
+tenants                  1
+prefill_threads          0
+prefill_turns_per_thread 0
+prefill_concurrency      4
+model_latency_ms         0
+model_latency_profile    fixed
+model_latency_jitter_ms  0
+model_latency_spike_every 0
+model_latency_spike_ms   0
+user_message_bytes       0
+assistant_message_bytes  0
+context_max_messages     20
+context_growth_turns_per_op 4
+tool_calls_per_turn      2
+tool_latency_ms          0
+tool_output_bytes        1024
+tool_failure_every       0
+attempted                100
+succeeded                100
+failed                   0
+duration                 3.46s
+throughput_ops_sec       28.93
+
+Operation latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+operation                     100    288.1ms    815.7ms      1.31s      1.31s
+
+Process metrics
+metric                          value
+------------------------ ------------
+cpu_total                       1.84s
+cpu_user                        819ms
+cpu_system                      1.02s
+peak_rss                       22.9MB
+peak_threads                        -
+peak_open_fds                      25
+
+DB probe
+metric                                     before        after        delta
+------------------------------------ ------------ ------------ ------------
+libsql_file                                32.0KB        2.9MB       +2.9MB
+libsql_wal                                     0B           0B          +0B
+libsql_shm                                     0B           0B          +0B
+
+Operation attribution
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+thread_store_writes           100     45.2ms    514.4ms      1.11s      1.11s
+context_reads                 100      578us     10.6ms     94.9ms     94.9ms
+turn_store                    100     18.4ms    279.0ms    590.8ms    590.8ms
+resource_governor             100    171.2ms    299.1ms    335.7ms    335.7ms
+synthetic_wait                 95        0us        0us        0us        0us
+
+Stage latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+ensure_thread                 100      754us    128.3ms      1.10s      1.10s
+accept_inbound                100      4.1ms     99.4ms    269.5ms    269.5ms
+submit_turn                   100      757us     98.0ms    562.6ms    562.6ms
+mark_submitted                100      773us     41.8ms    149.7ms    149.7ms
+claim_run                     100      2.6ms     91.4ms    202.2ms    202.2ms
+append_assistant              100      6.9ms    255.0ms    478.2ms    478.2ms
+finalize_assistant            100      1.7ms     46.9ms    141.3ms    141.3ms
+complete_run                  100      2.7ms    169.0ms    322.4ms    322.4ms
+load_context                  100      578us     10.6ms     94.9ms     94.9ms
+resource_reserve              100     77.1ms    146.6ms    246.5ms    246.5ms
+model_wait                    100        0us        0us        0us        0us
+resource_reconcile            100     75.0ms    225.2ms    248.5ms    248.5ms
+
+Bottleneck analysis
+signal                 level   evidence
+---------------------- ------- --------------------------------------------------------
+top_operation_group    high    thread_store_writes p95=514.4ms p99=1.11s count=100
+memory_growth          medium  rss_start=11.0MiB peak=22.9MiB delta=11.9MiB
+libsql_growth          info    database_file_delta=2.9MiB
+top_stage_p95          info    append_assistant p95=255.0ms p99=478.2ms count=100
+
+Next probes
+- Sweep --assistant-message-bytes, --tool-output-bytes, and --active-thread-count to separate payload write cost from hot-thread write contention.
+- Run memory-churn as a control, then rerun the target with --duration-seconds to see if RSS keeps climbing.
+- Compare growth across chat-turn, context-growth, and tool-session to find write amplification.
+- Run the same scenario with higher --users and compare append_assistant; this is likely storage read/write latency.

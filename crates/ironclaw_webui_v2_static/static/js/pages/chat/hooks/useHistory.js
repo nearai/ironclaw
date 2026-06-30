@@ -263,63 +263,9 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return mergePreservedMessages(hydratedFresh, preserved);
-}
-
-function mergePreservedMessages(fresh, preserved) {
-  if (preserved.length === 0) return fresh;
-
-  const lastFreshIndexByRun = new Map();
-  for (let index = 0; index < fresh.length; index += 1) {
-    const runId = anchoredRunId(fresh[index]);
-    if (runId) lastFreshIndexByRun.set(runId, index);
-  }
-
-  const anchoredByRun = new Map();
-  const appendOnly = [];
-  for (const message of preserved) {
-    const runId = shouldAnchorPreservedMessage(message)
-      ? anchoredRunId(message)
-      : null;
-    if (runId && lastFreshIndexByRun.has(runId)) {
-      const anchored = anchoredByRun.get(runId) || [];
-      anchored.push(message);
-      anchoredByRun.set(runId, anchored);
-    } else {
-      appendOnly.push(message);
-    }
-  }
-
-  if (anchoredByRun.size === 0) return [...fresh, ...appendOnly];
-
-  const merged = [];
-  for (let index = 0; index < fresh.length; index += 1) {
-    const message = fresh[index];
-    merged.push(message);
-    const runId = anchoredRunId(message);
-    if (runId && lastFreshIndexByRun.get(runId) === index) {
-      merged.push(...(anchoredByRun.get(runId) || []));
-    }
-  }
-  return appendOnly.length > 0 ? [...merged, ...appendOnly] : merged;
-}
-
-function shouldAnchorPreservedMessage(message) {
-  return isRuntimeActivityMessage(message) || isRunFailureMessage(message);
-}
-
-function isRunFailureMessage(message) {
-  return (
-    message?.role === "error" &&
-    typeof message.id === "string" &&
-    message.id.startsWith("err-")
-  );
-}
-
-function anchoredRunId(message) {
-  return typeof message?.turnRunId === "string" && message.turnRunId
-    ? message.turnRunId
-    : null;
+  return preserved.length > 0
+    ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
+    : hydratedFresh;
 }
 
 function isSeededOptimisticMessage(message) {
@@ -382,4 +328,59 @@ function isFinalAssistantMessage(message) {
 
 function isRuntimeActivityMessage(message) {
   return message?.role === "tool_activity" || message?.role === "thinking";
+}
+
+function insertPreservedAtOriginalPositions(fresh, preserved, current) {
+  const freshIndexById = new Map();
+  for (const [index, message] of fresh.entries()) {
+    if (typeof message?.id === "string") freshIndexById.set(message.id, index);
+  }
+  const currentAnchors = current.map((message) =>
+    freshIndexForCurrentMessage(message, freshIndexById),
+  );
+  const after = new Map();
+  const append = [];
+
+  for (const message of preserved) {
+    if (!isRuntimeActivityMessage(message)) {
+      append.push(message);
+      continue;
+    }
+    const originalIndex = current.indexOf(message);
+    let previousAnchor = null;
+    for (let index = originalIndex - 1; index >= 0; index -= 1) {
+      if (currentAnchors[index] !== null) {
+        previousAnchor = currentAnchors[index];
+        break;
+      }
+    }
+    if (previousAnchor !== null) {
+      const group = after.get(previousAnchor) || [];
+      group.push(message);
+      after.set(previousAnchor, group);
+    } else {
+      append.push(message);
+    }
+  }
+
+  const merged = [];
+  for (const [index, message] of fresh.entries()) {
+    merged.push(message);
+    const group = after.get(index);
+    if (group) merged.push(...group);
+  }
+  merged.push(...append);
+  return merged;
+}
+
+function freshIndexForCurrentMessage(message, freshIndexById) {
+  if (!message) return null;
+  if (typeof message.id === "string" && freshIndexById.has(message.id)) {
+    return freshIndexById.get(message.id);
+  }
+  if (typeof message.timelineMessageId === "string") {
+    const timelineId = `msg-${message.timelineMessageId}`;
+    if (freshIndexById.has(timelineId)) return freshIndexById.get(timelineId);
+  }
+  return null;
 }

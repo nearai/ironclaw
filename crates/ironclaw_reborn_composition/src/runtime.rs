@@ -785,6 +785,21 @@ struct LocalDevApprovalGateEvidence {
     approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 }
 
+/// Test-only constructor for [`LocalDevApprovalGateEvidence`].
+///
+/// Mirrors the production wiring in `build_local_runtime` (runtime.rs ~line 2799)
+/// where `LocalDevApprovalGateEvidence` is constructed inline and passed to
+/// `loop_exit_evidence.with_approval_gate_evidence`. Exists so `test_support.rs`
+/// can build the real evidence type without needing the struct or its field to be
+/// `pub(crate)`. For tests only — gated behind `test-support`, ships zero bytes
+/// in production binaries.
+#[cfg(feature = "test-support")]
+pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+    std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(
@@ -2004,7 +2019,7 @@ impl RebornRuntime {
             // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
             // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
-                if self
+                if let Err(error) = self
                     .cancel_run(
                         scope,
                         run_id,
@@ -2012,11 +2027,11 @@ impl RebornRuntime {
                         "timeout-cancel",
                     )
                     .await
-                    .is_err()
                 {
                     tracing::debug!(
-                        run_id = %run_id,
-                        "failed to cancel run after terminal-wait timeout"
+                        ?error,
+                        %run_id,
+                        "failed to cancel timed-out run while preserving timeout error"
                     );
                 }
                 return Err(RebornRuntimeError::RunTimeout {
@@ -2025,7 +2040,7 @@ impl RebornRuntime {
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    if self
+                    if let Err(error) = self
                         .cancel_run(
                             scope,
                             run_id,
@@ -2033,11 +2048,11 @@ impl RebornRuntime {
                             "caller-cancel",
                         )
                         .await
-                        .is_err()
                     {
                         tracing::debug!(
-                            run_id = %run_id,
-                            "failed to cancel run after caller cancellation"
+                            ?error,
+                            %run_id,
+                            "failed to cancel caller-cancelled run while preserving cancellation error"
                         );
                     }
                     return Err(RebornRuntimeError::OperationCancelled);
@@ -2436,8 +2451,7 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`,
-/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
+/// `RebornCompositionProfile::HostedSingleTenant`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -3109,7 +3123,7 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
-            planned_default_iteration_limit: optional_u32_env(
+            planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
             ..DefaultPlannedRuntimeConfig::default()
@@ -3541,7 +3555,9 @@ struct LocalDevSkillContextSource {
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
 
-fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError> {
+fn optional_nonzero_u32_env(
+    key: &'static str,
+) -> Result<Option<std::num::NonZeroU32>, RebornRuntimeError> {
     match std::env::var(key) {
         Ok(value) => {
             let trimmed = value.trim();
@@ -3559,7 +3575,7 @@ fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError
                     reason: format!("{key} must be greater than zero"),
                 });
             }
-            Ok(Some(parsed))
+            Ok(std::num::NonZeroU32::new(parsed))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {

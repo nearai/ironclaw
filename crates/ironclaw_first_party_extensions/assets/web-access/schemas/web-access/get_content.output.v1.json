@@ -7,6 +7,10 @@
     "query": {
       "type": "string"
     },
+    "provider_used": {
+      "type": "string",
+      "enum": ["cache", "exa_mcp"]
+    },
     "title": {
       "type": "string"
     },
@@ -15,8 +19,28 @@
     },
     "content": {
       "type": "string"
+    },
+    "contents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": ["title", "url", "content"],
+        "additionalProperties": false
+      }
     }
   },
-  "required": ["response_id", "query", "title", "url", "content"],
+  "required": ["provider_used", "title", "url", "content", "contents"],
   "additionalProperties": false
 }

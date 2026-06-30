@@ -272,14 +272,24 @@ class RebornQaSlackReportTests(unittest.TestCase):
             report.reborn_qa_cases[1].message,
             "requires live Google runtime access",
         )
+        self.assertEqual(
+            report.reborn_qa_cases[1].debug_paths,
+            [
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+            ],
+        )
+        self.assertEqual(report.reborn_qa_cases[0].debug_paths, [])
 
     def test_slack_payload_renders_each_reborn_qa_row(self):
         report = notify.LaneReport(
             lane="reborn-webui-v2-live-qa",
             provider="reborn-webui-v2",
             passed=1,
-            failed=1,
-            tests=2,
+            failed=2,
+            tests=3,
             duration_s=1.2,
             status="fail",
             reborn_qa_cases=[
@@ -304,6 +314,12 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     success=False,
                     latency_ms=0,
                     message="requires live Google runtime access",
+                    debug_paths=[
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+                    ],
                     tool_calls=[
                         notify.RebornQaToolCall(
                             name="google-calendar.list_events",
@@ -312,10 +328,25 @@ class RebornQaSlackReportTests(unittest.TestCase):
                         )
                     ],
                 ),
+                notify.RebornQaCaseReport(
+                    rows=("2E",),
+                    case="qa_2e_calendar_prep_email_routine",
+                    feature="Scheduled meeting-prep email routine",
+                    success=False,
+                    latency_ms=0,
+                    message=(
+                        "assistant returned success but routine scope "
+                        "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record"
+                    ),
+                ),
             ],
         )
 
-        payload = notify.slack_payload([report], None, "abcdef0123456789")
+        payload = notify.slack_payload(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "abcdef0123456789",
+        )
         section_texts = [
             block["text"]["text"]
             for block in payload["blocks"]
@@ -326,19 +357,36 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(len(qa_sections), 1)
         self.assertTrue(
             any(
-                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/2 passed"
+                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/3 passed"
                 in text
                 for text in section_texts
             )
         )
         qa_text = qa_sections[0]
-        self.assertIn("1/2 passed", qa_text)
+        self.assertIn("1/3 passed", qa_text)
         self.assertIn("\n*Cases:*", qa_text)
         self.assertIn("\n*Tools:*", qa_text)
         self.assertNotIn("\n*Tool I/O digests:*", qa_text)
         self.assertIn("`2A` Gmail connection flow", qa_text)
         self.assertIn("`2D` Calendar prep assistant using Google Docs and live news", qa_text)
-        self.assertIn("requires live Google runtime access", qa_text)
+        self.assertIn(
+            "*Failure `2D`:* requires live Google runtime access",
+            qa_text,
+        )
+        self.assertIn(
+            "*Debug `2D`:* <https://github.com/nearai/ironclaw/actions/runs/123|GitHub run artifacts> → "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json`, "
+            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json`",
+            qa_text,
+        )
+        self.assertIn(
+            "*Failure `2E`:* assistant returned success but routine scope "
+            "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record",
+            qa_text,
+        )
+        self.assertNotIn("*Debug `2A`", qa_text)
         self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
         self.assertNotIn("in#1234567890", qa_text)
         self.assertNotIn("out#9876543210", qa_text)
@@ -395,6 +443,32 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertTrue(any("*QA 2*" in text for text in section_texts))
         self.assertTrue(any("*QA 8*" in text for text in section_texts))
         self.assertFalse(any("*QA 2A" in text for text in section_texts))
+
+    def test_reborn_group_continuation_blocks_repeat_group_label(self):
+        cases = [
+            notify.RebornQaCaseReport(
+                rows=("7A",),
+                case=f"qa_7a_failure_{idx}",
+                feature=f"Slack product channel connect {idx}",
+                success=False,
+                message="failure detail " + ("x" * 900),
+            )
+            for idx in range(8)
+        ]
+
+        blocks = notify._format_reborn_qa_group("7", cases)
+        section_texts = [
+            block["text"]["text"]
+            for block in blocks
+            if block.get("type") == "section"
+        ]
+
+        self.assertGreater(len(section_texts), 1)
+        self.assertTrue(section_texts[0].startswith(":x: *QA 7* — "))
+        self.assertTrue(
+            all(text.startswith(":x: *QA 7* — ") for text in section_texts[1:])
+        )
+        self.assertTrue(any("continued" in text for text in section_texts[1:]))
 
 
 if __name__ == "__main__":
