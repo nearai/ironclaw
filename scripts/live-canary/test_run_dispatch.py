@@ -46,11 +46,12 @@ class RunShDispatchTests(unittest.TestCase):
                 check=True,
             )
 
-    def test_reborn_all_cases_dispatches_all_cases_flag(self):
+    def test_reborn_all_cases_dispatches_non_telegram_qa_flag(self):
         result = self.run_dispatch(cases="all")
 
         self.assertIn("scripts/reborn_webui_v2_live_qa/run_live_qa.py", result.stdout)
-        self.assertIn("--all-cases", result.stdout)
+        self.assertIn("--non-telegram-qa-cases", result.stdout)
+        self.assertNotIn("--all-cases", result.stdout)
         self.assertNotIn("--case all", result.stdout)
 
     def test_reborn_specific_cases_dispatch_as_repeated_case_flags(self):
