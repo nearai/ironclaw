@@ -429,6 +429,53 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_wait_for_assistant_reply_matches_combined_assistant_blocks(self):
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 2
+
+            async def inner_text(self, **_kwargs):
+                return "latest news on that company\nEmails a concise briefing"
+
+            async def all_inner_texts(self):
+                return [
+                    'The routine has been created successfully. Routine: "30-min meeting briefing"',
+                    "latest news on that company\nEmails a concise briefing",
+                ]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        text = asyncio.run(
+            run_live_qa._wait_for_assistant_reply(
+                FakePage(),
+                marker=None,
+                required_text=["routine", "email|emails|gmail"],
+                timeout=1.0,
+            )
+        )
+
+        self.assertIn("routine", text.lower())
+        self.assertIn("emails", text.lower())
+
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
