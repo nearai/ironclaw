@@ -1,4 +1,4 @@
-use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode};
@@ -46,6 +46,9 @@ fn time_now(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
     if let Some((tz, name)) = optional_timezone(input, &["timezone"])? {
         output["local_iso"] = Value::String(now.with_timezone(&tz).to_rfc3339());
         output["timezone"] = Value::String(name);
+    } else if let Some((offset, name)) = optional_utc_offset(input)? {
+        output["local_iso"] = Value::String(now.with_timezone(&offset).to_rfc3339());
+        output["utc_offset"] = Value::String(name);
     }
     Ok(output)
 }
@@ -151,6 +154,24 @@ fn optional_timezone(
         }
     }
     Ok(None)
+}
+
+fn optional_utc_offset(
+    input: &Value,
+) -> Result<Option<(FixedOffset, String)>, FirstPartyCapabilityError> {
+    let Some(name) = input.get("utc_offset").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    parse_utc_offset(name).map(Some)
+}
+
+fn parse_utc_offset(value: &str) -> Result<(FixedOffset, String), FirstPartyCapabilityError> {
+    let probe = format!("1970-01-01T00:00:00{value}");
+    let offset = DateTime::parse_from_rfc3339(&probe)
+        .map_err(|_| input_error())?
+        .offset()
+        .fix();
+    Ok((offset, value.to_string()))
 }
 
 fn parse_timestamp(
