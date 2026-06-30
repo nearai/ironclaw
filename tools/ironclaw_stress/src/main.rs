@@ -251,6 +251,18 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 0)]
     pub(crate) model_latency_ms: u64,
 
+    /// Source for mixed-user-session model waits. `provider` sends real LLM requests.
+    #[arg(long, value_enum, default_value_t = ModelLatencySource::Synthetic)]
+    pub(crate) model_latency_source: ModelLatencySource,
+
+    /// Optional per-request model override for provider-backed model latency.
+    #[arg(long)]
+    pub(crate) provider_model: Option<String>,
+
+    /// Max output tokens for provider-backed model latency requests.
+    #[arg(long, default_value_t = 16)]
+    pub(crate) provider_max_tokens: u32,
+
     /// Synthetic model latency profile for mixed-user-session operations.
     #[arg(long, value_enum, default_value_t = ModelLatencyProfile::Fixed)]
     pub(crate) model_latency_profile: ModelLatencyProfile,
@@ -425,6 +437,22 @@ impl Backend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelLatencySource {
+    Synthetic,
+    Provider,
+}
+
+impl ModelLatencySource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::Provider => "provider",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ModelLatencyProfile {
@@ -567,6 +595,9 @@ struct RunSummary {
     prefill_turns_per_thread: usize,
     prefill_concurrency: usize,
     model_latency_ms: u64,
+    model_latency_source: ModelLatencySource,
+    provider_model: Option<String>,
+    provider_max_tokens: u32,
     model_latency_profile: ModelLatencyProfile,
     model_latency_jitter_ms: u64,
     model_latency_spike_every: usize,
@@ -817,6 +848,27 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
+    }
+    if matches!(args.model_latency_source, ModelLatencySource::Provider) {
+        if !matches!(args.scenario, Scenario::MixedUserSession) {
+            return Err(
+                "--model-latency-source provider requires --scenario mixed-user-session"
+                    .to_string(),
+            );
+        }
+        if args.provider_max_tokens == 0 {
+            return Err("--provider-max-tokens must be greater than 0".to_string());
+        }
+        if args.suite.is_some()
+            || ramp::is_enabled(args)
+            || sweep::is_enabled(args)
+            || args.repetitions > 1
+        {
+            return Err(
+                "--model-latency-source provider cannot be combined with suite, ramp, sweep, or repeated runs"
+                    .to_string(),
+            );
+        }
     }
     if args.repetitions == 0 {
         return Err("--repetitions must be greater than 0".to_string());
@@ -1086,6 +1138,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.trace_interval_seconds.to_string())
             .arg("--model-latency-ms")
             .arg(args.model_latency_ms.to_string())
+            .arg("--model-latency-source")
+            .arg(args.model_latency_source.as_str())
+            .arg("--provider-max-tokens")
+            .arg(args.provider_max_tokens.to_string())
             .arg("--model-latency-profile")
             .arg(args.model_latency_profile.as_str())
             .arg("--model-latency-jitter-ms")
@@ -1122,6 +1178,9 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .stderr(Stdio::piped());
         if let Some(preset) = args.preset {
             command.arg("--preset").arg(preset.as_str());
+        }
+        if let Some(model) = &args.provider_model {
+            command.arg("--provider-model").arg(model);
         }
         if let Some(label) = &args.suite_case_label {
             command.arg("--suite-case-label").arg(label);
@@ -1627,6 +1686,9 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         prefill_turns_per_thread: args.prefill_turns_per_thread,
         prefill_concurrency: args.prefill_concurrency,
         model_latency_ms: args.model_latency_ms,
+        model_latency_source: args.model_latency_source,
+        provider_model: args.provider_model.clone(),
+        provider_max_tokens: args.provider_max_tokens,
         model_latency_profile: args.model_latency_profile,
         model_latency_jitter_ms: args.model_latency_jitter_ms,
         model_latency_spike_every: args.model_latency_spike_every,
