@@ -125,3 +125,19 @@ test("explicit notification scopes stay isolated from auth scope", () => {
   assert.equal(authState.seenIds.has("auth-read"), true);
   assert.equal(authState.seenIds.has("profile-message"), false);
 });
+
+test("seen ids are capped in memory", () => {
+  const ids = Array.from({ length: 260 }, (_, index) => `m${index}`);
+  let state = markNotificationIdsSeen(ids);
+
+  assert.equal(state.seenIds.size, 250);
+  assert.equal(state.seenIds.has("m0"), false);
+  assert.equal(state.seenIds.has("m9"), false);
+  assert.equal(state.seenIds.has("m10"), true);
+  assert.equal(state.seenIds.has("m259"), true);
+
+  state = markNotificationIdsSeen(["m260"]);
+  assert.equal(state.seenIds.size, 250);
+  assert.equal(state.seenIds.has("m10"), false);
+  assert.equal(state.seenIds.has("m260"), true);
+});

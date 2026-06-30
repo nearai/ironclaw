@@ -43,15 +43,15 @@ registerPack("hi", {
   "header.signOut": "साइन आउट",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "सूचनाएं खोलें",
+  "notifications.close": "सूचनाएं बंद करें",
+  "notifications.title": "सूचनाएं",
+  "notifications.emptyTitle": "कोई सूचना नहीं",
+  "notifications.emptyDescription": "नई कार्य गतिविधि यहां दिखाई देगी।",
+  "notifications.allCaughtUp": "सब देख लिया गया",
+  "notifications.unreadCount": "{count} नई",
+  "notifications.unread": "अपठित",
+  "notifications.automation.title": "ऑटोमेशन कार्य शुरू हुआ",
 
   // Status
   "status.online": "ऑनलाइन",

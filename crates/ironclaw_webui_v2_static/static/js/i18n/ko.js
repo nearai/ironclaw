@@ -43,15 +43,15 @@ registerPack("ko", {
   "header.signOut": "로그아웃",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "알림 열기",
+  "notifications.close": "알림 닫기",
+  "notifications.title": "알림",
+  "notifications.emptyTitle": "알림 없음",
+  "notifications.emptyDescription": "새 작업 활동이 여기에 표시됩니다.",
+  "notifications.allCaughtUp": "모두 확인함",
+  "notifications.unreadCount": "새 알림 {count}개",
+  "notifications.unread": "읽지 않음",
+  "notifications.automation.title": "자동화 작업이 시작됨",
 
   // Status
   "status.online": "온라인",

@@ -43,15 +43,15 @@ registerPack("pt-BR", {
   "header.signOut": "Sair",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "Abrir notificações",
+  "notifications.close": "Fechar notificações",
+  "notifications.title": "Notificações",
+  "notifications.emptyTitle": "Nenhuma notificação",
+  "notifications.emptyDescription": "Novas atividades de tarefas aparecerão aqui.",
+  "notifications.allCaughtUp": "Tudo em dia",
+  "notifications.unreadCount": "{count} novas",
+  "notifications.unread": "Não lida",
+  "notifications.automation.title": "Tarefa de automação iniciada",
 
   // Status
   "status.online": "online",

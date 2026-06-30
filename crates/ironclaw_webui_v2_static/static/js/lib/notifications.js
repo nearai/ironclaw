@@ -53,6 +53,11 @@ function writePersisted(scope) {
   }
 }
 
+function trimSeenIds() {
+  if (state.seenIds.size <= MAX_SEEN_IDS) return;
+  state.seenIds = new Set([...state.seenIds].slice(-MAX_SEEN_IDS));
+}
+
 function ensureScope(scope) {
   const nextScope = notificationScope(scope);
   if (nextScope === loadedScope) return;
@@ -102,6 +107,7 @@ export function ensureNotificationBaseline(messageIds = [], scope) {
     for (const id of messageIds) {
       if (id) state.seenIds.add(id);
     }
+    trimSeenIds();
     writePersisted(scope);
     emit(scope);
   }
@@ -114,6 +120,7 @@ export function markNotificationIdsSeen(messageIds = [], scope) {
   for (const id of messageIds) {
     if (id) state.seenIds.add(id);
   }
+  trimSeenIds();
   writePersisted(scope);
   emit(scope);
   return snapshot(scope);

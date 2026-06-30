@@ -43,15 +43,15 @@ registerPack("de", {
   "header.signOut": "Abmelden",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "Benachrichtigungen öffnen",
+  "notifications.close": "Benachrichtigungen schließen",
+  "notifications.title": "Benachrichtigungen",
+  "notifications.emptyTitle": "Keine Benachrichtigungen",
+  "notifications.emptyDescription": "Neue Aufgabenaktivität wird hier angezeigt.",
+  "notifications.allCaughtUp": "Alles erledigt",
+  "notifications.unreadCount": "{count} neu",
+  "notifications.unread": "Ungelesen",
+  "notifications.automation.title": "Automatisierungsaufgabe gestartet",
 
   // Status
   "status.online": "online",

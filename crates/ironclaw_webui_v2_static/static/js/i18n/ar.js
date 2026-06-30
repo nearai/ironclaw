@@ -43,15 +43,15 @@ registerPack("ar", {
   "header.signOut": "تسجيل الخروج",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "فتح الإشعارات",
+  "notifications.close": "إغلاق الإشعارات",
+  "notifications.title": "الإشعارات",
+  "notifications.emptyTitle": "لا توجد إشعارات",
+  "notifications.emptyDescription": "سيظهر نشاط المهام الجديد هنا.",
+  "notifications.allCaughtUp": "تمت متابعة كل شيء",
+  "notifications.unreadCount": "{count} جديد",
+  "notifications.unread": "غير مقروء",
+  "notifications.automation.title": "بدأت مهمة الأتمتة",
 
   // Status
   "status.online": "متصل",

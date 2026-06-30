@@ -58,6 +58,8 @@ export function NotificationCenter({ state }) {
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
   const [openedUnreadIds, setOpenedUnreadIds] = React.useState(new Set());
+  const panelRef = React.useRef(null);
+  const triggerRef = React.useRef(null);
   const messages = state?.messages || [];
   const unreadIds = state?.unreadIds || new Set();
   const hasUnread = state?.hasUnread || false;
@@ -65,14 +67,37 @@ export function NotificationCenter({ state }) {
   const markAllRead = state?.markAllRead;
   const visibleUnreadCount = open ? openedUnreadIds.size : unreadCount;
 
+  const close = React.useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus?.();
+  }, []);
+
   const toggleOpen = React.useCallback(() => {
     const nextOpen = !open;
     setOpen(nextOpen);
     if (nextOpen) {
       setOpenedUnreadIds(new Set(unreadIds));
       markAllRead?.();
+    } else {
+      triggerRef.current?.focus?.();
     }
   }, [markAllRead, open, unreadIds]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    panelRef.current?.focus?.();
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open || typeof document === "undefined") return;
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [close, open]);
 
   React.useEffect(() => {
     if (!open || unreadIds.size === 0) return;
@@ -90,10 +115,6 @@ export function NotificationCenter({ state }) {
     markAllRead?.();
   }, [markAllRead, open, unreadIds]);
 
-  const close = React.useCallback(() => {
-    setOpen(false);
-  }, []);
-
   const openMessage = React.useCallback(
     (message) => {
       close();
@@ -109,12 +130,15 @@ export function NotificationCenter({ state }) {
             type="button"
             aria-label=${t("notifications.close")}
             onClick=${close}
+            tabIndex="-1"
             className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
           />
           <section
             role="dialog"
             aria-label=${t("notifications.title")}
             data-testid="notification-panel"
+            ref=${panelRef}
+            tabIndex="-1"
             className=${cn(
               "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
               "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
@@ -176,6 +200,7 @@ export function NotificationCenter({ state }) {
         type="button"
         onClick=${toggleOpen}
         data-testid="notification-bell"
+        ref=${triggerRef}
         aria-label=${t("notifications.open")}
         aria-expanded=${open ? "true" : "false"}
         className=${cn(

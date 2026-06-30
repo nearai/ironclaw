@@ -43,15 +43,15 @@ registerPack("ja", {
   "header.signOut": "サインアウト",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "通知を開く",
+  "notifications.close": "通知を閉じる",
+  "notifications.title": "通知",
+  "notifications.emptyTitle": "通知はありません",
+  "notifications.emptyDescription": "新しいタスクのアクティビティがここに表示されます。",
+  "notifications.allCaughtUp": "すべて確認済み",
+  "notifications.unreadCount": "{count} 件の新着",
+  "notifications.unread": "未読",
+  "notifications.automation.title": "自動化タスクが開始されました",
 
   // Status
   "status.online": "オンライン",

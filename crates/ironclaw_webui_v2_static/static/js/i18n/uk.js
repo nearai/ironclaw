@@ -43,15 +43,15 @@ registerPack("uk", {
   "header.signOut": "Вийти",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
-  "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.open": "Відкрити сповіщення",
+  "notifications.close": "Закрити сповіщення",
+  "notifications.title": "Сповіщення",
+  "notifications.emptyTitle": "Немає сповіщень",
+  "notifications.emptyDescription": "Нова активність завдань з’явиться тут.",
+  "notifications.allCaughtUp": "Усе переглянуто",
+  "notifications.unreadCount": "{count} нових",
+  "notifications.unread": "Непрочитане",
+  "notifications.automation.title": "Завдання автоматизації запущено",
 
   // Status
   "status.online": "онлайн",

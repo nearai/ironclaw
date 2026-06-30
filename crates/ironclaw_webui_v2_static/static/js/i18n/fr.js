@@ -43,15 +43,15 @@ registerPack("fr", {
   "header.signOut": "Se déconnecter",
 
   // Notifications
-  "notifications.open": "Open notifications",
-  "notifications.close": "Close notifications",
+  "notifications.open": "Ouvrir les notifications",
+  "notifications.close": "Fermer les notifications",
   "notifications.title": "Notifications",
-  "notifications.emptyTitle": "No notifications",
-  "notifications.emptyDescription": "New task activity will appear here.",
-  "notifications.allCaughtUp": "All caught up",
-  "notifications.unreadCount": "{count} new",
-  "notifications.unread": "Unread",
-  "notifications.automation.title": "Automation task started",
+  "notifications.emptyTitle": "Aucune notification",
+  "notifications.emptyDescription": "La nouvelle activité des tâches apparaîtra ici.",
+  "notifications.allCaughtUp": "Tout est à jour",
+  "notifications.unreadCount": "{count} nouvelle(s)",
+  "notifications.unread": "Non lu",
+  "notifications.automation.title": "Tâche d’automatisation démarrée",
 
   // Status
   "status.online": "en ligne",
