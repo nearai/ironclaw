@@ -21,11 +21,11 @@ use ironclaw_llm::{
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
-    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
-    CapabilityDisplayPreviewStatus, EnsureThreadRequest, FilesystemSessionThreadService,
-    LoadContextWindowRequest, MessageContent, SessionThreadError, SessionThreadService,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
+    FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent, SessionThreadError,
+    SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
@@ -1126,30 +1126,19 @@ where
         assistant_message: String,
         stages: &mut UserTurnStageDurations,
     ) -> Result<(), OperationFailure> {
-        let draft = time_stage(
+        time_stage(
             &mut stages.append_assistant,
-            self.thread_service
-                .append_assistant_draft(AppendAssistantDraftRequest {
+            self.thread_service.append_finalized_assistant_message(
+                AppendFinalizedAssistantMessageRequest {
                     scope: context.thread_scope.clone(),
                     thread_id: thread_id.clone(),
                     turn_run_id: claimed.state.run_id.to_string(),
-                    content: MessageContent::text(assistant_message.clone()),
-                }),
-        )
-        .await
-        .map_err(|error| thread_failure("append_assistant", error))?;
-
-        time_stage(
-            &mut stages.finalize_assistant,
-            self.thread_service.finalize_assistant_message(
-                &context.thread_scope,
-                thread_id,
-                draft.message_id,
-                MessageContent::text(assistant_message),
+                    content: MessageContent::text(assistant_message),
+                },
             ),
         )
         .await
-        .map_err(|error| thread_failure("finalize_assistant", error))?;
+        .map_err(|error| thread_failure("append_assistant", error))?;
 
         time_stage(
             &mut stages.complete_run,
@@ -1251,9 +1240,8 @@ async fn reserve_resources(
     governor: Arc<dyn ResourceGovernor>,
     scope: ResourceScope,
 ) -> Result<ResourceReservation, OperationFailure> {
-    tokio::task::spawn_blocking(move || governor.reserve(scope, resource_ops::estimate()))
-        .await
-        .map_err(|error| OperationFailure::new("resource_worker", "resource_reserve", error))?
+    governor
+        .reserve(scope, resource_ops::estimate())
         .map_err(|error| resource_failure("resource_reserve", error))
 }
 
@@ -1261,9 +1249,8 @@ async fn reconcile_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    tokio::task::spawn_blocking(move || governor.reconcile(reservation_id, resource_ops::usage()))
-        .await
-        .map_err(|error| OperationFailure::new("resource_worker", "resource_reconcile", error))?
+    governor
+        .reconcile(reservation_id, resource_ops::usage())
         .map(|_| ())
         .map_err(|error| resource_failure("resource_reconcile", error))
 }
@@ -1272,9 +1259,8 @@ async fn release_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    tokio::task::spawn_blocking(move || governor.release(reservation_id))
-        .await
-        .map_err(|error| OperationFailure::new("resource_worker", "resource_release", error))?
+    governor
+        .release(reservation_id)
         .map(|_| ())
         .map_err(|error| resource_failure("resource_release", error))
 }
