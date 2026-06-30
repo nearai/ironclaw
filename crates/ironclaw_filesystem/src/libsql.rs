@@ -960,6 +960,15 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if deleted == 0 {
             return Err(not_found(path.clone(), FilesystemOperation::Delete));
         }
+        // Sweep any reserved sequence counter for this path and its subtree so
+        // a delete/recreate restarts sequences from 1 rather than resuming
+        // stale state. Mirrors the entries-delete predicate above.
+        conn.execute(
+            "DELETE FROM root_filesystem_sequences WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         Ok(())
     }
 

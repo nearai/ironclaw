@@ -35,7 +35,7 @@
 //! path itself.
 
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -163,7 +163,7 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_cache: Mutex<Option<CachedSnapshot>>,
-    runner_lease_cache: Mutex<BTreeMap<String, CachedRunnerLease>>,
+    runner_lease_cache: Mutex<HashMap<TurnRunId, CachedRunnerLease>>,
     apply_timeout: Duration,
 }
 
@@ -177,7 +177,7 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_cache: Mutex::new(None),
-            runner_lease_cache: Mutex::new(BTreeMap::new()),
+            runner_lease_cache: Mutex::new(HashMap::new()),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -391,8 +391,8 @@ where
         )
     }
 
-    fn runner_lease_cache_key(run_id: TurnRunId) -> String {
-        run_id.to_string()
+    fn runner_lease_cache_key(run_id: TurnRunId) -> TurnRunId {
+        run_id
     }
 
     fn try_heartbeat_runner_lease_from_cache(

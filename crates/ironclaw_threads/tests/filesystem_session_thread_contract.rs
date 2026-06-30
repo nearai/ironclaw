@@ -299,8 +299,8 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
         .unwrap();
     let finalized = service
         .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
-            scope,
-            thread_id: thread.thread_id,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized-existing-draft".into(),
             content: MessageContent::text("final answer"),
         })
@@ -310,6 +310,88 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final answer"));
+
+    // Finalize-by-turn-run finalizes the existing draft IN PLACE — it must
+    // not materialize a second history row. Assert the caller-visible
+    // single-row invariant, not just the returned record.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, draft.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[0].content.as_deref(), Some("final answer"));
+}
+
+#[tokio::test]
+async fn filesystem_redacts_append_only_finalized_assistant_message() {
+    // Regression for the append-log mutation gap: a finalized assistant
+    // message written with NO prior draft lives only in the per-thread
+    // append log (no individual message file). Redaction must still apply —
+    // `apply_message_update` materializes the file on mutation and the
+    // file-authoritative merge then shadows the original log entry, so reads
+    // surface the redacted record (not the stale appended one) and history
+    // stays single-row.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-redact-append-only", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("redact-append-only");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-redact-append-only").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // No prior draft -> this finalized message is append-only.
+    let finalized = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-redact-append-only".into(),
+            content: MessageContent::text("secret answer"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+
+    let redacted = service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: finalized.message_id,
+            redaction_ref: "redaction/audit/append-only".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(redacted.status, MessageStatus::Redacted);
+    assert_eq!(redacted.content, None);
+
+    // Reads must reflect the redaction, not the original append-log entry,
+    // and must not duplicate the message.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, finalized.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Redacted);
+    assert_eq!(history.messages[0].content, None);
+    assert_eq!(
+        history.messages[0].redaction_ref.as_deref(),
+        Some("redaction/audit/append-only")
+    );
 }
 
 #[tokio::test]

@@ -402,10 +402,19 @@ where
         if event_messages.is_empty() {
             return Ok(());
         }
-        messages.retain(|existing| {
-            !event_messages
+        // File-authoritative merge: a per-message file always wins over its
+        // append-log entry. The log only contributes messages that have no
+        // file yet (a finalized message written solely via
+        // `append_message_event`). This matches the single-message read in
+        // `read_message_versioned` (file first, log fallback) and lets
+        // `apply_message_update` materialize a file on mutation
+        // (redaction/status change) and have that file shadow the original
+        // log entry. Were the log to win, a redacted message's file would be
+        // masked by its stale log record.
+        event_messages.retain(|event| {
+            !messages
                 .iter()
-                .any(|event| event.message_id == existing.message_id)
+                .any(|existing| existing.message_id == event.message_id)
         });
         messages.append(&mut event_messages);
         Ok(())
@@ -505,8 +514,16 @@ where
                 ));
             }
 
-            txn.commit().await?;
-            return Ok(TransactionalMessageWrite::Written);
+            match txn.commit().await {
+                Ok(()) => return Ok(TransactionalMessageWrite::Written),
+                // Optimistic-concurrency conflict on the thread record: another
+                // writer committed between our `get` and `commit`. Retry the
+                // whole transaction — this is the bounded CAS-retry budget the
+                // loop exists to provide. (libSQL/in-memory never reach here;
+                // they return `Unsupported` from `begin` above.)
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
 
         Err(SessionThreadError::Backend(format!(
@@ -1078,10 +1095,43 @@ where
     {
         let path = message_record_path(scope, thread_id, message_id)?;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (mut message, version) = self
-                .read_message_versioned(scope, thread_id, message_id)
+            // Read the individual message file first. A finalized message that
+            // was written solely to the per-thread append log (see
+            // `append_finalized_assistant_message`) has no file yet; in that
+            // case materialize the file on first mutation with
+            // `CasExpectation::Absent`. Because `merge_message_append_events`
+            // is file-authoritative, the materialized (e.g. redacted) file
+            // then shadows the original append-log entry on reads. A
+            // concurrent materialization races to `Absent` and loses with
+            // `VersionMismatch`, so the retry re-reads and takes the
+            // file-versioned path.
+            let (mut message, cas) = match self
+                .filesystem
+                .get(&scope.to_resource_scope(), &path)
                 .await?
-                .ok_or(SessionThreadError::UnknownMessage { message_id })?;
+            {
+                Some(versioned) => {
+                    let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
+                    if &record.thread_id != thread_id || record.message_id != message_id {
+                        return Err(SessionThreadError::UnknownMessage { message_id });
+                    }
+                    (record, CasExpectation::Version(versioned.version))
+                }
+                None => {
+                    let Some(events) =
+                        self.read_message_append_events(scope, thread_id).await?
+                    else {
+                        return Err(SessionThreadError::UnknownMessage { message_id });
+                    };
+                    let Some((record, _)) = events
+                        .into_iter()
+                        .find(|(record, _)| record.message_id == message_id)
+                    else {
+                        return Err(SessionThreadError::UnknownMessage { message_id });
+                    };
+                    (record, CasExpectation::Absent)
+                }
+            };
             mutate(&mut message)?;
             let entry = Self::message_entry(&message)?;
             match put_with_cas(
@@ -1089,7 +1139,7 @@ where
                 &scope.to_resource_scope(),
                 &path,
                 entry,
-                CasExpectation::Version(version),
+                cas,
             )
             .await
             {

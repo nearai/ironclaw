@@ -147,6 +147,7 @@ impl RootFilesystem for InMemoryBackend {
             state
                 .entries
                 .retain(|key, _| !key.as_str().starts_with(&prefix));
+            clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
             return Ok(());
         }
         let prefix = with_trailing_slash(path.as_str());
@@ -154,6 +155,7 @@ impl RootFilesystem for InMemoryBackend {
         state
             .entries
             .retain(|key, _| !key.as_str().starts_with(&prefix));
+        clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
         if state.entries.len() == before {
             return Err(FilesystemError::NotFound {
                 path: path.clone(),
@@ -601,6 +603,16 @@ fn with_trailing_slash(s: &str) -> String {
     }
 }
 
+/// Drop any reserved sequence counter for `exact` and every path under
+/// `prefix` (the trailing-slash form of `exact`). Mirrors the entries-delete
+/// subtree semantics so a delete/recreate of the same path restarts its
+/// sequence from 1 instead of resuming stale state. The exact match is kept
+/// separate from the prefix scan so a sibling sharing a string prefix
+/// (`/a/b` vs `/a/bc`) is not swept.
+fn clear_sequences_under(sequences: &mut HashMap<String, SeqNo>, exact: &str, prefix: &str) {
+    sequences.retain(|key, _| key.as_str() != exact && !key.starts_with(prefix));
+}
+
 fn first_segment(s: &str) -> (&str, bool) {
     match s.find('/') {
         Some(idx) => (&s[..idx], true),
@@ -690,6 +702,34 @@ mod tests {
         assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 2);
         assert_eq!(fs.reserve_sequence(&thread_b).await.unwrap().get(), 1);
         assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_subtree_clears_its_reserved_sequences() {
+        // Counters are now path-scoped in a side table rather than embedded in
+        // the thread record, so delete must sweep them or a delete/recreate of
+        // the same path would resume from stale state. A sibling that merely
+        // shares a string prefix must NOT be swept.
+        let fs = InMemoryBackend::new();
+        let seq_path = vpath("/threads/a/message_sequence");
+        let sibling = vpath("/threads/ab/message_sequence");
+        let thread_dir = vpath("/threads/a");
+
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 1);
+
+        // Materialize an entry so the directory delete has something to remove,
+        // then delete the whole /threads/a subtree.
+        fs.put(&seq_path, Entry::bytes(vec![1]), CasExpectation::Any)
+            .await
+            .unwrap();
+        fs.delete(&thread_dir).await.unwrap();
+
+        // The deleted subtree's counter restarts from 1.
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        // The string-prefix sibling /threads/ab is untouched.
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 2);
     }
 
     #[tokio::test]

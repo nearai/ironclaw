@@ -1415,6 +1415,16 @@ async fn postgres_delete_with_client(
     if deleted == 0 {
         return Err(not_found(path.clone(), FilesystemOperation::Delete));
     }
+    // Sweep any reserved sequence counter for this path and its subtree so a
+    // delete/recreate restarts sequences from 1 rather than resuming stale
+    // state. Mirrors the entries-delete predicate above.
+    cached_execute(
+        client,
+        "DELETE FROM root_filesystem_sequences WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
     Ok(())
 }
 
