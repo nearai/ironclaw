@@ -29,8 +29,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use parking_lot::Mutex;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::RngExt as _;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 
@@ -103,7 +102,7 @@ impl PendingFlowStore {
     /// (no padding). RFC 7636 requires 43-128 chars; this yields 43.
     fn generate_code_verifier() -> String {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill(&mut bytes);
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
 
@@ -226,7 +225,7 @@ impl SessionTicketStore {
 /// trips cleanly through URL query parameters without escaping.
 fn mint_state_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 

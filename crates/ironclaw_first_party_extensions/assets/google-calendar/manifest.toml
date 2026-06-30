@@ -24,7 +24,7 @@ prompt_doc_ref = "prompts/google-calendar/list_calendars.md"
 
 [[capabilities]]
 id = "google-calendar.list_events"
-description = "List Google Calendar events."
+description = "List Google Calendar events. Defaults to upcoming expanded events ordered by start time; use include_all_calendars or calendar_ids to cover more than the primary calendar."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"

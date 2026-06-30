@@ -78,7 +78,7 @@ impl exports::near::agent::tool::Guest for GoogleSheetsTool {
          Supports cell value operations (read, write, append, clear) using A1 notation, sheet \
          (tab) management (add, delete, rename), and cell formatting (bold, colors, alignment, \
          number formats). Spreadsheet IDs are the same as Google Drive file IDs, so use the \
-         google-drive tool to search for existing spreadsheets. Requires a Google OAuth token \
+         google-drive tool to search for existing spreadsheets by name or title. Requires a Google OAuth token \
          with the spreadsheets scope. \
          To discover all available API operations, use http GET to fetch \
          <https://www.googleapis.com/discovery/v1/apis/sheets/v4/rest> (public, no auth needed)."

@@ -1,6 +1,6 @@
 //! Shared relay webhook signature verification helpers.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -29,6 +29,8 @@ fn verify_signature(secret: &[u8], timestamp: &str, body: &[u8], signature: &str
 
 #[cfg(test)]
 mod tests {
+    use hmac::KeyInit as _;
+
     use super::*;
 
     fn make_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> String {

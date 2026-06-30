@@ -31,7 +31,9 @@ pub fn convert_html_to_markdown(html: &str, url: &str) -> Result<String, ToolErr
     let markdown = convert(&clean_html, None)
         .map_err(|e| ToolError::ExecutionFailed(format!("HTML to markdown: {}", e)))?;
 
-    Ok(markdown)
+    markdown.content.ok_or_else(|| {
+        ToolError::ExecutionFailed("HTML to markdown returned no content".to_string())
+    })
 }
 
 #[cfg(test)]

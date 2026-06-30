@@ -57,7 +57,11 @@ function presentationFor(state) {
 function stateFromThreadSummary(thread) {
   const raw = String(thread?.state || "").toLowerCase();
   if (raw === "processing" || raw === "running") return THREAD_STATE.RUNNING;
-  if (raw === "awaitingapproval" || raw === "awaiting_approval") {
+  if (
+    raw === "needs_attention" ||
+    raw === "awaitingapproval" ||
+    raw === "awaiting_approval"
+  ) {
     return THREAD_STATE.NEEDS_ATTENTION;
   }
   if (raw === "failed" || raw === "interrupted") return THREAD_STATE.FAILED;

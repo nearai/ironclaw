@@ -230,6 +230,14 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
                  hosted domain; set it to also require a specific hd claim",
             );
         }
+        // Redacted startup diagnostic. The `client_id` is public (it
+        // appears in the authorization URL), but the secret is never
+        // logged — only its length, which lets an operator spot an empty,
+        // truncated, or wrong-length secret without a live login. A code
+        // exchange that fails only at the token endpoint while
+        // authorization succeeds almost always means the secret does not
+        // match this client id.
+        log_provider_config("google", &client_id, client_secret.len());
         let provider = GoogleProvider::new(GoogleOAuthConfig {
             client_id,
             client_secret: SecretString::from(client_secret),
@@ -248,6 +256,7 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
                      IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET is missing"
                 )
             })?;
+        log_provider_config("github", &client_id, client_secret.len());
         let provider = GitHubProvider::new(GitHubOAuthConfig {
             client_id,
             client_secret: SecretString::from(client_secret),
@@ -260,9 +269,51 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     Ok(providers)
 }
 
-/// Read an env var, returning `None` when it is unset or blank.
+/// Log a redacted view of a configured OAuth provider at startup. The
+/// secret value is never logged — only its length — so a misconfigured
+/// (empty / truncated / wrong) secret is diagnosable from boot logs
+/// without leaking it or needing to capture a live login attempt.
+fn log_provider_config(provider: &str, client_id: &str, client_secret_len: usize) {
+    tracing::info!(
+        target = "ironclaw::reborn::cli::serve",
+        provider,
+        client_id,
+        client_secret_len,
+        "configured WebUI SSO OAuth provider",
+    );
+}
+
+/// Read an env var, returning `None` when it is unset or blank and the
+/// **trimmed** value otherwise.
+///
+/// Trimming is the fix for a silent OAuth failure: an
+/// `IRONCLAW_REBORN_WEBUI_*_CLIENT_SECRET` pasted into a deployment
+/// dashboard with a trailing newline / surrounding space used to be
+/// forwarded to the provider verbatim. The `client_secret` is the one
+/// credential a provider checks *only* at the token endpoint (never at
+/// authorization), so the broken value sailed through the login redirect
+/// and Google rejected the code exchange with `invalid_client` —
+/// surfacing to the user as `login_error=exchange_failed` ("Could not
+/// complete sign-in with the provider"). Surrounding whitespace is never
+/// a meaningful part of any of these values (URLs, client ids/secrets,
+/// domains), so it is always stripped, and stripping is logged so the
+/// operator can spot a malformed secret without it reaching the provider.
 fn non_empty_env(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|raw| !raw.trim().is_empty())
+    let raw = env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() != raw.len() {
+        tracing::warn!(
+            target = "ironclaw::reborn::cli::serve",
+            var = name,
+            "environment variable had surrounding whitespace that was trimmed — check the \
+             deployment secret for a trailing newline; an untrimmed OAuth client secret is \
+             rejected by the provider at code exchange (invalid_client)",
+        );
+    }
+    Some(trimmed.to_string())
 }
 
 /// Operator override for the OAuth provider HTTP per-call timeout, in
@@ -569,5 +620,76 @@ mod tests {
             webui_oauth_base_url_from_env(addr("127.0.0.1:3000")).expect("base url"),
             "http://127.0.0.1:3000"
         );
+    }
+
+    /// Regression for the live preview failure: Google login reached the
+    /// callback (authorization + client_id + redirect_uri were valid) but
+    /// the token exchange was rejected with `invalid_client`, because the
+    /// `client_secret` is the one credential checked only at the token
+    /// endpoint. A secret pasted into the deployment dashboard with a
+    /// trailing newline / surrounding space was previously forwarded to
+    /// Google verbatim — `non_empty_env` filtered on `.trim()` but returned
+    /// the RAW value. It must now return the trimmed value so the secret
+    /// sent at exchange matches what Google stored.
+    #[test]
+    fn non_empty_env_trims_surrounding_whitespace() {
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "  GOCSPX-trailing-newline\n",
+            );
+        }
+        assert_eq!(
+            non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET").as_deref(),
+            Some("GOCSPX-trailing-newline"),
+            "surrounding whitespace (a trailing newline from a pasted secret) must be trimmed",
+        );
+
+        // Whitespace-only stays None — it is not a configured value.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET", "   \n\t");
+        }
+        assert_eq!(
+            non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET"),
+            None,
+            "a whitespace-only value is treated as unset",
+        );
+
+        clear_sso_env();
+    }
+
+    /// Caller-level coverage: credentials with surrounding whitespace must
+    /// still configure the provider through `sso_startup_config_from_env`
+    /// (the same path `serve.rs` uses), proving the trim happens before the
+    /// secret reaches `GoogleProvider` rather than the padded value being
+    /// rejected or forwarded.
+    #[test]
+    fn whitespace_padded_oauth_credentials_still_configure_provider() {
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "  client-id\n");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                " client-secret \n",
+            );
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+        }
+
+        let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))
+            .expect("padded-but-non-empty credentials must start")
+            .expect("providers configured → Some(config)");
+        assert_eq!(
+            resolved.providers.len(),
+            1,
+            "the Google provider should be configured from the trimmed credentials",
+        );
+
+        clear_sso_env();
     }
 }

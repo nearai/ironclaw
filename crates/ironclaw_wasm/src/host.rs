@@ -335,6 +335,7 @@ where
             }
         };
         let body = request.body.unwrap_or_default();
+        let redacted_url_origin = redacted_http_url_origin(&request.url);
         let credential_injections =
             match self
                 .credential_provider
@@ -345,9 +346,23 @@ where
                     url: request.url.clone(),
                     headers: headers.clone(),
                 }) {
-                Ok(injections) => injections,
+                Ok(injections) => {
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url_origin = %redacted_url_origin,
+                        injection_count = injections.len(),
+                        "WASM runtime credential provider returned injections"
+                    );
+                    injections
+                }
                 Err(error) => {
                     self.discard_staged_policy();
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url_origin = %redacted_url_origin,
+                        error_kind = %std::any::type_name_of_val(&error),
+                        "WASM runtime credential provider failed"
+                    );
                     return Err(wasm_credential_provider_error(error));
                 }
             };
@@ -537,6 +552,22 @@ fn wasm_credential_provider_error(_error: WasmHostError) -> WasmHostError {
     WasmHostError::Unavailable("credential_unavailable".to_string())
 }
 
+fn redacted_http_url_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<invalid-url>".to_string();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if host.trim().is_empty() {
+        "<missing-host>"
+    } else {
+        host.trim()
+    };
+    format!("{scheme}://{host}")
+}
+
 pub trait WasmHostWorkspace: Send + Sync {
     fn read(&self, path: &str) -> Option<String>;
 }
@@ -659,5 +690,23 @@ impl WitToolHost {
 impl Default for WitToolHost {
     fn default() -> Self {
         Self::deny_all()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_http_url_origin;
+
+    #[test]
+    fn redacted_http_url_origin_drops_path_query_and_fragment() {
+        assert_eq!(
+            redacted_http_url_origin("https://api.example.test/v1/messages?token=secret#frag"),
+            "https://api.example.test"
+        );
+        assert_eq!(
+            redacted_http_url_origin("https://user:secret@example.com:8443/path"),
+            "https://example.com:8443"
+        );
+        assert_eq!(redacted_http_url_origin("not a url"), "<invalid-url>");
     }
 }

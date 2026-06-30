@@ -2900,9 +2900,15 @@ def main():
     async def get_last_chat_request(request: web.Request) -> web.Response:
         return web.json_response(_last_chat_request or {})
 
+    async def reset_chat_requests(request: web.Request) -> web.Response:
+        global _last_chat_request
+        _last_chat_request = None
+        return web.json_response({"ok": True})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
+    app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)
