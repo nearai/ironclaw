@@ -30,6 +30,7 @@ use ironclaw_loop_support::{
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
@@ -62,22 +63,17 @@ const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_model_latency_ok(
     operation: &'static str,
     replay_identity: &ProviderReplayIdentity,
     provider_turn_scope: Option<&str>,
     started_at: Instant,
 ) {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "model_gateway",
         operation,
         provider_id = %replay_identity.provider_id,
@@ -98,8 +94,11 @@ fn trace_model_latency_error<E>(
 ) where
     E: std::fmt::Display + ?Sized,
 {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "model_gateway",
         operation,
         provider_id = %replay_identity.provider_id,

@@ -11,6 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{TurnRunExecutor, TurnRunExecutorError};
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
     TurnStatus,
@@ -28,21 +29,16 @@ use crate::{
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
 };
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_executor_latency_ok(
     operation: &'static str,
     claimed: &ClaimedTurnRun,
     started_at: Instant,
 ) {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "reborn_turn_executor",
         operation,
         thread_id = %claimed.state.scope.thread_id,
@@ -61,8 +57,11 @@ fn trace_executor_latency_error<E>(
 ) where
     E: fmt::Display + ?Sized,
 {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "reborn_turn_executor",
         operation,
         thread_id = %claimed.state.scope.thread_id,

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use std::{
     collections::HashMap,
     fmt,
@@ -10,23 +11,18 @@ use tracing::debug;
 
 const MAX_PREPARED_RUN_IDS: usize = 4096;
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_coordinator_latency_ok(
     operation: &'static str,
     scope: &TurnScope,
     run_id: Option<TurnRunId>,
     started_at: Instant,
 ) {
+    if !live_latency_enabled() {
+        return;
+    }
+
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    tracing::trace!(
-        target: "ironclaw_latency",
+    ironclaw_observability::live_latency_trace!(
         component = "turn_coordinator",
         operation,
         thread_id = %scope.thread_id,
@@ -46,9 +42,12 @@ fn trace_coordinator_latency_error<E>(
 ) where
     E: fmt::Display + ?Sized,
 {
+    if !live_latency_enabled() {
+        return;
+    }
+
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    tracing::trace!(
-        target: "ironclaw_latency",
+    ironclaw_observability::live_latency_trace!(
         component = "turn_coordinator",
         operation,
         thread_id = %scope.thread_id,

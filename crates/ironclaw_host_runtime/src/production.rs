@@ -35,6 +35,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -49,22 +50,17 @@ use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_capability_latency_ok(
     operation: &'static str,
     capability_id: &CapabilityId,
     scope: &ResourceScope,
     started_at: Instant,
 ) {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "host_runtime",
         operation,
         capability_id = %capability_id,
@@ -87,8 +83,11 @@ fn trace_capability_latency_error<E>(
 ) where
     E: fmt::Display + ?Sized,
 {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    if !live_latency_enabled() {
+        return;
+    }
+
+    ironclaw_observability::live_latency_trace!(
         component = "host_runtime",
         operation,
         capability_id = %capability_id,

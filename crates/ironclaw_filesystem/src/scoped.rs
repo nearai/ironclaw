@@ -3,6 +3,7 @@ use std::{fmt, sync::Arc, time::Instant};
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
 };
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -63,14 +64,6 @@ fn scoped_path_class(path: &ScopedPath) -> String {
     }
 }
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_fs_latency<T, E>(
     operation: &'static str,
     path: &ScopedPath,
@@ -80,11 +73,14 @@ fn trace_fs_latency<T, E>(
 ) where
     E: fmt::Display,
 {
+    if !live_latency_enabled() {
+        return;
+    }
+
     let elapsed_ms = elapsed_ms(started_at);
     let path_class = scoped_path_class(path);
     match result {
-        Ok(_) => tracing::trace!(
-            target: "ironclaw_latency",
+        Ok(_) => ironclaw_observability::live_latency_trace!(
             component = "filesystem",
             operation,
             path_class = path_class.as_str(),
@@ -93,8 +89,7 @@ fn trace_fs_latency<T, E>(
             outcome = "ok",
             "filesystem operation completed",
         ),
-        Err(error) => tracing::trace!(
-            target: "ironclaw_latency",
+        Err(error) => ironclaw_observability::live_latency_trace!(
             component = "filesystem",
             operation,
             path_class = path_class.as_str(),

@@ -2,17 +2,10 @@ use std::{fmt, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
-
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
 
 struct ProcessLatencyFields {
     capability_id: String,
@@ -22,8 +15,12 @@ struct ProcessLatencyFields {
 }
 
 impl ProcessLatencyFields {
-    fn from_request(request: &ProcessExecutionRequest) -> Self {
-        Self {
+    fn from_request(request: &ProcessExecutionRequest) -> Option<Self> {
+        if !live_latency_enabled() {
+            return None;
+        }
+
+        Some(Self {
             capability_id: request.capability_id.to_string(),
             runtime: format!("{:?}", request.runtime),
             thread_id: request
@@ -33,17 +30,20 @@ impl ProcessLatencyFields {
                 .map(|id| id.as_str().to_string())
                 .unwrap_or_default(),
             invocation_id: request.scope.invocation_id.to_string(),
-        }
+        })
     }
 }
 
 fn trace_process_latency_ok(
     operation: &'static str,
-    fields: &ProcessLatencyFields,
+    fields: Option<&ProcessLatencyFields>,
     started_at: Instant,
 ) {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    let Some(fields) = fields else {
+        return;
+    };
+
+    ironclaw_observability::live_latency_trace!(
         component = "process_executor",
         operation,
         capability_id = fields.capability_id.as_str(),
@@ -58,14 +58,17 @@ fn trace_process_latency_ok(
 
 fn trace_process_latency_error<E>(
     operation: &'static str,
-    fields: &ProcessLatencyFields,
+    fields: Option<&ProcessLatencyFields>,
     started_at: Instant,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    tracing::trace!(
-        target: "ironclaw_latency",
+    let Some(fields) = fields else {
+        return;
+    };
+
+    ironclaw_observability::live_latency_trace!(
         component = "process_executor",
         operation,
         capability_id = fields.capability_id.as_str(),
@@ -108,24 +111,37 @@ impl ProcessExecutor for HostProcessExecutor {
         if is_process_sandbox_request(&request) {
             let Some(executor) = &self.process_sandbox_executor else {
                 let error = ProcessExecutionError::new("missing_process_sandbox_executor");
-                trace_process_latency_error("host_process_execute", &fields, started_at, &error);
+                trace_process_latency_error(
+                    "host_process_execute",
+                    fields.as_ref(),
+                    started_at,
+                    &error,
+                );
                 return Err(error);
             };
             let result = executor.execute(request).await;
             match &result {
-                Ok(_) => trace_process_latency_ok("host_process_execute", &fields, started_at),
-                Err(error) => {
-                    trace_process_latency_error("host_process_execute", &fields, started_at, error)
+                Ok(_) => {
+                    trace_process_latency_ok("host_process_execute", fields.as_ref(), started_at)
                 }
+                Err(error) => trace_process_latency_error(
+                    "host_process_execute",
+                    fields.as_ref(),
+                    started_at,
+                    error,
+                ),
             }
             return result;
         }
         let result = self.dispatch_executor.execute(request).await;
         match &result {
-            Ok(_) => trace_process_latency_ok("host_process_execute", &fields, started_at),
-            Err(error) => {
-                trace_process_latency_error("host_process_execute", &fields, started_at, error)
-            }
+            Ok(_) => trace_process_latency_ok("host_process_execute", fields.as_ref(), started_at),
+            Err(error) => trace_process_latency_error(
+                "host_process_execute",
+                fields.as_ref(),
+                started_at,
+                error,
+            ),
         }
         result
     }
@@ -157,7 +173,12 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         let fields = ProcessLatencyFields::from_request(&request);
         if request.cancellation.is_cancelled() {
             let error = ProcessExecutionError::new("cancelled");
-            trace_process_latency_error("runtime_dispatch_execute", &fields, started_at, &error);
+            trace_process_latency_error(
+                "runtime_dispatch_execute",
+                fields.as_ref(),
+                started_at,
+                &error,
+            );
             return Err(error);
         }
         let result = self
@@ -174,13 +195,18 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
             .map_err(|error| ProcessExecutionError::new(error.event_kind()))?;
         if request.cancellation.is_cancelled() {
             let error = ProcessExecutionError::new("cancelled");
-            trace_process_latency_error("runtime_dispatch_execute", &fields, started_at, &error);
+            trace_process_latency_error(
+                "runtime_dispatch_execute",
+                fields.as_ref(),
+                started_at,
+                &error,
+            );
             return Err(error);
         }
         let result = Ok(ProcessExecutionResult {
             output: result.output,
         });
-        trace_process_latency_ok("runtime_dispatch_execute", &fields, started_at);
+        trace_process_latency_ok("runtime_dispatch_execute", fields.as_ref(), started_at);
         result
     }
 }

@@ -52,6 +52,7 @@ use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ModelGatewayBackedSystemInferencePort,
 };
+use ironclaw_observability::{elapsed_ms, live_latency_enabled};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
@@ -115,23 +116,18 @@ use crate::outbound_preferences::{
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn trace_runtime_latency_ok(
     operation: &'static str,
     thread_id: &ThreadId,
     run_id: Option<TurnRunId>,
     started_at: Instant,
 ) {
+    if !live_latency_enabled() {
+        return;
+    }
+
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    tracing::trace!(
-        target: "ironclaw_latency",
+    ironclaw_observability::live_latency_trace!(
         component = "reborn_runtime",
         operation,
         thread_id = %thread_id,
@@ -151,9 +147,12 @@ fn trace_runtime_latency_error<E>(
 ) where
     E: fmt::Display + ?Sized,
 {
+    if !live_latency_enabled() {
+        return;
+    }
+
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
-    tracing::trace!(
-        target: "ironclaw_latency",
+    ironclaw_observability::live_latency_trace!(
         component = "reborn_runtime",
         operation,
         thread_id = %thread_id,
