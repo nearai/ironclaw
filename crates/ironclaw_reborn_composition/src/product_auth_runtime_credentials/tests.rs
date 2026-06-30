@@ -749,6 +749,37 @@ async fn resolver_does_not_share_project_scoped_host_managed_nearai_account_acro
 }
 
 #[tokio::test]
+async fn resolver_uses_project_scoped_host_managed_nearai_account_for_same_project() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let mut host_scope = owner_auth_scope("reborn-cli");
+    host_scope.resource.project_id = Some(ProjectId::new("host-project").unwrap());
+    let mut same_project_scope = owner_auth_scope("alice");
+    same_project_scope.resource.project_id = Some(ProjectId::new("host-project").unwrap());
+    let host_access_secret = SecretHandle::new("host_nearai_access").unwrap();
+    ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .access_secret(Some(host_access_secret.clone()))
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope.clone());
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &same_project_scope.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect("project-scoped host-managed NEAR AI fallback should resolve in the same project");
+
+    assert_eq!(resolved.handle, host_access_secret);
+    assert_eq!(resolved.scope, host_scope.resource);
+}
+
+#[tokio::test]
 async fn resolver_does_not_share_host_managed_scope_for_other_provider() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let host_scope = owner_auth_scope("reborn-cli");

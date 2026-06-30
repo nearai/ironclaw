@@ -680,9 +680,12 @@ impl RebornProductAuthServices {
         // the generic `ProductAuthRuntimeCredentialAccountSelector` stays
         // provider-agnostic and this composition layer supplies the one
         // provider/extension pair that may fall back to it.
+        // safety: "nearai" is a fixed literal that satisfies both newtypes'
+        // validation (non-empty ASCII text under the length cap) — these
+        // can only fail if the literal itself is changed to something invalid.
         let fallback = HostManagedCredentialFallbackRule::new(
-            AuthProviderId::new("nearai").expect("provider id"),
-            ExtensionId::new("nearai").expect("extension id"),
+            AuthProviderId::new("nearai").expect("\"nearai\" is a valid AuthProviderId literal"),
+            ExtensionId::new("nearai").expect("\"nearai\" is a valid ExtensionId literal"),
             host_scope,
         );
         Arc::new(HostManagedRuntimeCredentialAccountSelector::new(
@@ -783,8 +786,17 @@ impl RebornProductAuthServices {
         self
     }
 
-    pub(crate) fn set_host_managed_nearai_credential_scope(&mut self, scope: AuthProductScope) {
+    /// Wire the host-managed NEAR AI MCP credential fallback scope.
+    ///
+    /// Consuming builder — call before wrapping the bundle in `Arc`, so
+    /// composition never depends on `Arc::get_mut` succeeding (which would
+    /// silently start failing the moment any caller clones the `Arc` first).
+    pub(crate) fn with_host_managed_nearai_credential_scope(
+        mut self,
+        scope: AuthProductScope,
+    ) -> Self {
         self.host_managed_nearai_credential_scope = Some(scope);
+        self
     }
 
     /// Enable WebUI/local-dev auth-flow projection source.

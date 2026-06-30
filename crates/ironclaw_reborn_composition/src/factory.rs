@@ -825,6 +825,7 @@ fn compose_product_auth_services(
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
+    nearai_mcp_host_managed_scope: Option<AuthProductScope>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
@@ -840,6 +841,9 @@ fn compose_product_auth_services(
     }
     if let Some(registry) = provider_composition.gate_registry {
         services = services.with_oauth_gate_registry(registry);
+    }
+    if let Some(scope) = nearai_mcp_host_managed_scope {
+        services = services.with_host_managed_nearai_credential_scope(scope);
     }
     Arc::new(services)
 }
@@ -1190,13 +1194,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         product_auth_runtime_ports.clone(),
     )?;
     let security_audit_sink = services.security_audit_sink();
-    let mut product_auth = match product_auth_ports {
+    let nearai_mcp_host_managed_scope =
+        AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
+    let product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(
             ports,
             turn_coordinator.clone(),
             provider_composition,
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
+            Some(nearai_mcp_host_managed_scope.clone()),
         ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1241,7 +1248,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                Arc::new(services)
+                Arc::new(services.with_host_managed_nearai_credential_scope(
+                    nearai_mcp_host_managed_scope.clone(),
+                ))
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             {
@@ -1260,24 +1269,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                Arc::new(match provider_composition.gate_registry.clone() {
+                let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
-                })
+                };
+                Arc::new(services.with_host_managed_nearai_credential_scope(
+                    nearai_mcp_host_managed_scope.clone(),
+                ))
             }
         }
     };
-    if let Some(product_auth) = Arc::get_mut(&mut product_auth) {
-        product_auth.set_host_managed_nearai_credential_scope(AuthProductScope::new(
-            nearai_mcp_owner_scope.clone(),
-            AuthSurface::Api,
-        ));
-    } else {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "product-auth services were shared before NEAR AI MCP credential scope could be attached"
-                .to_string(),
-        });
-    }
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth.runtime_credential_account_selection_service(),
@@ -3912,6 +3913,10 @@ where
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
+        // Host-managed NEAR AI MCP fallback is wired only by
+        // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
+        // preserves this builder's prior behavior of never attaching it.
+        None,
     );
     // Bundle the keepalive worker deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
