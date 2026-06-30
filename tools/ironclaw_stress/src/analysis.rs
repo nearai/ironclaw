@@ -250,8 +250,8 @@ fn operation_attribution_probe(name: &str) -> String {
         "resource_governor" => {
             "Run reserve-release and resource-contention presets to isolate governor reservation/reconcile/release writes.".to_string()
         }
-        "synthetic_wait" => {
-            "Sweep --model-latency-ms and --tool-latency-ms; if this bucket dominates, storage is not the current p95 ceiling.".to_string()
+        "model_tool_wait" => {
+            "Sweep --model-latency-ms and --tool-latency-ms, or use --model-latency-source provider; if this bucket dominates, storage is not the current p95 ceiling.".to_string()
         }
         _ => format!("Inspect stage latency under {name} and rerun with --trace-jsonl for interval-level timing."),
     }

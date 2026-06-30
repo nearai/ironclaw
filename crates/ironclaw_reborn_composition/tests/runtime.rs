@@ -5,9 +5,13 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_reborn_composition::{
-    HooksActivationConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, TurnRunnerSettings,
+    build_reborn_runtime,
+};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornCompositionProfile, local_runtime_build_input_with_options,
 };
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
