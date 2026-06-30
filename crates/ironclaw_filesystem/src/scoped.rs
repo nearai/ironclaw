@@ -51,13 +51,35 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     }
 }
 
-fn scoped_path_class(path: &ScopedPath) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PathClass {
+    Workspace,
+    Memory,
+    Artifacts,
+    Turns,
+    Other,
+}
+
+impl PathClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Memory => "memory",
+            Self::Artifacts => "artifacts",
+            Self::Turns => "turns",
+            Self::Other => "other",
+        }
+    }
+}
+
+fn scoped_path_class(path: &ScopedPath) -> PathClass {
     match path.as_str().split('/').nth(1) {
-        Some("workspace") => "workspace",
-        Some("memory") => "memory",
-        Some("artifacts") => "artifacts",
-        Some("turns") => "turns",
-        _ => "other",
+        Some("workspace") => PathClass::Workspace,
+        Some("memory") => PathClass::Memory,
+        Some("artifacts") => PathClass::Artifacts,
+        Some("turns") => PathClass::Turns,
+        _ => PathClass::Other,
     }
 }
 
@@ -96,7 +118,7 @@ fn trace_fs_latency<T>(
             "filesystem",
             operation,
             started_at,
-            path_class = path_class,
+            path_class = path_class.as_str(),
             bytes = bytes.unwrap_or(0),
             "filesystem operation completed",
         ),
@@ -105,7 +127,7 @@ fn trace_fs_latency<T>(
             operation,
             started_at,
             filesystem_error_kind(error),
-            path_class = path_class,
+            path_class = path_class.as_str(),
             bytes = bytes.unwrap_or(0),
             "filesystem operation failed",
         ),
