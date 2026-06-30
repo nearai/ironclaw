@@ -1133,6 +1133,24 @@ where
         Ok(())
     }
 
+    /// Best-effort recency stamp for after-commit call sites. The message is
+    /// already durably written when these run, so a touch failure must not
+    /// fail the enclosing operation: `accept_inbound_message` permits requests
+    /// without an idempotency key, and propagating an error here could make an
+    /// un-idempotent caller retry and duplicate the message. Logs and
+    /// continues; the advisory `updated_at` stamp simply stays at its prior
+    /// value until the next activity.
+    async fn touch_thread_updated_at_best_effort(&self, scope: &ThreadScope, thread_id: &ThreadId) {
+        if let Err(error) = self.touch_thread_updated_at(scope, thread_id).await {
+            // silent-ok: recency stamp is advisory after the message is durable.
+            tracing::debug!(
+                ?error,
+                thread_id = %thread_id.as_str(),
+                "message persisted but thread recency touch failed",
+            );
+        }
+    }
+
     /// Read-modify-write a single message record with optimistic CAS and
     /// bounded retry. The `mutate` closure projects the staged record onto
     /// its new shape.
@@ -1453,8 +1471,11 @@ where
         };
 
         // Inbound user message is thread activity — stamp recency so the
-        // sidebar surfaces this thread first.
-        self.touch_thread_updated_at(&scope, &thread_id).await?;
+        // sidebar surfaces this thread first. Best-effort: the message is
+        // already durable, so a touch failure must not fail (and retry) the
+        // accept.
+        self.touch_thread_updated_at_best_effort(&scope, &thread_id)
+            .await;
 
         Ok(AcceptedInboundMessage {
             thread_id,
@@ -1632,9 +1653,10 @@ where
                     },
                 )
                 .await?;
-            // Finalizing the in-flight draft is thread activity — stamp recency.
-            self.touch_thread_updated_at(&request.scope, &request.thread_id)
-                .await?;
+            // Finalizing the in-flight draft is thread activity — stamp recency
+            // (best-effort; the draft update above is already durable).
+            self.touch_thread_updated_at_best_effort(&request.scope, &request.thread_id)
+                .await;
             return Ok(finalized);
         }
         let sequence = self
@@ -1669,9 +1691,10 @@ where
             )
             .await?;
         }
-        // Finalized assistant reply is thread activity — stamp recency.
-        self.touch_thread_updated_at(&request.scope, &request.thread_id)
-            .await?;
+        // Finalized assistant reply is thread activity — stamp recency
+        // (best-effort; the append above is already durable).
+        self.touch_thread_updated_at_best_effort(&request.scope, &request.thread_id)
+            .await;
         Ok(message)
     }
 
@@ -2240,11 +2263,12 @@ where
         // *volume*. Activity ordering (newest interaction first) needs each
         // thread's `updated_at`, so we read all records under the scope
         // (one `get` per thread, concurrency-bounded), sort by that
-        // timestamp, then slice the requested page. Transcripts are never
-        // scanned here — `updated_at` is stamped at turn boundaries by
-        // `touch_thread_updated_at`, so it already reflects recency. The
-        // heavier title-derivation probes still run only for the sliced
-        // page. The current `ScopedFilesystem` port exposes neither a
+        // timestamp, then slice the requested page. Activity ordering itself
+        // never scans transcripts — `updated_at` is stamped at turn
+        // boundaries by `touch_thread_updated_at`, so it already reflects
+        // recency. The heavier title-derivation probes still read transcripts,
+        // but only for the sliced page. The current `ScopedFilesystem` port
+        // exposes neither a
         // cursor-paginated directory listing nor a timestamp index, and
         // adding either belongs upstream of this crate. When a tenant grows
         // past low thousands of threads under a single scope, replace this
