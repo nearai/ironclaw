@@ -3,6 +3,11 @@ import { authScope } from "./auth-scope.js";
 const STORAGE_PREFIX = "ironclaw:v2-notifications:";
 const MAX_SEEN_IDS = 250;
 const MAX_MESSAGES = 30;
+const APPROVAL_STATES = new Set([
+  "needs_attention",
+  "awaitingapproval",
+  "awaiting_approval",
+]);
 
 const subscribers = new Set();
 let loadedScope = null;
@@ -100,20 +105,6 @@ export function subscribeNotifications(listener) {
   };
 }
 
-export function ensureNotificationBaseline(messageIds = [], scope) {
-  ensureScope(scope);
-  if (!state.initialized) {
-    state.initialized = true;
-    for (const id of messageIds) {
-      if (id) state.seenIds.add(id);
-    }
-    trimSeenIds();
-    writePersisted(scope);
-    emit(scope);
-  }
-  return snapshot(scope);
-}
-
 export function markNotificationIdsSeen(messageIds = [], scope) {
   ensureScope(scope);
   state.initialized = true;
@@ -126,40 +117,59 @@ export function markNotificationIdsSeen(messageIds = [], scope) {
   return snapshot(scope);
 }
 
-export function automationRunNotificationId(automation, run) {
-  const automationId = automation?.automation_id || "unknown";
-  const runKey =
-    run?.run_id ||
-    run?.thread_id ||
-    run?.timestamp_source ||
-    run?.submitted_at ||
-    run?.fired_at ||
-    run?.fire_slot;
-  if (!runKey) return null;
-  return `automation:${automationId}:run:${runKey}`;
+export function isApprovalThread(thread, state) {
+  const summaryState = String(thread?.state || "").toLowerCase();
+  const localState = String(state || "").toLowerCase();
+  return APPROVAL_STATES.has(summaryState) || APPROVAL_STATES.has(localState);
 }
 
-export function automationRunNotifications(automations = [], t = (key) => key) {
+export function approvalThreadNotificationId(thread) {
+  const threadId = thread?.id || thread?.thread_id;
+  if (!threadId) return null;
+  return `approval:${threadId}`;
+}
+
+function threadTimestamp(thread) {
+  const value =
+    thread?.updated_at ||
+    thread?.created_at ||
+    thread?.last_activity ||
+    thread?.last_activity_at;
+  const timestamp = value ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function approvalThreadNotifications(
+  threads = [],
+  threadStates = new Map(),
+  t = (key) => key,
+) {
   const tx = typeof t === "function" ? t : (key) => key;
   const messages = [];
 
-  for (const automation of Array.isArray(automations) ? automations : []) {
-    for (const run of Array.isArray(automation?.recent_runs) ? automation.recent_runs : []) {
-      const id = automationRunNotificationId(automation, run);
-      if (!id) continue;
-      const timestamp = Number.isFinite(run.timestamp) ? run.timestamp : 0;
-      messages.push({
-        id,
-        type: "automation",
-        icon: "calendar",
-        title: tx("notifications.automation.title"),
-        body: automation.display_name || automation.name || tx("automations.untitled"),
-        detail: run.status_label || null,
-        timeLabel: run.fired_label || run.submitted_label || "",
-        timestamp,
-        href: run.chat_path || null,
-      });
-    }
+  for (const thread of Array.isArray(threads) ? threads : []) {
+    const threadId = thread?.id || thread?.thread_id;
+    const state = threadStates instanceof Map ? threadStates.get(threadId) : null;
+    if (!isApprovalThread(thread, state)) continue;
+    const id = approvalThreadNotificationId(thread);
+    if (!id || !threadId) continue;
+    const timestamp = threadTimestamp(thread);
+    messages.push({
+      id,
+      type: "approval",
+      icon: "shield",
+      title: tx("notifications.approval.title"),
+      body: thread.title || tx("notifications.approval.untitled"),
+      detail: tx("notifications.approval.detail"),
+      timeLabel: timestamp ? new Date(timestamp).toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }) : "",
+      timestamp,
+      href: `/chat/${encodeURIComponent(threadId)}`,
+    });
   }
 
   return messages

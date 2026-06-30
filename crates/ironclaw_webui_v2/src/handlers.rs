@@ -906,6 +906,8 @@ pub async fn list_threads(
     let request = WebUiListThreadsRequest {
         limit: query.limit,
         cursor: query.cursor,
+        candidate_thread_id: query.candidate_thread_id,
+        needs_approval: query.needs_approval,
     };
     let response = state.services().list_threads(caller, request).await?;
     Ok(Json(response))
@@ -917,6 +919,10 @@ pub struct ListThreadsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub candidate_thread_id: Option<String>,
+    #[serde(default)]
+    pub needs_approval: bool,
 }
 
 /// `GET /api/webchat/v2/automations`

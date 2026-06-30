@@ -47,11 +47,13 @@ registerPack("ja", {
   "notifications.close": "通知を閉じる",
   "notifications.title": "通知",
   "notifications.emptyTitle": "通知はありません",
-  "notifications.emptyDescription": "新しいタスクのアクティビティがここに表示されます。",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "すべて確認済み",
   "notifications.unreadCount": "{count} 件の新着",
   "notifications.unread": "未読",
-  "notifications.automation.title": "自動化タスクが開始されました",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "オンライン",

@@ -47,11 +47,13 @@ registerPack("es", {
   "notifications.close": "Cerrar notificaciones",
   "notifications.title": "Notificaciones",
   "notifications.emptyTitle": "Sin notificaciones",
-  "notifications.emptyDescription": "La nueva actividad de tareas aparecerá aquí.",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "Todo al día",
   "notifications.unreadCount": "{count} nuevas",
   "notifications.unread": "Sin leer",
-  "notifications.automation.title": "Tarea de automatización iniciada",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "en línea",

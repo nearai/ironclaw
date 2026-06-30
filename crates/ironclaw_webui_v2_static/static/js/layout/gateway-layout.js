@@ -28,8 +28,13 @@ export function GatewayLayout({
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
-  const notificationsState = useNotifications({ profile, enabled: Boolean(token) });
   const threadsState = useThreads();
+  const notificationsState = useNotifications({
+    profile,
+    enabled: Boolean(token),
+    activeThreadId: threadsState.activeThreadId,
+    threads: threadsState.threads,
+  });
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });

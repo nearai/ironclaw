@@ -1,7 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -28,7 +28,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
@@ -43,9 +44,9 @@ use ironclaw_product_workflow::{
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, ProjectCaller, ProjectService, ProjectServiceError,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
+    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
@@ -638,6 +639,86 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
         })
+    }
+}
+
+struct ThreadScopedApprovalInteractionService {
+    pending_thread_ids: HashSet<ThreadId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        if !self.pending_thread_ids.contains(&request.scope.thread_id) {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by thread approval filter tests")
+    }
+}
+
+struct ActorFallbackApprovalInteractionService {
+    pending_thread_id: ThreadId,
+    owner_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.agent_id.as_ref() == Some(&self.agent_id)
+            && request.scope.project_id == self.project_id
+            && !request.scope.has_explicit_thread_owner()
+            && request.actor.user_id == self.owner_user_id;
+        if !is_expected_scope {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by actor-fallback approval list tests")
     }
 }
 
@@ -7046,6 +7127,29 @@ async fn setup_trigger_thread(
     tid
 }
 
+async fn setup_ownerless_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    let mut scope = trigger_thread_scope_for(caller);
+    scope.owner_user_id = None;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope,
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Legacy trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("legacy trigger thread stored");
+    tid
+}
+
 #[tokio::test]
 async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     // The caller owns the automation that produced the trigger thread. Approval
@@ -9901,6 +10005,257 @@ async fn list_threads_hides_automation_trigger_threads() {
 }
 
 #[tokio::test]
+async fn list_threads_needs_approval_returns_only_automation_threads_with_pending_approval() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let pending_thread_id = ThreadId::new("thread-pending").expect("pending thread id");
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-pending").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [
+            pending_thread_id.clone(),
+            automation_pending_thread_id.clone(),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(pending_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Normal chat pending approval".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("normal pending thread");
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification thread filter must exclude non-automation approval threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-run-scope").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must use the same actor-fallback turn scope shape as blocked run state",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_ownerless_trigger_thread(&thread_service, &caller, "thread-automation-ownerless")
+            .await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must include legacy ownerless automation run threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_automation_name_when_thread_title_missing() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        ThreadId::new("thread-automation-titleless").expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(automation_pending_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: None,
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("titleless trigger thread stored");
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    assert_eq!(
+        response.threads[0].title.as_deref(),
+        Some("Gate test automation"),
+        "notification approval thread fallback title should use the automation name",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_checks_candidate_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-candidate").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [automation_pending_thread_id.clone()].into_iter().collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            automation_pending_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                candidate_thread_id: Some(automation_pending_thread_id.as_str().to_string()),
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "candidate thread must still be automation-authorized before entering notifications",
+    );
+}
+
+#[tokio::test]
 async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
     let caller = caller();
     let scope = thread_scope_for(&caller);
@@ -9939,6 +10294,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             WebUiListThreadsRequest {
                 limit: Some(2),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         ),
     )
@@ -9999,6 +10355,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await
@@ -10087,6 +10444,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await
@@ -10107,6 +10465,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: first_page.next_cursor,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await

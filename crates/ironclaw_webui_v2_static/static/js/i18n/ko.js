@@ -47,11 +47,13 @@ registerPack("ko", {
   "notifications.close": "알림 닫기",
   "notifications.title": "알림",
   "notifications.emptyTitle": "알림 없음",
-  "notifications.emptyDescription": "새 작업 활동이 여기에 표시됩니다.",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "모두 확인함",
   "notifications.unreadCount": "새 알림 {count}개",
   "notifications.unread": "읽지 않음",
-  "notifications.automation.title": "자동화 작업이 시작됨",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "온라인",

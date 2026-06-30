@@ -1,19 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { React } from "../lib/html.js";
-import { listAutomations } from "../lib/api.js";
+import { listThreads } from "../lib/api.js";
 import { useI18n } from "../lib/i18n.js";
-import { normalizeAutomations } from "../pages/automations/lib/automations-presenters.js";
-import { AUTOMATIONS_BASE_REFETCH_MS } from "../pages/automations/lib/automations-refresh.js";
+import { THREAD_STATE } from "../lib/thread-state.js";
 import {
-  automationRunNotifications,
-  ensureNotificationBaseline,
+  approvalThreadNotifications,
   getNotificationState,
   markNotificationIdsSeen,
   subscribeNotifications,
 } from "../lib/notifications.js";
 
-const NOTIFICATION_AUTOMATION_LIMIT = 25;
-const NOTIFICATION_RUN_LIMIT = 10;
+const NOTIFICATION_THREAD_LIMIT = 20;
+const NOTIFICATION_REFETCH_MS = 10_000;
 
 function profileScope(profile) {
   return profile?.tenant_id && profile?.user_id
@@ -21,8 +19,22 @@ function profileScope(profile) {
     : "anon";
 }
 
-export function useNotifications({ profile, enabled = true } = {}) {
-  const { t, lang } = useI18n();
+function normalizeThread(record) {
+  return {
+    ...record,
+    id: record?.id || record?.thread_id,
+    state: record?.state || null,
+    updated_at: record?.updated_at || null,
+    created_at: record?.created_at || null,
+  };
+}
+
+export function useNotifications({
+  profile,
+  enabled = true,
+  activeThreadId = null,
+} = {}) {
+  const { t } = useI18n();
   const scope = profileScope(profile);
   const [notificationState, setNotificationState] = React.useState(() =>
     getNotificationState(scope),
@@ -36,47 +48,57 @@ export function useNotifications({ profile, enabled = true } = {}) {
   }, [scope]);
 
   const query = useQuery({
-    queryKey: ["notifications", "automations", scope],
+    queryKey: ["notifications", "approval-threads", scope],
     queryFn: () =>
-      listAutomations({
-        limit: NOTIFICATION_AUTOMATION_LIMIT,
-        runLimit: NOTIFICATION_RUN_LIMIT,
-        includeCompleted: false,
+      listThreads({
+        limit: NOTIFICATION_THREAD_LIMIT,
+        needsApproval: true,
       }),
     enabled,
-    refetchInterval: AUTOMATIONS_BASE_REFETCH_MS,
+    refetchInterval: NOTIFICATION_REFETCH_MS,
     refetchIntervalInBackground: false,
   });
 
-  const messages = React.useMemo(() => {
-    const automations = normalizeAutomations(query.data, t, lang);
-    return automationRunNotifications(automations, t);
-  }, [query.data, t, lang]);
+  const approvalMessages = React.useMemo(() => {
+    const records = Array.isArray(query.data?.threads) ? query.data.threads : [];
+    const approvalThreads = records.map((record) => ({
+      ...normalizeThread(record),
+      state: record?.state || THREAD_STATE.NEEDS_ATTENTION,
+    }));
+    return approvalThreadNotifications(approvalThreads, new Map(), t);
+  }, [query.data, t]);
 
-  const messageIds = React.useMemo(
-    () => messages.map((message) => message.id),
-    [messages],
+  const messages = React.useMemo(
+    () =>
+      approvalMessages.filter(
+        (message) => !notificationState.seenIds.has(message.id),
+      ),
+    [approvalMessages, notificationState],
   );
 
   React.useEffect(() => {
-    if (!query.isSuccess) return;
-    const next = ensureNotificationBaseline(messageIds, scope);
+    if (!activeThreadId) return;
+    const activeMessageIds = approvalMessages
+      .filter(
+        (message) =>
+          message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
+          !notificationState.seenIds.has(message.id),
+      )
+      .map((message) => message.id);
+    if (activeMessageIds.length === 0) return;
+    const next = markNotificationIdsSeen(activeMessageIds, scope);
     setNotificationState(next);
-  }, [messageIds, scope, query.isSuccess]);
+  }, [activeThreadId, approvalMessages, notificationState, scope]);
 
-  const unreadIds = React.useMemo(() => {
-    if (!notificationState.initialized) return new Set();
-    return new Set(
-      messages
-        .filter((message) => !notificationState.seenIds.has(message.id))
-        .map((message) => message.id),
-    );
-  }, [messages, notificationState]);
+  const unreadIds = React.useMemo(
+    () => new Set(messages.map((message) => message.id)),
+    [messages],
+  );
 
-  const markAllRead = React.useCallback(() => {
-    const next = markNotificationIdsSeen(messageIds, scope);
+  const dismissMessage = React.useCallback((messageId) => {
+    const next = markNotificationIdsSeen([messageId], scope);
     setNotificationState(next);
-  }, [messageIds, scope]);
+  }, [scope]);
 
   return {
     messages,
@@ -86,6 +108,6 @@ export function useNotifications({ profile, enabled = true } = {}) {
     isLoading: query.isLoading,
     error: query.error || null,
     refetch: query.refetch,
-    markAllRead,
+    dismissMessage,
   };
 }

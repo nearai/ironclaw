@@ -47,11 +47,13 @@ registerPack("de", {
   "notifications.close": "Benachrichtigungen schließen",
   "notifications.title": "Benachrichtigungen",
   "notifications.emptyTitle": "Keine Benachrichtigungen",
-  "notifications.emptyDescription": "Neue Aufgabenaktivität wird hier angezeigt.",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "Alles erledigt",
   "notifications.unreadCount": "{count} neu",
   "notifications.unread": "Ungelesen",
-  "notifications.automation.title": "Automatisierungsaufgabe gestartet",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "online",

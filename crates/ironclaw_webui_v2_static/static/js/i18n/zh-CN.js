@@ -47,11 +47,13 @@ registerPack("zh-CN", {
   "notifications.close": "关闭通知",
   "notifications.title": "通知",
   "notifications.emptyTitle": "暂无通知",
-  "notifications.emptyDescription": "新的任务活动会显示在这里。",
+  "notifications.emptyDescription": "需要你审批的消息会显示在这里。",
   "notifications.allCaughtUp": "已全部查看",
   "notifications.unreadCount": "{count} 条新通知",
   "notifications.unread": "未读",
-  "notifications.automation.title": "自动化任务已开始",
+  "notifications.approval.title": "需要审批",
+  "notifications.approval.detail": "等待你审批",
+  "notifications.approval.untitled": "未命名对话",
 
   // Status
   "status.online": "在线",

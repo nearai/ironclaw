@@ -57,15 +57,13 @@ export function NotificationCenter({ state }) {
   const t = useT();
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
-  const [openedUnreadIds, setOpenedUnreadIds] = React.useState(new Set());
   const panelRef = React.useRef(null);
   const triggerRef = React.useRef(null);
   const messages = state?.messages || [];
   const unreadIds = state?.unreadIds || new Set();
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
-  const markAllRead = state?.markAllRead;
-  const visibleUnreadCount = open ? openedUnreadIds.size : unreadCount;
+  const dismissMessage = state?.dismissMessage;
 
   const close = React.useCallback(() => {
     setOpen(false);
@@ -75,13 +73,10 @@ export function NotificationCenter({ state }) {
   const toggleOpen = React.useCallback(() => {
     const nextOpen = !open;
     setOpen(nextOpen);
-    if (nextOpen) {
-      setOpenedUnreadIds(new Set(unreadIds));
-      markAllRead?.();
-    } else {
+    if (!nextOpen) {
       triggerRef.current?.focus?.();
     }
-  }, [markAllRead, open, unreadIds]);
+  }, [open]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -99,28 +94,13 @@ export function NotificationCenter({ state }) {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [close, open]);
 
-  React.useEffect(() => {
-    if (!open || unreadIds.size === 0) return;
-    setOpenedUnreadIds((current) => {
-      let changed = false;
-      const next = new Set(current);
-      for (const id of unreadIds) {
-        if (!next.has(id)) {
-          next.add(id);
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-    markAllRead?.();
-  }, [markAllRead, open, unreadIds]);
-
   const openMessage = React.useCallback(
     (message) => {
+      if (message?.id) dismissMessage?.(message.id);
       close();
       if (message?.href) navigate(message.href);
     },
-    [close, navigate],
+    [close, dismissMessage, navigate],
   );
 
   const overlay = open
@@ -151,8 +131,8 @@ export function NotificationCenter({ state }) {
                   ${t("notifications.title")}
                 </h2>
                 <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
-                  ${visibleUnreadCount > 0
-                    ? t("notifications.unreadCount", { count: visibleUnreadCount })
+                  ${unreadCount > 0
+                    ? t("notifications.unreadCount", { count: unreadCount })
                     : t("notifications.allCaughtUp")}
                 </p>
               </div>
@@ -184,7 +164,7 @@ export function NotificationCenter({ state }) {
                     <${NotificationRow}
                       key=${message.id}
                       message=${message}
-                      unread=${openedUnreadIds.has(message.id)}
+                      unread=${unreadIds.has(message.id)}
                       onOpen=${openMessage}
                     />
                   `)}

@@ -47,11 +47,13 @@ registerPack("hi", {
   "notifications.close": "सूचनाएं बंद करें",
   "notifications.title": "सूचनाएं",
   "notifications.emptyTitle": "कोई सूचना नहीं",
-  "notifications.emptyDescription": "नई कार्य गतिविधि यहां दिखाई देगी।",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "सब देख लिया गया",
   "notifications.unreadCount": "{count} नई",
   "notifications.unread": "अपठित",
-  "notifications.automation.title": "ऑटोमेशन कार्य शुरू हुआ",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "ऑनलाइन",

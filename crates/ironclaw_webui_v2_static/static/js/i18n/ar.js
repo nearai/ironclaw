@@ -47,11 +47,13 @@ registerPack("ar", {
   "notifications.close": "إغلاق الإشعارات",
   "notifications.title": "الإشعارات",
   "notifications.emptyTitle": "لا توجد إشعارات",
-  "notifications.emptyDescription": "سيظهر نشاط المهام الجديد هنا.",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
   "notifications.allCaughtUp": "تمت متابعة كل شيء",
   "notifications.unreadCount": "{count} جديد",
   "notifications.unread": "غير مقروء",
-  "notifications.automation.title": "بدأت مهمة الأتمتة",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
 
   // Status
   "status.online": "متصل",

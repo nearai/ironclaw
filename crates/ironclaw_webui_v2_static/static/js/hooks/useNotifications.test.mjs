@@ -86,32 +86,52 @@ function createReactStub() {
 }
 
 function instantiate(queryState, options = {}) {
-  const baselineCalls = [];
   const getStateScopes = [];
   const markSeenCalls = [];
+  const listThreadCalls = [];
   const subscribeCalls = [];
+  const notificationInputs = [];
+  let queryOptions = null;
   const react = createReactStub();
   const translate = (key) => key;
-  const messages = options.messages || [{ id: "message-1" }];
+  let storedState = options.initialState || { initialized: true, seenIds: new Set() };
+  const states = options.threadStates || new Map();
   const context = {
-    AUTOMATIONS_BASE_REFETCH_MS: 30_000,
     React: react,
     useI18n: () => ({ t: translate, lang: "en" }),
-    useQuery: () => queryState,
-    listAutomations: async () => ({}),
-    normalizeAutomations: () => [],
-    automationRunNotifications: () => messages,
-    ensureNotificationBaseline: (ids, scope) => {
-      baselineCalls.push({ ids, scope });
-      return { initialized: true, seenIds: new Set(ids) };
+    useQuery: (options) => {
+      queryOptions = options;
+      return queryState;
+    },
+    listThreads: async (request) => {
+      listThreadCalls.push(request);
+      return {};
+    },
+    THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
+    useThreadStates: () => states,
+    approvalThreadNotifications: (threads, threadStates, t) => {
+      notificationInputs.push({ threads, threadStates, t });
+      return typeof options.approvalThreadNotifications === "function"
+        ? options.approvalThreadNotifications(threads, threadStates, t)
+        : threads.map((thread) => {
+            const threadId = thread.id || thread.thread_id;
+            return {
+              id: `approval:${threadId}`,
+              href: `/chat/${threadId}`,
+            };
+          });
     },
     getNotificationState: (scope) => {
       getStateScopes.push(scope);
-      return { initialized: false, seenIds: new Set() };
+      return storedState;
     },
     markNotificationIdsSeen: (ids, scope) => {
       markSeenCalls.push({ ids, scope });
-      return { initialized: true, seenIds: new Set(ids) };
+      storedState = {
+        initialized: true,
+        seenIds: new Set([...storedState.seenIds, ...ids]),
+      };
+      return storedState;
     },
     subscribeNotifications: (listener) => {
       subscribeCalls.push(listener);
@@ -126,17 +146,41 @@ function instantiate(queryState, options = {}) {
       react.beginRender();
       hook = context.globalThis.__testExports.useNotifications({
         profile: { tenant_id: "tenant", user_id: "user" },
+        activeThreadId: options.activeThreadId || null,
+        threads: options.threads || [],
       });
       if (!react.didScheduleUpdate()) break;
     }
     return hook;
   };
   const hook = render();
-  return { hook, render, baselineCalls, getStateScopes, markSeenCalls, subscribeCalls };
+  return {
+    hook,
+    render,
+    get queryOptions() {
+      return queryOptions;
+    },
+    getStateScopes,
+    markSeenCalls,
+    listThreadCalls,
+    notificationInputs,
+    subscribeCalls,
+  };
 }
 
-test("does not baseline notifications before the automations query succeeds", () => {
-  const { baselineCalls } = instantiate({
+function plainCalls(calls) {
+  return calls.map((call) => ({ ids: [...call.ids], scope: call.scope }));
+}
+
+function plainThreadRequests(calls) {
+  return calls.map((call) => ({
+    limit: call.limit,
+    needsApproval: call.needsApproval,
+  }));
+}
+
+test("does not baseline approval notifications on first load", () => {
+  const harness = instantiate({
     data: undefined,
     isLoading: true,
     isSuccess: false,
@@ -144,27 +188,97 @@ test("does not baseline notifications before the automations query succeeds", ()
     refetch: () => {},
   });
 
-  assert.deepEqual(baselineCalls, []);
+  assert.deepEqual(harness.markSeenCalls, []);
+  assert.equal(harness.hook.unreadCount, 0);
+  assert.deepEqual(harness.listThreadCalls, []);
 });
 
-test("baselines the current notification ids after the first successful query", () => {
-  const { baselineCalls, hook } = instantiate({
-    data: { automations: [] },
+test("queries only threads that need approval", async () => {
+  const harness = instantiate({
+    data: { threads: [] },
     isLoading: false,
     isSuccess: true,
     error: null,
     refetch: () => {},
   });
 
-  assert.deepEqual(baselineCalls, [
-    { ids: ["message-1"], scope: "tenant:user" },
+  await harness.queryOptions.queryFn();
+  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
+    { limit: 20, needsApproval: true },
   ]);
-  assert.equal(hook.unreadCount, 0);
 });
 
-test("uses the profile scope for notification persistence", () => {
-  const { baselineCalls, getStateScopes, hook, markSeenCalls } = instantiate({
-    data: { automations: [] },
+test("does not use active thread as an approval query candidate", async () => {
+  const harness = instantiate(
+    {
+      data: { threads: [] },
+      isLoading: false,
+      isSuccess: true,
+      error: null,
+      refetch: () => {},
+    },
+    { activeThreadId: "thread-active" },
+  );
+
+  await harness.queryOptions.queryFn();
+  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
+    { limit: 20, needsApproval: true },
+  ]);
+});
+
+test("does not include locally known non-automation approval threads", () => {
+  const harness = instantiate(
+    {
+      data: { threads: [] },
+      isLoading: false,
+      isSuccess: true,
+      error: null,
+      refetch: () => {},
+    },
+    {
+      threadStates: new Map([["thread-local", "needs_attention"]]),
+      threads: [{ id: "thread-local", title: "Local approval", updated_at: "2026-06-30T10:00:00Z" }],
+      approvalThreadNotifications: (threads) =>
+        threads.map((thread) => ({
+          id: `approval:${thread.id}`,
+          href: `/chat/${thread.id}`,
+        })),
+    },
+  );
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      harness.notificationInputs.at(-1).threads.map((thread) => ({
+        id: thread.id,
+        state: thread.state,
+        title: thread.title,
+      })),
+    )),
+    [],
+  );
+  assert.equal(harness.hook.messages.length, 0);
+});
+
+test("shows approval messages until they are dismissed", () => {
+  const { hook, markSeenCalls, render } = instantiate({
+    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
+    isLoading: false,
+    isSuccess: true,
+    error: null,
+    refetch: () => {},
+  });
+
+  assert.equal(hook.unreadCount, 1);
+  hook.dismissMessage("approval:thread-1");
+  assert.deepEqual(plainCalls(markSeenCalls), [
+    { ids: ["approval:thread-1"], scope: "tenant:user" },
+  ]);
+  assert.equal(render().messages.length, 0);
+});
+
+test("uses the profile scope for notification dismissal", () => {
+  const { getStateScopes, hook, markSeenCalls } = instantiate({
+    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
     isLoading: false,
     isSuccess: true,
     error: null,
@@ -172,12 +286,26 @@ test("uses the profile scope for notification persistence", () => {
   });
 
   assert(getStateScopes.includes("tenant:user"));
-  assert.deepEqual(baselineCalls, [
-    { ids: ["message-1"], scope: "tenant:user" },
-  ]);
 
-  hook.markAllRead();
-  assert.deepEqual(markSeenCalls, [
-    { ids: ["message-1"], scope: "tenant:user" },
+  hook.dismissMessage("approval:thread-1");
+  assert.deepEqual(plainCalls(markSeenCalls), [
+    { ids: ["approval:thread-1"], scope: "tenant:user" },
+  ]);
+});
+
+test("dismisses an approval notification after the thread has been opened", () => {
+  const { markSeenCalls } = instantiate(
+    {
+      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
+      isLoading: false,
+      isSuccess: true,
+      error: null,
+      refetch: () => {},
+    },
+    { activeThreadId: "thread-1" },
+  );
+
+  assert.deepEqual(plainCalls(markSeenCalls), [
+    { ids: ["approval:thread-1"], scope: "tenant:user" },
   ]);
 });

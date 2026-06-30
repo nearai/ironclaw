@@ -45,13 +45,13 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -3653,7 +3653,8 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        self.list_visible_threads_for_scope(scope, request).await
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
     }
 
     async fn list_automations(
@@ -4218,8 +4219,19 @@ impl RebornServices {
         &self,
         scope: ThreadScope,
         request: WebUiListThreadsRequest,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         let visible_limit = clamp_thread_list_limit(request.limit);
+        let needs_approval = request.needs_approval;
+        if needs_approval {
+            return self
+                .list_automation_threads_needing_approval(
+                    caller,
+                    visible_limit,
+                    request.candidate_thread_id,
+                )
+                .await;
+        }
         let fetch_limit = visible_limit
             .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
             .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
@@ -4251,12 +4263,12 @@ impl RebornServices {
                 })
                 .await
                 .map_err(map_thread_error)?;
-            visible_threads.extend(
-                response
-                    .threads
-                    .into_iter()
-                    .filter(|thread| !is_automation_trigger_thread(thread)),
-            );
+            for thread in response.threads {
+                if is_automation_trigger_thread(&thread) {
+                    continue;
+                }
+                visible_threads.push(thread);
+            }
             next_cursor = response.next_cursor;
             let Some(next) = next_cursor.clone() else {
                 break;
@@ -4283,6 +4295,200 @@ impl RebornServices {
             threads: visible_threads,
             next_cursor,
         })
+    }
+
+    async fn list_automation_threads_needing_approval(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        visible_limit: usize,
+        candidate_thread_id: Option<String>,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let automations = self
+            .automation_facade
+            .list_automations(
+                bound_caller.clone(),
+                AutomationListRequest {
+                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+                    include_completed: true,
+                },
+            )
+            .await?;
+
+        let mut automation_thread_names = HashMap::new();
+        for automation in &automations {
+            let name = automation.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            for run in &automation.recent_runs {
+                if let Some(thread_id) = &run.thread_id {
+                    automation_thread_names
+                        .entry(thread_id.clone())
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone())
+                && let Some(record) = self
+                    .automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        thread_id.clone(),
+                        automation_thread_names.get(&thread_id).cloned(),
+                    )
+                    .await?
+            {
+                threads.push(record);
+            }
+        }
+        for run in automations
+            .into_iter()
+            .flat_map(|automation| automation.recent_runs.into_iter())
+        {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            let Some(thread_id) = run.thread_id else {
+                continue;
+            };
+            if !seen.insert(thread_id.clone()) {
+                continue;
+            }
+            let Some(record) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    thread_id.clone(),
+                    automation_thread_names.get(&thread_id).cloned(),
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn automation_run_thread_record(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        automation_name: Option<String>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let true_agent_id = trigger_scope
+            .agent_id
+            .clone()
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let creator_user_id = trigger_scope.creator_user_id.clone();
+        let mut record = None;
+        for owner_user_id in [Some(creator_user_id.clone()), None] {
+            let thread_turn_scope = TurnScope::new_with_owner(
+                caller.tenant_id.clone(),
+                true_agent_id.clone(),
+                trigger_scope.project_id.clone(),
+                thread_id.clone(),
+                owner_user_id,
+            );
+            let thread_scope = thread_scope_from_turn_scope(
+                &thread_turn_scope,
+                thread_turn_scope.explicit_owner_user_id().cloned(),
+            )?;
+            match self
+                .thread_service
+                .read_thread(ThreadHistoryRequest {
+                    scope: thread_scope,
+                    thread_id: thread_turn_scope.thread_id.clone(),
+                })
+                .await
+            {
+                Ok(found) => {
+                    record = Some(found);
+                    break;
+                }
+                Err(
+                    SessionThreadError::UnknownThread { .. }
+                    | SessionThreadError::ThreadScopeMismatch { .. },
+                ) => {}
+                Err(error) => return Err(map_ownership_probe_error(error)),
+            }
+        }
+        let Some(mut record) = record else {
+            return Ok(None);
+        };
+        if record
+            .title
+            .as_ref()
+            .is_none_or(|title| title.trim().is_empty())
+            && let Some(name) = automation_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        {
+            record.title = Some(name.to_string());
+        }
+        let run_actor = TurnActor::new(
+            record
+                .scope
+                .owner_user_id
+                .clone()
+                .unwrap_or(creator_user_id),
+        );
+        let approval_turn_scope = TurnScope::new(
+            record.scope.tenant_id.clone(),
+            Some(record.scope.agent_id.clone()),
+            record.scope.project_id.clone(),
+            record.thread_id.clone(),
+        );
+        if self
+            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
+            .await?
+        {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn thread_scope_has_pending_approval(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<bool, RebornServicesError> {
+        let pending = self
+            .approval_interactions
+            .list_pending(ListPendingApprovalsRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        Ok(!pending.approvals.is_empty())
     }
 
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
