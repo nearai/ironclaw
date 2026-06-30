@@ -112,8 +112,8 @@ use ironclaw_turns::{
 
 use super::builder::{
     HARNESS_ACTOR_ID, INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness, StorageMode,
-    apply_hermetic_env, binding_request, build_storage_composite, resolve_canonical_subject_user,
-    scoped_turns_fs_composite, thread_scope_from_binding,
+    apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
+    thread_scope_from_binding,
 };
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
@@ -390,7 +390,13 @@ impl RebornIntegrationGroupBuilder {
 
         // Resolve the group-canonical binding ONCE here so `into_group` can
         // build the single shared turn store and evidence-port `ThreadScope`
-        // before any per-thread binding exists.
+        // before any per-thread binding exists. This is the SINGLE canonical
+        // resolution for the group: `live_approvals` reuses
+        // `canonical_binding.subject_user_id` for its capability user rather than
+        // probing a second time, so turn-store scope and approval user can't
+        // drift. The probe persists one deterministic, inert binding for
+        // `conv-canonical-probe` (no thread submits turns against it); group
+        // tests assert on cross-thread persistence, not binding counts.
         let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
         let ingress = RebornTestIngress::new(adapter);
         let probe = ingress.verified_text_envelope_with_trigger(
@@ -560,8 +566,15 @@ impl RebornIntegrationGroupBuilder {
         // user (the hashed `UserId` the actor `host-user` resolves to), not the
         // constructor's fixed test user, so capability dispatch, approval
         // persistence, auto-approve keying, and gate-evidence lookup all share the
-        // run's `(tenant, user)` — matching production.
-        let subject_user = resolve_canonical_subject_user(&base.product_harness).await?;
+        // run's `(tenant, user)` — matching production. Reuse the SAME canonical
+        // binding `build_base` already resolved for the shared turn-store /
+        // evidence scope, so the approval user and the turn-store scope are
+        // derived from one probe and cannot drift.
+        let subject_user = base
+            .canonical_binding
+            .subject_user_id
+            .clone()
+            .ok_or("canonical binding missing subject user id")?;
         let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
             .await?
             .with_user_id(subject_user);
@@ -604,14 +617,17 @@ impl RebornIntegrationGroupBuilder {
 // RebornThreadBuilder
 // ---------------------------------------------------------------------------
 
-/// Per-thread runtime builder for a `RebornIntegrationGroup`.
+/// Per-thread *workflow* builder for a `RebornIntegrationGroup`.
 ///
-/// The builder borrows the group for its own lifetime (R6). Calling `build()`
-/// Arc-clones all shared fields from `GroupSharedStorage` into the returned
-/// `RebornIntegrationHarness`, which is `'static` and independent of the
-/// group's stack frame. Two harnesses may therefore coexist, though sequential
-/// drop is the intended usage pattern (each prior harness drops before the
-/// next thread builds, satisfying turn-scheduler exclusivity per thread scope).
+/// Builds a per-thread workflow (binding + inbound service + scripted-gateway
+/// registration) over the group's ONE shared runtime — it does NOT build a
+/// per-thread scheduler/coordinator. The builder borrows the group for its own
+/// lifetime (R6). Calling `build()` Arc-clones all shared fields from
+/// `GroupSharedStorage` into the returned `RebornIntegrationHarness`, which is
+/// `'static` and independent of the group's stack frame. Multiple harnesses
+/// may coexist — the shared coordinator dispatches by `run_id`, so siblings
+/// can be parked on gates at the same time (the `concurrent_dual_gate_resume`
+/// scenario relies on exactly this).
 pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,

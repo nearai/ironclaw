@@ -33,13 +33,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, UserId,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
-    ResolveBindingRequest, ResolvedBinding,
+    DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -56,7 +54,7 @@ use super::harness::{
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
-use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use super::test_adapter::RebornTestIngress;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -805,37 +803,6 @@ pub(crate) fn binding_request(
         route_kind: ProductConversationRouteKind::Direct,
         auth_claim: envelope.auth_claim().clone(),
     }
-}
-
-/// Resolve the canonical subject `UserId` that turns submitted under
-/// [`HARNESS_ACTOR_ID`] run as. Product binding resolution maps the external
-/// actor (`"host-user"`) to a hashed canonical `UserId`; the turn scope owner,
-/// the capability dispatch scope, the auto-approve key, and the approval-gate
-/// evidence lookup must all agree on THAT user. The group sets its capability
-/// harness to execute under this user (via `with_user_id`) so a real approval
-/// gate is persisted and verified under one consistent `(tenant, user)` —
-/// matching production, where the run owner is the capability user. The actor →
-/// canonical mapping is deterministic, so the throwaway probe binding here yields
-/// the same user every thread will resolve to.
-pub(crate) async fn resolve_canonical_subject_user(
-    product_harness: &super::product_workflow::RebornProductWorkflowHarness,
-) -> HarnessResult<UserId> {
-    let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-    let ingress = RebornTestIngress::new(adapter);
-    let probe = ingress.verified_text_envelope_with_trigger(
-        "subject-user-probe",
-        HARNESS_ACTOR_ID,
-        "conv-subject-user-probe",
-        "hi",
-        ProductTriggerReason::DirectChat,
-    )?;
-    let binding = product_harness
-        .binding_service()?
-        .resolve_binding(binding_request(&probe))
-        .await?;
-    binding
-        .subject_user_id
-        .ok_or_else(|| "resolved binding missing subject user id".into())
 }
 
 pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessResult<ThreadScope> {

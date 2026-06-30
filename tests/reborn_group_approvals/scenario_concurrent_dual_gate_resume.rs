@@ -1,6 +1,21 @@
 //! HEADLINE scenario for Option P: two threads simultaneously parked on the
 //! group's ONE shared `TurnCoordinator`, resolved independently with opposite
-//! dispositions, asserting zero cross-resume.
+//! dispositions, asserting each run's own gate disposition was applied and
+//! neither run's resume disturbed the other's pending gate or terminal state.
+//!
+//! Note on scope: the on-disk assertions below prove resume is dispatched
+//! correctly by `run_id` (A's approval landed A's write; B's denial never
+//! produced B's write). They do **not** prove per-thread workspace
+//! isolation — `GroupSharedStorage` builds ONE `capability_recorder` /
+//! workspace root for the whole group (`into_group`,
+//! `tests/support/reborn/group.rs`), so `thread_a` and `thread_b` read and
+//! write the *same* on-disk workspace. A file written under one thread's
+//! handle is trivially visible from the other's, regardless of resume
+//! correctness — that was confirmed empirically: an added
+//! `thread_b.assert_workspace_file_absent("concurrent_a.txt")` check failed
+//! because A's approved write is visible through B's handle on the shared
+//! workspace. Cross-thread workspace isolation is therefore not a property
+//! this group harness enforces or this scenario can test.
 //!
 //! ## Why this needs a new scenario (consolidate-don't-proliferate, CLAUDE.md
 //! "Testing Discipline")
@@ -36,8 +51,11 @@ use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Two distinct threads, two distinct gated writes, different target files
-    // so cross-bleed (A's write landing under B's name or vice versa) is
-    // directly detectable on disk, not just from in-process return values.
+    // so each run's own disposition (A approved, B denied) is independently
+    // verifiable on disk — not just from in-process return values. Both
+    // threads share one on-disk workspace (see module note above), so this
+    // proves resume is dispatched by `run_id` rather than proving per-thread
+    // workspace isolation.
     let thread_a = g
         .thread("conv-concurrent-dual-gate-a")
         .script([
@@ -133,8 +151,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_workspace_file_absent("concurrent_b.txt")
         .await?;
     // The negative-space check in the other direction: B's content must never
-    // have landed under A's path either (rules out a resume path that writes
-    // to "whichever gate resolved last" regardless of which run it came from).
+    // have landed at all (rules out a resume path that writes to "whichever
+    // gate resolved last" regardless of which run it came from). Checked via
+    // `thread_a`'s handle, but recall both handles read the same shared
+    // workspace (see module note above) — this is the same on-disk fact as
+    // the `thread_b` check above, re-asserted for readability at the call
+    // site, not an independent per-thread isolation proof.
     thread_a
         .assert_workspace_file_absent("concurrent_b.txt")
         .await?;

@@ -62,10 +62,15 @@ impl ScopeRegistryGateway {
     /// turn is submitted. This is called from `.thread(conv).script().build()`
     /// before any turn reaches the scheduler.
     pub fn register(&self, scope: TurnScope, gateway: Arc<dyn HostManagedModelGateway>) {
-        self.map
+        let replaced = self
+            .map
             .lock()
             .expect("ScopeRegistryGateway map lock poisoned")
             .insert(scope, gateway);
+        assert!(
+            replaced.is_none(),
+            "duplicate scope registration in ScopeRegistryGateway"
+        );
     }
 }
 
@@ -162,6 +167,76 @@ mod tests {
 
         let resolved = registry.resolve_for_scope(&scope_b);
         assert!(resolved.is_none(), "unregistered scope must return None");
+    }
+
+    /// Fail-loud guard: re-registering the same `TurnScope` must panic rather
+    /// than silently re-pointing the first registration's callers at the
+    /// second gateway (the bug this assert prevents — see module docs).
+    #[test]
+    #[should_panic(expected = "duplicate scope registration")]
+    fn duplicate_register_for_same_scope_panics() {
+        let registry = ScopeRegistryGateway::new();
+        let scope = make_scope("thread:a");
+        let gw_first = stub_gateway();
+        let gw_second = stub_gateway();
+
+        registry.register(scope.clone(), gw_first);
+        registry.register(scope, gw_second);
+    }
+
+    /// Construct a minimal `HostManagedModelRequest` for exercising the
+    /// `stream_model` sentinel directly; field contents beyond `run_id`/
+    /// `turn_id` are irrelevant since the sentinel never inspects them for
+    /// anything but the error message.
+    fn make_request() -> HostManagedModelRequest {
+        HostManagedModelRequest {
+            model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+                .expect("valid model profile id"),
+            messages: Vec::new(),
+            surface_version: None,
+            resolved_model_route: None,
+            run_id: ironclaw_turns::TurnRunId::new(),
+            turn_id: ironclaw_turns::TurnId::new(),
+        }
+    }
+
+    /// De-mask guard: a routing miss (no scope registered) must fail as the
+    /// distinct `ConfigurationError` sentinel, not silently resemble model
+    /// exhaustion (`Unavailable`) or `driver_protocol_violation`. If this
+    /// sentinel regresses to a different kind or loses its diagnostic text,
+    /// a real routing miss in a group scenario would become ambiguous with
+    /// those other failure categories — exactly the masking this gateway
+    /// exists to prevent (see module docs).
+    #[tokio::test]
+    async fn stream_model_sentinel_reports_configuration_error_on_routing_miss() {
+        let registry = ScopeRegistryGateway::new();
+
+        let error = registry
+            .stream_model(make_request())
+            .await
+            .expect_err("stream_model on an unrouted registry must fail");
+
+        assert_eq!(
+            error.kind,
+            HostManagedModelErrorKind::ConfigurationError,
+            "routing-miss sentinel must report ConfigurationError, not be confusable \
+             with model exhaustion (Unavailable) or driver_protocol_violation"
+        );
+        assert!(
+            error
+                .safe_summary
+                .contains("ScopeRegistryGateway: stream_model called directly"),
+            "sentinel error message must identify itself so a routing miss is \
+             diagnosable, got: {:?}",
+            error.safe_summary
+        );
+        assert!(
+            error
+                .safe_summary
+                .contains("no per-scope gateway was registered"),
+            "sentinel error message must explain the routing miss, got: {:?}",
+            error.safe_summary
+        );
     }
 
     #[test]

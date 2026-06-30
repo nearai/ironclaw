@@ -260,10 +260,17 @@ byte-identical after this refactor.
 
 ### When to use a group (vs a flat test)
 
-Use a group **only** when the scenario needs cross-thread persistence — e.g.,
-thread A submits a tool call that raises an approval gate; thread B resolves
-the gate; thread A resumes. A scenario that submits + asserts in one thread
-belongs in a flat `tests/reborn_integration_*.rs` test as always.
+Use a group when the scenario needs **multiple threads over shared state or
+the shared runtime** — either:
+- **cross-thread persistence** — thread A submits a tool call that raises an
+  approval gate; thread B resolves the gate; thread A resumes; or
+- **shared-coordinator/runtime behavior** — two threads parked on gates at the
+  same time, resolved independently by `run_id` (see
+  `scenario_concurrent_dual_gate_resume`), which only the one-shared-runtime
+  model can exercise.
+
+A scenario that submits + asserts in one thread belongs in a flat
+`tests/reborn_integration_*.rs` test as always.
 
 ### Group test binary layout
 
