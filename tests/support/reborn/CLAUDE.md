@@ -69,6 +69,7 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 ## Files
 
+- `scope_gateway.rs` — `ScopeRegistryGateway`, a `HostManagedModelGateway` dispatcher that routes model calls to per-thread scripted gateways by `TurnScope` (looked up in a `Mutex<HashMap>`). Sits at the `HostManagedModelGateway` seam but routes to REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` chain — the single-fake-at-the-vendor-SDK-seam invariant (CLAUDE.md lines 5–8, 28) is preserved. Its own `stream_model` is a `ConfigurationError` sentinel (never reached when routing succeeds); `resolve_for_scope` does the actual lookup.
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
 - `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, core assertions
@@ -249,9 +250,10 @@ Both are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 
-`RebornIntegrationGroup` (in `group.rs`) owns shared storage and a shared
-capability backend once; each `.thread(conv_id)` builds a per-thread turn
-runtime over those shared pieces. Cross-thread persistence is real — thread A
+`RebornIntegrationGroup` (in `group.rs`) owns shared storage, a shared
+capability backend, and one shared turn runtime (coordinator + scheduler) once;
+each `.thread(conv_id)` builds a per-thread workflow over that one shared
+runtime. Cross-thread persistence is real — thread A
 writes, thread B sees it. Single-shot `test_default()` is a degenerate
 one-thread group (its own storage, baseline = 0); all existing tests are
 byte-identical after this refactor.

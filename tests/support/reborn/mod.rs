@@ -19,6 +19,7 @@ pub mod product_workflow;
 pub mod qa_scenarios;
 pub mod qa_trace;
 pub mod reply;
+pub mod scope_gateway;
 pub mod scripted_provider;
 pub mod session_thread;
 pub mod test_adapter;
