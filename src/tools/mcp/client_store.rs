@@ -129,7 +129,7 @@ pub fn surface_signature(tools: &[McpTool]) -> String {
         hasher.update(annotations.as_bytes());
         hasher.update(b"\x01");
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Composite key identifying an MCP client instance: the authenticating

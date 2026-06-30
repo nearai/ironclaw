@@ -38,6 +38,10 @@ pub(crate) fn github_request(
         return Ok(body);
     }
 
+    if response.status == 422 && is_github_validation_error_body(&response.body) {
+        return Err("github_api_error_status_422_validation".to_string());
+    }
+
     Err(format!("github_api_error_status_{}", response.status))
 }
 
@@ -74,6 +78,22 @@ pub(crate) fn sanitize_host_error(error: &str) -> String {
         return "github_api_egress_denied".to_string();
     }
     "github_api_request_failed".to_string()
+}
+
+fn is_github_validation_error_body(body: &[u8]) -> bool {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let message_is_validation = parsed
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|message| message.eq_ignore_ascii_case("Validation Failed"));
+    let has_validation_errors = parsed
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|errors| !errors.is_empty());
+
+    message_is_validation && has_validation_errors
 }
 
 #[cfg(test)]
@@ -120,5 +140,25 @@ pub(crate) mod test_support {
 
     pub(super) fn take_response() -> Option<Result<String, String>> {
         RESPONSES.with(|responses| responses.borrow_mut().pop_front())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_github_validation_error_body;
+
+    #[test]
+    fn github_validation_422_body_requires_validation_error_details() {
+        assert!(is_github_validation_error_body(
+            br#"{"message":"Validation Failed","errors":[{"resource":"Search","field":"q","code":"invalid"}],"status":"422"}"#
+        ));
+
+        assert!(!is_github_validation_error_body(
+            br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
+        ));
+
+        assert!(!is_github_validation_error_body(
+            br#"{"message":"You have triggered an abuse detection mechanism.","status":"422"}"#
+        ));
     }
 }

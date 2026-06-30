@@ -32,8 +32,8 @@ use crate::worker::autonomous_recovery::{
 };
 use ironclaw_common::{AppEvent, JobResultStatus};
 use ironclaw_llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
-    ResponseMetadata, ToolCall, ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, ReasoningDetails,
+    RespondResult, ResponseMetadata, ToolCall, ToolSelection,
 };
 use ironclaw_safety::SafetyLayer;
 
@@ -1532,6 +1532,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                         tool_calls,
                         content: reasoning_text,
                         reasoning: None,
+                        reasoning_details: None,
                     },
                     usage: ironclaw_llm::TokenUsage::default(),
                     finish_reason: ironclaw_llm::FinishReason::ToolUse,
@@ -1701,6 +1702,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
+        reasoning_details: Option<ReasoningDetails>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -1767,6 +1769,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // Gemini 2.5+ reject the follow-up with HTTP 400 otherwise (#3201, #3225).
         reason_ctx.messages.push(
             ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning_details(reasoning_details)
                 .with_reasoning(reasoning),
         );
 

@@ -65,6 +65,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
+    Icon() {},
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
@@ -81,7 +82,18 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
     },
+    NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
+    buildScopedLogsPath: (
+      { threadId, runId } = {},
+      { absolute = false } = {},
+    ) => {
+      const params = [];
+      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
+      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
+      const query = params.length > 0 ? `?${params.join("&")}` : "";
+      return `${absolute ? "/v2" : ""}/logs${query}`;
+    },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
     globalThis: {},
@@ -93,7 +105,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
 
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
-    threads: [{ id: activeThreadId }],
+    threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
     onSelectThread: () => {},
     isCreatingThread: false,
@@ -283,6 +295,50 @@ test("Chat keeps composer send blocked while a gate owns the run decision", asyn
   assert.equal(sendCount, 0);
 });
 
+test("Chat keeps the new-conversation composer sendable while a prior run is settling", async () => {
+  let sentBody = null;
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    hookState: {
+      messages: [],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async (content, options) => {
+        sentBody = { content, options };
+        return { thread_id: "thread-2" };
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const props = componentProps(emptyState, components.EmptyState);
+  assert.equal(props.sendDisabled, false);
+  assert.equal(props.canCancel, false);
+
+  await props.onSend("hi how are you");
+
+  assert.equal(sentBody.content, "hi how are you");
+  assert.equal(sentBody.options.threadId, null);
+  assert.equal(sentBody.options.images.length, 0);
+  assert.equal(sentBody.options.attachments.length, 0);
+});
+
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
   const historyLoadError = "Failed to load conversation history.";
   const { tree, components } = renderChat({
@@ -319,7 +375,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
-test("Chat does not render a duplicate logs bar while a run is active", () => {
+test("Chat links to scoped logs for the active thread run", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -346,10 +402,18 @@ test("Chat does not render a duplicate logs bar while a run is active", () => {
   });
 
   const logsLink = findComponent(tree, components.Link);
+  assert.ok(logsLink, "active chat should render a scoped logs link");
   assert.equal(
-    logsLink,
+    componentProps(logsLink, components.Link).to,
+    "/v2/logs?thread_id=thread-1&run_id=run-1",
+  );
+  assert.ok(logsLink.values.includes("nav.logs"));
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    findComponent(messageList, components.Link),
     null,
-    "active chat should not render a second Logs link below the page header",
+    "active run logs link should not render in the message list footer near the composer",
   );
 });
 

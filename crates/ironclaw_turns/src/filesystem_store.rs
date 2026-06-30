@@ -1,11 +1,12 @@
 //! Filesystem-backed [`TurnStateStore`] implementation.
 //!
 //! Persists the lower-churn [`TurnPersistenceSnapshot`] as a JSON blob under
-//! the `/turns` mount alias (alias-relative path: `/turns/state.json`) and
-//! high-churn runner lease heartbeats as per-run CAS records under
-//! `/turns/runner-leases`. Snapshot mutations read the snapshot, overlay
-//! current runner leases, delegate to an [`InMemoryTurnStateStore`] in a
-//! transient `apply` closure, and write the resulting snapshot back with
+//! the `/turns` mount alias (alias-relative path: `/turns/state.json`).
+//! High-churn runner lease heartbeats are memory-backed per
+//! [`FilesystemTurnStateStore`] instance and are overlaid onto the durable
+//! snapshot while the process is alive. Snapshot mutations read the snapshot,
+//! overlay current runner leases, delegate to an [`InMemoryTurnStateStore`] in
+//! a transient `apply` closure, and write the resulting snapshot back with
 //! optimistic CAS + bounded retry. Reads load the snapshot, overlay current
 //! runner leases, and project through the in-memory store without writing
 //! back.
@@ -22,7 +23,6 @@
 //!
 //! ```text
 //! /turns/state.json
-//! /turns/runner-leases/{run_id}.json
 //! ```
 //!
 //! Within-tenant scoping (agent/project/thread) is encoded inside the
@@ -33,6 +33,7 @@
 //! path itself.
 
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -43,6 +44,7 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, UserId};
+use tokio::sync::RwLock;
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
@@ -70,7 +72,7 @@ mod runner_lease;
 
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
-use runner_lease::{RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar};
+use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
 
 #[cfg(test)]
 mod tests;
@@ -123,6 +125,7 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_cache: Mutex<Option<CachedSnapshot>>,
+    runner_leases: RunnerLeaseMemory,
     apply_timeout: Duration,
 }
 
@@ -136,6 +139,7 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_cache: Mutex::new(None),
+            runner_leases: Arc::new(RwLock::new(HashMap::new())),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -216,7 +220,7 @@ where
         snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
         overlay: RunnerLeaseOverlay,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        self.runner_lease_sidecar().overlay(snapshot, overlay).await
+        self.runner_lease_store().overlay(snapshot, overlay).await
     }
 
     async fn seed_runner_lease_from_snapshot_inner(
@@ -224,7 +228,7 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .seed_from_snapshot(&snapshot, run_id)
             .await?;
         self.clear_snapshot_cache();
@@ -232,9 +236,7 @@ where
     }
 
     async fn cleanup_runner_lease_after_state(&self, result: &Result<TurnRunState, TurnError>) {
-        self.runner_lease_sidecar()
-            .cleanup_after_state(result)
-            .await;
+        self.runner_lease_store().cleanup_after_state(result).await;
         self.clear_snapshot_cache();
     }
 
@@ -242,12 +244,12 @@ where
         &self,
         request: HeartbeatRequest,
     ) -> Result<EventCursor, TurnError> {
-        let sidecar = self.runner_lease_sidecar();
-        let cursor = match sidecar.heartbeat(request.clone()).await {
+        let lease_store = self.runner_lease_store();
+        let cursor = match lease_store.heartbeat(request.clone()).await {
             Err(TurnError::ScopeNotFound) => {
                 self.seed_missing_runner_lease_from_snapshot(request.run_id)
                     .await?;
-                self.runner_lease_sidecar().heartbeat(request).await?
+                self.runner_lease_store().heartbeat(request).await?
             }
             result => result?,
         };
@@ -260,7 +262,7 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .seed_from_snapshot_if_missing(&snapshot, run_id)
             .await
     }
@@ -283,7 +285,7 @@ where
         ) {
             return Ok(None);
         }
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .mark_cancel_requested_from_snapshot(&snapshot, request.run_id)
             .await
     }
@@ -296,7 +298,7 @@ where
         retired_status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .retire_runner_lease_from_snapshot(
                 &snapshot,
                 run_id,
@@ -315,15 +317,15 @@ where
         let Some(previous) = previous else {
             return;
         };
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .restore_if_current_status(previous, current_status)
             .await;
         self.clear_snapshot_cache();
     }
 
-    fn runner_lease_sidecar(&self) -> RunnerLeaseSidecar<F> {
-        RunnerLeaseSidecar::new(
-            Arc::clone(&self.filesystem),
+    fn runner_lease_store(&self) -> RunnerLeaseStore {
+        RunnerLeaseStore::new(
+            Arc::clone(&self.runner_leases),
             self.limits.runner_lease_ttl,
             self.apply_timeout,
         )
@@ -393,7 +395,7 @@ where
         let scope = ResourceScope::system();
         let limits = self.limits;
         let admission_limit_provider = self.admission_limit_provider.clone();
-        let filesystem_for_overlay = Arc::clone(&self.filesystem);
+        let runner_leases_for_overlay = Arc::clone(&self.runner_leases);
         let runner_lease_ttl = limits.runner_lease_ttl;
         let overlay_timeout = self.apply_timeout;
 
@@ -415,8 +417,8 @@ where
             |snapshot: &TurnPersistenceSnapshot| snapshot_entry(snapshot),
             // apply: per CAS-retry callback.
             //   1. Apply runner-lease overlay so the InMemoryTurnStateStore sees
-            //      up-to-date `last_heartbeat_at` / `lease_expires_at` from
-            //      per-run sidecar records. The overlaid snapshot is both the
+            //      up-to-date `last_heartbeat_at` / `lease_expires_at` from the
+            //      in-memory runner-lease map. The overlaid snapshot is both the
             //      no-op baseline and (on a real transition) what cas_update
             //      writes back — mirroring the pre-merge `apply_with_retry`,
             //      which built and persisted from the overlaid `old_snapshot`.
@@ -425,13 +427,13 @@ where
             //      the returned Future without holding the lock.
             move |current: Option<TurnPersistenceSnapshot>| {
                 let apply = Arc::clone(&apply);
-                let filesystem_for_overlay = Arc::clone(&filesystem_for_overlay);
+                let runner_leases_for_overlay = Arc::clone(&runner_leases_for_overlay);
                 let admission_limit_provider = admission_limit_provider.clone();
 
                 async move {
                     let raw_snapshot = current.unwrap_or_default();
-                    let (overlaid_snapshot, _) = RunnerLeaseSidecar::new(
-                        filesystem_for_overlay,
+                    let (overlaid_snapshot, _) = RunnerLeaseStore::new(
+                        runner_leases_for_overlay,
                         runner_lease_ttl,
                         overlay_timeout,
                     )
@@ -440,8 +442,8 @@ where
                     // No-op baseline is the OVERLAID snapshot, not the raw
                     // backend body. `RunnerLeaseOverlay::Run` / `::All` patch
                     // time-varying lease fields (last_heartbeat_at,
-                    // lease_expires_at) from per-run sidecar records into the
-                    // snapshot the closure sees. Comparing the closure's result
+                    // lease_expires_at) from the in-memory runner-lease map into
+                    // the snapshot the closure sees. Comparing the closure's result
                     // against the raw body would classify an inert transition as
                     // a real mutation and write on every call — version churn and
                     // CAS retries under load. This mirrors the pre-merge
@@ -572,7 +574,7 @@ where
             tracing::debug!(
                 run_id = %run_id,
                 error = %error,
-                "failed to compensate turn claim after runner lease sidecar seed failed"
+                "failed to compensate turn claim after memory runner lease seed failed"
             );
         }
         self.clear_snapshot_cache();
@@ -668,7 +670,7 @@ where
         let response = result?;
         match response.status {
             status if status.is_terminal() => {
-                self.runner_lease_sidecar()
+                self.runner_lease_store()
                     .delete_best_effort(response.run_id)
                     .await;
             }
@@ -875,7 +877,7 @@ where
             .await;
         if let Ok(response) = &result {
             for state in &response.recovered {
-                self.runner_lease_sidecar()
+                self.runner_lease_store()
                     .delete_best_effort(state.run_id)
                     .await;
             }

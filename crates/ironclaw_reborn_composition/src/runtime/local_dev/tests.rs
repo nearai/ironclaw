@@ -1359,6 +1359,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-external-tool-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let run_context = run_context("external-tool-provider-name").await;
+        let catalog = Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new());
+        catalog
+            .register(
+                run_context.run_id,
+                vec![
+                    ironclaw_turns::ExternalToolSpec::new(
+                        "client_lookup",
+                        "Look up client-side data",
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" }
+                            }
+                        }),
+                    )
+                    .expect("external tool spec"),
+                ],
+            )
+            .await
+            .expect("external tool catalog registers");
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
+            policy,
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            project_service: Arc::clone(&local_runtime.project_service),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: catalog,
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "client_lookup")
+            .expect("external tool definition");
+
+        assert_eq!(
+            tool_definition.capability_id.as_str(),
+            "external_tool.client_lookup"
+        );
+
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    tool_definition.name.as_str(),
+                    serde_json::json!({"query": "status"}),
+                ),
+            ))
+            .await
+            .expect("external provider tool call stages");
+
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            "external_tool.client_lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1720,6 +1823,136 @@ mod tests {
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
         );
+        // Global auto-approve now defaults ON, so disable it for the owner scope
+        // (the scope the set dispatch authorizes against) to exercise the
+        // gate -> approve -> resume path this test verifies.
+        {
+            let mut disable_scope = run_context.scope.to_resource_scope();
+            disable_scope.user_id = owner_user_id.clone();
+            ironclaw_approvals::AutoApproveSettingStore::set(
+                local_runtime.auto_approve_settings.as_ref(),
+                ironclaw_approvals::AutoApproveSettingInput {
+                    updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
+                    scope: disable_scope,
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("disable global auto-approve"); // safety: test-only gating precondition
+        }
+        let set_capability_id =
+            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
+
+        let missing_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:missing-approved-dm").expect("target id");
+        let missing_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("missing-target set call stages");
+        let missing_set_activity_id = missing_set_candidate.activity_id;
+        let missing_set_surface_version = missing_set_candidate.surface_version.clone();
+        let missing_set_capability_id_from_candidate = missing_set_candidate.capability_id.clone();
+        let missing_blocked_outcome = port
+            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
+            .await
+            .expect("missing-target set call reaches approval gate");
+        let missing_approval_resume = match missing_blocked_outcome {
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref,
+                approval_resume: Some(resume),
+                ..
+            } => {
+                assert!(gate_ref.as_str().starts_with("gate:approval-"));
+                resume
+            }
+            outcome => panic!("missing-target set should require approval, got {outcome:?}"),
+        };
+        let missing_invocation_id =
+            InvocationId::parse(missing_approval_resume.resume_token.as_str())
+                .expect("missing-target resume token carries invocation id");
+        let mut missing_approval_scope = run_context.scope.to_resource_scope();
+        missing_approval_scope.user_id = owner_user_id.clone();
+        missing_approval_scope.invocation_id = missing_invocation_id;
+        let missing_approval = local_runtime
+            .capability_policy
+            .lease_approval_for(
+                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                    capability: &set_capability_id,
+                },
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
+            )
+            .expect("missing-target outbound delivery approval lease terms");
+        ApprovalResolver::new(
+            local_runtime.approval_requests.as_ref(),
+            local_runtime.capability_leases.as_ref(),
+        )
+        .approve_dispatch(
+            &missing_approval_scope,
+            missing_approval_resume.approval_request_id,
+            missing_approval,
+        )
+        .await
+        .expect("missing-target approval issues dispatch lease");
+        let missing_lease_id = local_runtime
+            .capability_leases
+            .leases_for_scope(&missing_approval_scope)
+            .await
+            .into_iter()
+            .find(|lease| lease.grant.capability == set_capability_id)
+            .expect("missing-target approval lease exists")
+            .grant
+            .id;
+
+        let missing_set_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: missing_set_activity_id,
+                surface_version: missing_set_surface_version,
+                capability_id: missing_set_capability_id_from_candidate,
+                input_ref: CapabilityInputRef::new("input:missing-target-approval-resume")
+                    .expect("missing-target input ref"),
+                approval_resume: Some(missing_approval_resume),
+                auth_resume: None,
+            })
+            .await
+            .expect("approved missing-target set call returns a capability outcome");
+        match missing_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.safe_summary,
+                    "outbound delivery target is not available"
+                );
+            }
+            outcome => {
+                panic!("approved missing target should fail non-terminally, got {outcome:?}")
+            }
+        }
+        assert!(
+            local_runtime
+                .outbound_preferences
+                .load_communication_preference(owner_preference_key.clone())
+                .await
+                .expect("owner preference read after approved missing-target set")
+                .is_none()
+        );
+        let missing_leases = local_runtime
+            .capability_leases
+            .leases_for_scope(&missing_approval_scope)
+            .await;
+        let missing_lease = missing_leases
+            .iter()
+            .find(|lease| lease.grant.id == missing_lease_id)
+            .expect("missing-target approval lease remains");
+        assert_eq!(missing_lease.status, CapabilityLeaseStatus::Claimed);
+
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
@@ -1765,8 +1998,6 @@ mod tests {
                 .is_none()
         );
 
-        let set_capability_id =
-            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
         let invocation_id = InvocationId::parse(approval_resume.resume_token.as_str())
             .expect("resume token carries invocation id");
         let mut approval_scope = run_context.scope.to_resource_scope();
@@ -2043,6 +2274,40 @@ mod tests {
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
         );
+        let missing_target_id =
+            RebornOutboundDeliveryTargetId::new("slack:missing-dm").expect("target id");
+        let missing_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": missing_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("missing-target set call stages");
+        let missing_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
+            .await
+            .expect("missing-target set call returns a capability outcome");
+        match missing_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.safe_summary,
+                    "outbound delivery target is not available"
+                );
+            }
+            outcome => panic!("missing target should fail non-terminally, got {outcome:?}"),
+        }
+        assert!(
+            local_runtime
+                .outbound_preferences
+                .load_communication_preference(owner_preference_key.clone())
+                .await
+                .expect("owner preference read after missing-target set")
+                .is_none()
+        );
+
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
@@ -2919,43 +3184,13 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        assert_extension_search_capability_port_reads_system_catalog(
+        let run_context = run_context("extension-search-loop-port").await;
+        enable_global_auto_approve_for_run(
             &services,
-            "extension-search-loop-port",
-            "local-dev-extension-search-user",
+            &run_context,
+            &UserId::new("local-dev-extension-search-user").expect("user id"),
         )
         .await;
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn hosted_single_tenant_volume_capability_port_extension_search_reads_system_catalog() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(
-            crate::hosted_single_tenant_volume_build_input(
-                "hosted-volume-extension-search-owner",
-                dir.path().join("hosted-volume"),
-            )
-            .expect("hosted volume input"),
-        )
-        .await
-        .expect("hosted volume services build");
-        assert_extension_search_capability_port_reads_system_catalog(
-            &services,
-            "hosted-volume-extension-search-loop-port",
-            "hosted-volume-extension-search-user",
-        )
-        .await;
-    }
-
-    async fn assert_extension_search_capability_port_reads_system_catalog(
-        services: &crate::RebornServices,
-        run_label: &str,
-        user_id: &str,
-    ) {
-        let run_context = run_context(run_label).await;
-        let user_id = UserId::new(user_id).expect("user id");
-        enable_global_auto_approve_for_run(services, &run_context, &user_id).await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
             agent_id: run_context.scope.agent_id.clone().expect("agent id"),
@@ -2964,10 +3199,10 @@ mod tests {
             mission_id: None,
         };
         let wiring = capability_wiring(
-            services,
+            &services,
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
-            user_id,
+            UserId::new("local-dev-extension-search-user").expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),

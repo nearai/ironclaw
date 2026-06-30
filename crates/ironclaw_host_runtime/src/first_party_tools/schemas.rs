@@ -22,6 +22,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "timestamp": { "type": "string", "description": "Alias for input" },
                 "timestamp2": { "type": "string", "description": "Second timestamp for diff" },
                 "timezone": { "type": "string", "description": "IANA timezone name" },
+                "utc_offset": { "type": "string", "description": "UTC offset for now output, e.g. +03:00 or -07:00" },
                 "from_timezone": { "type": "string", "description": "IANA timezone for interpreting the input" },
                 "to_timezone": { "type": "string", "description": "IANA timezone for conversion output" },
                 "format": { "type": "string", "description": "chrono format string for format operation" },
@@ -46,10 +47,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
+            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Preferred natural language search query for persistent memory"
+                    "description": "Preferred natural language search query for Reborn internal persistent memory"
                 },
                 "q": {
                     "type": "string",

@@ -812,6 +812,14 @@ pub trait ResourceGovernorStore: Send + Sync + 'static {
     where
         T: Send + 'static,
         F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
+
+    /// Lock-free read of the governor snapshot. Implementations must not
+    /// take the same exclusive lock used by `update`'s read-modify-write
+    /// transaction.
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
 }
 
 /// File-backed resource-governor store using a stable sidecar lock file around
@@ -850,6 +858,33 @@ impl ResourceGovernorStore for JsonFileResourceGovernorStore {
         lock_file.lock_exclusive().map_err(storage_error)?;
 
         let result = update_file_snapshot(&self.path, update);
+        let unlock_result = lock_file.unlock().map_err(storage_error);
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        let lock_path = lock_path_for(&self.path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(storage_error)?;
+        }
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(storage_error)?;
+        lock_file.lock_shared().map_err(storage_error)?;
+
+        let result = read_file_snapshot(&self.path).and_then(|snapshot| inspect(&snapshot));
         let unlock_result = lock_file.unlock().map_err(storage_error);
         match (result, unlock_result) {
             (Ok(value), Ok(())) => Ok(value),
@@ -1073,6 +1108,8 @@ where
 {
     store: S,
     clock: Arc<dyn Clock>,
+    unlimited_fast_path: bool,
+    unlimited_state: Mutex<UnlimitedFastPathState>,
     /// Optional sink that receives `BudgetEvent`s as reservations,
     /// reconciliations, warnings, and denials happen. Wired by
     /// composition; defaults to [`NoOpBudgetEventSink`] so the
@@ -1089,6 +1126,8 @@ where
         Self {
             store,
             clock: Arc::new(SystemClock),
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1100,8 +1139,23 @@ where
         Self {
             store,
             clock,
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
+    }
+
+    /// Keep unlimited/no-quota reservation bookkeeping process-local.
+    ///
+    /// When no finite resource limits are configured, the persistent governor
+    /// does not need durable snapshot writes to enforce limits. This opt-in
+    /// path preserves same-process reservation lifecycle checks while avoiding
+    /// synchronous writes on reserve/reconcile/release. As soon as any finite
+    /// limit is present in the durable snapshot, new reservations use the
+    /// durable path again.
+    pub fn with_unlimited_fast_path(mut self) -> Self {
+        self.unlimited_fast_path = true;
+        self
     }
 
     /// Plug in an audit/SSE sink. Every `reserve`, `reconcile`,
@@ -1122,7 +1176,26 @@ where
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
         // Clone per invocation: the store may re-run this closure on a CAS
-        // retry, so it must not move `account`/`limits` out of its capture.
+        // retry, so it must not move `account`/`limits`/`local_state` out of
+        // its capture.
+        if self.unlimited_fast_path {
+            let mut local = self.lock_unlimited_state()?;
+            let local_state = local.state.clone();
+            let local_initialized = local.initialized;
+            let updated_state = self.store.update(move |snapshot| {
+                if local_initialized
+                    && !resource_state_has_finite_limits(&snapshot.state)
+                    && !resource_state_has_durable_activity(&snapshot.state)
+                {
+                    snapshot.state = local_state.clone();
+                }
+                set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
+                Ok(snapshot.state.clone())
+            })?;
+            local.state = updated_state;
+            local.initialized = true;
+            return Ok(());
+        }
         self.store.update(move |snapshot| {
             set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
             Ok(())
@@ -1132,10 +1205,9 @@ where
     pub fn reserved_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
-            Ok(snapshot
-                .state
+        self.update_active_state(move |state| {
+            advance_period_if_rolled_over(state, &account, now);
+            Ok(state
                 .reserved_by_account
                 .get(&account)
                 .cloned()
@@ -1146,15 +1218,88 @@ where
     pub fn usage_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
-            Ok(snapshot
-                .state
+        self.update_active_state(move |state| {
+            advance_period_if_rolled_over(state, &account, now);
+            Ok(state
                 .usage_by_account
                 .get(&account)
                 .cloned()
                 .unwrap_or_default())
         })
+    }
+
+    fn unlimited_fast_path_seed(&self) -> Result<Option<ResourceState>, ResourceError> {
+        if !self.unlimited_fast_path {
+            return Ok(None);
+        }
+        self.store.inspect(|snapshot| {
+            if resource_state_has_finite_limits(&snapshot.state)
+                || resource_state_has_durable_activity(&snapshot.state)
+            {
+                Ok(None)
+            } else {
+                Ok(Some(snapshot.state.clone()))
+            }
+        })
+    }
+
+    /// `update` is `FnMut`, not `FnOnce`: when the fast path is inactive this
+    /// forwards straight into `ResourceGovernorStore::update`, which may
+    /// re-run the closure on a CAS retry. Callers must clone captures rather
+    /// than move them out (see `ResourceGovernorStore::update` docs).
+    fn update_active_state<T, F>(&self, mut update: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnMut(&mut ResourceState) -> Result<T, ResourceError> + Send + 'static,
+    {
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            return update(&mut local.state);
+        }
+        self.store
+            .update(move |snapshot| update(&mut snapshot.state))
+    }
+
+    /// `durable_close` is `FnMut` for the same CAS-retry reason as
+    /// `update_active_state`; `local_close` runs at most once against the
+    /// process-local fast-path state so it stays `FnOnce`.
+    fn close_fast_path_or_durable<T, L, D>(
+        &self,
+        local_close: L,
+        durable_close: D,
+    ) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        L: FnOnce(&mut ResourceState) -> Result<T, ResourceError>,
+        D: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            match local_close(&mut local.state) {
+                Ok(value) => return Ok(value),
+                Err(ResourceError::UnknownReservation { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.store.update(durable_close)
+    }
+
+    fn lock_unlimited_state(
+        &self,
+    ) -> Result<MutexGuard<'_, UnlimitedFastPathState>, ResourceError> {
+        self.unlimited_state
+            .lock()
+            .map_err(|_| ResourceError::Storage {
+                reason: "resource governor unlimited fast-path state lock poisoned".to_string(),
+            })
     }
 }
 
@@ -1192,9 +1337,9 @@ where
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
         // Clone per invocation: this closure may be re-run on a CAS retry.
-        let result = self.store.update(move |snapshot| {
+        let result = self.update_active_state(move |state| {
             reserve_with_outcome_in_state(
-                &mut snapshot.state,
+                state,
                 scope.clone(),
                 estimate.clone(),
                 reservation_id,
@@ -1211,10 +1356,15 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        // Clone per invocation: this closure may be re-run on a CAS retry.
-        let result = self.store.update(move |snapshot| {
-            reconcile_in_state(&mut snapshot.state, reservation_id, actual.clone(), now)
-        });
+        // Clone per invocation: the durable closure may be re-run on a CAS
+        // retry, so it must not move `actual` out of its capture.
+        let local_actual = actual.clone();
+        let result = self.close_fast_path_or_durable(
+            move |state| reconcile_in_state(state, reservation_id, local_actual, now),
+            move |snapshot| {
+                reconcile_in_state(&mut snapshot.state, reservation_id, actual.clone(), now)
+            },
+        );
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Reconciled {
                 account: most_specific_account(&receipt.scope),
@@ -1230,9 +1380,10 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        let result = self
-            .store
-            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now));
+        let result = self.close_fast_path_or_durable(
+            move |state| release_in_state(state, reservation_id, now),
+            move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now),
+        );
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Released {
                 account: most_specific_account(&receipt.scope),
@@ -1249,13 +1400,7 @@ where
     ) -> Result<Option<AccountSnapshot>, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            Ok(account_snapshot_in_state(
-                &mut snapshot.state,
-                &account,
-                now,
-            ))
-        })
+        self.update_active_state(move |state| Ok(account_snapshot_in_state(state, &account, now)))
     }
 }
 
@@ -1295,6 +1440,22 @@ struct ResourceState {
     /// `ResourceLimits::period` on each mutation; v1 snapshots that lack
     /// this field migrate transparently.
     period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UnlimitedFastPathState {
+    state: ResourceState,
+    initialized: bool,
+}
+
+fn resource_state_has_finite_limits(state: &ResourceState) -> bool {
+    state.limits.values().any(|limits| !limits.is_unlimited())
+}
+
+fn resource_state_has_durable_activity(state: &ResourceState) -> bool {
+    !state.reserved_by_account.is_empty()
+        || !state.usage_by_account.is_empty()
+        || !state.reservations.is_empty()
 }
 
 /// Snapshot of accumulated period-scoped spend + reserved.

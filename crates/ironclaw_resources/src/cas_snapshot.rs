@@ -134,6 +134,44 @@ where
         self.update_with_scope::<S, T, E, U>(self.scope.clone(), update)
     }
 
+    /// Read the underlying snapshot through the store's default scope without
+    /// writing it back.
+    pub(crate) fn inspect<S, T, E, U>(&self, inspect: U) -> Result<T, E>
+    where
+        S: Snapshot,
+        T: Send + 'static,
+        E: StorageError,
+        U: FnOnce(&S) -> Result<T, E> + Send + 'static,
+    {
+        self.inspect_with_scope::<S, T, E, U>(self.scope.clone(), inspect)
+    }
+
+    /// Read the underlying snapshot through a caller-supplied scope without
+    /// writing it back.
+    pub(crate) fn inspect_with_scope<S, T, E, U>(
+        &self,
+        scope: ResourceScope,
+        inspect: U,
+    ) -> Result<T, E>
+    where
+        S: Snapshot,
+        T: Send + 'static,
+        E: StorageError,
+        U: FnOnce(&S) -> Result<T, E> + Send + 'static,
+    {
+        let filesystem = Arc::clone(&self.filesystem);
+        let path_str = self.path_str;
+        let worker_cell = Arc::clone(&self.worker);
+        let worker_name = self.worker_thread_name;
+        run_on_worker(&worker_cell, worker_name, move || async move {
+            let path = ScopedPath::new(path_str.to_string()).map_err(|error| {
+                E::storage(format!("invalid snapshot path {path_str}: {error}"))
+            })?;
+            let snapshot = read_snapshot::<F, S, E>(&filesystem, &scope, &path).await?;
+            inspect(&snapshot)
+        })
+    }
+
     /// Run a read-modify-write transaction against the underlying
     /// snapshot using a caller-supplied [`ResourceScope`].
     ///
@@ -221,9 +259,9 @@ where
 
 /// Snapshots the CAS store wraps. Each store provides its own concrete
 /// snapshot type (e.g. `ResourceGovernorSnapshot`, `BudgetGateSnapshot`)
-/// implementing this trait so the shared `update_snapshot` helper can
-/// decode, build a default-on-absent, and re-encode without knowing
-/// per-store schema details.
+/// implementing this trait so the shared `cas_update` helper and the
+/// lock-free `read_snapshot` helper can decode, build a default-on-absent,
+/// and re-encode without knowing per-store schema details.
 pub(crate) trait Snapshot: DeserializeOwned + Serialize + Send + 'static {
     /// Filesystem record-kind tag written into [`Entry::kind`] on every
     /// encode. Must satisfy `[A-Za-z_][A-Za-z0-9_]*` (the
@@ -234,6 +272,37 @@ pub(crate) trait Snapshot: DeserializeOwned + Serialize + Send + 'static {
     /// Construct the snapshot used when the underlying file does not
     /// yet exist (first write).
     fn fresh() -> Self;
+}
+
+/// Read the underlying snapshot without taking the CAS-retry path.
+///
+/// Lock-free: a single backend `get` + decode, no `update`/`apply`
+/// closure and no write-back, so callers that only need to inspect the
+/// current value (e.g. the unlimited-fast-path check) don't pay for a
+/// `cas_update` round trip.
+async fn read_snapshot<F, S, E>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: &ScopedPath,
+) -> Result<S, E>
+where
+    F: RootFilesystem,
+    S: Snapshot,
+    E: StorageError,
+{
+    match filesystem.get(scope, path).await {
+        Ok(Some(versioned)) => decode_snapshot::<S, E>(&versioned.entry.body),
+        Ok(None) => Ok(S::fresh()),
+        Err(error) => Err(E::storage_from(error)),
+    }
+}
+
+fn decode_snapshot<S, E>(body: &[u8]) -> Result<S, E>
+where
+    S: Snapshot,
+    E: StorageError,
+{
+    serde_json::from_slice(body).map_err(|error| E::storage(format!("decode snapshot: {error}")))
 }
 
 // ---------------------------------------------------------------------------
