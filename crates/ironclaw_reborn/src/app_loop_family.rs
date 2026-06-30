@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use ironclaw_agent_loop::{
     families,
@@ -15,10 +15,10 @@ pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamil
 }
 
 pub fn build_loop_family_registry_with_default_iteration_limit(
-    default_iteration_limit: Option<u32>,
+    default_iteration_limit: Option<NonZeroU32>,
 ) -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
     let default_family = match default_iteration_limit {
-        Some(iteration_limit) => families::default_with_iteration_limit(iteration_limit),
+        Some(iteration_limit) => families::default_with_iteration_limit(iteration_limit.get()),
         None => families::default(),
     };
     LoopFamilyRegistry::with_families(vec![

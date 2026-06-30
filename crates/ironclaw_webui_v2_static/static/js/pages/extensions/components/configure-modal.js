@@ -47,6 +47,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const canSave = manualSecrets.length > 0 || fields.length > 0;
   const isActive = extensionIsActive(extension);
   const canActivate = setupReadyForActivation({ extension, secrets, fields });
+  const setupUrl = httpsUrl(onboarding?.setup_url);
 
   if (isLoading) {
     return html`
@@ -92,10 +93,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${onboarding.credential_instructions}
         </p>
       `}
-      ${onboarding?.setup_url &&
+      ${setupUrl &&
       html`
         <a
-          href=${onboarding.setup_url}
+          href=${setupUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="mb-4 inline-flex items-center gap-1.5 text-sm text-signal hover:underline"
@@ -261,7 +262,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   `;
 }
 
+function httpsUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    return url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function ModalShell({ onClose, title, children }) {
+  const titleId = React.useId();
   React.useEffect(() => {
     const handleKey = (e) => {
       if (e.key === "Escape") onClose();
@@ -278,11 +290,14 @@ function ModalShell({ onClose, title, children }) {
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby=${titleId}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
         onClick=${(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-white">${title}</h3>
+          <h3 id=${titleId} className="text-lg font-semibold text-white">${title}</h3>
           <button
             onClick=${onClose}
             className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"

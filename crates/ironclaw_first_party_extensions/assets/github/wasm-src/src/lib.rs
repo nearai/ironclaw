@@ -91,6 +91,7 @@ fn guest_error_kind(code: &str) -> &'static str {
         "github_api_timeout" => "executor",
         "github_api_egress_denied" | "github_api_redirect_denied" => "network_denied",
         "github_api_error_status_401" => "auth_required",
+        "github_api_error_status_422_validation" => "input",
         "github_api_error_status_403" | "github_api_error_status_429" => "client",
         _ => "operation_failed",
     }
@@ -305,9 +306,15 @@ mod tests {
             "Invalid assignees: at most 10 values are allowed",
             "Invalid assignees: at most 100 values are allowed",
             "invalid_comments: comments serialization failed",
+            "github_api_error_status_422_validation",
         ] {
             assert_eq!(guest_error_kind(code), "input", "{code}");
         }
+    }
+
+    #[test]
+    fn guest_error_kind_does_not_classify_generic_422_as_input() {
+        assert_eq!(guest_error_kind("github_api_error_status_422"), "operation_failed");
     }
 
     #[test]

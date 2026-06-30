@@ -989,7 +989,7 @@ async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
             response = await stack.enter_async_context(
                 sse_stream(
                     reborn_v2_server,
-                    events_path,
+                    path=events_path,
                     token=REBORN_V2_AUTH_TOKEN,
                     params=params,
                     timeout=15,
@@ -1002,7 +1002,7 @@ async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
 
         async with sse_stream(
             reborn_v2_server,
-            events_path,
+            path=events_path,
             token=REBORN_V2_AUTH_TOKEN,
             params=params,
             timeout=15,
@@ -1020,10 +1020,9 @@ async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    events_path = f"/api/webchat/v2/threads/{thread_id}/events"
     async with sse_stream(
         reborn_v2_server,
-        events_path,
+        path=f"/api/webchat/v2/threads/{thread_id}/events",
         token=REBORN_V2_AUTH_TOKEN,
         params={"token": REBORN_V2_AUTH_TOKEN},
         timeout=25,
