@@ -51,8 +51,14 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     }
 }
 
-fn scoped_path_class(_path: &ScopedPath) -> &'static str {
-    "scoped"
+fn scoped_path_class(path: &ScopedPath) -> &'static str {
+    match path.as_str().split('/').nth(1) {
+        Some("workspace") => "workspace",
+        Some("memory") => "memory",
+        Some("artifacts") => "artifacts",
+        Some("turns") => "turns",
+        _ => "other",
+    }
 }
 
 fn filesystem_error_kind(error: &FilesystemError) -> &'static str {

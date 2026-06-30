@@ -63,6 +63,9 @@ pub(super) fn operation_ok(
     run_id: TurnRunId,
     started_at: Option<Instant>,
 ) {
+    if started_at.is_none() {
+        return;
+    }
     trace_ok(
         operation,
         Some(&ScopeFields::from_scope(scope)),
@@ -71,19 +74,22 @@ pub(super) fn operation_ok(
     );
 }
 
-pub(super) fn operation_error<E: ?Sized>(
+pub(super) fn operation_error(
     operation: &'static str,
     scope: &TurnScope,
     run_id: TurnRunId,
     started_at: Option<Instant>,
-    _error: &E,
+    error_kind: &'static str,
 ) {
+    if started_at.is_none() {
+        return;
+    }
     trace_error(
         operation,
         Some(&ScopeFields::from_scope(scope)),
         Some(run_id),
         started_at,
-        "executor_error",
+        error_kind,
     );
 }
 

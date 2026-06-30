@@ -21,12 +21,18 @@ pub(super) fn result_to_outcome(
             ExecutorTaskOutcome::Completed
         }
         Ok(Err(error)) => {
-            latency::operation_error("execute_claimed_run", scope, run_id, started_at, &error);
+            latency::operation_error(
+                "execute_claimed_run",
+                scope,
+                run_id,
+                started_at,
+                "executor_error",
+            );
             ExecutorTaskOutcome::TerminalFailure(Some(error.failure().clone()))
         }
         Err(_) => {
             let reason = "scheduler_executor_panic";
-            latency::operation_error("execute_claimed_run", scope, run_id, started_at, &reason);
+            latency::operation_error("execute_claimed_run", scope, run_id, started_at, reason);
             ExecutorTaskOutcome::TerminalFailure(scheduler_failure(reason))
         }
     }
