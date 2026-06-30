@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use std::{
     collections::HashMap,
     fmt,
@@ -15,11 +15,11 @@ fn trace_coordinator_latency_ok(
     operation: &'static str,
     scope: &TurnScope,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(
@@ -37,14 +37,14 @@ fn trace_coordinator_latency_error<E>(
     operation: &'static str,
     scope: &TurnScope,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(
@@ -307,7 +307,7 @@ where
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         // If the caller passed a run id that came out of prepare_turn, verify
         // it is being submitted under the same scope it was prepared under,
         // unless this is a child run (parent_run_id set). Subagent spawn
@@ -367,7 +367,7 @@ where
             resolved_run_profile_version = resolved_run_profile_version.as_u64(),
             "turn coordinator accepted turn with resolved run profile"
         );
-        let wake_started_at = Instant::now();
+        let wake_started_at = live_latency_started_at();
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             submit_wake(scope.clone(), &response),
@@ -384,7 +384,7 @@ where
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let scope = request.scope.clone();
         let response = match self.store.resume_turn(request).await {
             Ok(response) => {
@@ -407,7 +407,7 @@ where
                 return Err(error);
             }
         };
-        let wake_started_at = Instant::now();
+        let wake_started_at = live_latency_started_at();
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             resume_wake(scope.clone(), &response),
@@ -423,7 +423,7 @@ where
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let scope = request.scope.clone();
         let response = match self.store.request_cancel(request).await {
             Ok(response) => {
@@ -451,7 +451,7 @@ where
         // fallback to discover a direct-to-terminal cancellation, which would
         // leave them in the requester map until the polling task next ticks.
         if response.status == TurnStatus::CancelRequested || response.status.is_terminal() {
-            let wake_started_at = Instant::now();
+            let wake_started_at = live_latency_started_at();
             notify_queued_run_best_effort(
                 self.wake_notifier.as_ref(),
                 cancel_wake(scope.clone(), &response),
@@ -486,7 +486,7 @@ where
         &self,
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let child_scope = request.child_scope.clone();
         let response = match self
             .store
@@ -519,7 +519,7 @@ where
             }
         };
         let SubmitTurnResponse::Accepted { run_id, .. } = &response;
-        let wake_started_at = Instant::now();
+        let wake_started_at = live_latency_started_at();
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             submit_wake(child_scope.clone(), &response),

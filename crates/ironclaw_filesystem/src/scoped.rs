@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc, time::Instant};
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -67,15 +67,15 @@ fn scoped_path_class(path: &ScopedPath) -> String {
 fn trace_fs_latency<T, E>(
     operation: &'static str,
     path: &ScopedPath,
-    started_at: Instant,
+    started_at: Option<Instant>,
     result: &Result<T, E>,
     bytes: Option<usize>,
 ) where
     E: fmt::Display,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let elapsed_ms = elapsed_ms(started_at);
     let path_class = scoped_path_class(path);
@@ -156,7 +156,7 @@ where
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let bytes = entry.body.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
@@ -171,7 +171,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<VersionedEntry>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
         let result = self.root.get(&virtual_path).await;
@@ -187,7 +187,7 @@ where
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::Query)?;
         let result = self.root.query(&virtual_path, filter, page).await;
@@ -202,7 +202,7 @@ where
         prefix: &ScopedPath,
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
         let result = self.root.ensure_index(&virtual_path, spec).await;
@@ -222,7 +222,7 @@ where
         scope: &ResourceScope,
         prefix: &ScopedPath,
     ) -> Result<Box<dyn StorageTxn>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let view = self.mount_view(scope)?;
         let virtual_path =
             resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
@@ -246,7 +246,7 @@ where
         path: &ScopedPath,
         payload: Vec<u8>,
     ) -> Result<SeqNo, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let bytes = payload.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
@@ -265,7 +265,7 @@ where
         path: &ScopedPath,
         payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<SeqNo>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let bytes = payloads.iter().map(Vec::len).sum();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
@@ -281,7 +281,7 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
         let result = self.root.tail(&virtual_path, from).await;
         trace_fs_latency("tail", path, started_at, &result, None);
@@ -296,7 +296,7 @@ where
         from: SeqNo,
         max_records: usize,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
         let result = self
             .root
@@ -315,7 +315,7 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
         let result = self.root.head_seq(&virtual_path, from).await;
@@ -329,7 +329,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<SeqNo, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)?;
         let result = self.root.reserve_sequence(&virtual_path).await;
@@ -346,7 +346,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<u8>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
         let result = self.root.read_file(&virtual_path).await;
@@ -362,7 +362,7 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
         let result = self.root.write_file(&virtual_path, bytes).await;
@@ -381,7 +381,7 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
         let result = self
@@ -412,7 +412,7 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::AppendFile)?;
         let result = self.root.append_file(&virtual_path, bytes).await;
@@ -425,7 +425,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
         let result = self.root.list_dir(&virtual_path).await;
@@ -439,7 +439,7 @@ where
         path: &ScopedPath,
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
         let result = self.root.list_dir_bounded(&virtual_path, max_entries).await;
@@ -452,7 +452,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<FileStat, FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Stat)?;
         let result = self.root.stat(&virtual_path).await;
         trace_fs_latency("stat", path, started_at, &result, None);
@@ -464,7 +464,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
         let result = self.root.delete(&virtual_path).await;
@@ -479,7 +479,7 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::CreateDirAll)?;
         let result = self.root.create_dir_all(&virtual_path).await;

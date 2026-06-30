@@ -52,7 +52,7 @@ use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ModelGatewayBackedSystemInferencePort,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
@@ -120,11 +120,11 @@ fn trace_runtime_latency_ok(
     operation: &'static str,
     thread_id: &ThreadId,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(
@@ -142,14 +142,14 @@ fn trace_runtime_latency_error<E>(
     operation: &'static str,
     thread_id: &ThreadId,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(
@@ -1739,8 +1739,8 @@ impl RebornRuntime {
         cancellation: CancellationToken,
         capture_skill_execution_plan: bool,
     ) -> Result<AssistantReply, RebornRuntimeError> {
-        let total_started_at = Instant::now();
-        let submit_started_at = Instant::now();
+        let total_started_at = live_latency_started_at();
+        let submit_started_at = total_started_at;
         let submitted = match self
             .submit_user_turn(
                 conversation,
@@ -1778,7 +1778,7 @@ impl RebornRuntime {
             }
         };
 
-        let wait_started_at = Instant::now();
+        let wait_started_at = live_latency_started_at();
         let reply = async {
             let terminal_state = self
                 .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
@@ -1872,7 +1872,7 @@ impl RebornRuntime {
         capture_skill_execution_plan: bool,
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
-        let send_lock_started_at = Instant::now();
+        let send_lock_started_at = live_latency_started_at();
         let _send_guard = send_lock.lock_owned().await;
         trace_runtime_latency_ok(
             "send_lock_wait",
@@ -1894,7 +1894,7 @@ impl RebornRuntime {
             return Err(error);
         }
         let scope = self.turn_scope_for(&conversation.0);
-        let accept_started_at = Instant::now();
+        let accept_started_at = live_latency_started_at();
         let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
@@ -1950,7 +1950,7 @@ impl RebornRuntime {
                 .skill_execution_adapter
                 .as_ref()
                 .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
-            let skill_record_started_at = Instant::now();
+            let skill_record_started_at = live_latency_started_at();
             if let Err(error) = adapter.record_user_message_for_execution(
                 scope.clone(),
                 accepted_message_ref.clone(),
@@ -1972,7 +1972,7 @@ impl RebornRuntime {
                 skill_record_started_at,
             );
         } else if let Some(skill_activation_source) = &self.skill_activation_source {
-            let skill_record_started_at = Instant::now();
+            let skill_record_started_at = live_latency_started_at();
             if let Err(error) = skill_activation_source.record_user_message(
                 scope.clone(),
                 accepted_message_ref.clone(),
@@ -1995,7 +1995,7 @@ impl RebornRuntime {
             );
         }
 
-        let turn_submit_started_at = Instant::now();
+        let turn_submit_started_at = live_latency_started_at();
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
@@ -2067,7 +2067,7 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
-        let notify_started_at = Instant::now();
+        let notify_started_at = live_latency_started_at();
         self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
             run_id,

@@ -12,7 +12,7 @@ pub(super) enum ExecutorTaskOutcome {
 pub(super) fn result_to_outcome(
     thread_id: &str,
     run_id: TurnRunId,
-    started_at: Instant,
+    started_at: Option<Instant>,
     result: Result<Result<(), TurnRunExecutorError>, Box<dyn Any + Send>>,
 ) -> ExecutorTaskOutcome {
     match result {

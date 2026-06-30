@@ -35,7 +35,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -54,11 +54,11 @@ fn trace_capability_latency_ok(
     operation: &'static str,
     capability_id: &CapabilityId,
     scope: &ResourceScope,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "host_runtime",
@@ -78,14 +78,14 @@ fn trace_capability_latency_error<E>(
     operation: &'static str,
     capability_id: &CapabilityId,
     scope: &ResourceScope,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "host_runtime",
@@ -430,7 +430,7 @@ impl HostRuntime for DefaultHostRuntime {
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
-        let total_started_at = Instant::now();
+        let total_started_at = live_latency_started_at();
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
@@ -495,7 +495,7 @@ impl HostRuntime for DefaultHostRuntime {
         // before the authorizer and trust/authorization checks. The dispatch-time
         // obligation check (which runs after those checks) is the enforcing layer.
         // The pre-flight provides ordering only (credentials before approval gate).
-        let credential_preflight_started_at = Instant::now();
+        let credential_preflight_started_at = live_latency_started_at();
         if let Some(auth_required) = self
             .credential_preflight_check(&capability_id, &scope, &registry)
             .await
@@ -521,7 +521,7 @@ impl HostRuntime for DefaultHostRuntime {
             credential_preflight_started_at,
         );
 
-        let approval_started_at = Instant::now();
+        let approval_started_at = live_latency_started_at();
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -547,7 +547,7 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision,
         };
 
-        let dispatch_started_at = Instant::now();
+        let dispatch_started_at = live_latency_started_at();
         match host.invoke_json(invocation).await {
             Ok(result) => {
                 trace_capability_latency_ok(

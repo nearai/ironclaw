@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
@@ -15,11 +15,11 @@ struct ProcessLatencyFields {
 }
 
 impl ProcessLatencyFields {
-    fn from_request(request: &ProcessExecutionRequest) -> Option<Self> {
-        if !live_latency_enabled() {
-            return None;
-        }
-
+    fn from_request(
+        started_at: Option<Instant>,
+        request: &ProcessExecutionRequest,
+    ) -> Option<Self> {
+        started_at?;
         Some(Self {
             capability_id: request.capability_id.to_string(),
             runtime: format!("{:?}", request.runtime),
@@ -37,9 +37,9 @@ impl ProcessLatencyFields {
 fn trace_process_latency_ok(
     operation: &'static str,
     fields: Option<&ProcessLatencyFields>,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    let Some(fields) = fields else {
+    let (Some(fields), Some(started_at)) = (fields, started_at) else {
         return;
     };
 
@@ -59,12 +59,12 @@ fn trace_process_latency_ok(
 fn trace_process_latency_error<E>(
     operation: &'static str,
     fields: Option<&ProcessLatencyFields>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    let Some(fields) = fields else {
+    let (Some(fields), Some(started_at)) = (fields, started_at) else {
         return;
     };
 
@@ -106,8 +106,8 @@ impl ProcessExecutor for HostProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
-        let started_at = Instant::now();
-        let fields = ProcessLatencyFields::from_request(&request);
+        let started_at = live_latency_started_at();
+        let fields = ProcessLatencyFields::from_request(started_at, &request);
         if is_process_sandbox_request(&request) {
             let Some(executor) = &self.process_sandbox_executor else {
                 let error = ProcessExecutionError::new("missing_process_sandbox_executor");
@@ -169,8 +169,8 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
-        let started_at = Instant::now();
-        let fields = ProcessLatencyFields::from_request(&request);
+        let started_at = live_latency_started_at();
+        let fields = ProcessLatencyFields::from_request(started_at, &request);
         if request.cancellation.is_cancelled() {
             let error = ProcessExecutionError::new("cancelled");
             trace_process_latency_error(

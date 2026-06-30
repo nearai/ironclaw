@@ -1,6 +1,6 @@
 use std::{fmt, time::Instant};
 
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::elapsed_ms;
 use ironclaw_turns::{TurnRunId, TurnRunWake, TurnScope, runner::ClaimedTurnRun};
 
 pub(super) struct RunFields {
@@ -8,22 +8,22 @@ pub(super) struct RunFields {
     run_id: TurnRunId,
 }
 
-pub(super) fn run_fields_from_wake(wake: &TurnRunWake) -> Option<RunFields> {
-    if !live_latency_enabled() {
-        return None;
-    }
-
+pub(super) fn run_fields_from_wake(
+    started_at: Option<Instant>,
+    wake: &TurnRunWake,
+) -> Option<RunFields> {
+    started_at?;
     Some(RunFields {
         thread_id: wake.scope.thread_id.as_str().to_string(),
         run_id: wake.run_id,
     })
 }
 
-pub(super) fn scope_thread_id(scope: Option<&TurnScope>) -> Option<String> {
-    if !live_latency_enabled() {
-        return None;
-    }
-
+pub(super) fn scope_thread_id(
+    started_at: Option<Instant>,
+    scope: Option<&TurnScope>,
+) -> Option<String> {
+    started_at?;
     scope.map(|scope| scope.thread_id.as_str().to_string())
 }
 
@@ -31,7 +31,7 @@ pub(super) fn operation_ok(
     operation: &'static str,
     thread_id: &str,
     run_id: TurnRunId,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
     trace_ok(operation, Some(thread_id), Some(run_id), started_at);
 }
@@ -40,7 +40,7 @@ pub(super) fn operation_error<E>(
     operation: &'static str,
     thread_id: &str,
     run_id: TurnRunId,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
@@ -50,7 +50,7 @@ pub(super) fn operation_error<E>(
 
 pub(super) fn notify_queued_run_result<E>(
     fields: Option<&RunFields>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     result: &Result<(), E>,
 ) where
     E: fmt::Display,
@@ -78,7 +78,7 @@ pub(super) fn notify_queued_run_result<E>(
 
 pub(super) fn claim_next_run_result<E>(
     scope_filter_thread_id: Option<&str>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     claim: &Result<Option<ClaimedTurnRun>, E>,
 ) where
     E: fmt::Display,
@@ -110,11 +110,11 @@ fn trace_ok(
     operation: &'static str,
     thread_id: Option<&str>,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(
@@ -132,14 +132,14 @@ fn trace_error<E>(
     operation: &'static str,
     thread_id: Option<&str>,
     run_id: Option<TurnRunId>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     let run_id = run_id.map(|id| id.to_string()).unwrap_or_default();
     ironclaw_observability::live_latency_trace!(

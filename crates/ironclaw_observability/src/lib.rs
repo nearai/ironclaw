@@ -17,6 +17,11 @@ pub fn live_latency_enabled() -> bool {
     tracing::enabled!(target: "ironclaw_latency", tracing::Level::TRACE)
 }
 
+#[inline]
+pub fn live_latency_started_at() -> Option<Instant> {
+    live_latency_enabled().then(Instant::now)
+}
+
 #[macro_export]
 macro_rules! live_latency_trace {
     ($($fields:tt)*) => {

@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{TurnRunExecutor, TurnRunExecutorError};
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
     TurnStatus,
@@ -32,11 +32,11 @@ use crate::{
 fn trace_executor_latency_ok(
     operation: &'static str,
     claimed: &ClaimedTurnRun,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "reborn_turn_executor",
@@ -52,14 +52,14 @@ fn trace_executor_latency_ok(
 fn trace_executor_latency_error<E>(
     operation: &'static str,
     claimed: &ClaimedTurnRun,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "reborn_turn_executor",
@@ -140,7 +140,7 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
         claimed: ClaimedTurnRun,
         transitions: Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), TurnRunExecutorError> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         match self.invoke_driver(&claimed, &transitions).await {
             Ok(exit) => {
                 let result = self.apply_exit(&claimed, exit, &transitions).await;
@@ -224,7 +224,7 @@ impl RebornTurnRunExecutor {
             "reborn executor resolved loop driver"
         );
 
-        let host_started_at = Instant::now();
+        let host_started_at = live_latency_started_at();
         let host = match self.host_factory.create_host(claimed).await {
             Ok(host) => {
                 trace_executor_latency_ok("create_loop_host", claimed, host_started_at);
@@ -241,7 +241,7 @@ impl RebornTurnRunExecutor {
                 });
             }
         };
-        let route_snapshot_started_at = Instant::now();
+        let route_snapshot_started_at = live_latency_started_at();
         if let Err(error) = self
             .persist_model_route_snapshot(claimed, host.as_ref(), transitions)
             .await
@@ -263,7 +263,7 @@ impl RebornTurnRunExecutor {
         let turn_id = claimed.state.turn_id;
         let run_id = claimed.state.run_id;
 
-        let driver_started_at = Instant::now();
+        let driver_started_at = live_latency_started_at();
         let driver_operation = if claimed.state.checkpoint_id.is_some() {
             "driver_resume"
         } else {
@@ -357,7 +357,7 @@ impl RebornTurnRunExecutor {
         exit: LoopExit,
         transitions: &Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), ()> {
-        let started_at = Instant::now();
+        let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;

@@ -30,7 +30,7 @@ use ironclaw_loop_support::{
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
-use ironclaw_observability::{elapsed_ms, live_latency_enabled};
+use ironclaw_observability::{elapsed_ms, live_latency_started_at};
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
@@ -67,11 +67,11 @@ fn trace_model_latency_ok(
     operation: &'static str,
     replay_identity: &ProviderReplayIdentity,
     provider_turn_scope: Option<&str>,
-    started_at: Instant,
+    started_at: Option<Instant>,
 ) {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "model_gateway",
@@ -89,14 +89,14 @@ fn trace_model_latency_error<E>(
     operation: &'static str,
     replay_identity: &ProviderReplayIdentity,
     provider_turn_scope: Option<&str>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     error: &E,
 ) where
     E: std::fmt::Display + ?Sized,
 {
-    if !live_latency_enabled() {
+    let Some(started_at) = started_at else {
         return;
-    }
+    };
 
     ironclaw_observability::live_latency_trace!(
         component = "model_gateway",
@@ -897,7 +897,7 @@ where
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
-            let provider_started_at = Instant::now();
+            let provider_started_at = live_latency_started_at();
             let response = match provider.complete_with_tools(tool_request.clone()).await {
                 Ok(response) => {
                     trace_model_latency_ok(
@@ -921,7 +921,7 @@ where
             };
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
-            let host_response_started_at = Instant::now();
+            let host_response_started_at = live_latency_started_at();
             match tool_response_to_host(
                 response.clone(),
                 Arc::clone(&capabilities),
@@ -962,7 +962,7 @@ where
                             error.safe_summary.as_str(),
                         ));
                     let rejected_response = response;
-                    let retry_started_at = Instant::now();
+                    let retry_started_at = live_latency_started_at();
                     let response = match provider.complete_with_tools(repair_request).await {
                         Ok(response) => {
                             trace_model_latency_ok(
@@ -989,7 +989,7 @@ where
                         &recovery_tool_names,
                     )?;
                     accumulate_tool_response_usage(&mut response, &rejected_response);
-                    let repair_host_started_at = Instant::now();
+                    let repair_host_started_at = live_latency_started_at();
                     let result = tool_response_to_host(
                         response,
                         capabilities,
@@ -1038,7 +1038,7 @@ where
         );
     }
 
-    let provider_started_at = Instant::now();
+    let provider_started_at = live_latency_started_at();
     let response = match provider.complete(completion).await {
         Ok(response) => {
             trace_model_latency_ok(

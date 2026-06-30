@@ -1,15 +1,11 @@
 use std::{
-    collections::HashMap,
-    error::Error,
-    fmt,
-    panic::AssertUnwindSafe,
-    sync::Arc,
-    time::{Duration, Instant},
+    collections::HashMap, error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration,
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt;
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
@@ -310,8 +306,8 @@ impl fmt::Debug for SchedulerTurnRunWakeNotifier {
 
 impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
-        let started_at = Instant::now();
-        let trace_fields = latency::run_fields_from_wake(&wake);
+        let started_at = live_latency_started_at();
+        let trace_fields = latency::run_fields_from_wake(started_at, &wake);
         let result = self
             .command_tx
             .try_send(SchedulerCommand::Wake(wake))
@@ -606,8 +602,9 @@ async fn drain_queued_runs(
         let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
             return false;
         };
-        let claim_started_at = Instant::now();
-        let scope_filter_thread_id = latency::scope_thread_id(scope_filter.as_ref());
+        let claim_started_at = live_latency_started_at();
+        let scope_filter_thread_id =
+            latency::scope_thread_id(claim_started_at, scope_filter.as_ref());
         let claim = context
             .transitions
             .claim_next_run(ClaimRunRequest {
@@ -703,7 +700,7 @@ fn spawn_executor_task(
                 run_id = %recovery_run_id_for_start,
                 "turn run started",
             );
-            let executor_started_at = Instant::now();
+            let executor_started_at = live_latency_started_at();
             let mut heartbeat_tick = interval(task_config.runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Consume the immediate first tick so the heartbeat loop never fires
