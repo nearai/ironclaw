@@ -38,9 +38,25 @@ function LogEntry({ entry }) {
     <div data-testid="logs-entry" className=${rowBg}>
       <div
         data-testid="logs-entry-row"
-        onClick=${() => setExpanded((v) => !v)}
+        onClick=${(event) => {
+          // Don't toggle when the click ends a text selection *within this row*
+          // — otherwise selecting log text to copy it would also expand/collapse
+          // the row. The selection is document-global, so scope the check to
+          // event.currentTarget; a selection elsewhere on the page must not
+          // block this row's toggle.
+          const selection = typeof window !== "undefined" && window.getSelection?.();
+          if (
+            selection &&
+            !selection.isCollapsed &&
+            event.currentTarget.contains(selection.anchorNode) &&
+            event.currentTarget.contains(selection.focusNode)
+          ) {
+            return;
+          }
+          setExpanded((v) => !v);
+        }}
         className=${[
-          "grid cursor-pointer select-none gap-x-3 px-4 py-1 font-mono text-xs hover:bg-[var(--v2-surface-muted)]",
+          "grid cursor-pointer select-text gap-x-3 px-4 py-1 font-mono text-xs hover:bg-[var(--v2-surface-muted)]",
           "grid-cols-[7rem_3rem_minmax(10rem,18rem)_1fr]",
         ].join(" ")}
       >

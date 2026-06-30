@@ -236,3 +236,9 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.active"], "活跃");
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
+
+test("ja localizes Trace Commons settings navigation label", () => {
+  const pack = loadLocalePack("ja");
+
+  assert.equal(pack["settings.traceCommons"], "トレース共有");
+});

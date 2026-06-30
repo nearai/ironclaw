@@ -46,10 +46,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
+            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Preferred natural language search query for persistent memory"
+                    "description": "Preferred natural language search query for Reborn internal persistent memory"
                 },
                 "q": {
                     "type": "string",

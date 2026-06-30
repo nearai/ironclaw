@@ -263,63 +263,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return mergePreservedMessages(hydratedFresh, preserved);
-}
-
-function mergePreservedMessages(fresh, preserved) {
-  if (preserved.length === 0) return fresh;
-
-  const lastFreshIndexByRun = new Map();
-  for (let index = 0; index < fresh.length; index += 1) {
-    const runId = anchoredRunId(fresh[index]);
-    if (runId) lastFreshIndexByRun.set(runId, index);
-  }
-
-  const anchoredByRun = new Map();
-  const appendOnly = [];
-  for (const message of preserved) {
-    const runId = shouldAnchorPreservedMessage(message)
-      ? anchoredRunId(message)
-      : null;
-    if (runId && lastFreshIndexByRun.has(runId)) {
-      const anchored = anchoredByRun.get(runId) || [];
-      anchored.push(message);
-      anchoredByRun.set(runId, anchored);
-    } else {
-      appendOnly.push(message);
-    }
-  }
-
-  if (anchoredByRun.size === 0) return [...fresh, ...appendOnly];
-
-  const merged = [];
-  for (let index = 0; index < fresh.length; index += 1) {
-    const message = fresh[index];
-    merged.push(message);
-    const runId = anchoredRunId(message);
-    if (runId && lastFreshIndexByRun.get(runId) === index) {
-      merged.push(...(anchoredByRun.get(runId) || []));
-    }
-  }
-  return appendOnly.length > 0 ? [...merged, ...appendOnly] : merged;
-}
-
-function shouldAnchorPreservedMessage(message) {
-  return isRuntimeActivityMessage(message) || isRunFailureMessage(message);
-}
-
-function isRunFailureMessage(message) {
-  return (
-    message?.role === "error" &&
-    typeof message.id === "string" &&
-    message.id.startsWith("err-")
-  );
-}
-
-function anchoredRunId(message) {
-  return typeof message?.turnRunId === "string" && message.turnRunId
-    ? message.turnRunId
-    : null;
+  return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
 }
 
 function isSeededOptimisticMessage(message) {
