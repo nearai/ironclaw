@@ -19,7 +19,9 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
 use crate::slack_actor_identity::RebornUserIdentityLookup;
-use crate::slack_outbound_targets::SlackPersonalDmTargetProvisioner;
+use crate::slack_outbound_targets::{
+    SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner,
+};
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingService,
@@ -68,6 +70,7 @@ impl std::fmt::Display for SlackPersonalBindingPairingCode {
 pub struct SlackPersonalBindingPairingChallenge {
     pub installation_id: AdapterInstallationId,
     pub slack_user_id: SlackUserId,
+    pub setup_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,17 +124,94 @@ pub trait SlackPersonalBindingPairingNotifier: Send + Sync {
     ) -> Result<(), SlackPersonalBindingPairingError>;
 }
 
+#[async_trait::async_trait]
+pub(crate) trait SlackPersonalDmTargetProvisioning: Send + Sync + std::fmt::Debug {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalDmTargetProvisioning for SlackPersonalDmTargetProvisioner {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        SlackPersonalDmTargetProvisioner::provision_for_user(self, user_id, slack_user_id).await
+    }
+}
+
+#[async_trait::async_trait]
+pub(crate) trait SlackPersonalUserBinder: Send + Sync + std::fmt::Debug {
+    async fn validate_installation_actor(
+        &self,
+        principal: &SlackPersonalBindingPrincipal,
+        installation_id: &AdapterInstallationId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<(), SlackPersonalUserBindingError>;
+
+    async fn bind_installation_actor(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalUserBinder for SlackPersonalUserBindingService {
+    async fn validate_installation_actor(
+        &self,
+        principal: &SlackPersonalBindingPrincipal,
+        installation_id: &AdapterInstallationId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<(), SlackPersonalUserBindingError> {
+        SlackPersonalUserBindingService::validate_installation_actor(
+            self,
+            principal,
+            installation_id,
+            slack_user_id,
+        )
+    }
+
+    async fn bind_installation_actor(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        SlackPersonalUserBindingService::bind_installation_actor(
+            self,
+            principal,
+            installation_id,
+            slack_user_id,
+        )
+        .await
+    }
+}
+
 #[derive(Clone)]
 pub struct SlackPersonalBindingPairingService {
-    binding_service: SlackPersonalUserBindingService,
+    binding_service: Arc<dyn SlackPersonalUserBinder>,
     challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
     notifier: Arc<dyn SlackPersonalBindingPairingNotifier>,
-    dm_provisioner: Option<Arc<SlackPersonalDmTargetProvisioner>>,
+    dm_provisioner: Option<Arc<dyn SlackPersonalDmTargetProvisioning>>,
 }
 
 impl SlackPersonalBindingPairingService {
     pub fn new(
         binding_service: SlackPersonalUserBindingService,
+        challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
+        notifier: Arc<dyn SlackPersonalBindingPairingNotifier>,
+    ) -> Self {
+        Self::new_with_binder(Arc::new(binding_service), challenge_store, notifier)
+    }
+
+    pub(crate) fn new_with_binder(
+        binding_service: Arc<dyn SlackPersonalUserBinder>,
         challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
         notifier: Arc<dyn SlackPersonalBindingPairingNotifier>,
     ) -> Self {
@@ -148,7 +228,7 @@ impl SlackPersonalBindingPairingService {
     /// and never blocks or fails the redemption itself.
     pub(crate) fn with_dm_provisioner(
         mut self,
-        provisioner: Arc<SlackPersonalDmTargetProvisioner>,
+        provisioner: Arc<dyn SlackPersonalDmTargetProvisioning>,
     ) -> Self {
         self.dm_provisioner = Some(provisioner);
         self
@@ -164,6 +244,7 @@ impl SlackPersonalBindingPairingService {
             .issue_challenge(SlackPersonalBindingPairingChallenge {
                 installation_id,
                 slack_user_id,
+                setup_revision: None,
             })
             .await?;
         self.notifier
@@ -188,6 +269,7 @@ impl SlackPersonalBindingPairingService {
                 &preview.installation_id,
                 &preview.slack_user_id,
             )
+            .await
             .map_err(SlackPersonalBindingPairingError::Binding)?;
         let challenge = self.challenge_store.consume_challenge(&code).await?;
         let slack_user_id = challenge.slack_user_id.clone();
@@ -386,6 +468,7 @@ mod tests {
                 SlackPersonalBindingPairingChallenge {
                     installation_id: installation("install-a"),
                     slack_user_id: SlackUserId::new("U123"),
+                    setup_revision: None,
                 },
             )),
             Arc::new(RecordingNotifier::default()),
@@ -415,6 +498,7 @@ mod tests {
             SlackPersonalBindingPairingChallenge {
                 installation_id: installation("install-a"),
                 slack_user_id: SlackUserId::new("U123"),
+                setup_revision: None,
             },
         ));
         let service = SlackPersonalBindingPairingService::new(

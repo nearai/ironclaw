@@ -2,7 +2,7 @@
 name = "ironclaw_product_workflow"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Product-facing workflow facade for IronClaw Reborn (#3280)"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -40,7 +40,7 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "time"] }
 tracing = "0.1"
@@ -52,7 +52,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_product_workflow = { path = ".", features = ["test-support"] }

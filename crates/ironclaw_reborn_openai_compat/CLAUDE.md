@@ -80,6 +80,31 @@ handles Chat Completions create and optional projection-backed SSE streaming:
   `AppEvent` streams, `ironclaw_llm`, `TurnCoordinator`, projection internals,
   listener APIs, secrets, DBs, or the host runtime directly.
 
+## Models Listing
+
+`GET /v1/models` (and its `/api/v1/models` alias) lists the deployment's
+configured models for OpenAI-compatible clients (model pickers, etc.).
+
+- The route authenticates the caller first: a missing
+  `OpenAiCompatAuthenticatedCaller` fails closed with `401` before the catalog
+  is consulted.
+- The model source is the host-injected `OpenAiCompatModelCatalog` port
+  (mirroring the projection reader/streamer ports). When no catalog is wired the
+  route fails closed with `501`, exactly like the chat/responses surfaces before
+  composition wiring.
+- `ironclaw_reborn_composition::build_openai_compat_route_mount` wires a catalog
+  backed by the operator `LlmConfigService` snapshot (the same configured-model
+  source the operator WebUI uses), but only under the `root-llm-provider`
+  feature; otherwise the route stays fail-closed.
+- The crate maps catalog entries into the OpenAI list envelope
+  (`{ object: "list", data: [{ id, object: "model", created, owned_by }] }`);
+  it does not reach into `ironclaw_llm` or the runtime directly.
+
+The `model` string on chat/responses create requests is validated at the parse
+boundary (`validate_model_name`): non-empty, no surrounding whitespace, no
+control characters, and at most 256 bytes (the #2673 bounded-resources bound).
+Violations return a sanitized `400` naming the `model` param.
+
 ## Responses Workflow
 
 With `openai-compat-beta`, host composition may also inject

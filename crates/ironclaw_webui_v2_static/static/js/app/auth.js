@@ -266,6 +266,10 @@ export function useAuthSession() {
     isChecking: isExchanging || isSessionChecking,
     isAuthenticated: Boolean(token),
     isAdmin: Boolean(session?.capabilities?.operator_webui_config),
+    // Deployment feature gate (not a per-user capability): the Reborn
+    // Projects surface is hidden until the server sets
+    // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.
+    rebornProjectsEnabled: Boolean(session?.features?.reborn_projects),
     signIn,
     signOut,
   };

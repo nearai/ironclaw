@@ -41,7 +41,7 @@ async fn slack_shaped_harness(
     room: &str,
     model_gateway: RebornTraceReplayModelGateway,
 ) -> RebornBinaryE2EHarness {
-    RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage(
         room,
         model_gateway,
         RecordingTestCapabilityPort::echo(),

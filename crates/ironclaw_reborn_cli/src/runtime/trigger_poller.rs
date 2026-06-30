@@ -2,40 +2,9 @@ use std::time::Duration;
 
 use ironclaw_reborn_composition::TriggerPollerSettings;
 
-use super::RuntimeInputCaller;
+use crate::operator_env::{strict_bool_env_var, strict_env_var, truncate_env_value_for_display};
 
-/// Read a trigger-poller env var with **strict** presence semantics.
-///
-/// `IRONCLAW_TRIGGER_POLLER_*` env vars are operator-control knobs: presence
-/// is authoritative, not just non-empty content. Treat the var as
-///
-/// - unset → `Ok(None)` (fall through to the config/default layer)
-/// - set, empty or all-whitespace → fatal (operator must unset or fix)
-/// - set, non-empty → `Ok(Some(value))` (caller validates content)
-///
-/// Distinct from the broader `optional_nonempty_env` used by optional-config
-/// callers (OAuth, etc.), which intentionally collapses present-blank to
-/// absent. Here, a present-but-blank env slot is almost always a bug — a
-/// shell typo, a half-set deployment template, or a credential injector
-/// that failed to populate the slot — and falling through silently would
-/// drop the operator's intended kill-switch or interval override with no
-/// visible signal.
-fn strict_env_var(name: &str) -> anyhow::Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(value) => {
-            if value.trim().is_empty() {
-                anyhow::bail!(
-                    "{name} is set but empty or whitespace-only; either unset it or provide a valid value"
-                );
-            }
-            Ok(Some(value))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-            "{name} contains non-UTF-8 bytes; either unset it or provide a valid value"
-        ),
-    }
-}
+use super::RuntimeInputCaller;
 
 /// Upper bound on `poll_interval_secs` (config) and
 /// `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` (env). One hour caps the
@@ -53,21 +22,6 @@ const MAX_JITTER_SECS: u64 = 3600;
 /// leaves plenty of headroom for a future high-throughput deployment
 /// while rejecting accidents like `u32::MAX` (~4B dispatches per tick).
 const MAX_FIRES_PER_TICK: u32 = 1000;
-
-/// Truncate an env-var value to a bounded length before echoing it in an
-/// error message. Prevents the value from blowing up startup logs if the
-/// operator accidentally pastes a long string (e.g. a credential) into the
-/// env slot. Char-aware so we cannot split a multi-byte UTF-8 codepoint.
-fn truncate_env_value_for_display(raw: &str) -> String {
-    const MAX_CHARS: usize = 64;
-    let mut iter = raw.chars();
-    let truncated: String = iter.by_ref().take(MAX_CHARS).collect();
-    if iter.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
 
 /// Build [`TriggerPollerSettings`] by merging three layers of configuration.
 ///
@@ -170,19 +124,8 @@ pub(super) fn trigger_poller_settings(
     // Layer 1: environment variable overrides. Uses strict presence
     // semantics — a present-but-blank value is fatal, not a silent
     // fall-through to config/default.
-    if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" => settings.enabled = true,
-            "0" | "false" => settings.enabled = false,
-            _ => {
-                // Display the operator's original value (case preserved), not the
-                // lowercased match key — they need to find it in their config.
-                let display = truncate_env_value_for_display(&raw);
-                anyhow::bail!(
-                    "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {display:?})"
-                )
-            }
-        }
+    if let Some(enabled) = strict_bool_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
+        settings.enabled = enabled;
     }
 
     if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS")? {
@@ -205,7 +148,7 @@ pub(super) fn trigger_poller_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_env::{EnvGuard, lock_trigger_env};
+    use super::super::test_env::{EnvGuard, lock_runtime_env};
     use super::{RuntimeInputCaller, trigger_poller_settings};
     use ironclaw_reborn_config::TriggerPollerConfigSection;
     use std::time::Duration;
@@ -224,7 +167,7 @@ mod tests {
         // No config file, no env → disabled with zero jitter. Hold the env
         // lock for the whole test so a sibling test cannot mutate the env
         // between EnvGuard::clear and the call below.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -240,7 +183,7 @@ mod tests {
     fn trigger_poller_settings_serve_default_is_enabled() {
         // Regression: the local `serve` surface must default the scheduler on so
         // scheduled automations actually fire, while other callers stay off.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -254,7 +197,7 @@ mod tests {
     fn trigger_poller_settings_serve_default_respects_env_kill_switch() {
         // The serve-on default is layer 3, so an explicit env kill-switch still
         // wins and turns the scheduler off.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "0");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -269,7 +212,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_enabled_maps_worker_fields() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -333,7 +276,7 @@ mod tests {
     #[test]
     fn trigger_poller_settings_env_enabled_overrides_config_disabled() {
         // Config says disabled; env says enabled — env must win.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "true");
 
@@ -354,7 +297,7 @@ mod tests {
     #[test]
     fn trigger_poller_settings_env_disabled_overrides_config_enabled() {
         // Operator kill-switch: config has enabled=true but the env var disables.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "false");
 
@@ -374,7 +317,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_interval_overrides_config_interval() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "45");
 
@@ -396,7 +339,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_interval_zero_is_error() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "0");
 
@@ -412,7 +355,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_interval_non_numeric_preserves_parse_error() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "10s");
 
@@ -428,7 +371,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_enabled_invalid_value_is_error() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "yes");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -538,7 +481,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_interval_above_cap_is_error() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "86400");
 
@@ -556,7 +499,7 @@ mod tests {
     fn trigger_poller_settings_env_enabled_invalid_value_preserves_case() {
         // Operator must see what they actually typed (e.g. "YES"), not the
         // lowercased match key, so they can find the value in their config.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "YES");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -572,7 +515,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_poll_interval_at_cap_is_accepted() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
@@ -589,7 +532,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_fires_per_tick_at_cap_is_accepted() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
@@ -606,7 +549,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_jitter_at_cap_is_accepted() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
@@ -644,7 +587,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_enabled_numeric_one_enables() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "1");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -658,7 +601,7 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_env_enabled_numeric_zero_disables() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "0");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -681,7 +624,7 @@ mod tests {
         // Operator pastes an 80-char string into the env slot by mistake. The
         // error message must NOT echo the full value verbatim (it might be a
         // credential); the truncation ellipsis MUST appear.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let long_value: String = "x".repeat(80);
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", &long_value);
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
@@ -706,7 +649,7 @@ mod tests {
     fn trigger_poller_settings_env_enabled_empty_is_error() {
         // ENABLED="" must NOT silently fall through to config — operator's
         // env slot is present but empty, almost always a deployment bug.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -729,7 +672,7 @@ mod tests {
     #[test]
     fn trigger_poller_settings_env_enabled_whitespace_is_error() {
         // ENABLED="   " (all-whitespace) hits the same fatal path as "".
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "   ");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -745,7 +688,7 @@ mod tests {
     #[test]
     fn trigger_poller_settings_env_interval_empty_is_error() {
         // INTERVAL_SECS="" follows the same strict contract.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "");
 

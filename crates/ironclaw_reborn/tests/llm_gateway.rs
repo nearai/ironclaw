@@ -4,7 +4,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -44,6 +46,10 @@ use rust_decimal::Decimal;
 use tokio::sync::Barrier;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
+
+fn provider_name(value: &str) -> ProviderToolName {
+    ProviderToolName::new(value).expect("provider tool name")
+}
 
 fn local_development_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::local_development_noop()
@@ -336,7 +342,7 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
     assert_eq!(provider_replay.provider_id, STATIC_PROVIDER_ID);
     assert_eq!(provider_replay.provider_model_id, "host-selected-model");
     assert_eq!(provider_replay.provider_call_id, "call_1");
-    assert_eq!(provider_replay.provider_tool_name, "demo__echo");
+    assert_eq!(provider_replay.provider_tool_name.as_str(), "demo__echo");
     assert_eq!(
         provider_replay.arguments,
         serde_json::json!({"message":"hello"})
@@ -356,6 +362,138 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 }
 
 #[tokio::test]
+async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo \"disabled-test\"",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use builtin.echo to print:\ndisabled-test".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "suppressed substitute tool call must not be registered as a capability activity"
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(
+        reply.content.contains("unavailable or disabled"),
+        "expected unavailable capability reply, got {:?}",
+        reply.content
+    );
+    assert!(
+        reply
+            .content
+            .contains("will not route it through another tool"),
+        "expected no-workaround reply, got {:?}",
+        reply.content
+    );
+}
+
+#[tokio::test]
+async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo \"gmail workaround\"",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use gmail.send to email the report".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "suppressed substitute tool call must not be registered as a capability activity"
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(
+        reply.content.contains("unavailable or disabled"),
+        "expected unavailable capability reply, got {:?}",
+        reply.content
+    );
+}
+
+#[tokio::test]
+async fn gateway_does_not_treat_plain_dotted_domain_as_unavailable_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo domain-ok",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use meet.google.com to join the meeting".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("builtin.shell").unwrap()
+    );
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retry() {
     let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
         content: None,
@@ -366,6 +504,7 @@ async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retr
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         reasoning: None,
+        reasoning_details: None,
     }));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -417,7 +556,7 @@ async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
 
     let registered = capabilities.registered.lock().unwrap();
     assert_eq!(registered.len(), 1);
-    assert_eq!(registered[0].name, "demo__echo");
+    assert_eq!(registered[0].name.as_str(), "demo__echo");
     assert_eq!(
         registered[0].arguments,
         serde_json::json!({"message":"hello"})
@@ -469,6 +608,7 @@ async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         reasoning: Some("response reasoning".to_string()),
+        reasoning_details: None,
     }));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -560,6 +700,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: Some("response reasoning".to_string()),
+            reasoning_details: None,
         },
         ToolCompletionResponse {
             content: Some("Finished after repair.".to_string()),
@@ -570,6 +711,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -712,7 +854,7 @@ async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -789,7 +931,7 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -843,7 +985,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -884,7 +1026,7 @@ async fn gateway_replays_resolved_tool_result_content_instead_of_summary() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -1050,7 +1192,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1062,7 +1204,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1143,7 +1285,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("first provider reasoning".to_string()),
@@ -1155,7 +1297,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_2".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("second provider reasoning".to_string()),
@@ -1260,7 +1402,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1272,7 +1414,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1354,7 +1496,7 @@ async fn gateway_degrades_provider_tool_replay_from_different_provider_route_to_
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -1402,7 +1544,7 @@ async fn gateway_degrades_resolved_provider_mismatch_to_safe_summary() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -2123,6 +2265,38 @@ async fn gateway_sanitizes_provider_errors() {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
+}
+
+#[tokio::test]
+async fn gateway_maps_offline_provider_to_unavailable_without_leaking_details() {
+    let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
+        provider: "offline-provider".to_string(),
+        reason: "connection refused at https://api.example.test with sk-provider-secret"
+            .to_string(),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let error = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(error.safe_summary, "model service is unavailable");
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let debug = format!("{error:?}");
+    for sentinel in [
+        "connection refused",
+        "https://api.example.test",
+        "sk-provider-secret",
+    ] {
+        assert!(!debug.contains(sentinel));
+    }
 }
 
 #[tokio::test]
@@ -2884,6 +3058,7 @@ impl ToolAwareProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: Some("response reasoning".to_string()),
+            reasoning_details: None,
         })
     }
 
@@ -2897,6 +3072,7 @@ impl ToolAwareProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 
@@ -2959,12 +3135,30 @@ impl GatewayCapabilityPort {
         Self {
             definitions: vec![ProviderToolDefinition {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
-                name: "demo__echo".to_string(),
+                name: provider_name("demo__echo"),
                 description: "Echo input".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "message": { "type": "string" }
+                    }
+                }),
+            }],
+            registered: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_builtin_shell_surface() -> Self {
+        Self {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("builtin.shell").unwrap(),
+                name: provider_name("builtin_shell"),
+                description: "Run shell commands".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "workdir": { "type": "string" }
                     }
                 }),
             }],
@@ -3019,21 +3213,30 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<
         ironclaw_turns::run_profile::CapabilityCallCandidate,
         ironclaw_turns::run_profile::AgentLoopHostError,
     > {
+        let tool_call = request.tool_call;
         self.validate_provider_tool_call(&tool_call)?;
+        let capability_id = self
+            .definitions
+            .iter()
+            .find(|definition| definition.name == tool_call.name)
+            .expect("validated tool definition")
+            .capability_id
+            .clone();
         let input_ref =
             ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))
                 .unwrap();
         self.registered.lock().unwrap().push(tool_call.clone());
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-            capability_id: CapabilityId::new("demo.echo").unwrap(),
+            capability_id: capability_id.clone(),
             input_ref,
-            effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
+            effective_capability_ids: vec![capability_id],
             provider_replay: tool_call
                 .turn_id
                 .map(|provider_turn_id| ProviderToolCallReplay {

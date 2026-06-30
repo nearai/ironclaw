@@ -57,6 +57,7 @@ browser-reachable.
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
+| `webui.v2.logs` | GET | `/api/webchat/v2/logs` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
@@ -76,6 +77,9 @@ browser-reachable.
 | `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
 | `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
 | `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
+| `webui.v2.settings.list_tools` | GET | `/api/webchat/v2/settings/tools` | None | `ProjectionOnly` |
+| `webui.v2.settings.set_tools_auto_approve` | POST | `/api/webchat/v2/settings/tools` | None | `ProductWorkflow` |
+| `webui.v2.settings.set_tool_permission` | POST | `/api/webchat/v2/settings/tools/{capability_id}` | None | `ProductWorkflow` |
 | `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
 | `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
 | `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
@@ -87,12 +91,14 @@ browser-reachable.
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
-`webui.v2.operator.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
-query parameters, the existing boolean `tail` flag from `RebornOperatorLogsQuery`,
-plus optional scoped filters for `thread_id`, `run_id`, `turn_id`, `tool_call_id`,
-`tool_name`, and `source`. Responses include the same correlation fields when the
-captured tracing context provides them and expose tail/follow capability through
-`tail_supported` and `follow_supported`.
+`webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
+query parameters, mutually exclusive boolean `tail` and `follow` flags from
+`RebornOperatorLogsQuery`, plus optional scoped filters for `thread_id`,
+`run_id`, `turn_id`, `tool_call_id`, `tool_name`, and `source`. Responses
+include the same correlation fields when the captured tracing context provides
+them and expose tail/follow capability through `tail_supported` and
+`follow_supported`. `webui.v2.operator.logs` shares the same shape but stays
+operator-gated.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
@@ -100,16 +106,24 @@ constructing the `WebUiAuthenticatedCaller`, carrying the matched
 token's `WebUiV2Capabilities`, and injecting both as axum
 `Extension`s before the handler runs.
 
-The LLM configuration and operator command-plane routes are operator-wide. Host
-composition mounts them only when the authenticator says the deployment
-has an operator configuration surface, and must still authorize each
-request from the matched token's `operator_webui_config` capability.
-Multi-user session/OIDC authenticators should leave those routes
-unmounted or return non-operator capabilities until an admin role
-boundary exists. The route handlers also reject mounted operator
-requests with `403` when the injected `WebUiV2Capabilities` lacks
-`operator_webui_config`, so host composition and handler dispatch share
-the same fail-closed capability boundary.
+The `/api/webchat/v2/settings/tools` routes are authenticated caller routes,
+not operator routes. They expose the caller's tenant/user-scoped tool approval
+settings so regular multi-user sessions can read and update global
+auto-approve plus per-tool overrides without access to the operator command
+plane.
+
+The LLM configuration and operator setup/config/service-control routes are
+operator-wide. Host composition mounts them only when the authenticator says
+the deployment has an operator configuration surface, and must still authorize
+each request from the matched token's `operator_webui_config` capability.
+Multi-user session/OIDC authenticators should leave those routes unmounted or
+return non-operator capabilities until an admin role boundary exists. The
+route handlers also reject mounted operator config requests with `403` when
+the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
+composition and handler dispatch share the same fail-closed capability
+boundary. `webui.v2.operator.logs` follows the same operator-capability
+boundary, while non-operator users use `webui.v2.logs` in the v2 surface and
+the separate gateway logs surface in the main Web UI.
 Unwired operator command-plane write, setup, log, and
 service-control methods fail closed with sanitized `503 service_unavailable`
 responses. Config validation plus read-only config, status, and diagnostics
@@ -119,9 +133,16 @@ unsupported-config reason codes currently include
 `operator_config_service_not_wired`, `operator_config_secret_not_wired`,
 `operator_config_deprecated`, `operator_config_immutable`,
 `operator_config_not_wired`, and `operator_config_unknown_key`.
-`POST /api/webchat/v2/operator/setup` uses the typed LLM config service
-for provider/model setup; profile and WebUI access setup return redacted
-not-yet-wired diagnostics until those owning services are exposed.
+`POST /api/webchat/v2/operator/setup` uses the typed LLM config service for
+provider/model setup. Profile selection and WebUI access inputs are validated
+through the same operator setup facade; unchanged masked tokens (not modified
+by the user) are treated as no-ops, and actual profile/token mutations fail
+closed until an owning persistence service is wired. Token values are never
+echoed.
+`GET /api/webchat/v2/operator/diagnostics` is the Reborn doctor surface: the
+product facade aggregates status/readiness, setup, and config diagnostics into
+one redacted payload instead of making route handlers inspect runtime internals
+or adding a second CLI-only diagnostic path.
 
 ### List-threads
 

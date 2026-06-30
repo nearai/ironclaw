@@ -1,0 +1,88 @@
+{
+  "backend": "libsql",
+  "preset": null,
+  "scenario": "reserve-reconcile",
+  "run_id": "8845e6ed400d441bbdc54a84563d2134",
+  "target": "libsql://<redacted-local-path>",
+  "child_index": null,
+  "processes": 1,
+  "concurrency": 12,
+  "operations_per_thread": 20,
+  "duration_seconds": 60,
+  "warmup_seconds": 0,
+  "trace_jsonl_enabled": true,
+  "trace_interval_seconds": 1,
+  "users": 1000,
+  "active_thread_count": 0,
+  "tenants": 1,
+  "prefill_threads": 0,
+  "prefill_turns_per_thread": 0,
+  "prefill_concurrency": 4,
+  "model_latency_ms": 0,
+  "model_latency_profile": "fixed",
+  "model_latency_jitter_ms": 0,
+  "model_latency_spike_every": 0,
+  "model_latency_spike_ms": 0,
+  "user_message_bytes": 0,
+  "assistant_message_bytes": 0,
+  "context_max_messages": 20,
+  "context_growth_turns_per_operation": 4,
+  "tool_calls_per_turn": 2,
+  "tool_latency_ms": 0,
+  "tool_output_bytes": 1024,
+  "tool_failure_every": 0,
+  "attempted": 1860,
+  "succeeded": 1860,
+  "failed": 0,
+  "duration_ms": 60554,
+  "throughput_ops_sec": 30.716190166886967,
+  "latency": {
+    "min_us": 9601,
+    "p50_us": 453921,
+    "p95_us": 636708,
+    "p99_us": 666343,
+    "max_us": 693520
+  },
+  "process": {
+    "start": {
+      "rss_kb": 11248,
+      "peak_rss_kb": 11248,
+      "user_cpu_ms": 159,
+      "system_cpu_ms": 114,
+      "threads": null,
+      "open_fds": 10
+    },
+    "end": {
+      "rss_kb": 96544,
+      "peak_rss_kb": 385088,
+      "user_cpu_ms": 37571,
+      "system_cpu_ms": 18188,
+      "threads": null,
+      "open_fds": 14
+    },
+    "delta_user_cpu_ms": 37412,
+    "delta_system_cpu_ms": 18074,
+    "delta_cpu_ms": 55486,
+    "peak_rss_kb": 385088,
+    "peak_threads": null,
+    "peak_open_fds": 16
+  },
+  "db_probe": {
+    "before": {
+      "libsql_file_bytes": 32768,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "after": {
+      "libsql_file_bytes": 13778944,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "delta": {
+      "libsql_file_bytes": 13746176,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    }
+  },
+  "errors": {}
+}

@@ -13,9 +13,9 @@ use ironclaw_host_api::{
     sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
-    ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -175,6 +175,16 @@ impl RebornLocalExtensionManagementPort {
         }
     }
 
+    /// Test-support access to the extension installation store.
+    ///
+    /// Mirrors the `installation_store` field that `build_local_runtime` wires
+    /// in when constructing `RebornLocalExtensionManagementPort`. For tests
+    /// only — zero bytes shipped in production builds.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn installation_store_for_test(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
     pub(crate) async fn search(
         &self,
         query: &str,
@@ -311,6 +321,7 @@ impl RebornLocalExtensionManagementPort {
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let mut summary = extension.summary();
+        suppress_search_credential_onboarding(&mut summary);
         let Some(installation) = self.search_installation(&extension.package.id).await? else {
             return Ok(LifecycleSearchExtensionSummary {
                 summary,
@@ -318,10 +329,6 @@ impl RebornLocalExtensionManagementPort {
             });
         };
         let phase = search_installation_phase(extension, &installation, credential_gate).await?;
-        if search_setup_is_complete(phase) {
-            summary.credential_requirements.clear();
-            summary.onboarding = None;
-        }
         Ok(LifecycleSearchExtensionSummary {
             summary,
             installation_phase: Some(phase),
@@ -571,7 +578,7 @@ impl RebornLocalExtensionManagementPort {
             },
         );
         response.message = Some(
-            "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed unless a later tool call reports auth_required."
+            "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true."
                 .to_string(),
         );
         Ok(response)
@@ -1216,14 +1223,9 @@ async fn search_credentials_configured(
         .is_empty())
 }
 
-fn search_setup_is_complete(phase: LifecyclePhase) -> bool {
-    matches!(
-        phase,
-        LifecyclePhase::Configured
-            | LifecyclePhase::Activating
-            | LifecyclePhase::Active
-            | LifecyclePhase::Disabled
-    )
+fn suppress_search_credential_onboarding(summary: &mut LifecycleExtensionSummary) {
+    summary.credential_requirements.clear();
+    summary.onboarding = None;
 }
 
 fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) -> bool {

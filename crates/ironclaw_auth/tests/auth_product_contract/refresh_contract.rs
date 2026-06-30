@@ -664,6 +664,66 @@ async fn credential_refresh_revalidates_scope_provider_and_grants() {
     assert!(report.refreshed);
 }
 
+#[tokio::test]
+async fn credential_refresh_invalid_grant_marks_account_revoked() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-invalid-grant-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-invalid-grant-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("configured account");
+    services.invalid_grant_next_refresh_for_tests(account.id);
+
+    let report = auth
+        .refresh_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .expect("invalid grant is projected, not propagated");
+
+    assert!(!report.refreshed);
+    assert_eq!(report.account.status, CredentialAccountStatus::Revoked);
+    assert_eq!(
+        report.recovery.kind(),
+        CredentialRecoveryKind::ReauthorizeRequired
+    );
+    assert_eq!(
+        report.recovery.reason,
+        CredentialRecoveryReason::AccountRevoked
+    );
+    assert_eq!(report.recovery.choices().len(), 1);
+    assert_eq!(report.recovery.choices()[0].id, account.id);
+
+    let revoked = services
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
+        .await
+        .expect("lookup")
+        .expect("revoked account");
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+
+    let serialized = serde_json::to_string(&report).expect("serialize report");
+    assert!(!serialized.contains("github-invalid-grant-access"));
+    assert!(!serialized.contains("github-invalid-grant-refresh"));
+    assert!(!serialized.contains("RAW_PROVIDER_ERROR_SENTINEL"));
+}
+
 #[test]
 fn provider_refresh_request_debug_redacts_secret_handle() {
     let request = OAuthProviderRefreshRequest {

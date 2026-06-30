@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use parking_lot::RwLock;

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::InvocationId;
 use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityOutcome, CapabilityResultMessage,
-    ConcurrencyHint,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
+    CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
 };
 
 use crate::runtime::{
@@ -68,11 +68,22 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             .map(|name| name.to_ascii_lowercase())
             .collect::<Vec<_>>();
         let requested_names = names.iter().cloned().collect::<HashSet<_>>();
-        let plan = self
+        let plan = match self
             .skill_activation_source
             .activate_skills_for_run(&invocation.run_context, &names)
             .await
-            .map_err(skill_activation_host_error)?;
+        {
+            Ok(plan) => plan,
+            // A model-recoverable selection failure (the model selected too many
+            // or too-large skills, or named an ambiguous skill) must surface as a
+            // model-visible tool error so the run continues and the model can
+            // retry with a smaller/disambiguated selection — NOT a terminal
+            // `Err(AgentLoopHostError)`, which `ironclaw_agent_loop`'s executor
+            // maps to a run-ending `HostUnavailable { stage: Capability }`. Only
+            // genuine host/infra failures stay terminal. See
+            // `skill_activation_selection_outcome`.
+            Err(error) => return skill_activation_selection_outcome(error),
+        };
         let activated = plan
             .selection
             .activations
@@ -196,6 +207,41 @@ fn skill_activation_host_error(
     )
 }
 
+/// Disposition a skill-activation selection failure into either a model-visible,
+/// recoverable capability failure or a terminal host error.
+///
+/// The two arms map onto the executor's two failure paths
+/// (`ironclaw_agent_loop::executor::mapping`):
+///
+/// - `CapabilityOutcome::Failed` is handed back to the model and the run
+///   continues, so the model can retry. Selection failures the model directly
+///   controls — picking too many/too-large skills (`ContextBudgetExceeded`) or
+///   naming an ambiguous skill (`AmbiguousSkill`) — take this path.
+/// - `Err(AgentLoopHostError)` is mapped to a run-ending
+///   `HostUnavailable { stage: Capability }`. Only genuine host/infra failures
+///   (unavailable source, unparsable bundle, missing trust/visibility metadata,
+///   internal bug) stay terminal, because the model cannot recover from them by
+///   adjusting its request.
+fn skill_activation_selection_outcome(
+    error: ironclaw_first_party_extension_ports::SkillActivationSelectionError,
+) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    use ironclaw_first_party_extension_ports::SkillActivationSelectionError as SelectionError;
+    match error {
+        SelectionError::ContextBudgetExceeded => Ok(CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
+            detail: None,
+        })),
+        SelectionError::AmbiguousSkill { .. } => Ok(CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "ambiguous skill name; specify a single unique skill to activate"
+                .to_string(),
+            detail: None,
+        })),
+        other => Err(skill_activation_host_error(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +278,58 @@ mod tests {
         .expect_err("oversized names list should fail");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn budget_exceeded_selection_is_a_recoverable_tool_failure_not_terminal() {
+        let outcome = skill_activation_selection_outcome(
+            ironclaw_first_party_extension_ports::SkillActivationSelectionError::ContextBudgetExceeded,
+        )
+        .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
+
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_skill_selection_is_a_recoverable_tool_failure_not_terminal() {
+        let outcome = skill_activation_selection_outcome(
+            ironclaw_first_party_extension_ports::SkillActivationSelectionError::AmbiguousSkill {
+                name: "deploy".to_string(),
+                sources: Vec::new(),
+            },
+        )
+        .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
+
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_unavailable_selection_stays_a_terminal_host_error() {
+        let error = skill_activation_selection_outcome(
+            ironclaw_first_party_extension_ports::SkillActivationSelectionError::SourceUnavailable,
+        )
+        .expect_err("genuine host/infra failures must stay terminal");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn internal_selection_stays_a_terminal_host_error() {
+        let error = skill_activation_selection_outcome(
+            ironclaw_first_party_extension_ports::SkillActivationSelectionError::Internal,
+        )
+        .expect_err("internal bugs must stay terminal");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
     }
 }

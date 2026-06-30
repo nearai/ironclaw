@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -843,6 +843,60 @@ async fn replay_projection_service_projects_timeline_and_run_status_by_scope() {
     assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
     assert_eq!(snapshot.next_cursor.runtime, EventCursor::new(4));
     assert!(!snapshot.truncated);
+}
+
+#[tokio::test]
+async fn replay_projection_snapshot_reuses_run_state_checkpoints() {
+    let thread_id = ThreadId::new("thread-cache").unwrap();
+    let scope = scope_for_thread(thread_id);
+    let capability = capability_id();
+    let provider = provider_id();
+    let entries = vec![
+        EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: RuntimeEvent::dispatch_requested(scope.clone(), capability.clone()),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(2),
+            record: RuntimeEvent::runtime_selected(
+                scope.clone(),
+                capability.clone(),
+                provider.clone(),
+                RuntimeKind::Script,
+            ),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(3),
+            record: RuntimeEvent::dispatch_succeeded(
+                scope.clone(),
+                capability,
+                provider,
+                RuntimeKind::Script,
+                0,
+            ),
+        },
+    ];
+    let log = Arc::new(CountingDurableEventLog::new(entries));
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let request = ProjectionRequest {
+        scope: ProjectionScope::from_resource_scope(&scope),
+        after: None,
+        limit: 1,
+    };
+
+    service.snapshot(request.clone()).await.unwrap();
+    service.snapshot(request).await.unwrap();
+
+    let reads = log.reads();
+    let origin_reads = reads.iter().filter(|cursor| cursor.is_none()).count();
+    assert_eq!(
+        origin_reads, 3,
+        "two timeline reads plus one initial fold should start at origin; the second fold must resume from the cached head"
+    );
+    assert!(
+        reads.contains(&Some(EventCursor::new(3))),
+        "second run-state fold should probe from the cached head"
+    );
 }
 
 #[tokio::test]
@@ -1823,6 +1877,85 @@ impl DurableEventLog for FailingDurableEventLog {
         Err(EventError::DurableLog {
             reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
         })
+    }
+}
+
+struct CountingDurableEventLog {
+    entries: Vec<EventLogEntry<RuntimeEvent>>,
+    reads: Mutex<Vec<Option<EventCursor>>>,
+}
+
+impl CountingDurableEventLog {
+    fn new(entries: Vec<EventLogEntry<RuntimeEvent>>) -> Self {
+        Self {
+            entries,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reads(&self) -> Vec<Option<EventCursor>> {
+        match self.reads.lock() {
+            Ok(reads) => reads.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl DurableEventLog for CountingDurableEventLog {
+    async fn append(
+        &self,
+        _event: RuntimeEvent,
+    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "counting-log:append-not-supported".to_string(),
+        })
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        match self.reads.lock() {
+            Ok(mut reads) => reads.push(after),
+            Err(poisoned) => poisoned.into_inner().push(after),
+        }
+        let cutoff = after.unwrap_or_else(EventCursor::origin);
+        let visible = self
+            .entries
+            .iter()
+            .filter(|entry| entry.cursor > cutoff)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_cursor = visible.last().map(|entry| entry.cursor).unwrap_or(cutoff);
+        Ok(EventReplay {
+            entries: visible,
+            next_cursor,
+        })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let head = self
+            .entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .max()
+            .unwrap_or_else(EventCursor::origin);
+        if after.as_u64() > head.as_u64() {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: head,
+            });
+        }
+        Ok(head)
     }
 }
 

@@ -1,1 +1,110 @@
-{"type":"object","additionalProperties":false,"required":["message"],"properties":{"message":{"type":"object","additionalProperties":false,"required":["raw"],"properties":{"raw":{"type":"string","minLength":1,"maxLength":5242880},"threadId":{"type":"string","minLength":1,"maxLength":1024}}}}}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message"
+  ],
+  "properties": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "raw"
+          ]
+        },
+        {
+          "required": [
+            "to",
+            "body"
+          ]
+        }
+      ],
+      "properties": {
+        "raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 5242880
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 998
+        },
+        "to": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 998
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              }
+            }
+          ]
+        },
+        "cc": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 998
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              }
+            }
+          ]
+        },
+        "bcc": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 998
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              }
+            }
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 998
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1048576
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    }
+  }
+}

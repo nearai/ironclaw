@@ -49,7 +49,7 @@ pub fn for_testing() -> LlmConfig {
         bedrock: None,
         gemini_oauth: None,
         openai_codex: None,
-        request_timeout_secs: 120,
+        request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
         cheap_model: None,
         smart_routing_cascade: false,
         max_retries: 0,
@@ -433,7 +433,8 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
         None
     };
 
-    let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
+    let request_timeout_secs =
+        parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", DEFAULT_REQUEST_TIMEOUT_SECS)?;
 
     let gemini_oauth = if is_gemini_oauth {
         Some(GeminiOauthConfig::build(
@@ -1605,14 +1606,14 @@ mod tests {
     }
 
     #[test]
-    fn test_request_timeout_defaults_to_120() {
+    fn test_request_timeout_defaults_to_canonical() {
         let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
         }
         let config = crate::config::llm::resolve(&Settings::default()).expect("resolve");
-        assert_eq!(config.request_timeout_secs, 120);
+        assert_eq!(config.request_timeout_secs, DEFAULT_REQUEST_TIMEOUT_SECS);
     }
 
     #[test]

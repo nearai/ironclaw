@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ScopedPath, TenantId};
@@ -249,6 +250,7 @@ where
         &self,
         config: SkillActivationSelectorConfig,
         workspace_filesystem: Arc<ScopedFilesystem<W>>,
+        auto_activate_flag: Arc<AtomicBool>,
     ) -> FirstPartySelectableSkillsRuntime<F>
     where
         W: RootFilesystem + 'static,
@@ -256,6 +258,7 @@ where
         let setup_marker_source = Arc::new(FilesystemSetupMarkerSource::new(workspace_filesystem));
         let activation_source = Arc::new(
             SelectableSkillContextSource::new(Arc::clone(&self.bundle_source), config)
+                .with_auto_activate_flag(auto_activate_flag)
                 .with_setup_marker_source(setup_marker_source),
         );
         let execution_adapter =

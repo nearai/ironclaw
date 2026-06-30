@@ -1,0 +1,25 @@
+tokens:
+  ghp_emulate_github_token:
+    login: reborn-dev
+    scopes:
+      - repo
+      - user
+
+github:
+  users:
+    - login: reborn-dev
+      name: Reborn Dev
+      email: reborn-dev@example.com
+  orgs:
+    - login: nearai
+      name: NEAR AI
+      description: Emulated organization for Reborn QA.
+  repos:
+    - owner: nearai
+      name: ironclaw
+      description: Emulated IronClaw repo for Reborn QA.
+      language: Rust
+      topics:
+        - reborn
+        - qa
+      auto_init: true
