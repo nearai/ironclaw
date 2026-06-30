@@ -125,10 +125,11 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
+    AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
-    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService, SummaryArtifact,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
@@ -608,57 +609,54 @@ where
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         let reply_content = request.reply.content;
-        let draft = self
+        // One-shot finalize keyed on `turn_run_id`. This collapses the former
+        // append-draft-then-CAS-finalize two-write sequence into a single
+        // call: on the filesystem backend with no prior draft it takes the
+        // append-only fast path (one log append + sequence index, no
+        // per-message file rewrite); if the loop streamed a draft first
+        // (`begin_assistant_draft`), it resolves that draft by run and
+        // finalizes it in place. It is idempotent for a resumed/retried turn —
+        // a second call returns the already-finalized message.
+        let finalized = match self
             .thread_service
-            .append_assistant_draft(AppendAssistantDraftRequest {
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 turn_run_id: self.run_context.run_id.to_string(),
                 content: MessageContent::text(reply_content.clone()),
             })
             .await
-            .map_err(transcript_write_error)?;
-        if draft.status == MessageStatus::Finalized {
-            if draft.content.as_deref() == Some(reply_content.as_str()) {
-                let message_ref = message_ref(draft.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                return Ok(message_ref);
+        {
+            Ok(message) => message,
+            Err(append_error) => {
+                // Concurrency convergence: a racing finalize for the same run
+                // can win the CAS first, leaving this call's finalize to fail.
+                // If a finalized reply for this run already exists with matching
+                // content, converge on it rather than failing the turn — this
+                // preserves the idempotent-under-concurrent-duplicate contract
+                // the former append-draft-then-finalize path provided.
+                match self
+                    .finalized_reply_for_run_matching(&reply_content)
+                    .await?
+                {
+                    Some(existing) => existing,
+                    None => return Err(transcript_write_error(append_error)),
+                }
             }
+        };
+        // Preserve the prior contract: if a finalized reply already exists for
+        // this run with different content (a divergent re-run), surface a
+        // transcript write failure rather than silently keeping stale content.
+        if finalized.content.as_deref() != Some(reply_content.as_str()) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
                 "assistant transcript write failed",
             ));
         }
-        let finalized = self
-            .thread_service
-            .finalize_assistant_message(
-                &self.thread_scope,
-                &self.run_context.thread_id,
-                draft.message_id,
-                MessageContent::text(reply_content.clone()),
-            )
-            .await;
-        match finalized {
-            Ok(message) => {
-                let message_ref = message_ref(message.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                Ok(message_ref)
-            }
-            Err(error) => {
-                if let Some(message_id) = self
-                    .already_finalized_matching_reply(draft.message_id, &reply_content)
-                    .await?
-                {
-                    let message_ref = message_ref(message_id)?;
-                    self.emit_assistant_reply_finalized(message_ref.clone())
-                        .await?;
-                    return Ok(message_ref);
-                }
-                Err(transcript_write_error(error))
-            }
-        }
+        let message_ref = message_ref(finalized.message_id)?;
+        self.emit_assistant_reply_finalized(message_ref.clone())
+            .await?;
+        Ok(message_ref)
     }
 
     async fn append_capability_result_ref(
@@ -723,6 +721,25 @@ impl<S> ThreadBackedLoopTranscriptPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    /// Look up the finalized assistant reply for this run, returning it only
+    /// when its content matches `reply_content`. Used to converge a finalize
+    /// that lost a concurrent race onto the winner's message.
+    async fn finalized_reply_for_run_matching(
+        &self,
+        reply_content: &str,
+    ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
+        let existing = self
+            .thread_service
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                turn_run_id: self.run_context.run_id.to_string(),
+            })
+            .await
+            .map_err(transcript_write_error)?;
+        Ok(existing.filter(|message| message.content.as_deref() == Some(reply_content)))
+    }
+
     async fn emit_assistant_reply_finalized(
         &self,
         message_ref: LoopMessageRef,
@@ -778,32 +795,6 @@ where
             ));
         }
         Ok(message)
-    }
-
-    async fn already_finalized_matching_reply(
-        &self,
-        message_id: ThreadMessageId,
-        reply_content: &str,
-    ) -> Result<Option<ThreadMessageId>, AgentLoopHostError> {
-        let history = self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-            })
-            .await
-            .map_err(transcript_write_error)?;
-        let expected_run_id = self.run_context.run_id.to_string();
-        Ok(history.messages.into_iter().find_map(|message| {
-            let belongs_to_run = message.turn_run_id.as_deref() == Some(expected_run_id.as_str());
-            let matches_reply = message.status == MessageStatus::Finalized
-                && message.content.as_deref() == Some(reply_content);
-            if message.message_id == message_id && belongs_to_run && matches_reply {
-                Some(message.message_id)
-            } else {
-                None
-            }
-        }))
     }
 }
 

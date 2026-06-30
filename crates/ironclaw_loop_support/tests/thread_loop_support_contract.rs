@@ -2252,6 +2252,126 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
     );
 }
 
+/// Finalizing twice for the same run (e.g. a resumed/retried turn) must be
+/// idempotent: one finalized assistant row, same message ref both times. The
+/// one-shot `append_finalized_assistant_message` path the port now uses keys on
+/// `turn_run_id`, so the second call resolves the existing finalized message
+/// rather than appending a duplicate.
+#[tokio::test]
+async fn transcript_port_finalize_assistant_reply_is_idempotent_for_one_run() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    let first = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "final answer".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+    let second = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "final answer".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.as_str(), second.as_str());
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let assistant_rows: Vec<_> = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::Assistant)
+        .collect();
+    assert_eq!(
+        assistant_rows.len(),
+        1,
+        "double finalize must not materialize a second assistant row"
+    );
+    assert_eq!(assistant_rows[0].status, MessageStatus::Finalized);
+    assert_eq!(assistant_rows[0].content.as_deref(), Some("final answer"));
+}
+
+/// When the loop streamed a draft first (`begin_assistant_draft` +
+/// `update_assistant_draft`), finalizing must finalize that existing draft IN
+/// PLACE — same message id, final content — not append a second message. The
+/// one-shot path resolves the streamed draft by `turn_run_id` and finalizes it.
+#[tokio::test]
+async fn transcript_port_finalize_finalizes_existing_streamed_draft_in_place() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    let draft_ref = adapter
+        .begin_assistant_draft(BeginAssistantDraft {
+            reply: AssistantReply {
+                content: "partial".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+    adapter
+        .update_assistant_draft(UpdateAssistantDraft {
+            message_ref: draft_ref.clone(),
+            reply: AssistantReply {
+                content: "partial answer".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let finalized_ref = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "partial answer complete".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        finalized_ref.as_str(),
+        draft_ref.as_str(),
+        "finalize must finalize the streamed draft in place, not create a new message"
+    );
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let assistant_rows: Vec<_> = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::Assistant)
+        .collect();
+    assert_eq!(assistant_rows.len(), 1);
+    assert_eq!(assistant_rows[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        assistant_rows[0].content.as_deref(),
+        Some("partial answer complete")
+    );
+}
+
 #[tokio::test]
 async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     let fixture = ThreadFixture::new().await;
