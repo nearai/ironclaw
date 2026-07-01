@@ -263,10 +263,12 @@ export function MessageList({
         to=${logsPath}
         aria-label=${t("nav.logs")}
         title=${t("nav.logs")}
-        className="absolute bottom-4 right-4 inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 text-xs font-semibold text-[var(--v2-text-muted)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] transition hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)]"
+        className="group absolute bottom-5 right-5 inline-flex h-9 items-center gap-0 overflow-hidden rounded-full border border-white/10 bg-[color-mix(in_srgb,var(--v2-canvas-strong)_82%,transparent)] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] shadow-[0_12px_28px_-18px_rgba(0,0,0,0.9)] backdrop-blur-md transition-all hover:gap-1.5 hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)] hover:px-3 hover:text-[var(--v2-text-strong)] focus:gap-1.5 focus:px-3 focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_38%,transparent)]"
       >
         <${Icon} name="logs" className="h-3.5 w-3.5" />
-        ${t("nav.logs")}
+        <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all group-hover:max-w-12 group-hover:opacity-100 group-focus:max-w-12 group-focus:opacity-100">
+          ${t("nav.logs")}
+        </span>
       <//>
     `}
     ${!atBottom &&
