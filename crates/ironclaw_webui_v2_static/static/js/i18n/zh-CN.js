@@ -42,6 +42,19 @@ registerPack("zh-CN", {
   // Header
   "header.signOut": "退出登录",
 
+  // Notifications
+  "notifications.open": "打开通知",
+  "notifications.close": "关闭通知",
+  "notifications.title": "通知",
+  "notifications.emptyTitle": "暂无通知",
+  "notifications.emptyDescription": "需要你审批的消息会显示在这里。",
+  "notifications.allCaughtUp": "已全部查看",
+  "notifications.unreadCount": "{count} 条新通知",
+  "notifications.unread": "未读",
+  "notifications.approval.title": "需要审批",
+  "notifications.approval.detail": "等待你审批",
+  "notifications.approval.untitled": "未命名对话",
+
   // Status
   "status.online": "在线",
   "status.offline": "离线",
@@ -125,6 +138,7 @@ registerPack("zh-CN", {
   "approval.always": "始终允许",
   "approval.approveAndAlways": "批准并始终允许",
   "approval.alwaysAllowToolLabel": "始终允许 {tool} （不再询问）",
+  "approval.globalAutoApproveLink": "自动批准并执行所有操作",
   "approval.thisTool": "此工具",
   "approval.viewFullCommand": "查看完整命令",
   "approval.showCommandPreview": "显示预览",

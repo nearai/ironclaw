@@ -186,7 +186,9 @@ fields:
 
 ### bottleneck-finder
 
-The broad scan for libsql and general local bottleneck discovery:
+The broad scan for libsql and general local bottleneck discovery. User-turn
+cases use separate user threads by default; hot-thread serialization is kept as
+an explicit preset so it does not distort capacity results.
 
 ```bash
 cargo run -p ironclaw_stress --release -- \
@@ -200,7 +202,6 @@ Cases include:
 
 - `resource-contention`
 - `chat-baseline`
-- `hot-thread`
 - `large-context`
 - `tool-heavy`
 - `tool-wait`
@@ -246,12 +247,17 @@ cargo run -p ironclaw_stress --release -- \
 cargo run -p ironclaw_stress --release -- \
   --backend libsql \
   --preset chat-baseline \
+  --users 128 \
   --ramp-concurrency 64 \
   --max-p95-ms 500 \
   --max-failure-rate 0.01 \
   --human-read \
   --bottleneck-report
 ```
+
+For user-turn capacity runs, keep `--users >= --concurrency`. With the default
+`--active-thread-count 0`, the harness partitions users/threads across workers
+so concurrent workers do not target the same thread.
 
 ### Test hot-thread behavior
 

@@ -127,7 +127,8 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Query => permissions.read && permissions.list,
         FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::ReserveSeq => permissions.write,
         FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
 }

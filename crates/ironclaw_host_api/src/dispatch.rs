@@ -158,6 +158,12 @@ pub enum RuntimeDispatchErrorKind {
     Unknown,
 }
 
+/// Fixed user-facing fallback for [`RuntimeDispatchErrorKind::InputEncode`].
+///
+/// This exact sentence is whitelisted by downstream safety validators after
+/// they reject arbitrary summaries mentioning raw tool input.
+pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encoded";
+
 impl RuntimeDispatchErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -183,6 +189,38 @@ impl RuntimeDispatchErrorKind {
             Self::UndeclaredCapability => "UndeclaredCapability",
             Self::UnsupportedRunner => "UnsupportedRunner",
             Self::Unknown => "Unknown",
+        }
+    }
+
+    /// Human-readable, user-facing summary for this redacted failure kind.
+    ///
+    /// Used when a dispatch failure carries no host-authored `safe_summary`, so
+    /// surfaces show a plain sentence instead of the stable category token
+    /// (`as_str`). Fixed host-authored text — no raw content interpolated.
+    pub const fn human_summary(self) -> &'static str {
+        match self {
+            Self::Backend => "the tool's backend failed",
+            Self::Client => "the tool client failed to run",
+            Self::Executor => "the tool executor failed",
+            Self::ExitFailure => "the tool exited with an error",
+            Self::ExtensionRuntimeMismatch => "the tool runtime did not match its extension",
+            Self::FilesystemDenied => "the tool was denied filesystem access",
+            Self::Guest => "the tool reported an internal error",
+            Self::InputEncode => INPUT_ENCODE_HUMAN_SUMMARY,
+            Self::InvalidResult => "the tool returned an invalid result",
+            Self::Manifest => "the tool manifest is invalid",
+            Self::Memory => "the tool exceeded its memory limit",
+            Self::MethodMissing => "the tool method is not available",
+            Self::NetworkDenied => "the tool was denied network access",
+            Self::OperationFailed => "the tool operation failed",
+            Self::OutputDecode => "the tool output could not be decoded",
+            Self::OutputTooLarge => "the tool output was too large",
+            Self::PolicyDenied => "the tool call was denied by policy",
+            Self::Resource => "the tool ran out of resources",
+            Self::SecretDenied => "the tool was denied access to a required secret",
+            Self::UndeclaredCapability => "the tool used an undeclared capability",
+            Self::UnsupportedRunner => "the tool runner is not supported",
+            Self::Unknown => "the tool failed for an unknown reason",
         }
     }
 
@@ -243,6 +281,20 @@ impl DispatchFailureKind {
             Self::UnsupportedRuntime => "UnsupportedRuntime",
             Self::AuthRequired => "AuthRequired",
             Self::Runtime(kind) => kind.as_str(),
+        }
+    }
+
+    /// Human-readable, user-facing summary for this redacted failure kind.
+    /// Fixed host-authored text — no raw content interpolated.
+    pub const fn human_summary(self) -> &'static str {
+        match self {
+            Self::UnknownCapability => "the requested tool was not found",
+            Self::UnknownProvider => "the tool provider was not found",
+            Self::RuntimeMismatch => "the tool runtime did not match",
+            Self::MissingRuntimeBackend => "the tool runtime backend is unavailable",
+            Self::UnsupportedRuntime => "the tool runtime is not supported",
+            Self::AuthRequired => "the tool requires authentication",
+            Self::Runtime(kind) => kind.human_summary(),
         }
     }
 }
@@ -435,6 +487,31 @@ pub trait CapabilityDispatcher: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_failure_kind_human_summary_is_plain_language_not_category_token() {
+        // The user-facing summary must read as a sentence, never the stable
+        // category token (which is for routing/metrics/audit only).
+        let runtime = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode);
+        assert_eq!(runtime.human_summary(), INPUT_ENCODE_HUMAN_SUMMARY);
+        assert_ne!(runtime.human_summary(), runtime.as_str());
+        assert_eq!(
+            DispatchFailureKind::UnknownCapability.human_summary(),
+            "the requested tool was not found"
+        );
+        // Every variant maps to non-empty, lowercase-initial plain text.
+        for kind in [
+            RuntimeDispatchErrorKind::Backend,
+            RuntimeDispatchErrorKind::InputEncode,
+            RuntimeDispatchErrorKind::OperationFailed,
+            RuntimeDispatchErrorKind::NetworkDenied,
+            RuntimeDispatchErrorKind::Unknown,
+        ] {
+            let summary = kind.human_summary();
+            assert!(!summary.is_empty());
+            assert_ne!(summary, kind.as_str());
+        }
+    }
 
     #[test]
     fn dispatch_input_issue_builder_methods_round_trip_optional_fields() {

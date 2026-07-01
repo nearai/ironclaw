@@ -167,3 +167,41 @@ test("MessageList observes content growth from streamed markdown layout", () => 
     "resize-driven follow should still respect intentional user scrollback",
   );
 });
+
+test("MessageList renders a floating thread logs shortcut", () => {
+  assert.match(
+    messageListSource,
+    /import \{ Link \} from "react-router";/,
+    "thread logs shortcut should use React Router navigation",
+  );
+  assert.doesNotMatch(
+    messageListSource,
+    /buildScopedLogsPath/,
+    "message-list should receive a logsPath prop instead of building routes",
+  );
+  assert.match(
+    messageListSource,
+    /logsPath,/,
+    "message-list should accept a prebuilt thread logs route",
+  );
+  assert.match(
+    messageListSource,
+    /className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"/,
+    "scroll area should keep its normal bottom padding",
+  );
+  assert.match(
+    messageListSource,
+    /\$\{logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" \/>`\}/,
+    "floating logs control should reserve space with an end-of-content spacer",
+  );
+  assert.match(
+    messageListSource,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-5 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
+    "floating logs button classes should live in a module-level constant",
+  );
+  assert.match(
+    messageListSource,
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*<\$\{Icon\} name="logs"/,
+    "thread logs shortcut should render as a visible bottom-right icon button",
+  );
+});

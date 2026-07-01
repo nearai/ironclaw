@@ -19,17 +19,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion, RootFilesystem,
-    ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, LocalFilesystem, Page, RecordVersion,
+    RootFilesystem, ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, ProjectId, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
-    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
@@ -204,6 +205,207 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_run() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-append", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-append");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-append").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+            content: MessageContent::text("retry answer ignored"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(duplicate.kind, MessageKind::Assistant);
+    assert_eq!(duplicate.status, MessageStatus::Finalized);
+    assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-append".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message should be indexed by run");
+    assert_eq!(finalized.message_id, first.message_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, first.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+}
+
+#[tokio::test]
+async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_by_turn_run() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-existing-draft", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-existing-draft");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-existing-draft").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-existing-draft".into(),
+            content: MessageContent::text("draft answer"),
+        })
+        .await
+        .unwrap();
+    let finalized = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-existing-draft".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final answer"));
+
+    // The run index resolves to the same single message — finalizing in place
+    // must not leave the run pointing at a stale or second record.
+    let by_run = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-existing-draft".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message should be indexed by run");
+    assert_eq!(by_run.message_id, draft.message_id);
+    assert_eq!(by_run.status, MessageStatus::Finalized);
+
+    // Finalize-by-turn-run finalizes the existing draft IN PLACE — it must
+    // not materialize a second history row. Assert the caller-visible
+    // single-row invariant, not just the returned record.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, draft.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[0].content.as_deref(), Some("final answer"));
+}
+
+#[tokio::test]
+async fn filesystem_redacts_append_only_finalized_assistant_message() {
+    // Regression for the append-log mutation gap: a finalized assistant
+    // message written with NO prior draft lives only in the per-thread
+    // append log (no individual message file). Redaction must still apply —
+    // `apply_message_update` materializes the file on mutation and the
+    // file-authoritative merge then shadows the original log entry, so reads
+    // surface the redacted record (not the stale appended one) and history
+    // stays single-row.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-redact-append-only", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("redact-append-only");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-redact-append-only").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // No prior draft -> this finalized message is append-only.
+    let finalized = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-redact-append-only".into(),
+            content: MessageContent::text("secret answer"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+
+    let redacted = service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: finalized.message_id,
+            redaction_ref: "redaction/audit/append-only".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(redacted.status, MessageStatus::Redacted);
+    assert_eq!(redacted.content, None);
+
+    // Reads must reflect the redaction, not the original append-log entry,
+    // and must not duplicate the message.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, finalized.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Redacted);
+    assert_eq!(history.messages[0].content, None);
+    assert_eq!(
+        history.messages[0].redaction_ref.as_deref(),
+        Some("redaction/audit/append-only")
+    );
 }
 
 #[tokio::test]
@@ -1318,7 +1520,7 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
     // The freshly-used thread now leads the Recent list.
     let after = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: scope_a,
+            scope: scope_a.clone(),
             limit: None,
             cursor: None,
         })
@@ -1330,6 +1532,79 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(after_ids, ["t-older", "t-newer"]);
+
+    // Cross-thread recency invariant the activity sort exists for: a
+    // *chattier but staler* thread must NOT outrank a *quieter but more
+    // recently touched* one. A per-thread-sequence sort (transcript length)
+    // would wrongly float `t-newer` above `t-older` after the steps below.
+    let older_stamp = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+        })
+        .await
+        .unwrap()
+        .updated_at
+        .expect("touched thread has activity stamp");
+    wait_until_after(older_stamp).await;
+
+    // Pile several messages onto `t-newer`, raising its per-thread sequence
+    // well above `t-older`'s — but at this earlier instant.
+    for i in 0..3 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope_a.clone(),
+                thread_id: ThreadId::new("t-newer").unwrap(),
+                actor_id: "actor-a".into(),
+                source_binding_id: Some(format!("binding-chatter-{i}")),
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-chatter-{i}")),
+                content: MessageContent::text("chatter on the new thread"),
+            })
+            .await
+            .unwrap();
+    }
+    let newer_stamp = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-newer").unwrap(),
+        })
+        .await
+        .unwrap()
+        .updated_at
+        .expect("touched thread has activity stamp");
+    wait_until_after(newer_stamp).await;
+
+    // Touch `t-older` once more, strictly later. It now has FEWER total
+    // messages than `t-newer` but the most recent activity.
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-activity-2".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-activity-2".into()),
+            content: MessageContent::text("ping the old thread again"),
+        })
+        .await
+        .unwrap();
+
+    let final_list = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let final_ids: Vec<&str> = final_list
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    // Recency wins over transcript length.
+    assert_eq!(final_ids, ["t-older", "t-newer"]);
 }
 
 #[tokio::test]
@@ -1748,6 +2023,48 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
     assert!(
         history.messages[0].turn_run_id.is_none(),
         "legacy DeferredBusy message must have no turn_run_id"
+    );
+}
+
+/// Regression: `ensure_thread` was migrated to the shared `cas_update`
+/// helper, which maps `CasUpdateError::CasUnsupported` to
+/// `SessionThreadError::Backend(...)` (`map_cas_error`,
+/// `filesystem_service.rs`). Existing `ensure_thread` coverage only runs
+/// over `InMemoryBackend`, which supports versioned CAS — so the
+/// byte-only/`Unsupported` fail-closed branch for thread creation was
+/// unpinned.
+///
+/// `LocalFilesystem` is the canonical byte-only `RootFilesystem`: its
+/// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
+/// surfaces as `CasUnsupported`. This mirrors
+/// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
+/// `crates/ironclaw_run_state/tests/run_state_contract.rs`.
+#[tokio::test]
+async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+    let scoped = scoped_threads_fs_at(Arc::new(local_fs), "tenant-byte-only", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let err = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("byte-only"),
+            thread_id: Some(ThreadId::new("thread-byte-only").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect_err("ensure_thread must fail closed on a byte-only backend");
+    assert!(
+        matches!(&err, SessionThreadError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
     );
 }
 

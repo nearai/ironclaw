@@ -56,6 +56,7 @@ async fn completed_preview_for_input(
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -180,6 +181,7 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                error_detail: None,
                 first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
@@ -243,6 +245,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -295,6 +298,7 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
             process_id: None,
             output_bytes: Some(2),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -667,6 +671,7 @@ async fn capability_display_preview_store_admits_workspace_and_project_scoped_pa
                 process_id: None,
                 output_bytes: Some(4),
                 error_kind: None,
+                error_detail: None,
                 first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
@@ -714,6 +719,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -775,6 +781,7 @@ async fn capability_display_preview_store_redacts_camel_case_api_key_json() {
             process_id: None,
             output_bytes: Some(128),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -842,6 +849,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -861,6 +869,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
@@ -936,6 +945,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -955,6 +965,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
@@ -1037,6 +1048,7 @@ async fn capability_display_preview_marks_json_depth_truncation() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1070,6 +1082,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             process_id: None,
             output_bytes: None,
             error_kind: Some("operation_failed".to_string()),
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1088,6 +1101,71 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             .as_deref()
             .is_some_and(|summary| summary.contains("operation_failed"))
     );
+}
+
+// Regression: when a failed capability stages a failure preview carrying the
+// rendered invalid-input detail, the projection surfaces that detail in
+// `output_summary` instead of degrading to the bare "tool failed: <kind>"
+// fallback. This is the chokepoint the per-tool UI Error tab reads.
+#[tokio::test]
+async fn capability_display_preview_uses_staged_failure_summary_over_bare_kind() {
+    let run_id = TurnRunId::new();
+    let invocation_id = InvocationId::from_uuid(run_id.as_uuid());
+    let capability = CapabilityId::new("builtin.json").unwrap();
+    let input_ref = preview_input_ref("failure-detail");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "json",
+        &serde_json::json!({ "value": "{" }),
+    );
+    store.record_running_invocation(invocation_id, &input_ref);
+
+    store.record_failure_preview(
+        &run_id.to_string(),
+        invocation_id,
+        &capability,
+        "Invalid input: value — missing required field (expected object)",
+    );
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(invocation_id),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("invalid_input".to_string()),
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The bare kind is still on `error_kind`, but the human-facing summary now
+    // carries the actionable detail, not "tool failed: invalid_input".
+    assert_eq!(preview.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(
+        preview.output_summary.as_deref(),
+        Some("Invalid input: value — missing required field (expected object)")
+    );
+    assert!(
+        !preview
+            .output_summary
+            .as_deref()
+            .unwrap()
+            .contains("tool failed")
+    );
+    // Title comes from the staged input, not just the capability id.
+    assert_eq!(preview.title, "json");
 }
 
 #[tokio::test]
@@ -1122,6 +1200,7 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             process_id: None,
             output_bytes: Some(2048),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1185,6 +1264,7 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
             process_id: None,
             output_bytes: Some(32),
             error_kind: None,
+            error_detail: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),

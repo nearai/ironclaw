@@ -37,6 +37,34 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "iteration_limit" => {
             "The run stopped after reaching its iteration limit before producing a reply."
         }
+        // Categories below come from `LoopFailureKind::as_str()` via the normal
+        // loop-exit path (`ironclaw_turns::loop_exit`), not the driver-error
+        // path above. They were previously unmapped and degraded to the generic
+        // fallback, which masked the real failure (a tool failure surfaced to
+        // the user as a vague "driver protocol error").
+        "capability_protocol_error" => {
+            "The run stopped because a tool returned a response it could not process."
+        }
+        "model_error" => "The run stopped because the model could not complete the request.",
+        "context_build_failed" => {
+            "The run failed while preparing the conversation context for the model."
+        }
+        "invalid_model_output" => {
+            "The run stopped because the model returned a response that could not be parsed."
+        }
+        "checkpoint_rejected" => "The run failed while saving a progress checkpoint.",
+        "checkpoint_unavailable" => {
+            "The run could not resume because its saved progress was unavailable."
+        }
+        "transcript_write_failed" => "The run failed while recording its transcript.",
+        "driver_bug" => "The run stopped because of an internal error in the agent runtime.",
+        "policy_denied" => "The run stopped because an action it attempted was not permitted.",
+        "compaction_unavailable" => {
+            "The run stopped because it could not free up context space to continue."
+        }
+        "driver_protocol_violation" => {
+            "The run produced an invalid result and stopped before replying."
+        }
         "unknown_failure" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
@@ -124,6 +152,43 @@ mod tests {
             assert!(
                 !summary.contains("execution driver"),
                 "{category} leaked execution driver wording"
+            );
+        }
+    }
+
+    // Regression guard: categories emitted by `LoopFailureKind::as_str()`
+    // through the normal loop-exit path must map to specific, honest summaries
+    // instead of degrading to the generic fallback (which the LLM failure
+    // explainer then paraphrased into a vague "driver protocol error" that
+    // masked the real tool failure).
+    #[test]
+    fn reborn_failure_summary_describes_capability_protocol_error() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("capability_protocol_error")),
+            "The run stopped because a tool returned a response it could not process."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_maps_loop_failure_categories_specifically() {
+        let generic = reborn_failure_summary_for_category(None);
+        for category in [
+            "capability_protocol_error",
+            "model_error",
+            "context_build_failed",
+            "invalid_model_output",
+            "checkpoint_rejected",
+            "checkpoint_unavailable",
+            "transcript_write_failed",
+            "driver_bug",
+            "policy_denied",
+            "compaction_unavailable",
+            "driver_protocol_violation",
+        ] {
+            let summary = reborn_failure_summary_for_category(Some(category));
+            assert_ne!(
+                summary, generic,
+                "{category} still degrades to the generic failure summary"
             );
         }
     }

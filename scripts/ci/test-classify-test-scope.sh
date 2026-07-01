@@ -97,6 +97,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn group test runner script" \
+  "scripts/ci/run-reborn-group-tests.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
 tests/support/reborn/harness.rs

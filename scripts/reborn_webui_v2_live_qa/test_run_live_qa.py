@@ -86,6 +86,145 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(absent_result)
         self.assertFalse(absent.clicked)
 
+    def test_slack_connect_case_uses_extensions_channels_surface(self):
+        class FakePage:
+            def __init__(self) -> None:
+                self.gotos: list[tuple[str, str | None]] = []
+
+            async def goto(self, url: str, wait_until: str | None = None) -> None:
+                self.gotos.append((url, wait_until))
+
+            def locator(self, selector: str) -> str:
+                return selector
+
+        class FakeExpectation:
+            def __init__(self, selector: str) -> None:
+                self.selector = selector
+
+            async def to_contain_text(
+                self,
+                text: str,
+                timeout: int | None = None,
+            ) -> None:
+                expected_texts.append((self.selector, text, timeout))
+
+        def fake_expect(selector: str) -> FakeExpectation:
+            return FakeExpectation(selector)
+
+        async def fake_with_page(
+            _output_dir: Path,
+            _case_name: str,
+            action,
+        ) -> None:
+            await action(fake_page)
+
+        async def fake_fetch_webui_json(_page: object, path: str) -> dict[str, object]:
+            fetched_paths.append(path)
+            return {
+                "channels": [
+                    {
+                        "channel": "slack",
+                        "display_name": "Slack",
+                        "strategy": "admin_managed_channels",
+                        "action": {"title": "Choose Slack channel"},
+                    },
+                    {
+                        "channel": "slack",
+                        "display_name": "Slack",
+                        "strategy": "inbound_proof_code",
+                        "action": {
+                            "title": "Slack account connection",
+                            "instructions": "Message the Slack app, then enter the code here.",
+                        },
+                    },
+                ]
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "preflight.json").write_text(
+                json.dumps(
+                    {
+                        "checks": {
+                            "slack": {
+                                "enabled_in_config": True,
+                                "env_present": True,
+                                "auth_test": {
+                                    "ok": True,
+                                    "team_id": "T123",
+                                    "user_id": "U123",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_page = FakePage()
+            fetched_paths: list[str] = []
+            expected_texts: list[tuple[str, str, int | None]] = []
+            playwright_module = types.ModuleType("playwright")
+            playwright_async_api = types.ModuleType("playwright.async_api")
+            playwright_async_api.expect = fake_expect
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=output_dir,
+                reborn_home=output_dir / "reborn-home",
+                env={},
+            )
+
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": playwright_module,
+                        "playwright.async_api": playwright_async_api,
+                    },
+                ),
+                patch.object(run_live_qa, "_with_page", new=fake_with_page),
+                patch.object(
+                    run_live_qa,
+                    "_fetch_webui_json",
+                    new=fake_fetch_webui_json,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._slack_connect_case(
+                        ctx,
+                        case_name="qa_3a_slack_connect",
+                    )
+                )
+
+        self.assertTrue(result.success, result.details)
+        self.assertEqual(
+            fake_page.gotos,
+            [
+                (
+                    "http://127.0.0.1:3000/v2/extensions/channels?"
+                    f"token={run_live_qa.AUTH_TOKEN}",
+                    "domcontentloaded",
+                )
+            ],
+        )
+        self.assertEqual(
+            fetched_paths,
+            ["/api/webchat/v2/channels/connectable"],
+        )
+        observed_expectations = [text for _selector, text, _timeout in expected_texts]
+        self.assertIn("Channels", observed_expectations)
+        self.assertIn("Slack account connection", observed_expectations)
+        self.assertIn("Message the Slack app", observed_expectations)
+        self.assertNotIn("Connect Slack", observed_expectations)
+        self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
+        self.assertEqual(
+            result.details["slack_connect_surface"],
+            "/v2/extensions/channels",
+        )
+        self.assertEqual(
+            result.details["slack_connect_title"],
+            "Slack account connection",
+        )
+
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):
         captured_chat: dict[str, dict[str, object]] = {}
         captured_registry: dict[str, dict[str, object]] = {}
@@ -428,6 +567,53 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ["news.ycombinator.com|hacker news|hn|discussion|id="],
             )
         )
+
+    def test_wait_for_assistant_reply_matches_combined_assistant_blocks(self):
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 2
+
+            async def inner_text(self, **_kwargs):
+                return "latest news on that company\nEmails a concise briefing"
+
+            async def all_inner_texts(self):
+                return [
+                    'The routine has been created successfully. Routine: "30-min meeting briefing"',
+                    "latest news on that company\nEmails a concise briefing",
+                ]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        text = asyncio.run(
+            run_live_qa._wait_for_assistant_reply(
+                FakePage(),
+                marker=None,
+                required_text=["routine", "email|emails|gmail"],
+                timeout=1.0,
+            )
+        )
+
+        self.assertIn("routine", text.lower())
+        self.assertIn("emails", text.lower())
 
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))

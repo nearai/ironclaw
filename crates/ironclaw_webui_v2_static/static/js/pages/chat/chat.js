@@ -1,7 +1,5 @@
 import { React, html } from "../../lib/html.js";
-import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
-import { Icon } from "../../design-system/icons.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -11,7 +9,6 @@ import { ApprovalCard } from "./components/approval-card.js";
 import { AuthGenericCard } from "./components/auth-generic-card.js";
 import { AuthOauthCard } from "./components/auth-oauth-card.js";
 import { AuthTokenCard } from "./components/auth-token-card.js";
-import { ChannelConnectCard } from "./components/channel-connect-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
@@ -46,6 +43,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  globalAutoApproveEnabled = false,
 }) {
   const t = useT();
   const {
@@ -53,7 +51,6 @@ export function Chat({
     isProcessing,
     pendingGate,
     busyGateNotice,
-    channelConnectAction,
     suggestions,
     sseStatus,
     historyLoading,
@@ -70,7 +67,6 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    dismissChannelConnectAction,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -86,8 +82,7 @@ export function Chat({
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
-    activeThreadHasGate ||
-    Boolean(channelConnectAction);
+    activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
@@ -107,6 +102,7 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  const logsPath = activeThreadId ? buildScopedLogsPath({ threadId: activeThreadId }) : null;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -114,15 +110,6 @@ export function Chat({
       activeThreadIsProcessing &&
       !activeThreadHasGate
   );
-  const activeRunLogsPath =
-    activeThreadId &&
-    activeRun?.runId &&
-    activeRun.threadId === activeThreadId
-      ? buildScopedLogsPath(
-          { threadId: activeThreadId, runId: activeRun.runId },
-          { absolute: true },
-        )
-      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
       if (activeThreadHasGate) {
@@ -235,19 +222,6 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
-        ${isProcessing && !pendingGate && activeRunLogsPath && html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <${Link}
-              to=${activeRunLogsPath}
-              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-              title=${t("nav.logs")}
-            >
-              <${Icon} name="list" className="h-3.5 w-3.5" />
-              ${t("nav.logs")}
-            <//>
-          </div>
-        `}
-
         ${historyLoadError &&
         html`
           <div
@@ -283,6 +257,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
+            logsPath=${logsPath}
             pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
@@ -293,13 +268,6 @@ export function Chat({
               />
             `}
             ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
-            ${channelConnectAction &&
-            html`
-              <${ChannelConnectCard}
-                connectAction=${channelConnectAction}
-                onDismiss=${dismissChannelConnectAction}
-              />
-            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
@@ -329,6 +297,7 @@ export function Chat({
               : html`
               <${ApprovalCard}
                 gate=${pendingGate}
+                globalAutoApproveEnabled=${globalAutoApproveEnabled}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>

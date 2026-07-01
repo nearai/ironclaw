@@ -42,6 +42,19 @@ registerPack("uk", {
   // Header
   "header.signOut": "Вийти",
 
+  // Notifications
+  "notifications.open": "Відкрити сповіщення",
+  "notifications.close": "Закрити сповіщення",
+  "notifications.title": "Сповіщення",
+  "notifications.emptyTitle": "Немає сповіщень",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "Усе переглянуто",
+  "notifications.unreadCount": "{count} нових",
+  "notifications.unread": "Непрочитане",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "онлайн",
   "status.offline": "офлайн",
@@ -125,6 +138,7 @@ registerPack("uk", {
   "approval.always": "Завжди",
   "approval.approveAndAlways": "Затверджувати та завжди дозволяти",
   "approval.alwaysAllowToolLabel": "Завжди дозволяти {tool} без запиту",
+  "approval.globalAutoApproveLink": "Автоматично затверджувати й виконувати всі дії",
   "approval.thisTool": "цей інструмент",
   "approval.viewFullCommand": "Переглянути повну команду",
   "approval.showCommandPreview": "Показати попередній перегляд",

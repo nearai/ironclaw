@@ -25,6 +25,7 @@ DEFAULT_PROFILE = "local-dev"
 YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
+ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 
 
 def find_free_port() -> int:
@@ -383,15 +384,27 @@ async def create_thread(client: httpx.AsyncClient, base_url: str) -> str:
     return response.json()["thread"]["thread_id"]
 
 
-async def send_message(
+async def _submit_message(
     client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
-) -> None:
+) -> dict:
     response = await client.post(
         f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
         json={"client_action_id": client_action_id(), "content": content},
         timeout=30,
     )
     assert response.status_code in (200, 202), response.text
+    return response.json()
+
+
+async def send_message(
+    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
+) -> dict:
+    body = await _submit_message(client, base_url, thread_id, content)
+    outcome = body.get("outcome")
+    assert outcome in ACCEPTED_SEND_OUTCOMES, (
+        f"Message was not accepted for a run; outcome={outcome!r}, body={body}"
+    )
+    return body
 
 
 async def fetch_timeline(client: httpx.AsyncClient, base_url: str, thread_id: str) -> dict:
@@ -453,7 +466,31 @@ async def send_and_settle(
     expected: int,
 ) -> None:
     """Send a text turn and wait until ``expected`` assistant replies finalize."""
-    await send_message(client, base_url, thread_id, content)
+    submit_body: dict = {}
+    last_submit_error = None
+    for _ in range(12):
+        try:
+            submit_body = await _submit_message(client, base_url, thread_id, content)
+            last_submit_error = None
+        except httpx.HTTPError as error:
+            last_submit_error = error
+            await asyncio.sleep(0.5)
+            continue
+        outcome = submit_body.get("outcome")
+        if outcome in ACCEPTED_SEND_OUTCOMES:
+            break
+        if outcome == "rejected_busy":
+            await asyncio.sleep(0.5)
+            continue
+        raise AssertionError(
+            f"Message was not accepted for a run; outcome={outcome!r}, body={submit_body}"
+        )
+    else:
+        raise AssertionError(
+            f"Thread {thread_id} remained busy before accepting a new turn; "
+            f"last submit response: {submit_body}; last submit error: {last_submit_error!r}"
+        )
+
     for _ in range(90):
         try:
             timeline = await fetch_timeline(client, base_url, thread_id)
@@ -464,5 +501,6 @@ async def send_and_settle(
             return
         await asyncio.sleep(0.5)
     raise AssertionError(
-        f"Thread {thread_id} did not reach {expected} finalized assistant replies"
+        f"Thread {thread_id} did not reach {expected} finalized assistant replies; "
+        f"submit response: {submit_body}"
     )
