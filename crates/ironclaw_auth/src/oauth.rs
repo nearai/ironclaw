@@ -57,6 +57,16 @@ pub const GOOGLE_GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail
 /// Permission to modify Gmail messages and drafts.
 pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
+/// Reborn auth provider id for Slack personal (user-token) OAuth accounts.
+///
+/// Deliberately distinct from the bot Slack extension (`slack`) so a user
+/// token can never collide with the workspace bot token.
+pub const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
+/// Slack OAuth v2 authorization endpoint (user-token consent).
+pub const SLACK_PERSONAL_AUTHORIZATION_ENDPOINT: &str = "https://slack.com/oauth/v2/authorize";
+/// Slack OAuth v2 token endpoint (`oauth.v2.access`).
+pub const SLACK_PERSONAL_TOKEN_ENDPOINT: &str = "https://slack.com/api/oauth.v2.access";
+
 /// URL-safe S256 PKCE code challenge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkceCodeChallenge(String);
@@ -221,6 +231,100 @@ impl GoogleOAuthCallbackState {
             scope,
             account_label: wire.account_label,
             requested_scopes: validate_google_callback_scope_values(wire.requested_scopes)?,
+            nonce: wire.nonce,
+        })
+    }
+}
+
+/// Slack personal (user-token) OAuth callback state.
+///
+/// Duplicate of [`GoogleOAuthCallbackState`] with a Slack-specific prefix and
+/// permissive scope validation: Slack user scopes are an open set, and the
+/// extension manifest is the source of truth for requested scopes. Reuses the
+/// same private wire shape as Google — only the prefix and validation differ.
+/// Like Google's, this value is not authority by itself; callback handlers must
+/// still hash the full raw state and compare it against the durable flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackPersonalOAuthCallbackState {
+    flow_id: AuthFlowId,
+    scope: AuthProductScope,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
+    nonce: String,
+}
+
+impl SlackPersonalOAuthCallbackState {
+    const PREFIX: &'static str = "ics1.";
+
+    pub fn new(
+        flow_id: AuthFlowId,
+        scope: AuthProductScope,
+        account_label: CredentialAccountLabel,
+        requested_scopes: Vec<ProviderScope>,
+    ) -> Result<Self, AuthProductError> {
+        Ok(Self {
+            flow_id,
+            scope,
+            account_label,
+            requested_scopes,
+            nonce: ironclaw_common::pkce::generate_code_verifier(),
+        })
+    }
+
+    pub fn flow_id(&self) -> AuthFlowId {
+        self.flow_id
+    }
+
+    pub fn scope(&self) -> &AuthProductScope {
+        &self.scope
+    }
+
+    pub fn account_label(&self) -> &CredentialAccountLabel {
+        &self.account_label
+    }
+
+    pub fn requested_scopes(&self) -> &[ProviderScope] {
+        &self.requested_scopes
+    }
+
+    pub fn encode(&self) -> Result<OAuthState, AuthProductError> {
+        let wire = GoogleOAuthCallbackStateWire {
+            flow_id: self.flow_id,
+            resource: self.scope.resource.clone(),
+            session_id: self.scope.session_id.clone(),
+            account_label: self.account_label.clone(),
+            requested_scopes: self.requested_scopes.clone(),
+            nonce: self.nonce.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&wire).map_err(|_| AuthProductError::BackendUnavailable)?;
+        OAuthState::new(format!(
+            "{}{}",
+            Self::PREFIX,
+            URL_SAFE_NO_PAD.encode(payload)
+        ))
+    }
+
+    pub fn decode(raw: &str) -> Result<Self, AuthProductError> {
+        let encoded = raw
+            .strip_prefix(Self::PREFIX)
+            .ok_or(AuthProductError::MalformedCallback)?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| AuthProductError::MalformedCallback)?;
+        let wire: GoogleOAuthCallbackStateWire =
+            serde_json::from_slice(&payload).map_err(|_| AuthProductError::MalformedCallback)?;
+        validate_authorize_fragment("slack oauth nonce", &wire.nonce)
+            .map_err(|_| AuthProductError::MalformedCallback)?;
+        let mut scope = AuthProductScope::new(wire.resource, AuthSurface::Callback);
+        if let Some(session_id) = wire.session_id {
+            scope = scope.with_session_id(session_id);
+        }
+        Ok(Self {
+            flow_id: wire.flow_id,
+            scope,
+            account_label: wire.account_label,
+            requested_scopes: wire.requested_scopes,
             nonce: wire.nonce,
         })
     }
@@ -562,6 +666,39 @@ pub fn build_google_authorization_url(
         scopes,
         extra_params: &extra_params,
     })
+}
+
+/// Builds the Slack personal (user-token) authorization URL.
+///
+/// Mirrors [`build_google_authorization_url`] but places the requested scopes in
+/// Slack's `user_scope` parameter (not `scope`, which is for bot tokens) and
+/// omits Google-specific extras. Slack v2 OAuth supports PKCE, so the S256
+/// challenge is included.
+pub fn build_slack_personal_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &PkceCodeChallenge,
+    scopes: &[ProviderScope],
+) -> Result<OAuthAuthorizationUrl, AuthProductError> {
+    let client_id = OAuthClientId::new(client_id)?;
+    let redirect_uri = OAuthRedirectUri::new(redirect_uri)?;
+    let state = OAuthState::new(state)?;
+    let mut url = Url::parse(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT).map_err(|_| {
+        AuthProductError::invalid_request("slack authorization endpoint must be an absolute url")
+    })?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("client_id", client_id.as_str())
+            .append_pair("redirect_uri", redirect_uri.as_str())
+            .append_pair("response_type", "code")
+            .append_pair("user_scope", &scope_text(scopes))
+            .append_pair("state", state.as_str())
+            .append_pair("code_challenge", code_challenge.as_str())
+            .append_pair("code_challenge_method", "S256");
+    }
+    OAuthAuthorizationUrl::new(url.to_string())
 }
 
 pub fn parse_google_requested_scopes(

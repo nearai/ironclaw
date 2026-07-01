@@ -357,6 +357,7 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         resource: None,
         exchange_scope_policy:
             crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: crate::oauth_provider_client::TokenResponseShape::Standard,
     };
     let provider_client = crate::oauth_provider_client::HostOAuthProviderClient::new(
         spec,
@@ -523,6 +524,7 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         resource: None,
         exchange_scope_policy:
             crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: crate::oauth_provider_client::TokenResponseShape::Standard,
     };
     let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = Arc::new(
         crate::oauth_provider_client::HostOAuthProviderClient::new(

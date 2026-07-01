@@ -31,6 +31,19 @@ pub(crate) enum ExchangeScopePolicy {
     FallbackToRequested,
 }
 
+/// Shape of the provider's token-endpoint JSON response.
+///
+/// Most providers (Google, Notion, DCR) return the access token at the top
+/// level (`access_token`). Slack's `oauth.v2.access` returns the workspace bot
+/// token at the top level but the **user** token nested under
+/// `authed_user.access_token`, and signals errors with `ok: false` at HTTP 200.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TokenResponseShape {
+    #[default]
+    Standard,
+    SlackAuthedUser,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HostOAuthProviderSpec {
     pub(crate) provider_id: &'static str,
@@ -39,6 +52,7 @@ pub(crate) struct HostOAuthProviderSpec {
     pub(crate) secret_handle_prefix: &'static str,
     pub(crate) resource: Option<&'static str>,
     pub(crate) exchange_scope_policy: ExchangeScopePolicy,
+    pub(crate) token_response_shape: TokenResponseShape,
 }
 
 #[derive(Clone, Debug)]
@@ -304,7 +318,7 @@ impl HostOAuthProviderClient {
             }
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        parse_token_response(&response.body).map_err(|error| {
+        parse_token_response(&response.body, self.spec.token_response_shape).map_err(|error| {
             if refresh_request {
                 match error {
                     AuthProductError::BackendUnavailable => AuthProductError::BackendUnavailable,
@@ -610,7 +624,40 @@ struct TokenResponseBody {
     token_type: Option<String>,
 }
 
-fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {
+/// Slack `oauth.v2.access` response. Only the fields needed to extract the user
+/// token are modeled; the workspace bot token (top-level `access_token`) is
+/// intentionally ignored — this provider issues user-token credentials only.
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseBody {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    authed_user: Option<SlackAuthedUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackAuthedUser {
+    #[serde(default)]
+    access_token: Option<SecretString>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<SecretString>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+fn parse_token_response(
+    body: &[u8],
+    shape: TokenResponseShape,
+) -> Result<OAuthTokenResponse, AuthProductError> {
+    match shape {
+        TokenResponseShape::Standard => parse_standard_token_response(body),
+        TokenResponseShape::SlackAuthedUser => parse_slack_authed_user_token_response(body),
+    }
+}
+
+fn parse_standard_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {
     let parsed: TokenResponseBody =
         serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
     let response_scope = parsed
@@ -623,6 +670,38 @@ fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductEr
         parsed.refresh_token,
         response_scope,
         parsed.expires_in,
+    )
+    .map_err(|_| AuthProductError::TokenExchangeFailed)
+}
+
+/// Parses Slack's `oauth.v2.access` response, extracting the **user** token from
+/// `authed_user`. Slack returns HTTP 200 with `ok: false` on failure, so the
+/// `ok` flag is checked before trusting the payload. Token rotation (when the
+/// app enables it) adds `authed_user.{refresh_token,expires_in}`; both are
+/// carried through when present.
+fn parse_slack_authed_user_token_response(
+    body: &[u8],
+) -> Result<OAuthTokenResponse, AuthProductError> {
+    let parsed: SlackTokenResponseBody =
+        serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
+    if !parsed.ok {
+        return Err(AuthProductError::TokenExchangeFailed);
+    }
+    let authed_user = parsed
+        .authed_user
+        .ok_or(AuthProductError::TokenExchangeFailed)?;
+    let access_token = authed_user
+        .access_token
+        .ok_or(AuthProductError::TokenExchangeFailed)?;
+    let response_scope = authed_user
+        .scope
+        .as_deref()
+        .filter(|scope| !scope.trim().is_empty());
+    OAuthTokenResponse::new(
+        access_token,
+        authed_user.refresh_token,
+        response_scope,
+        authed_user.expires_in,
     )
     .map_err(|_| AuthProductError::TokenExchangeFailed)
 }

@@ -370,6 +370,7 @@ fn google_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::RequireProviderScope,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 
@@ -381,6 +382,7 @@ fn notion_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some("https://mcp.notion.com/mcp"),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 
