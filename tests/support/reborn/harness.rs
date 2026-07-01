@@ -2630,17 +2630,10 @@ impl HostRuntimeCapabilityHarness {
 
     /// E-PROFILE: the raw local-dev memory filesystem backing the user-profile
     /// source, for write→read-back assertions on `context/profile.json`. `Some`
-    /// only for `new_with_options`-built harnesses. Unused in PR-E1; consumed by
-    /// C-PROFILE (which adds a `profile_set`-capable constructor).
+    /// only for `new_with_options`-built harnesses. Consumed by the E-PROFILE
+    /// `profile_tools()` constructor and the `reborn_integration_profile` test.
     pub(crate) fn profile_filesystem_for_test(&self) -> Option<Arc<dyn RootFilesystem>> {
         self.profile_filesystem.clone()
-    }
-
-    /// E-PROJ: the project service backing the synthetic `project_create`
-    /// capability, for project read-back assertions. `Some` only for
-    /// `project_tools()`.
-    pub(crate) fn project_service(&self) -> Option<&Arc<dyn ProjectService>> {
-        self.project_service.as_ref()
     }
 
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness

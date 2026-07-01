@@ -74,34 +74,10 @@ use refreshing_capability_port::{
 #[cfg(test)]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridge (E-PROJ seam): wrap `inner` with just the `project_create`
-/// local-dev synthetic capability, so the Reborn integration-test harness can
-/// inject it onto its host-runtime capability port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `project_create_capability` + `wrap_local_dev_synthetic_capabilities`, so the
-/// test path never hand-mirrors the production wrap.
+/// Test-only bridge (E-PROJ seam), co-located with the capability it wraps in
+/// `project_create.rs` and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
-pub(super) fn wrap_project_create_capability_for_test(
-    inner: Arc<dyn LoopCapabilityPort>,
-    project_service: Arc<dyn ProjectService>,
-    fallback_user_id: UserId,
-    run_context: LoopRunContext,
-    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-    synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        vec![project_create::project_create_capability(
-            project_service,
-            fallback_user_id,
-        )?],
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
+pub(super) use project_create::wrap_project_create_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
