@@ -6248,6 +6248,34 @@ pub struct AccountLoginLink {
     pub url: String,
 }
 
+/// Typed classification of an account login-link failure. The host maps these
+/// variants to the user-facing `error_code` contract, so that contract no
+/// longer depends on substring-matching upstream error wording. The mint path
+/// returns the specific variant at each failure site.
+#[derive(Debug, thiserror::Error)]
+pub enum AccountLoginLinkError {
+    /// No enrollment (personal invite or instance) resolved for the caller.
+    #[error("not enrolled in Trace Commons")]
+    NotEnrolled,
+    /// The local enrollment policy could not be read or parsed.
+    #[error("could not read Trace Commons enrollment policy")]
+    PolicyRead(#[source] anyhow::Error),
+    /// Enrollment is incomplete — the upload-claim issuer URL or the local
+    /// device-key state is missing/invalid (both surface from the bearer mint).
+    #[error("Trace Commons enrollment is incomplete (issuer URL or device-key state)")]
+    EnrollmentIncomplete(#[source] anyhow::Error),
+    /// The issuer refused to mint the login link (non-2xx HTTP response).
+    #[error("Trace Commons issuer refused the login-link request (HTTP {status})")]
+    IssuerRefused { status: u16 },
+    /// Any other failure — transport, serialization, or a malformed response.
+    #[error("Trace Commons login-link request failed")]
+    Backend(#[source] anyhow::Error),
+    /// The host could not persist the minted link to local state (host-side
+    /// write failure; carried here so the host maps one typed contract).
+    #[error("could not write the account login link to local state")]
+    LocalStateWrite,
+}
+
 /// Extract the API base URL (origin) from the configured upload-claim issuer
 /// URL by stripping the `/v1/trace-upload-claim` suffix. Other account API
 /// endpoints (`/v1/account/login-links`, `/v1/account/traces`, …) are built on
@@ -6309,7 +6337,7 @@ pub async fn mint_account_login_link_via_sink(
     tenant_id: &TenantId,
     user_id: &UserId,
     sink: &dyn ContributionHttpSink,
-) -> anyhow::Result<AccountLoginLink> {
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
     // Typed at the public boundary so callers can't transpose tenant/user;
     // stringify only when handing off to the dir-parameterised core.
     mint_account_login_link_inner(
@@ -6328,9 +6356,10 @@ async fn mint_account_login_link_inner(
     tenant_id: &str,
     user_id: &str,
     sink: &dyn ContributionHttpSink,
-) -> anyhow::Result<AccountLoginLink> {
-    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
-        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)
+        .map_err(AccountLoginLinkError::PolicyRead)?
+        .ok_or(AccountLoginLinkError::NotEnrolled)?;
 
     // Device key location depends on enrollment type:
     // - Instance enrollment (`subject` is `Some`): the shared device key is at
@@ -6346,41 +6375,56 @@ async fn mint_account_login_link_inner(
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
+    // Both the missing-issuer-URL and incomplete-device-key failures surface
+    // here; classify them as EnrollmentIncomplete so the host contract stays
+    // typed without inspecting error strings.
     let bearer = provider
         .bearer_token(&resolution.policy, &context, false)
-        .await?;
-    let url = account_login_links_url(&resolution.policy)?;
+        .await
+        .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
+    let url = account_login_links_url(&resolution.policy)
+        .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
     let body = match &resolution.subject {
         Some(s) => serde_json::json!({ "subject": s }),
         None => serde_json::json!({}),
     };
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| {
+        AccountLoginLinkError::Backend(anyhow::Error::new(e).context("serialize login-link body"))
+    })?;
     let response = sink
         .execute(ContributionHttpRequest {
             method: ContributionHttpMethod::Post,
             url,
             bearer_token: Some(bearer),
-            json_body: Some(
-                serde_json::to_vec(&body).context("failed to serialize login-link request body")?,
-            ),
+            json_body: Some(body_bytes),
             response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
             timeout_ms: 10_000,
         })
         .await
-        .map_err(|e| anyhow::anyhow!("login-link request failed: {e}"))?;
-    anyhow::ensure!(
-        (200..300).contains(&response.status),
-        "login-link request returned HTTP {}",
-        response.status
-    );
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&response.body).context("login-link response was not valid JSON")?;
+        .map_err(|e| {
+            AccountLoginLinkError::Backend(anyhow::anyhow!("login-link request failed: {e}"))
+        })?;
+    if !(200..300).contains(&response.status) {
+        return Err(AccountLoginLinkError::IssuerRefused {
+            status: response.status,
+        });
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&response.body).map_err(|e| {
+        AccountLoginLinkError::Backend(anyhow::Error::new(e).context("login-link response JSON"))
+    })?;
     let account_id = parsed["account_id"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("login-link response missing account_id field"))?
+        .ok_or_else(|| {
+            AccountLoginLinkError::Backend(anyhow::anyhow!(
+                "login-link response missing account_id"
+            ))
+        })?
         .to_string();
     let link_url = parsed["url"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("login-link response missing url field"))?
+        .ok_or_else(|| {
+            AccountLoginLinkError::Backend(anyhow::anyhow!("login-link response missing url"))
+        })?
         .to_string();
     Ok(AccountLoginLink {
         account_id,

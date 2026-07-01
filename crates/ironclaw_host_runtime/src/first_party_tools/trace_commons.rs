@@ -22,11 +22,11 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_reborn_traces::contribution::{
-    AccountLoginLink, COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
-    COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError, ContributionHttpMethod,
-    ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
-    ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
-    TraceUploadAuthMode, mint_account_login_link_via_sink,
+    AccountLoginLink, AccountLoginLinkError, COMMUNITY_PROFILE_BIO_MAX_BYTES,
+    COMMUNITY_PROFILE_HANDLE_MAX_CHARS, COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError,
+    ContributionHttpMethod, ContributionHttpRequest, ContributionHttpResponse,
+    ContributionHttpSink, ProfileAttributionToken, StandingTraceContributionPolicy,
+    TraceCreditReport, TraceUploadAuthMode, mint_account_login_link_via_sink,
     mint_profile_attribution_token_for_user_via_sink, resolve_trace_credentials,
     set_community_profile_for_user_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
@@ -420,11 +420,17 @@ impl ContributionHttpSink for HostEgressContributionSink {
                     "trace bearer staging is unavailable",
                 ));
             };
-            let handle = SecretHandle::new(TRACE_COMMONS_BEARER_HANDLE).map_err(|error| {
-                // Safe to log the cause: the handle name is a compile-time
-                // constant, so this validation error carries no secret/path —
-                // it only fires if the constant itself is malformed.
-                tracing::debug!(%error, "invalid trace bearer handle constant");
+            // Per-request unique handle: the injection store is a HashMap keyed
+            // by (scope, capability, handle) with overwrite-on-insert, so a
+            // constant handle would let two concurrent same-scope Trace Commons
+            // egresses race — one staging over the other's bearer before it is
+            // consumed. A uuid suffix makes every staged bearer key distinct.
+            let handle_name = format!("{TRACE_COMMONS_BEARER_HANDLE}-{}", uuid::Uuid::new_v4());
+            let handle = SecretHandle::new(&handle_name).map_err(|error| {
+                // Safe to log the cause: the handle name is composed from a
+                // compile-time constant plus a uuid, so this validation error
+                // carries no secret/path — it only fires if that scheme is wrong.
+                tracing::debug!(%error, "invalid trace bearer handle");
                 ContributionHttpError::new("invalid trace bearer handle")
             })?;
             secret_stager
@@ -1113,10 +1119,14 @@ pub(super) async fn dispatch_account_login_link(
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(account_login_link_error_value(
-                "not enrolled in Trace Commons".to_string(),
+                &AccountLoginLinkError::NotEnrolled,
             ));
         }
-        Err(error) => return Ok(account_login_link_error_value(error.to_string())),
+        Err(error) => {
+            return Ok(account_login_link_error_value(
+                &AccountLoginLinkError::PolicyRead(error),
+            ));
+        }
     }
 
     // The agent account_login_link path MUST route through host network egress
@@ -1158,28 +1168,30 @@ pub(super) async fn dispatch_account_login_link(
                     let _ = error;
                     tracing::debug!("failed to persist Trace Commons account login link");
                     Ok(account_login_link_error_value(
-                        "could not write the account login link to local state".to_string(),
+                        &AccountLoginLinkError::LocalStateWrite,
                     ))
                 }
                 Err(join_error) => {
                     let _ = join_error;
                     tracing::debug!("account login link persist task failed");
                     Ok(account_login_link_error_value(
-                        "could not write the account login link to local state".to_string(),
+                        &AccountLoginLinkError::LocalStateWrite,
                     ))
                 }
             }
         }
-        Err(error) => Ok(account_login_link_error_value(error.to_string())),
+        Err(error) => Ok(account_login_link_error_value(&error)),
     }
 }
 
-/// Write the one-time login URL to a 0600 file in the scope's local state dir
-/// and return its path. The URL is a code-bearing account-access credential: it
-/// must NOT be returned in the model-visible tool result (that copies it into
-/// the LLM transcript/history and any downstream persistence). Delivering it
-/// out-of-band via a private file keeps the secret off the model surface while
-/// the local browser-login flow can still read it. Mirrors `persist_profile_token`.
+/// Write the one-time login URL to a private local file in the scope's local
+/// state dir (created with mode `0600` on Unix; default inherited permissions
+/// elsewhere) and return its path. The URL is a code-bearing account-access
+/// credential: it must NOT be returned in the model-visible tool result (that
+/// copies it into the LLM transcript/history and any downstream persistence).
+/// Delivering it out-of-band via a private file keeps the secret off the model
+/// surface while the local browser-login flow can still read it. Mirrors
+/// `persist_profile_token`.
 fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::Result<PathBuf> {
     use std::io::Write as _;
 
@@ -1187,10 +1199,10 @@ fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("account_login_link.url");
 
-    // Atomic write: a unique 0600 temp file (per-write uuid name so concurrent
-    // mints don't race on a fixed temp path), fsync, then rename onto the final
-    // path — the same temp+rename credential-write discipline as the profile
-    // token, so a reader only ever sees a complete URL.
+    // Atomic write: a unique temp file (per-write uuid name so concurrent mints
+    // don't race on a fixed temp path; created 0600 on Unix), fsync, then rename
+    // onto the final path — the same temp+rename credential-write discipline as
+    // the profile token, so a reader only ever sees a complete URL.
     let temp_path = dir.join(format!(
         "account_login_link.url.{}.tmp",
         uuid::Uuid::new_v4()
@@ -1230,9 +1242,10 @@ fn format_account_login_link(link: &AccountLoginLink) -> Value {
         "account_id": link.account_id,
         // The one-time login URL is deliberately NOT included here — it is a
         // code-bearing account-access credential and must not enter the model
-        // transcript. It is persisted (0600) for out-of-band retrieval by the
-        // local Trace Commons UI/CLI; `link_delivery` is an opaque marker (never
-        // a host path, which is itself a host detail that must not cross the
+        // transcript. It is persisted as a private local file (0600 on Unix) for
+        // out-of-band retrieval by the local Trace Commons UI/CLI; `link_delivery`
+        // is an opaque marker (never a host path, which is itself a host detail
+        // that must not cross the
         // model/user-visible surface).
         "link_delivery": "local_private_account_login_link_file",
         "message": "A one-time Trace Commons browser login link was minted but is not shown here \
@@ -1242,40 +1255,34 @@ fn format_account_login_link(link: &AccountLoginLink) -> Value {
     })
 }
 
-fn account_login_link_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
-        (
+fn account_login_link_error_value(error: &AccountLoginLinkError) -> Value {
+    // The public `error_code` contract is derived from typed variants, not from
+    // substring-matching upstream error wording.
+    let (error_code, message) = match error {
+        AccountLoginLinkError::NotEnrolled => (
             "NotEnrolled",
             "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
-        )
-    } else if error.contains("could not read policy") {
-        (
+        ),
+        AccountLoginLinkError::PolicyRead(_) => (
             "PolicyReadFailed",
             "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
-        )
-    } else if error.contains("issuer URL is not configured")
-        || error.contains("upload_token_issuer_url")
-        || error.contains("does not end in /v1/trace-upload-claim")
-    {
-        (
-            "IssuerNotConfigured",
-            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("device key") {
-        (
-            "DeviceKeyUnavailable",
-            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("login-link request returned HTTP") {
-        (
+        ),
+        AccountLoginLinkError::EnrollmentIncomplete(_) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        AccountLoginLinkError::IssuerRefused { .. } => (
             "IssuerRefused",
             "The Trace Commons issuer refused to mint a login link. Ask the operator to check account/device-key status.",
-        )
-    } else {
-        (
+        ),
+        AccountLoginLinkError::Backend(_) => (
             "AccountLoginLinkFailed",
             "Could not mint a Trace Commons account login link. Check enrollment status and retry.",
-        )
+        ),
+        AccountLoginLinkError::LocalStateWrite => (
+            "LocalStateWriteFailed",
+            "Could not write the account login link to local state.",
+        ),
     };
     json!({
         "minted": false,
