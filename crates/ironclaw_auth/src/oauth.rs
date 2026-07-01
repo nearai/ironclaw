@@ -852,6 +852,74 @@ mod tests {
     }
 
     #[test]
+    fn slack_personal_authorization_url_uses_user_scope_and_omits_scope() {
+        let verifier = PkceVerifierSecret::new(SecretString::from(
+            ironclaw_common::pkce::generate_code_verifier(),
+        ))
+        .unwrap();
+        let challenge = pkce_s256_challenge(&verifier);
+        let scopes = vec![
+            ProviderScope::new("search:read").unwrap(),
+            ProviderScope::new("users:read").unwrap(),
+        ];
+        let url = build_slack_personal_authorization_url(
+            "slack-client-id",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            "teststatevalue",
+            &challenge,
+            &scopes,
+        )
+        .unwrap();
+        let parsed = Url::parse(url.as_str()).unwrap();
+        assert!(
+            parsed
+                .as_str()
+                .starts_with("https://slack.com/oauth/v2/authorize")
+        );
+        let pairs: std::collections::HashMap<String, String> =
+            parsed.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("user_scope").map(String::as_str),
+            Some("search:read users:read")
+        );
+        assert!(
+            !pairs.contains_key("scope"),
+            "Slack personal flow must not request bot `scope`"
+        );
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+    }
+
+    #[test]
+    fn slack_personal_callback_state_round_trips() {
+        let resource = ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
+            user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let scope = AuthProductScope::new(resource, AuthSurface::Callback);
+        let label = CredentialAccountLabel::new("slack_personal").unwrap();
+        let flow_id = AuthFlowId::new();
+        let scopes = vec![ProviderScope::new("search:read").unwrap()];
+        let encoded =
+            SlackPersonalOAuthCallbackState::new(flow_id, scope, label.clone(), scopes.clone())
+                .unwrap()
+                .encode()
+                .unwrap();
+        assert!(encoded.as_str().starts_with("ics1."));
+        let decoded = SlackPersonalOAuthCallbackState::decode(encoded.as_str()).unwrap();
+        assert_eq!(decoded.flow_id(), flow_id);
+        assert_eq!(decoded.account_label(), &label);
+        assert_eq!(decoded.requested_scopes(), scopes.as_slice());
+    }
+
+    #[test]
     fn google_oauth_allowlist_includes_gsuite_wasm_scopes() {
         for scope in [
             GOOGLE_DRIVE_READONLY_SCOPE,
