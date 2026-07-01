@@ -527,9 +527,10 @@ impl InMemoryTurnStateStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         let seq = self.persist_seq.fetch_add(1, Ordering::SeqCst);
-        // Durable writes persist the *compact recovery* snapshot (non-terminal
-        // runs + their referenced records, no audit events) — O(active runs), not
-        // O(total state). The full `persistence_snapshot()` stays the runtime
+        // Durable writes persist the *compact recovery* snapshot (live runs +
+        // their referenced records, plus terminal spawn-tree roots still anchoring
+        // a live reservation, no audit events) — O(active runs), not O(total
+        // state). The full `persistence_snapshot()` stays the runtime
         // read-model/projection surface.
         (seq, inner.recovery_snapshot())
     }
@@ -2123,13 +2124,15 @@ impl Inner {
         self.build_snapshot(SnapshotScope::Full)
     }
 
-    /// The compact snapshot durable writes persist: only the runs a restart must
+    /// The compact snapshot durable writes persist: the runs a restart must
     /// coordinate — the **non-terminal** ones (blocked + queued + running) — plus
-    /// their referential closure, with the audit event log dropped. Terminal runs
-    /// need no coordination recovery (a completed/failed run must not rehydrate as
-    /// live) and events exist only for audit/projection, so both are omitted. The
-    /// durable write is then O(active runs) instead of O(total accumulated state),
-    /// and a finished run cannot be structurally resurrected.
+    /// their referential closure, plus any *terminal* spawn-tree root still needed
+    /// to release a live descendant reservation, with the audit event log dropped.
+    /// Ordinary terminal runs need no coordination recovery (a completed/failed
+    /// run must not rehydrate as live) and events exist only for audit/projection,
+    /// so both are omitted. The durable write is then O(active runs) instead of
+    /// O(total accumulated state), and a finished run cannot be structurally
+    /// resurrected.
     ///
     /// The retained closure satisfies what `from_persistence_snapshot` requires:
     /// a run's turn must be present, and a blocked run keeps its thread lock,
@@ -2267,6 +2270,22 @@ impl Inner {
             })
             .collect::<Vec<_>>();
         spawn_tree_reservations.sort_by_key(|reservation| reservation.root_run_id.to_string());
+        // Recovery clears the audit event log, so every event up to the highest
+        // issued cursor becomes unavailable. Advance the retention floor to that
+        // high-water mark (over both the dropped events and every run's cursor) so
+        // a consumer with a stale cursor is told to rebase rather than silently
+        // reading an empty range — fail loud, no silent retention gap.
+        let event_retention_floor = if recovery {
+            self.events
+                .iter()
+                .map(|event| event.cursor)
+                .chain(self.records.values().map(|record| record.event_cursor))
+                .fold(self.event_retention_floor, |floor, cursor| {
+                    floor.max(cursor)
+                })
+        } else {
+            self.event_retention_floor
+        };
         TurnPersistenceSnapshot {
             turns,
             runs,
@@ -2274,14 +2293,15 @@ impl Inner {
             checkpoints,
             loop_checkpoints,
             idempotency_records,
-            // Recovery drops the audit-only event log (the unbounded bloat) and
-            // rebuilds the cursor from the kept runs' cursors + the retention floor.
+            // Recovery drops the audit-only event log (the unbounded bloat); the
+            // retention floor above marks everything up to the high-water mark as
+            // evicted so consumers rebase instead of replaying a missing range.
             events: if recovery {
                 Vec::new()
             } else {
                 self.events.clone()
             },
-            event_retention_floor: self.event_retention_floor,
+            event_retention_floor,
             admission_reservations,
             spawn_tree_reservations,
         }

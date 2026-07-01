@@ -1708,6 +1708,73 @@ async fn recovery_snapshot_keeps_terminal_spawn_tree_root_with_live_reservation(
         .expect("release must resolve the retained terminal root, not fail ScopeNotFound");
 }
 
+/// Regression: recovery drops the audit event log, so it must advance the
+/// retention floor to the high-water cursor. Otherwise a consumer holding a
+/// stale cursor below the floor would silently read an empty range after a
+/// restart instead of being told to rebase past the evicted events.
+#[tokio::test]
+async fn recovery_snapshot_advances_retention_floor_past_dropped_events() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let thread = "thread-floor";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread, "idem-floor"))
+            .await
+            .unwrap(),
+    );
+    // Claim + block advances the run's event cursor above the initial floor (0).
+    let runner = TurnRunnerId::new();
+    let lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner,
+            lease_token: lease,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: runner,
+            lease_token: lease,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: GateRef::new("floor-gate").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+
+    store.flush().await;
+    let snapshot = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    assert!(
+        snapshot.events.is_empty(),
+        "recovery drops the audit event log"
+    );
+    // The blocked run's own events were dropped with the log, so the floor must
+    // now cover its cursor — a consumer below it must rebase, not read empty.
+    let kept_cursor = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("blocked run kept")
+        .event_cursor;
+    assert!(
+        snapshot.event_retention_floor >= kept_cursor,
+        "clearing the event log must advance the retention floor past dropped events ({:?} < {:?})",
+        snapshot.event_retention_floor,
+        kept_cursor,
+    );
+}
+
 #[tokio::test]
 async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
     let store = Arc::new(InMemoryTurnStateStore::default());
