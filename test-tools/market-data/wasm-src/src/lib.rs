@@ -5,8 +5,13 @@
 //! via the WebUI "Install Tool" button, activates it, and then any user can ask
 //! the agent about the market and have it call this capability.
 //!
-//! It makes no network call and declares no secret/credential obligation, so it
-//! always publishes and always completes once activated (keyless test fixture).
+//! Its manifest declares `network` + a REQUIRED `market_data_api_key` runtime
+//! credential (host-injected as an `x-api-key` header at egress), so dispatch
+//! gates with AuthRequired until a key is provisioned — personal or
+//! tenant-shared (env-seeded via `IRONCLAW_REBORN_DEV_SECRET__…` or the admin
+//! API). The wasm itself still returns canned data and performs no real
+//! egress: the credential exists to exercise the host-side obligation
+//! pipeline (pre-flight, gating, injection), not to authenticate anything.
 
 mod types;
 

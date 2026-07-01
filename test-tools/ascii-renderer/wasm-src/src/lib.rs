@@ -80,7 +80,10 @@ impl exports::near::agent::tool::Guest for AsciiRendererTool {
     }
 
     fn schema() -> String {
-        r#"{"type":"object","properties":{"subject":{"type":"string","enum":["cat","dog","robot"]}},"additionalProperties":false}"#
+        // No enum on `subject`: the tool deliberately accepts any string and
+        // falls back to robot, so the advertised contract must not promise a
+        // closed set it doesn't enforce.
+        r#"{"type":"object","properties":{"subject":{"type":"string","description":"cat, dog, or robot; unknown subjects fall back to robot"}},"additionalProperties":false}"#
             .to_string()
     }
 

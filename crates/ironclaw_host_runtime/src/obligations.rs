@@ -1272,22 +1272,47 @@ impl BuiltinObligationHandler {
             // (#5459). The injection target below stays the caller's invocation
             // slot regardless of where the source material came from. Fail closed
             // if the secret vanished between preflight and here.
+            // Every arm below fails closed; the bound error is logged first so a
+            // shared-secret lease/consume fault (e.g. an AAD/scope regression on
+            // the cross-scope read) leaves a server-side trail. `SecretStoreError`
+            // Display carries no raw secret material — handles/reasons only.
             let source_scope = secret_owner_scope(
                 secret_store.as_ref(),
                 &request.context.resource_scope,
                 handle,
             )
             .await
-            .map_err(|_| secret_obligation_failed())?
+            .map_err(|error| {
+                tracing::debug!(
+                    secret_handle = handle.as_str(),
+                    error = %error,
+                    "secret injection: owner-scope probe failed; failing closed"
+                );
+                secret_obligation_failed()
+            })?
             .ok_or_else(secret_obligation_failed)?;
             let lease = secret_store
                 .lease_once(&source_scope, handle)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "secret injection: lease failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
             let secret = secret_store
                 .consume(&source_scope, lease.id)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "secret injection: lease consume failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
             material.push((handle.clone(), secret));
         }
 
@@ -1299,7 +1324,14 @@ impl BuiltinObligationHandler {
                     &handle,
                     secret,
                 )
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "secret injection: injection-slot insert failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
         }
         Ok(())
     }
@@ -2565,7 +2597,9 @@ mod tests {
                 obligations: &obligations,
             })
             .await
-            .expect("tenant-shared key satisfies InjectSecretOnce for a caller with no personal secret");
+            .expect(
+                "tenant-shared key satisfies InjectSecretOnce for a caller with no personal secret",
+            );
 
         assert!(
             secret_injections

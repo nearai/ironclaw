@@ -36,10 +36,14 @@ pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 /// `/tenants/<tenant>/users/<this>/secrets`, so tenants remain isolated while
 /// their users share.
 ///
-/// It deliberately passes `UserId` validation (no path separators / control
-/// bytes) so scopes carrying it round-trip through durable secret records, and
-/// is namespaced (`__ironclaw_…__`) so it cannot collide with a real
-/// email/env-bearer `UserId`.
+/// Unforgeable by construction, mirroring [`SYSTEM_RESERVED_ID`]: the
+/// `__ironclaw_` prefix is rejected by scope-id validation, so no identity
+/// boundary (env bearer, SSO directory, OIDC claims, request payloads) can
+/// mint a `UserId` that collides with it. It is minted exclusively via
+/// `from_trusted` in [`ResourceScope::tenant_shared_managed_scope`], and
+/// persisted scopes carrying it round-trip through the `ResourceScope`
+/// user-id deserializer carve-out — never through bare `UserId` deserialize
+/// (locked by `tenant_shared_sentinel_is_rejected_for_bare_ids`).
 pub const TENANT_SHARED_MANAGED_USER_ID: &str = "__ironclaw_tenant_shared_admin__";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,14 +59,17 @@ pub struct ResourceScope {
     // influence it. Do not add a `ResourceScope` (or bare `TenantId`/`UserId`)
     // field to any untrusted request DTO.
     //
-    // The system sentinel ([`SYSTEM_RESERVED_ID`]) carries control bytes that
-    // `TenantId`/`UserId` validation rejects, so [`ResourceScope::system`] builds
-    // it via `from_trusted`. A persisted system scope must therefore round-trip,
-    // but the trusted exception stays scoped to these two fields only — the
-    // shared id `Deserialize` keeps rejecting control bytes everywhere else
-    // (locked by `system_sentinel_is_rejected_for_bare_ids`), so untrusted input
-    // can never mint a sentinel-bearing id or collide with the reserved system
-    // identity on any other axis.
+    // Sentinels ([`SYSTEM_RESERVED_ID`] on both axes,
+    // [`TENANT_SHARED_MANAGED_USER_ID`] on the user axis) carry shapes that
+    // `TenantId`/`UserId` validation rejects (control bytes / the reserved
+    // `__ironclaw_` prefix), so they are built via `from_trusted`. Persisted
+    // scopes carrying them must therefore round-trip, but the trusted exception
+    // stays scoped to these two fields only — the shared id `Deserialize` keeps
+    // rejecting both shapes everywhere else (locked by
+    // `system_sentinel_is_rejected_for_bare_ids` and
+    // `tenant_shared_sentinel_is_rejected_for_bare_ids`), so untrusted input can
+    // never mint a sentinel-bearing id or collide with a reserved identity on
+    // any other axis.
     #[serde(deserialize_with = "deserialize_system_aware_tenant_id")]
     pub tenant_id: TenantId,
     #[serde(deserialize_with = "deserialize_system_aware_user_id")]
@@ -92,7 +99,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = String::deserialize(deserializer)?;
-    if raw == SYSTEM_RESERVED_ID {
+    if raw == SYSTEM_RESERVED_ID || raw == TENANT_SHARED_MANAGED_USER_ID {
         Ok(UserId::from_trusted(raw))
     } else {
         UserId::new(raw).map_err(serde::de::Error::custom)
@@ -332,8 +339,8 @@ mod tests {
     /// admin-set secret is visible to every user of the tenant while tenants
     /// stay isolated. Two different callers in the same tenant must resolve to
     /// the SAME shared owner, and the scope must survive a serde round-trip (the
-    /// secret store persists the scope in each record, so the sentinel user id
-    /// must be a valid `UserId`).
+    /// secret store persists the scope in each record; the sentinel reads back
+    /// through the `ResourceScope` user-id carve-out).
     #[test]
     fn tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips() {
         let base = ResourceScope {
@@ -363,7 +370,8 @@ mod tests {
         assert_eq!(shared.user_id, other.user_id);
 
         // Persisted secret records serialize the scope; the sentinel user must
-        // read back (it passes `UserId` validation).
+        // read back through the user-id deserializer carve-out (bare `UserId`
+        // validation rejects the reserved prefix).
         let json = serde_json::to_string(&shared).expect("serialize shared scope");
         let restored: ResourceScope =
             serde_json::from_str(&json).expect("deserialize shared scope");
@@ -396,6 +404,30 @@ mod tests {
         assert!(
             serde_json::from_str::<AgentId>(&json).is_err(),
             "AgentId must not accept the system sentinel"
+        );
+    }
+
+    /// #5459: the tenant-shared sentinel must be unforgeable the same way the
+    /// system sentinel is — rejected by `UserId::new` and by every bare id
+    /// `Deserialize`, so no identity boundary (env bearer, SSO directory, OIDC
+    /// claims, request payloads) can ever mint a principal that reads or writes
+    /// the tenant-shared secret subtree. It round-trips ONLY through
+    /// `ResourceScope`'s user-id carve-out
+    /// (`tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips`).
+    #[test]
+    fn tenant_shared_sentinel_is_rejected_for_bare_ids() {
+        assert!(
+            UserId::new(TENANT_SHARED_MANAGED_USER_ID).is_err(),
+            "UserId::new must reject the tenant-shared sentinel"
+        );
+        let json = serde_json::to_string(TENANT_SHARED_MANAGED_USER_ID).expect("encode sentinel");
+        assert!(
+            serde_json::from_str::<UserId>(&json).is_err(),
+            "bare UserId must not accept the tenant-shared sentinel"
+        );
+        assert!(
+            serde_json::from_str::<TenantId>(&json).is_err(),
+            "TenantId must not accept the tenant-shared sentinel"
         );
     }
 }

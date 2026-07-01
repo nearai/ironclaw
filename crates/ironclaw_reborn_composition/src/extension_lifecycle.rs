@@ -105,6 +105,13 @@ impl ExtensionActivationMode {
     }
 }
 
+/// Zip-bomb guards for [`unzip_extension_bundle`]: the HTTP route caps only the
+/// COMPRESSED body (8 MiB), so these bound what an uploaded bundle may expand
+/// to in memory. Generous for real tool bundles (wasm + schemas + prompts),
+/// tight enough that a hostile upload cannot OOM the host.
+const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
+const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
 /// Extract an uploaded tool bundle (a zip) into `(path, bytes)` pairs, guarding
 /// against zip-slip: absolute paths, `..` traversal, and backslash separators
 /// are rejected rather than trusted.
@@ -116,6 +123,7 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
         }
     })?;
     let mut files = Vec::new();
+    let mut total_bytes = 0usize;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
@@ -125,21 +133,42 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().replace('\\', "/");
+        if files.len() >= MAX_EXTENSION_BUNDLE_FILES {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle contains too many files (limit {MAX_EXTENSION_BUNDLE_FILES})"
+                ),
+            });
+        }
+        let name = entry.name().to_string();
         if name.is_empty()
             || name.starts_with('/')
+            || name.contains('\\')
             || name.split('/').any(|component| component == "..")
         {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
             });
         }
+        // `take(allowance + 1)` bounds what a hostile entry can buffer: the
+        // declared zip sizes are attacker-controlled lies, so the guard must sit
+        // on the actual decompressed stream, never on entry metadata.
+        let allowance = MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES - total_bytes;
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
+        entry
+            .take(allowance as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("failed to read `{name}` from the uploaded bundle: {error}"),
-            }
-        })?;
+            })?;
+        if bytes.len() > allowance {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle expands past the {MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES}-byte decompressed limit"
+                ),
+            });
+        }
+        total_bytes += bytes.len();
         files.push((name, bytes));
     }
     Ok(files)
@@ -1431,6 +1460,70 @@ mod tests {
         LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
+
+    /// Build an in-memory zip from `(entry_name, bytes)` pairs for
+    /// [`unzip_extension_bundle`] boundary tests.
+    fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    /// The doc contract promises backslash separators are REJECTED; normalizing
+    /// them instead silently accepts a path shape the guard claims to refuse.
+    #[test]
+    fn unzip_extension_bundle_rejects_backslash_entry_names() {
+        let bundle = zip_bundle(&[("wasm\\module.wasm", b"x".as_slice())]);
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("backslash separators must be rejected, not normalized");
+        assert!(
+            format!("{error}").contains("unsafe path"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A small compressed upload must not be allowed to expand past the
+    /// decompressed-bytes cap (zip bomb): the route body limit bounds only the
+    /// COMPRESSED size, so the cap here is the actual memory guard.
+    #[test]
+    fn unzip_extension_bundle_caps_total_decompressed_bytes() {
+        let oversized = vec![0u8; MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES + 1];
+        let bundle = zip_bundle(&[("payload.bin", oversized.as_slice())]);
+        assert!(
+            bundle.len() < MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
+            "test premise: the bomb must be small compressed"
+        );
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("expansion past the decompressed cap must be rejected");
+        assert!(
+            format!("{error}").contains("expands past"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Entry-count flooding is the other zip-bomb axis: many tiny entries.
+    #[test]
+    fn unzip_extension_bundle_caps_entry_count() {
+        let names: Vec<String> = (0..=MAX_EXTENSION_BUNDLE_FILES)
+            .map(|index| format!("assets/file-{index}.txt"))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), b"x".as_slice()))
+            .collect();
+        let bundle = zip_bundle(&entries);
+        let error =
+            unzip_extension_bundle(&bundle).expect_err("entry-count flooding must be rejected");
+        assert!(
+            format!("{error}").contains("too many files"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {

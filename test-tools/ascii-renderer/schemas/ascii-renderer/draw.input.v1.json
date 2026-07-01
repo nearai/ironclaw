@@ -5,8 +5,7 @@
   "properties": {
     "subject": {
       "type": "string",
-      "enum": ["cat", "dog", "robot"],
-      "description": "Which drawing to render. Defaults to robot."
+      "description": "Which drawing to render: cat, dog, or robot. Unknown or missing subjects fall back to robot."
     }
   },
   "additionalProperties": false
