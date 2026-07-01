@@ -351,10 +351,10 @@ mod production;
 mod runtime_turn_scheduler;
 mod skills;
 
-#[cfg(test)]
-pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(test)]
+pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
     RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,

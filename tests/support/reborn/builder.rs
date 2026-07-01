@@ -48,6 +48,7 @@ use ironclaw_turns::{
     TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
+use super::delivery::RecordingOutboundDeliverySink;
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{
     HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
@@ -56,7 +57,6 @@ use super::harness::{
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
-use super::delivery::RecordingOutboundDeliverySink;
 use super::test_adapter::RebornTestIngress;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -376,7 +376,9 @@ impl RebornIntegrationHarness {
         text: &str,
     ) -> HarnessResult<(TurnRunId, GateRef)> {
         let run_id = self.submit_turn_async(text).await?;
-        let state = self.wait_for_status(run_id, TurnStatus::BlockedAuth).await?;
+        let state = self
+            .wait_for_status(run_id, TurnStatus::BlockedAuth)
+            .await?;
         let gate_ref = state.gate_ref.ok_or("blocked auth run missing gate ref")?;
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());

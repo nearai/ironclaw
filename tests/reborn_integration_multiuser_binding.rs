@@ -36,7 +36,10 @@ async fn distinct_actor_ids_resolve_to_distinct_bindings() {
         .build()
         .await
         .expect("thread a builds");
-    harness_a.submit_turn("hi from a").await.expect("a completes");
+    harness_a
+        .submit_turn("hi from a")
+        .await
+        .expect("a completes");
     harness_a
         .assert_reply_contains("reply-a")
         .await
@@ -55,7 +58,10 @@ async fn distinct_actor_ids_resolve_to_distinct_bindings() {
     // status wait — this line fails if `submit_turn_async` regressed to
     // `HARNESS_ACTOR_ID`, because the submitted scope would mismatch harness-b's
     // binding scope (wrong actor_user_id → wrong thread_owner → ScopeNotFound).
-    harness_b.submit_turn("hi from b").await.expect("b completes");
+    harness_b
+        .submit_turn("hi from b")
+        .await
+        .expect("b completes");
     harness_b
         .assert_reply_contains("reply-b")
         .await
@@ -70,8 +76,7 @@ async fn distinct_actor_ids_resolve_to_distinct_bindings() {
     // Catches the probe-wiring mutation at the actor_user_id level: distinct
     // actors must hash to distinct actor_user_ids via `user_id_for_binding`.
     assert_ne!(
-        harness_a.binding.actor_user_id,
-        harness_b.binding.actor_user_id,
+        harness_a.binding.actor_user_id, harness_b.binding.actor_user_id,
         "distinct actor ids must resolve to distinct actor_user_ids"
     );
 }

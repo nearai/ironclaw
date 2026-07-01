@@ -642,7 +642,7 @@ impl RebornIntegrationGroupBuilder {
         let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools_auth_required().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(self.into_group(base, capability))
+        self.into_group(base, capability).await
     }
 
     /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].
@@ -650,7 +650,7 @@ impl RebornIntegrationGroupBuilder {
         let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::project_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        Ok(self.into_group(base, capability))
+        self.into_group(base, capability).await
     }
 }
 

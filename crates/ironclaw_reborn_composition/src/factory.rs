@@ -556,7 +556,8 @@ impl RebornServices {
         &self,
     ) -> Option<Arc<dyn ironclaw_filesystem::RootFilesystem>> {
         let local_runtime = self.local_runtime.as_ref()?;
-        Some(Arc::clone(&local_runtime.extension_filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>)
+        Some(Arc::clone(&local_runtime.extension_filesystem)
+            as Arc<dyn ironclaw_filesystem::RootFilesystem>)
     }
 
     /// Test-support access to the local-dev project service backing the synthetic
