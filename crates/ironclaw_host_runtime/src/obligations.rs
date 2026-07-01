@@ -1224,14 +1224,14 @@ impl BuiltinObligationHandler {
             // cause as a server-side trail (`SecretStoreError` Display carries no raw
             // secret material — handles/reasons only); the caller still receives the
             // opaque, sanitized secret-obligation failure.
-            let exists = match secret_present(
+            let owner = match secret_owner_scope(
                 secret_store.as_ref(),
                 &request.context.resource_scope,
                 handle,
             )
             .await
             {
-                Ok(exists) => exists,
+                Ok(owner) => owner,
                 Err(error) => {
                     tracing::debug!(
                         secret_handle = handle.as_str(),
@@ -1241,7 +1241,7 @@ impl BuiltinObligationHandler {
                     return Err(secret_obligation_failed());
                 }
             };
-            if !exists {
+            if owner.is_none() {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
                 });
@@ -1267,12 +1267,25 @@ impl BuiltinObligationHandler {
 
         let mut material = Vec::with_capacity(handles.len());
         for handle in handles {
+            // Read from the same scope the presence probe accepted: the caller's
+            // own secret if present, else the tenant-shared admin-managed secret
+            // (#5459). The injection target below stays the caller's invocation
+            // slot regardless of where the source material came from. Fail closed
+            // if the secret vanished between preflight and here.
+            let source_scope = secret_owner_scope(
+                secret_store.as_ref(),
+                &request.context.resource_scope,
+                handle,
+            )
+            .await
+            .map_err(|_| secret_obligation_failed())?
+            .ok_or_else(secret_obligation_failed)?;
             let lease = secret_store
-                .lease_once(&request.context.resource_scope, handle)
+                .lease_once(&source_scope, handle)
                 .await
                 .map_err(|_| secret_obligation_failed())?;
             let secret = secret_store
-                .consume(&request.context.resource_scope, lease.id)
+                .consume(&source_scope, lease.id)
                 .await
                 .map_err(|_| secret_obligation_failed())?;
             material.push((handle.clone(), secret));
@@ -2066,6 +2079,34 @@ pub(crate) async fn secret_present(
     Ok(store.metadata(scope, handle).await?.is_some())
 }
 
+/// Resolve which scope owns `handle` for this caller, honoring tenant-shared,
+/// admin-managed credentials (#5459). A caller's OWN secret wins; otherwise the
+/// tenant-shared admin-managed scope ([`ResourceScope::tenant_shared_managed_scope`]),
+/// so one admin-set key satisfies every user of the tenant. `Ok(None)` means the
+/// secret is absent in both scopes.
+///
+/// Single source of truth for BOTH "is this required secret present" (callers map
+/// to `.is_some()`) and "where does the lease read from" — the pre-flight ordering
+/// probe (`credential_preflight_check`), the dispatch-time backstop
+/// (`preflight_secret_injection`), and the injection lease (`inject_secrets`) all
+/// consult this one rule, so presence and ownership can never drift. Each caller
+/// decides how to treat a store `Err` (the pre-flight fails open and skips; the
+/// obligation backstop and lease fail closed).
+pub(crate) async fn secret_owner_scope(
+    store: &dyn SecretStore,
+    caller_scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<Option<ResourceScope>, SecretStoreError> {
+    if secret_present(store, caller_scope, handle).await? {
+        return Ok(Some(caller_scope.clone()));
+    }
+    let shared = caller_scope.tenant_shared_managed_scope();
+    if secret_present(store, &shared, handle).await? {
+        return Ok(Some(shared));
+    }
+    Ok(None)
+}
+
 fn resource_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Resource,
@@ -2414,6 +2455,124 @@ mod tests {
                 .take(&context.resource_scope, &capability_id, &handle)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    // #5459 tenant-shared credential resolution: a caller's own secret wins;
+    // otherwise the tenant-shared admin-managed scope; otherwise absent.
+    #[tokio::test]
+    async fn secret_owner_scope_prefers_caller_then_tenant_shared_then_none() {
+        let handle = SecretHandle::new("market_data_api_key").unwrap();
+        let caller = execution_context().resource_scope;
+        let shared = caller.tenant_shared_managed_scope();
+
+        // Absent in both scopes -> None (dispatch then gates with AuthRequired).
+        let store = InMemorySecretStore::new();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle).await.unwrap(),
+            None,
+        );
+
+        // Present ONLY at the tenant-shared admin-managed scope -> resolves there,
+        // so one admin-set key satisfies a caller who never provisioned it.
+        let store = InMemorySecretStore::new();
+        store
+            .put(
+                shared.clone(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&shared),
+        );
+
+        // Present at BOTH scopes -> the caller's OWN secret wins over the shared one.
+        let store = InMemorySecretStore::new();
+        store
+            .put(
+                caller.clone(),
+                handle.clone(),
+                SecretMaterial::from("caller-own-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                shared.clone(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&caller),
+        );
+    }
+
+    // Through the caller: InjectSecretOnce is satisfied by an admin-set
+    // tenant-shared key even when the caller has no personal secret, and the
+    // material is staged at the caller's own invocation slot (#5459).
+    #[tokio::test]
+    async fn inject_secret_once_falls_back_to_tenant_shared_admin_key() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            secret_store.clone(),
+            secret_injections.clone(),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("market_data_api_key").unwrap();
+        let estimate = ResourceEstimate::default();
+
+        // Admin set the key ONLY at the tenant-shared scope; the caller has none.
+        secret_store
+            .put(
+                context.resource_scope.tenant_shared_managed_scope(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let obligations = vec![Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        }];
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .expect("tenant-shared key satisfies InjectSecretOnce for a caller with no personal secret");
+
+        assert!(
+            secret_injections
+                .take(&context.resource_scope, &capability_id, &handle)
+                .unwrap()
+                .is_some(),
+            "shared-sourced secret must be staged at the caller's own invocation slot",
         );
     }
 

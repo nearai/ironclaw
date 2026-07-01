@@ -247,6 +247,8 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 product_auth.runtime_credential_account_selection_service(),
             );
         }
+        // Raw secret store for admin-set tenant-shared credentials (#5459 P3).
+        lifecycle_facade = lifecycle_facade.with_secret_store(services.secret_store());
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     if let Some(skill_management) = &services.skill_management {

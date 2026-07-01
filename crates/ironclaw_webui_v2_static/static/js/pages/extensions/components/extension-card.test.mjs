@@ -233,7 +233,7 @@ function extensionCardSourceWithInternals() {
   const source = readFileSync(new URL("./extension-card.js", import.meta.url), "utf8");
   return (
     stripImports(source) +
-    "\nglobalThis.__testExports = { ExtensionCard, RegistryCard, OverflowMenu };"
+    "\nglobalThis.__testExports = { ExtensionCard, RegistryCard, OverflowMenu, Button };"
   );
 }
 
@@ -469,6 +469,85 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
       assert.equal(configurePayload.onboardingState, "failed");
+    },
+  );
+
+  // --- Shared-credential-only extension gets a PRIMARY Configure button (#5459) ---
+  await t.test(
+    "extension declaring only a shared credential gets a PRIMARY Configure button (not buried in overflow), carrying sharedCredentials",
+    () => {
+      let configurePayload = null;
+      const context = makeContext();
+      vm.runInNewContext(extensionCardSourceWithInternals(), context);
+      const { ExtensionCard, OverflowMenu, Button } = context.globalThis.__testExports;
+
+      // market-data: has_auth=false, needs_setup=false, but declares a shared
+      // credential. Active state, so primaryExtensionAction returns null — yet
+      // the admin must get a first-class "Configure" button, not a 3-dot entry.
+      const ext = {
+        package_ref: { id: "market-data" },
+        kind: "wasm_tool",
+        activation_status: "active",
+        active: true,
+        display_name: "Market Data",
+        has_auth: false,
+        needs_setup: false,
+        shared_credentials: [{ handle: "market_data_api_key", required: true }],
+      };
+      const rendered = ExtensionCard({
+        ext,
+        onActivate() {},
+        onConfigure(payload) { configurePayload = payload; },
+        onRemove() {},
+        isBusy: false,
+      });
+
+      // (a) Configure must NOT be in the overflow menu anymore.
+      const overflow = extractOverflowActions(rendered, OverflowMenu);
+      if (overflow !== null) {
+        const ids = overflow.map((a) => a.id);
+        assert.ok(!ids.includes("configure"), `Configure must not be in overflow, got: ${JSON.stringify(ids)}`);
+      }
+
+      // (b) A PRIMARY Button rendered with label "configure" (first-time
+      // semantics — NOT "reconfigure"), and its onClick fires onConfigure with
+      // the payload carrying the declared shared credentials.
+      const buttonNodes = findComponentNodes(rendered, Button);
+      const primaryConfigure = buttonNodes.find((n) => n.values.includes("configure"));
+      assert.notEqual(primaryConfigure, undefined, "a primary Configure button must be rendered");
+      // values[0] is the Button component ref itself; the onClick is the other function.
+      const onClick = primaryConfigure.values.find((v) => typeof v === "function" && v !== Button);
+      assert.equal(typeof onClick, "function", "primary Configure button wires an onClick");
+      onClick();
+      assert.deepEqual(configurePayload.packageRef, { id: "market-data" });
+      assert.deepEqual(
+        configurePayload.sharedCredentials,
+        [{ handle: "market_data_api_key", required: true }],
+        "the configure payload carries the declared shared credentials for the modal",
+      );
+    },
+  );
+
+  // --- Extension with no shared credential and no setup/auth gets no Configure ---
+  await t.test(
+    "extension with no setup, auth, or shared credential does not get a Configure overflow action",
+    () => {
+      const ext = {
+        package_ref: { id: "plain-tool" },
+        kind: "wasm_tool",
+        activation_status: "active",
+        active: true,
+        display_name: "Plain Tool",
+        has_auth: false,
+        needs_setup: false,
+        shared_credentials: [],
+      };
+      const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
+      const actions = extractOverflowActions(rendered, OverflowMenu);
+      if (actions !== null) {
+        const ids = actions.map((a) => a.id);
+        assert.ok(!ids.includes("configure"), `Expected no 'configure' action, got: ${JSON.stringify(ids)}`);
+      }
     },
   );
 

@@ -122,12 +122,17 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       : ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions) ||
     null;
 
+  // Tenant-shared credentials declared by the manifest (#5459). They arrive on
+  // the raw extension as snake_case `shared_credentials`; carry them onto the
+  // camelCased configure payload the modal reads as `sharedCredentials`.
+  const sharedCredentials = ext.shared_credentials || [];
   const configurePayload = {
     packageRef: ext.package_ref,
     displayName,
     active: ext.active,
     activationStatus: ext.activation_status,
     onboardingState: ext.onboarding_state,
+    sharedCredentials,
   };
 
   const primaryActions = [];
@@ -146,8 +151,26 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       label: t("extensions.activate"),
       run: () => onActivate(configurePayload),
     });
+  } else if (canManage && sharedCredentials.length > 0) {
+    // A shared-credential-only extension (e.g. market-data: has_auth=false,
+    // needs_setup=false, already active) has no primary action from
+    // primaryExtensionAction, but an admin still needs a first-class Configure
+    // button to set the tenant-shared key — it must not be buried in the
+    // 3-dot overflow. Label is "Configure" (first-time semantics), independent
+    // of ext.authenticated (which is true for an active tool whose key is unset).
+    primaryActions.push({
+      id: "configure",
+      label: t("extensions.configure"),
+      run: () => onConfigure(configurePayload),
+    });
   }
-  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
+  // The shared-credential-only Configure is handled as a PRIMARY action above.
+  // This overflow entry stays for the has_auth/needs_setup cases only.
+  if (
+    canManage &&
+    (ext.needs_setup || ext.has_auth) &&
+    primaryAction !== "configure"
+  ) {
     overflowActions.push({
       id: "configure",
       label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),

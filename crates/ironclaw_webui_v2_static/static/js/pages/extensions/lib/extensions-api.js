@@ -61,6 +61,20 @@ export function approvePairingCode(channel, code) {
   return redeemPairingCode(channel, code);
 }
 
+// Set a tenant-shared credential (operator-only, #5459 P3). The admin sets one
+// key for the whole tenant; every user then resolves it without being prompted
+// individually. `value` is the raw secret and is write-only — the backend never
+// echoes it back, so we deliberately return only the handle it confirms.
+// The endpoint answers 403 for non-admins; `apiFetch` throws an `ApiError`
+// whose `.status` the caller inspects.
+export async function setSharedCredential({ handle, value }) {
+  const data = await apiFetch("/api/webchat/v2/operator/shared-credentials", {
+    method: "POST",
+    body: JSON.stringify({ handle, value }),
+  });
+  return { success: data?.success !== false, handle: data?.handle ?? handle };
+}
+
 function packageId(packageRef) {
   const id = typeof packageRef === "string" ? packageRef : packageRef?.id;
   if (!id) {

@@ -1144,6 +1144,20 @@ pub struct RebornExtensionInfo {
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_credentials: Vec<RebornSharedCredential>,
+}
+
+/// A tenant-shared, admin-managed credential declared by an extension manifest
+/// (a `secret_handle` runtime credential). The admin sets one value once at the
+/// tenant-shared scope and every user inherits it. The handle is fixed by the
+/// manifest; the frontend renders a read-only handle label plus a write-only
+/// value field for admins.
+// TODO(#5459): surface is_set from tenant-shared scope
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSharedCredential {
+    pub handle: String,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

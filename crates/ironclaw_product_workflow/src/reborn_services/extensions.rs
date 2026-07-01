@@ -9,7 +9,7 @@ use crate::{
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleProductSurfaceContext, RebornExtensionActionResponse, RebornExtensionInfo,
     RebornExtensionListResponse, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    RebornServicesError, RebornSharedCredential, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -108,6 +108,22 @@ pub(super) async fn import_extension(
         .await
         .map_err(map_lifecycle_error)?;
     Ok(action_response(&lifecycle, None, None))
+}
+
+/// Admin sets a tenant-shared, admin-managed credential (#5459 P3). The raw
+/// `value` is passed straight to the facade for storage at the tenant-shared
+/// scope and is never logged or echoed back.
+pub(super) async fn set_shared_credential(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    handle: String,
+    value: String,
+) -> Result<(), RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    facade
+        .set_shared_credential(context, handle, value)
+        .await
+        .map_err(map_lifecycle_error)
 }
 
 pub(super) async fn activate_extension(
@@ -284,6 +300,14 @@ fn extension_info(
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
     let summary = installed.summary;
     let kind = extension_kind(&summary).to_string();
+    let shared_credentials = summary
+        .shared_credentials
+        .into_iter()
+        .map(|cred| RebornSharedCredential {
+            handle: cred.handle,
+            required: cred.required,
+        })
+        .collect();
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
@@ -303,6 +327,7 @@ fn extension_info(
         version: Some(summary.version),
         onboarding_state: onboarding.state,
         onboarding: onboarding.onboarding,
+        shared_credentials,
     }
 }
 
@@ -976,6 +1001,7 @@ mod tests {
                 required: true,
                 setup: LifecycleExtensionCredentialSetup::ManualToken,
             }],
+            shared_credentials: Vec::new(),
             onboarding: Some(LifecycleExtensionOnboarding {
                 instructions: "Fixture needs a token before its tools can run.".to_string(),
                 credential_instructions: Some("Paste the fixture token.".to_string()),
@@ -1000,6 +1026,7 @@ mod tests {
             visible_capability_ids: vec!["nearai.web_search".to_string()],
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),
+            shared_credentials: Vec::new(),
             onboarding: Some(LifecycleExtensionOnboarding {
                 instructions: "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension."
                     .to_string(),

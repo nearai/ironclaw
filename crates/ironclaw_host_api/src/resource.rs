@@ -27,6 +27,21 @@ pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 /// caller-supplied identifier can ever collide with it.
 pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
+/// Reserved `user_id` for tenant-shared, admin-managed credentials (#5459 P3).
+///
+/// A secret stored under this sentinel user (paired with the caller's REAL
+/// `tenant_id`) is visible to every user of that tenant — the "admin sets the
+/// key once, the whole usergroup inherits" model. Unlike [`SYSTEM_RESERVED_ID`]
+/// (tenant-global), this stays tenant-scoped: the filesystem secret mount is
+/// `/tenants/<tenant>/users/<this>/secrets`, so tenants remain isolated while
+/// their users share.
+///
+/// It deliberately passes `UserId` validation (no path separators / control
+/// bytes) so scopes carrying it round-trip through durable secret records, and
+/// is namespaced (`__ironclaw_…__`) so it cannot collide with a real
+/// email/env-bearer `UserId`.
+pub const TENANT_SHARED_MANAGED_USER_ID: &str = "__ironclaw_tenant_shared_admin__";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
     // SECURITY: `ResourceScope` is a TRUSTED-PERSISTENCE shape. It is serialized
@@ -151,6 +166,26 @@ impl ResourceScope {
         Self {
             tenant_id: self.tenant_id.clone(),
             user_id: self.user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: self.invocation_id,
+        }
+    }
+
+    /// Copy of this scope narrowed to the tenant-shared, admin-managed
+    /// credential owner (#5459 P3): keeps `tenant_id`, replaces `user_id` with
+    /// [`TENANT_SHARED_MANAGED_USER_ID`], and drops all sub-user axes
+    /// (agent/project/mission/thread). A secret stored at this scope is shared
+    /// by every user of the tenant — the "admin sets it once, everyone
+    /// inherits" model — while remaining tenant-isolated. Used for both storing
+    /// a shared credential (admin write) and the resolution fallback when a
+    /// caller has no personal secret for the handle.
+    pub fn tenant_shared_managed_scope(&self) -> Self {
+        Self {
+            tenant_id: self.tenant_id.clone(),
+            user_id: UserId::from_trusted(TENANT_SHARED_MANAGED_USER_ID.to_string()),
             agent_id: None,
             project_id: None,
             mission_id: None,
@@ -290,6 +325,50 @@ mod tests {
         assert!(restored.is_system());
         assert_eq!(restored.tenant_id.as_str(), SYSTEM_RESERVED_ID);
         assert_eq!(restored.user_id.as_str(), SYSTEM_RESERVED_ID);
+    }
+
+    /// #5459 P3: the tenant-shared, admin-managed scope keeps the tenant, swaps
+    /// the user for the reserved sentinel, and drops all sub-user axes — so one
+    /// admin-set secret is visible to every user of the tenant while tenants
+    /// stay isolated. Two different callers in the same tenant must resolve to
+    /// the SAME shared owner, and the scope must survive a serde round-trip (the
+    /// secret store persists the scope in each record, so the sentinel user id
+    /// must be a valid `UserId`).
+    #[test]
+    fn tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips() {
+        let base = ResourceScope {
+            tenant_id: TenantId::new("acme").unwrap(),
+            user_id: UserId::new("alice").unwrap(),
+            agent_id: Some(AgentId::new("agent-1").unwrap()),
+            project_id: Some(ProjectId::new("proj-1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let shared = base.tenant_shared_managed_scope();
+        assert_eq!(shared.tenant_id.as_str(), "acme");
+        assert_eq!(shared.user_id.as_str(), TENANT_SHARED_MANAGED_USER_ID);
+        assert!(shared.agent_id.is_none());
+        assert!(shared.project_id.is_none());
+
+        // A different caller (different user + agent) in the same tenant resolves
+        // to the identical shared owner — that is what makes the key shared.
+        let other = ResourceScope {
+            user_id: UserId::new("bob").unwrap(),
+            agent_id: Some(AgentId::new("agent-2").unwrap()),
+            ..base.clone()
+        }
+        .tenant_shared_managed_scope();
+        assert_eq!(shared.tenant_id, other.tenant_id);
+        assert_eq!(shared.user_id, other.user_id);
+
+        // Persisted secret records serialize the scope; the sentinel user must
+        // read back (it passes `UserId` validation).
+        let json = serde_json::to_string(&shared).expect("serialize shared scope");
+        let restored: ResourceScope =
+            serde_json::from_str(&json).expect("deserialize shared scope");
+        assert_eq!(restored.user_id.as_str(), TENANT_SHARED_MANAGED_USER_ID);
+        assert_eq!(restored.tenant_id.as_str(), "acme");
     }
 
     /// The trusted-sentinel exception must not widen into a general bypass. The

@@ -8,8 +8,9 @@ import {
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
 import { extensionIsActive, setupReadyForActivation } from "../lib/extension-actions.js";
+import { SharedCredentialSection } from "./shared-credential-section.js";
 
-export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
+export function ConfigureModal({ extension, isAdmin = false, onActivate, onClose, onSaved }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
   const { secrets = [], fields = [], onboarding, isLoading, error } =
@@ -49,6 +50,23 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const canActivate = setupReadyForActivation({ extension, secrets, fields });
   const setupUrl = httpsUrl(onboarding?.setup_url);
 
+  // Tenant-shared, admin-managed credentials declared by the manifest (#5459).
+  // Only admins see the shared-key form, and only for extensions that actually
+  // declare one — so it no longer renders on every extension. Each declared
+  // handle is fixed (read-only), so we render one section per credential.
+  const sharedCreds = extension?.sharedCredentials || [];
+  const sharedCredentialSections =
+    isAdmin && sharedCreds.length > 0
+      ? sharedCreds.map(
+          (cred) => html`
+            <${SharedCredentialSection}
+              key=${cred.handle}
+              defaultHandle=${cred.handle}
+            />
+          `
+        )
+      : null;
+
   if (isLoading) {
     return html`
       <${ModalShell} onClose=${onClose} title=${t("extensions.configureName").replace("{name}", extensionName)}>
@@ -81,6 +99,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         <p className="text-sm text-iron-300">
           ${t("extensions.noConfigRequired")}
         </p>
+        ${sharedCredentialSections}
       <//>
     `;
   }
@@ -235,6 +254,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${oauthMutation.error.message}
         </div>
       `}
+
+      ${sharedCredentialSections}
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <${Button} variant="ghost" onClick=${onClose}>${t("common.cancel")}<//>

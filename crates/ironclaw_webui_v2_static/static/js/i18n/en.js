@@ -546,6 +546,22 @@ registerPack("en", {
   "tools.description.nearai.web_search": "Search through the NEAR AI MCP server",
   "tools.description.builtin.outbound_delivery_target_set": "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel",
 
+  // Extensions — Configure modal: shared credential (operator/admin-only)
+  "sharedCredential.title": "Shared API key (admin, tenant-wide)",
+  "sharedCredential.description":
+    "Set one credential for the whole tenant. Every user resolves it automatically and is never prompted for it individually.",
+  "sharedCredential.handleLabel": "Key:",
+  "sharedCredential.handleFixedHint": "Declared by this extension. Every user inherits the value you set here.",
+  "sharedCredential.value": "Value",
+  "sharedCredential.valueHint": "Write-only. The value is stored securely and never shown again.",
+  "sharedCredential.valuePlaceholder": "Enter the secret value",
+  "sharedCredential.valueRequired": "Enter a value.",
+  "sharedCredential.submit": "Set shared key",
+  "sharedCredential.saving": "Setting...",
+  "sharedCredential.saved": "Shared key set for {handle}.",
+  "sharedCredential.adminOnly": "Admin only.",
+  "sharedCredential.failed": "Could not set the shared credential.",
+
   // Settings — skills tab
   "skills.installed": "Installed skills",
   "skills.group.user": "Your skills",

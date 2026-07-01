@@ -116,7 +116,8 @@ pub use lifecycle::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
-    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleSharedCredential, LifecycleSkillSource, LifecycleSkillSummary,
+    UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
@@ -191,8 +192,8 @@ pub use reborn_services::{
     RebornResumeGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSharedCredential,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,

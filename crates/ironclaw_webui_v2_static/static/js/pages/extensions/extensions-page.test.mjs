@@ -46,6 +46,7 @@ function renderExtensionsPage(tab) {
       remove: () => {},
       invalidate: () => {},
     }),
+    useOutletContext: () => ({ isAdmin: false }),
     useParams: () => ({ tab }),
   };
   vm.runInNewContext(extensionsPageSourceForTest(), context);
