@@ -14,10 +14,15 @@
 //! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
 //! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
 //! over the SAME captured `RecordingRuntimeHttpEgress` request log slice 2 wired
-//! — there is one egress-assertion API, not a parallel one (the O-egress
-//! MCP/OAuth interceptor folds its per-URL needs in here). `assert_system_prompt_contains`
-//! reads a different capture source — the scripted `TraceLlm`'s captured requests,
-//! via the harness's `captured_system_prompts` accessor.
+//! — there is one runtime-lane egress-assertion API, not a parallel one (the
+//! O-egress MCP/OAuth interceptor folds its per-URL needs in here). The one
+//! exception is `assert_network_egress_header_contains`, which reads the
+//! recording *network* egress lane — required for the T0-SECRET-INJECT
+//! credential-injection proof, whose harness routes through the host egress
+//! pipeline over the network recorder (see that method's docs for why).
+//! `assert_system_prompt_contains` reads a different capture source — the
+//! scripted `TraceLlm`'s captured requests, via the harness's
+//! `captured_system_prompts` accessor.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
@@ -225,6 +230,58 @@ impl RebornIntegrationHarness {
         )
         .into())
     }
+
+    /// Assert that the (first) captured **network** egress request whose URL
+    /// contains `url_substr` carried a header named `header_name`
+    /// (case-insensitive) whose value contains `value_substr`. This is the
+    /// credential-injection-on-the-wire proof for T0-SECRET-INJECT: a
+    /// host-injected `Authorization: Bearer <token>` lands on the outbound
+    /// request only after the egress pipeline's `apply_credential_injections`
+    /// step, which the recording network egress captures.
+    ///
+    /// **Why the network lane, not the runtime lane:** the GitHub WASM harness
+    /// (`with_github_issue_tools`) wires its recording `RuntimeHttpEgress` and
+    /// then calls `try_with_host_http_egress`, which overwrites the runtime port
+    /// with the host egress pipeline over the recording *network* egress. So the
+    /// injected request flows through the network recorder, and the runtime-lane
+    /// `assert_egress_*` family (which reads `runtime_http_requests()`) is inert
+    /// for this wiring. Assert here instead.
+    ///
+    /// Reads the FULL network-egress log (no `[baseline..]` slice — there is no
+    /// `baseline_network_count`). Correct for a single-shot flat harness (the only
+    /// caller today); a future group backend sharing this recorder across threads
+    /// would need baseline slicing here to avoid matching a prior thread's request.
+    pub async fn assert_network_egress_header_contains(
+        &self,
+        url_substr: &str,
+        header_name: &str,
+        value_substr: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.capability_recorder.network_http_requests();
+        let Some(request) = requests.iter().find(|r| r.url.contains(url_substr)) else {
+            let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+            return Err(format!(
+                "no captured network egress request matching url {url_substr:?}; saw {seen:?}"
+            )
+            .into());
+        };
+        if request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case(header_name) && value.contains(value_substr)
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<&str> = request
+            .headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        Err(format!(
+            "network egress request to {url_substr:?} has no header {header_name:?} \
+             containing {value_substr:?}; header names present: {seen:?}"
+        )
+        .into())
+    }
+
 
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed

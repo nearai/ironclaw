@@ -305,7 +305,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+    pub(crate) fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
@@ -2322,7 +2322,7 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
-    async fn github_issue_tools() -> HarnessResult<Self> {
+    pub(crate) async fn github_issue_tools() -> HarnessResult<Self> {
         // Credential account resolves to a real handle → capability dispatches.
         Self::github_issue_tools_with_credential_result(Ok(SecretHandle::new(
             "github_manual_access",
