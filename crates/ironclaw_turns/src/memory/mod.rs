@@ -346,15 +346,20 @@ impl InMemoryTurnStateStore {
         block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
     ) -> Self {
         self.block_persistence = Some(block_persistence);
-        // Seed the gate-persisted set from any runs that are *already* blocked —
-        // e.g. rehydrated from a recovery snapshot via
-        // `from_persistence_snapshot`. Without this, a run restored blocked then
-        // resumed would reach a terminal state with `is_gate_persisted == false`
-        // and skip its durable terminal-convergence write, so the next restart
-        // could resurrect the finished run as live. `mark_gate_persisted` only
-        // fires for runs that block *live* after the sink is attached, so the
-        // restore path must be seeded here.
-        let blocked: Vec<TurnRunId> = {
+        // Seed the gate-persisted set from any *gate-touched, not-yet-terminal*
+        // run rehydrated from a recovery snapshot via `from_persistence_snapshot`.
+        // `mark_gate_persisted` only fires for runs that block *live* after the
+        // sink is attached, so the restore path must be seeded here or a recovered
+        // run would reach a terminal state with `is_gate_persisted == false`, skip
+        // its durable terminal-convergence write, and be resurrected as live on
+        // the next restart.
+        //
+        // A currently-blocked run is the obvious case, but a run that blocked then
+        // resumed is persisted as `Queued`/`Running`, so status alone misses it.
+        // `checkpoint_id` is set only on the gate-block paths (`block_run` and the
+        // loop-exit block) and is not cleared on resume, so it is the durable
+        // marker that a not-yet-terminal run was gate-touched — seed from that.
+        let gate_touched: Vec<TurnRunId> = {
             let inner = match self.inner.lock() {
                 Ok(inner) => inner,
                 Err(poisoned) => poisoned.into_inner(),
@@ -362,16 +367,18 @@ impl InMemoryTurnStateStore {
             inner
                 .records
                 .iter()
-                .filter(|(_, record)| record.status.get().is_blocked())
+                .filter(|(_, record)| {
+                    !record.status.get().is_terminal() && record.checkpoint_id.is_some()
+                })
                 .map(|(run_id, _)| *run_id)
                 .collect()
         };
-        if !blocked.is_empty() {
+        if !gate_touched.is_empty() {
             let mut set = match self.gate_persisted_runs.lock() {
                 Ok(set) => set,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            set.extend(blocked);
+            set.extend(gate_touched);
         }
         self
     }

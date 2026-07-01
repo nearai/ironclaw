@@ -119,6 +119,11 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+use ironclaw_turns::FilesystemTurnStateBlockPersistence;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -132,11 +137,6 @@ use ironclaw_turns::{
     CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
     LoopCheckpointStore,
 };
-#[cfg(all(
-    feature = "inmemory-turn-state",
-    any(feature = "libsql", feature = "postgres")
-))]
-use ironclaw_turns::{FilesystemTurnStateBlockPersistence, TurnPersistenceSnapshot};
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
@@ -1713,35 +1713,6 @@ where
     )))
 }
 
-/// Load the last persist-on-block snapshot for the in-memory turn-state
-/// authority's startup recovery. Best-effort: a missing snapshot is the normal
-/// fresh-start case, and any read fault falls back to an empty snapshot rather
-/// than wedging boot.
-#[cfg(all(
-    feature = "inmemory-turn-state",
-    any(feature = "libsql", feature = "postgres")
-))]
-async fn restore_turn_state_block_snapshot<F>(
-    block_persistence: &FilesystemTurnStateBlockPersistence<F>,
-) -> TurnPersistenceSnapshot
-where
-    F: RootFilesystem,
-{
-    match block_persistence.load().await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            // silent-ok: startup recovery read; a missing snapshot is expected on
-            // a fresh volume and a read fault must not block boot — live traffic
-            // repopulates the in-memory authority regardless.
-            tracing::warn!(
-                %error,
-                "turn-state block persistence: startup recovery load failed; starting with empty turn state"
-            );
-            TurnPersistenceSnapshot::default()
-        }
-    }
-}
-
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -1912,22 +1883,16 @@ async fn build_local_dev_store_graph(
         let block_persistence = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
             &turn_state_filesystem,
         )));
-        let restored = restore_turn_state_block_snapshot(block_persistence.as_ref()).await;
-        let store = match InMemoryTurnStateStore::from_persistence_snapshot(
-            restored,
-            turn_state_store_limits,
-        ) {
-            Ok(store) => store,
-            Err(error) => {
-                // Recovery is best-effort: a corrupt/incompatible snapshot must
-                // not wedge startup. Start clean and let live traffic repopulate.
-                tracing::warn!(
-                    %error,
-                    "turn-state block persistence: recovery snapshot rejected; starting with empty turn state"
-                );
-                InMemoryTurnStateStore::with_limits(turn_state_store_limits)
-            }
-        };
+        // Fail loud on a real recovery fault. `load()` returns an empty snapshot
+        // for the normal missing-snapshot case (fresh volume), so an `Err` here is
+        // a genuine read/deserialization/integrity failure — falling back to an
+        // empty store would silently drop persisted blocked approvals/auth and
+        // defeat the recovery guarantee. Surface it as a build error instead
+        // (`RebornBuildError: Turn`), so an operator sees the failure rather than
+        // losing gate-parked turns.
+        let restored = block_persistence.load().await?;
+        let store =
+            InMemoryTurnStateStore::from_persistence_snapshot(restored, turn_state_store_limits)?;
         Arc::new(store.with_block_persistence(block_persistence))
     };
     #[cfg(not(feature = "inmemory-turn-state"))]
