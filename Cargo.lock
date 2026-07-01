@@ -4172,6 +4172,7 @@ dependencies = [
  "ironclaw_agent_loop",
  "ironclaw_common",
  "ironclaw_host_api",
+ "ironclaw_observability",
  "ironclaw_turns",
  "serde",
  "serde_jcs",
