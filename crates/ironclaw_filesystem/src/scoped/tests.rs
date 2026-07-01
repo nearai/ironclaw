@@ -39,6 +39,23 @@ fn expect_err<T>(result: Result<T, FilesystemError>) -> FilesystemError {
     }
 }
 
+#[test]
+fn scoped_path_class_buckets_known_segments_and_redacts_unknowns() {
+    let cases = [
+        ("/workspace/project/file.txt", PathClass::Workspace),
+        ("/memory/profile.json", PathClass::Memory),
+        ("/artifacts/run/output.json", PathClass::Artifacts),
+        ("/turns/state.json", PathClass::Turns),
+        ("/users/alice/private.txt", PathClass::Other),
+        ("/tenants/acme/users/alice/secrets", PathClass::Other),
+    ];
+
+    for (raw, expected) in cases {
+        let path = ScopedPath::new(raw).unwrap();
+        assert_eq!(scoped_path_class(&path), expected);
+    }
+}
+
 fn scoped_in_memory(permissions: MountPermissions) -> ScopedFilesystem<InMemoryBackend> {
     ScopedFilesystem::with_fixed_view(
         Arc::new(InMemoryBackend::new()),
