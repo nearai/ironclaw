@@ -176,8 +176,13 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /const logsPath = threadId \? `\/logs\?thread_id=\$\{encodeURIComponent\(threadId\)\}` : null;/,
-    "thread logs shortcut should build a thread-scoped route",
+    /import \{ buildScopedLogsPath \} from "\.\.\/\.\.\/logs\/lib\/logs-data\.js";/,
+    "thread logs shortcut should reuse the shared scoped logs path builder",
+  );
+  assert.match(
+    messageListSource,
+    /const logsPath = threadId \? buildScopedLogsPath\(\{ threadId \}\) : null;/,
+    "thread logs shortcut should build a thread-scoped route through the shared helper",
   );
   assert.match(
     messageListSource,

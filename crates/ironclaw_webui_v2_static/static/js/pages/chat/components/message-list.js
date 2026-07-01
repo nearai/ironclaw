@@ -5,6 +5,7 @@ import { ActivityRun } from "./activity-run.js";
 import { MessageBubble } from "./message-bubble.js";
 import { Icon } from "../../../design-system/icons.js";
 import { groupMessages } from "../lib/message-groups.js";
+import { buildScopedLogsPath } from "../../logs/lib/logs-data.js";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
@@ -209,7 +210,7 @@ export function MessageList({
   React.useEffect(() => cancelScrollSync, [cancelScrollSync]);
 
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
-  const logsPath = threadId ? `/logs?thread_id=${encodeURIComponent(threadId)}` : null;
+  const logsPath = threadId ? buildScopedLogsPath({ threadId }) : null;
 
   return html`
     <div className="relative flex min-h-0 min-w-0 flex-1">
