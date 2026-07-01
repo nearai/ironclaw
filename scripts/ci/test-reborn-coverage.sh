@@ -433,6 +433,31 @@ else
   report_fail "C3: fake gh did not record a mutation"
 fi
 
+# C4: GH_TOKEN unset -> fast-fail before any `gh` call. `env -u` (not a subshell
+# export/unset) keeps this the same shape as C1-C3 and shellcheck-clean.
+capture env -u GH_TOKEN \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+assert_exit_code "C4: GH_TOKEN unset exits non-zero" 1 "${CAP_RC}"
+assert_contains "C4: GH_TOKEN unset reports the missing-var guard" "${CAP_ERR}" "GH_TOKEN must be set"
+
+# C5: PR_NUMBER unset -> guard fires before GH_TOKEN is even checked.
+capture env -u PR_NUMBER \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+assert_exit_code "C5: PR_NUMBER unset exits non-zero" 1 "${CAP_RC}"
+assert_contains "C5: PR_NUMBER unset reports the missing-var guard" "${CAP_ERR}" "PR_NUMBER must be set"
+
+# C6: GITHUB_REPOSITORY unset -> the first guard, fires immediately.
+capture env -u GITHUB_REPOSITORY \
+  GH_TOKEN="fake-token" \
+  PR_NUMBER="${gh_pr}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+assert_exit_code "C6: GITHUB_REPOSITORY unset exits non-zero" 1 "${CAP_RC}"
+assert_contains "C6: GITHUB_REPOSITORY unset reports the missing-var guard" "${CAP_ERR}" "GITHUB_REPOSITORY must be set"
+
 # ---------------------------------------------------------------------------
 # D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 # ---------------------------------------------------------------------------
