@@ -501,25 +501,28 @@ where
                     let (outcome, store) = apply_fut.await;
                     let new_snapshot = store.persistence_snapshot();
 
-                    match outcome {
-                        Err(e) => Err(e),
-                        Ok(value) => {
-                            // Inert transition: the closure left the overlaid
-                            // snapshot unchanged, so there is nothing to persist.
-                            // Signal no-op so `cas_update` skips the write
-                            // entirely (no version bump).
-                            if new_snapshot == baseline {
-                                return Ok(CasApply::no_op(
-                                    new_snapshot.clone(),
-                                    (value, new_snapshot),
-                                ));
-                            }
-                            // Thread the new snapshot back alongside the
-                            // caller's outcome so the outer scope can populate
-                            // the cache.
-                            Ok(CasApply::new(new_snapshot.clone(), (value, new_snapshot)))
-                        }
+                    let outcome = match outcome {
+                        Ok(value) => Ok(value),
+                        Err(error) if new_snapshot != baseline => Err(error),
+                        Err(error) => return Err(error),
+                    };
+
+                    // Inert transition: the closure left the overlaid
+                    // snapshot unchanged, so there is nothing to persist.
+                    // Signal no-op so `cas_update` skips the write entirely
+                    // (no version bump).
+                    if new_snapshot == baseline {
+                        return Ok(CasApply::no_op(
+                            new_snapshot.clone(),
+                            (outcome, new_snapshot),
+                        ));
                     }
+                    // Thread the new snapshot back alongside the caller's
+                    // outcome so the outer scope can populate the cache. Some
+                    // failed operations still intentionally mutate durable
+                    // audit state, such as retry ThreadBusy idempotency
+                    // records.
+                    Ok(CasApply::new(new_snapshot.clone(), (outcome, new_snapshot)))
                 }
             },
         );
@@ -532,19 +535,21 @@ where
         // `with_apply_timeout`.  The outer `tokio::time::timeout` here enforces
         // the per-call deadline; `cas_update`'s inner timeout is an additional
         // guard inside the helper itself.
-        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<TurnError>> =
-            match tokio::time::timeout(self.apply_timeout, cas_future).await {
-                Ok(result) => result,
-                Err(_) => {
-                    self.clear_snapshot_cache();
-                    return Err(TurnError::Unavailable {
-                        reason: "turn state filesystem apply timed out".to_string(),
-                    });
-                }
-            };
+        let result: Result<
+            (Result<T, TurnError>, TurnPersistenceSnapshot),
+            CasUpdateError<TurnError>,
+        > = match tokio::time::timeout(self.apply_timeout, cas_future).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.clear_snapshot_cache();
+                return Err(TurnError::Unavailable {
+                    reason: "turn state filesystem apply timed out".to_string(),
+                });
+            }
+        };
 
         match result {
-            Ok((value, written_snapshot)) => {
+            Ok((outcome, written_snapshot)) => {
                 // Successful write or explicit no-op (CasApply::no_op). Populate
                 // the snapshot cache with the resulting snapshot so the next read
                 // can skip a backend roundtrip. For a true write we cache the
@@ -553,7 +558,7 @@ where
                 // absent record. We store `None` for the version; reads don't use
                 // the version and writes always re-read fresh.
                 self.store_snapshot_cache((written_snapshot, None));
-                Ok(value)
+                outcome
             }
             Err(e) => {
                 self.clear_snapshot_cache();
