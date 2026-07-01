@@ -186,6 +186,27 @@ where
             }
         }
     }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
+        let result = pipeline::execute_credential_exchange(self, request).await;
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if error.should_discard_staged_policy() {
+                    self.discard_staged_policy(&scope, &capability_id);
+                }
+                if error.should_discard_staged_secret_injections() {
+                    self.discard_staged_secret_injections(&scope, &capability_id);
+                }
+                Err(error.into_inner())
+            }
+        }
+    }
 }
 
 #[async_trait]

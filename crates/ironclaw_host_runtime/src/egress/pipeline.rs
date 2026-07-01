@@ -19,7 +19,7 @@ where
     N: NetworkHttpEgress + Send + Sync,
     S: SecretStore + Send + Sync,
 {
-    execute_inner(service, request, false).await
+    execute_inner(service, request, false, false).await
 }
 
 pub(super) async fn execute_for_model_visible_output<N, S>(
@@ -30,13 +30,29 @@ where
     N: NetworkHttpEgress + Send + Sync,
     S: SecretStore + Send + Sync,
 {
-    execute_inner(service, request, true).await
+    execute_inner(service, request, true, false).await
+}
+
+/// Transport for an internal credential exchange (OAuth token endpoint).
+/// Identical to [`execute`] except response leak-sanitization is skipped, so
+/// the credential in the response body reaches the host auth caller intact.
+/// Request-side leak validation and credential injection still apply.
+pub(super) async fn execute_credential_exchange<N, S>(
+    service: &HostHttpEgressService<N, S>,
+    request: RuntimeHttpEgressRequest,
+) -> Result<RuntimeHttpEgressResponse, PipelineError>
+where
+    N: NetworkHttpEgress + Send + Sync,
+    S: SecretStore + Send + Sync,
+{
+    execute_inner(service, request, false, true).await
 }
 
 async fn execute_inner<N, S>(
     service: &HostHttpEgressService<N, S>,
     mut request: RuntimeHttpEgressRequest,
     allow_partial_response_body: bool,
+    skip_response_sanitization: bool,
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
@@ -62,12 +78,21 @@ where
         dispatch_network(service, request, network_policy).await?
     };
     let credentials_injected = !redaction_values.is_empty();
-    let (response, response_redacted) = super::sanitize::sanitize_runtime_response(
-        response,
-        &redaction_values,
-        service.leak_detector(),
-    )
-    .map_err(PipelineError::post_transport)?;
+    let (response, response_redacted) = if skip_response_sanitization {
+        // Credential-exchange responses (OAuth token endpoints) are consumed by
+        // the host auth system and never surfaced to the model, so the response
+        // sanitizer is bypassed — it would otherwise redact or hard-block the
+        // token this call exists to fetch. Safe here because such requests
+        // carry no injected credentials to redact (redaction_values is empty).
+        (response, false)
+    } else {
+        super::sanitize::sanitize_runtime_response(
+            response,
+            &redaction_values,
+            service.leak_detector(),
+        )
+        .map_err(PipelineError::post_transport)?
+    };
     let (response, saved_body) = http_body::apply_body_disposition(
         response,
         save_body_to,
