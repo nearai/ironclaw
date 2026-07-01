@@ -76,6 +76,8 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_oauth;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
