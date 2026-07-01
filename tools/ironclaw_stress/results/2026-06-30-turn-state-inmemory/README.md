@@ -50,3 +50,22 @@ Artifacts: `chatturn-filesystem.jsonl`, `chatturn-memory.jsonl`.
 
 > Environment: 4-core Linux container, libSQL local file, `rustc 1.96.0`,
 > `cargo build -p ironclaw_stress --release`.
+
+## Heavier-scale re-run (16 owners × 32 threads) — validates the shipped feature path
+
+Same harness `memory` backend is the exact `InMemoryTurnStateStore` the product
+now wires via the `inmemory-turn-state` feature, so this stresses the shipped
+path. `--users 16 --active-thread-count 16 --threads-per-owner 32 --operations 20`,
+concurrency 16→128:
+
+| Concurrency | filesystem p99 → max (fail%) | memory p99 → max (fail%) | ops/s (fs → mem) |
+| ---: | ---: | ---: | ---: |
+| 16  | 281ms → 320ms (0%)      | 137ms → 172ms (0%)  | 28.2 → 52.1 |
+| 64  | 376ms → **53.97s** (0.16%) | 143ms → 225ms (0%)  | 20.3 → 47.6 |
+| 128 | 519ms → **147.64s** (0.78%) | 176ms → 194ms (0%)  | 14.4 → 32.9 |
+
+At c128 the filesystem CAS worst-case is **147 seconds** (livelock) vs the
+in-memory authority's **194ms** — ~760× better worst-case, 0% failures, ~2.3×
+throughput that keeps scaling instead of collapsing.
+
+Artifacts: `chatturn-filesystem-16x32.jsonl`, `chatturn-memory-16x32.jsonl`.
