@@ -9,6 +9,13 @@
 //! egress returns the body of the FIRST scripted response whose key matches the
 //! request, falling back to the FIFO queue, then the default body.
 //!
+//! A matched response is not always a `200` body: `.with_status(u16)` scripts a
+//! non-2xx status (still a successful egress call — `builtin.http` surfaces it
+//! as a Completed tool result carrying that status), and
+//! `ScriptedHttpResponse::egress_error(url, RuntimeHttpEgressError)` scripts a
+//! runtime egress failure (`Err` from `execute`, mapping to a
+//! `Failed`/`Denied` capability outcome). See [`ScriptedHttpOutcome`].
+//!
 //! Concrete by design (spec §3.7): the `Recording*` structs are deliberately not
 //! a premature generic `Recording<P>` — this is written in the extractable
 //! scripted-responses + captured-calls shape so a future rule-of-three lift is
@@ -89,11 +96,19 @@ impl ScriptedHttpResponse {
         }
     }
 
-    /// Override the HTTP status of a body response (default `200`). No-op on an
-    /// [`egress_error`](ScriptedHttpResponse::egress_error) response.
+    /// Override the HTTP status of a body response (default `200`). Panics on
+    /// an [`egress_error`](ScriptedHttpResponse::egress_error) response — the
+    /// two are mutually exclusive scripted outcomes, and silently no-op'ing
+    /// would leave the test exercising the egress-error path instead of the
+    /// status the author intended.
     pub fn with_status(mut self, status: u16) -> Self {
-        if let ScriptedHttpOutcome::Body { status: s, .. } = &mut self.outcome {
-            *s = status;
+        match &mut self.outcome {
+            ScriptedHttpOutcome::Body { status: s, .. } => *s = status,
+            ScriptedHttpOutcome::Error(_) => {
+                panic!(
+                    "with_status() has no effect on an egress_error() response; these are mutually exclusive outcomes"
+                )
+            }
         }
         self
     }

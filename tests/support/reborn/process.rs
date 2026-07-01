@@ -87,7 +87,10 @@ impl RuntimeProcessPort for RecordingProcessPort {
             None => 0,
             Some(ScriptedProcessResult::ExitCode(code)) => code,
             Some(ScriptedProcessResult::Timeout) => {
-                return Err(RuntimeProcessError::Timeout(Duration::from_secs(1)));
+                let timeout_secs = request.timeout_secs.unwrap_or(1);
+                return Err(RuntimeProcessError::Timeout(Duration::from_secs(
+                    timeout_secs,
+                )));
             }
         };
         Ok(CommandExecutionOutput {

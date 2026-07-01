@@ -100,7 +100,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
         .await
         .expect("harness builds");
     h.submit_turn("run shell").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("resource")
+    h.assert_tool_error_summary_contains("capability failed with resource")
         .await
         .expect("timeout surfaced as a model-visible Failed{Resource} tool error");
     h.assert_reply_contains("done")

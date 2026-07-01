@@ -14,7 +14,38 @@ mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
-use support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
+use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
+
+/// Asserts the mock MCP server actually received a `tools/call` request naming
+/// `expected_tool` with a `query` argument equal to `expected_query`. Mirrors
+/// the inline server-side check in `mcp_tool_call_reaches_mock_server`, so
+/// error-path tests also prove the loopback HTTP boundary was reached, not
+/// just that the harness's own capability-invocation recorder fired.
+fn assert_recorded_tools_call(server: &MockMcpServer, expected_tool: &str, expected_query: &str) {
+    let recorded = server.recorded_requests();
+    let tools_call = recorded
+        .iter()
+        .find(|r| r.method == "tools/call")
+        .unwrap_or_else(|| panic!("no tools/call recorded; saw: {:?}", recorded));
+
+    assert_eq!(
+        tools_call
+            .params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str()),
+        Some(expected_tool)
+    );
+    assert_eq!(
+        tools_call
+            .params
+            .as_ref()
+            .and_then(|p| p.get("arguments"))
+            .and_then(|a| a.get("query"))
+            .and_then(|q| q.as_str()),
+        Some(expected_query)
+    );
+}
 
 /// Core slice-6 scenario: a scripted MCP tool call round-trips through the real
 /// MCP runtime to the loopback mock server, and the invocation is recorded.
@@ -130,10 +161,11 @@ async fn mcp_tool_call_error_surfaces_recoverable_failed() {
         .expect("harness builds");
 
     h.submit_turn("search").await.expect("turn completes");
+    assert_recorded_tools_call(&server, "search", "x");
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked before the error");
-    h.assert_tool_error_summary_contains("backend")
+    h.assert_tool_error_summary_contains("capability failed with backend")
         .await
         .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")
@@ -165,10 +197,11 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
         .expect("harness builds");
 
     h.submit_turn("search").await.expect("turn completes");
+    assert_recorded_tools_call(&server, "search", "x");
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool call reached the server before the 5xx");
-    h.assert_tool_error_summary_contains("backend")
+    h.assert_tool_error_summary_contains("capability failed with backend")
         .await
         .expect("server 5xx surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")

@@ -121,11 +121,30 @@ impl RebornIntegrationHarness {
     /// message whose `content` is the JSON-serialized `ToolResultReferenceEnvelope`.
     /// That envelope's `safe_summary` reads `"capability failed with <kind>: …"`
     /// / `"capability denied with <reason>: …"` (and, for `Failed`, a
-    /// `model_observation` naming the same failure kind), so `needle` such as
-    /// `"policy_denied"`, `"output_too_large"`, `"resource"`, or `"backend"`
-    /// discriminates the surfaced category. Reaching this state at all (rather
-    /// than a terminal `driver_unavailable`) also proves the failure was a
-    /// recoverable, model-visible tool error.
+    /// `model_observation` naming the same failure kind). Reaching this state at
+    /// all (rather than a terminal `driver_unavailable`) also proves the failure
+    /// was a recoverable, model-visible tool error.
+    ///
+    /// **`needle` must include the `"capability failed with "` / `"capability
+    /// denied with "` prefix** (not just the bare failure-kind/reason token) to
+    /// discriminate the outcome *class*, not just the reason — e.g.
+    /// `"capability denied with policy_denied"`, not `"policy_denied"` alone.
+    /// The bare-token form is ambiguous: `CapabilityFailureKind::PolicyDenied`
+    /// (a `Failed` outcome) and the `policy_denied` `Denied` reason both render
+    /// the token `"policy_denied"`, so a regression that turns a `Denied` into a
+    /// `Failed{PolicyDenied}` (or vice versa) would still match a bare-token
+    /// needle and pass vacuously.
+    ///
+    /// **Scans the full thread history, not baseline-sliced** (unlike the
+    /// sibling `assert_egress_*`/`assert_tool_result_contains`, which slice
+    /// `[baseline..]` off the shared in-process recorder). Every current caller
+    /// is a single-turn, single-tool-call harness, so there is at most one
+    /// `ToolResultReference` message and no earlier-thread bleed-through is
+    /// reachable. A future multi-turn or group-thread reuse of this assertion
+    /// MUST add baseline scoping first (thread a `baseline_history_len` through
+    /// harness construction, mirroring `baseline_egress_count` etc.) — do not
+    /// assume this helper is safe to reuse as-is once a thread has more than one
+    /// turn.
     pub async fn assert_tool_error_summary_contains(&self, needle: &str) -> HarnessResult<()> {
         let history = self
             .thread_harness

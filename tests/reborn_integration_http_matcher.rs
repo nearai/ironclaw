@@ -186,7 +186,7 @@ async fn http_network_policy_denied_surfaces_recoverable_denied() {
         .await
         .expect("harness builds");
     h.submit_turn("fetch").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("policy_denied")
+    h.assert_tool_error_summary_contains("capability denied with policy_denied")
         .await
         .expect("policy-denied surfaced as a model-visible Denied tool error");
     h.assert_reply_contains("done")
@@ -219,7 +219,7 @@ async fn http_oversize_response_surfaces_recoverable_failed() {
         .await
         .expect("harness builds");
     h.submit_turn("fetch").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("output_too_large")
+    h.assert_tool_error_summary_contains("capability failed with output_too_large")
         .await
         .expect("oversize response surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")

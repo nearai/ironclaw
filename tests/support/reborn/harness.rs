@@ -3403,8 +3403,11 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let request_bytes = request.body.len() as u64;
-        // Resolve the keyed outcome BEFORE recording the request: pushing moves
-        // the request into the log and (via its `Drop`) zeroizes its URL/headers.
+        // Resolve the keyed outcome BEFORE recording the request: `push(request)`
+        // moves `request` by value into the log, so any code reading its fields
+        // (the `.matches()` lookup) must run first. (`RuntimeHttpEgressRequest`
+        // does implement `Drop`/`ZeroizeOnDrop` to scrub its URL/headers, but that
+        // fires later when the logged entry is actually dropped, not on push.)
         let keyed_outcome = {
             let scripted = self.scripted.lock().unwrap();
             scripted

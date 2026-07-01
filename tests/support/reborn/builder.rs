@@ -169,6 +169,7 @@ impl RebornIntegrationHarnessBuilder {
     pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.scripted_process = Some(ScriptedProcessResult::ExitCode(exit_code));
+        self.live_shell = false;
         self
     }
 
@@ -179,6 +180,7 @@ impl RebornIntegrationHarnessBuilder {
     pub fn with_shell_timeout(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.scripted_process = Some(ScriptedProcessResult::Timeout);
+        self.live_shell = false;
         self
     }
 

@@ -80,10 +80,13 @@ impl MockMcpServer {
         self.state.recorded_requests.lock().unwrap().clone()
     }
 
-    /// Force every subsequent otherwise-successful `/mcp` response to carry this
-    /// HTTP status (sticky), keeping the normal JSON-RPC body. Use for the MCP
+    /// Force every subsequent otherwise-successful `tools/call` response to
+    /// carry this HTTP status (sticky), keeping the normal JSON-RPC body. The
+    /// `initialize`/`tools/list` handshake is unaffected. Use for the MCP
     /// server-5xx error-path case.
     pub fn force_http_status(&self, status: u16) {
+        let status = StatusCode::from_u16(status)
+            .unwrap_or_else(|_| panic!("invalid HTTP status code for force_http_status: {status}"));
         *self.state.force_status.lock().unwrap() = Some(status);
     }
 
@@ -139,11 +142,12 @@ struct MockState {
     /// observe that each activation binds its own session.
     session_counter: std::sync::Mutex<u64>,
     /// Sticky HTTP status override for error-path tests: when set, every
-    /// otherwise-successful `/mcp` response is returned with this status
+    /// otherwise-successful `tools/call` response is returned with this status
     /// (keeping the normal JSON-RPC success body, so a client that wrongly
     /// accepts a non-2xx status would parse it as Completed). Drives the
-    /// server-5xx MCP error case.
-    force_status: std::sync::Mutex<Option<u16>>,
+    /// server-5xx MCP error case. Scoped to `tools/call` only — the
+    /// `initialize`/`tools/list` handshake is unaffected.
+    force_status: std::sync::Mutex<Option<StatusCode>>,
     /// Sticky `tools/call` JSON-RPC error override: when set, `tools/call`
     /// returns a top-level `error` object (alongside a valid `result`, so the
     /// client's error-detection guard is the only thing preventing a spurious
@@ -521,7 +525,8 @@ async fn handle_mcp(
                 "content": [
                     {
                         "type": "text",
-                        "text": serde_json::to_string(&content).unwrap_or_default()
+                        "text": serde_json::to_string(&content)
+                            .expect("serializing serde_json::Value for mock MCP content should not fail")
                     }
                 ]
             });
@@ -559,12 +564,7 @@ async fn handle_mcp(
     // rejects a non-2xx status before parsing; a client that wrongly accepts it
     // would parse the valid body as Completed — so the mutation is detectable.
     let status = if req.method == "tools/call" {
-        state
-            .force_status
-            .lock()
-            .unwrap()
-            .and_then(|code| StatusCode::from_u16(code).ok())
-            .unwrap_or(StatusCode::OK)
+        state.force_status.lock().unwrap().unwrap_or(StatusCode::OK)
     } else {
         StatusCode::OK
     };

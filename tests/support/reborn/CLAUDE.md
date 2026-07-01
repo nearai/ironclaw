@@ -100,7 +100,8 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   `.with_keyed_http_responses([..])`).
 - `assertions.rs` — the richer egress + tool-result assertions
   (`assert_egress_count` / `assert_egress_url_order` / `assert_egress_method_order`
-  / `assert_egress_body_contains` / `assert_tool_result_contains`).
+  / `assert_egress_body_contains` / `assert_tool_result_contains` /
+  `assert_tool_error_summary_contains`).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
@@ -148,7 +149,8 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_url_order(&[substrings])` — URLs in call order, each containing the matching substring; also checks count.
 - `assert_egress_method_order(&[methods])` — HTTP methods in call order (case-insensitive).
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
-- `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model).
+- `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
+- `assert_tool_error_summary_contains(needle)` — a persisted `ToolResultReference` transcript message's `safe_summary` contains the text. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `needle` must include the `"capability failed with "` / `"capability denied with "` prefix to discriminate outcome class, not just a bare failure-kind token (see doc comment). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
 
 ### Keyed HTTP responses
 
@@ -158,9 +160,11 @@ needs a different scripted body, install keyed responses via
 
 `ScriptedHttpResponse` — first-match-wins in scripted order:
 
-- `ScriptedHttpResponse::for_url(url_substr, body)` — matches any request whose URL contains the substring.
+- `ScriptedHttpResponse::for_url(url_substr, body)` — matches any request whose URL contains the substring; defaults to a `200` body.
 - `.with_method(method)` — narrow to a specific HTTP method (lowercase, e.g. `"post"`).
 - `.with_capability(capability_id)` — narrow to a specific capability id (e.g. `"builtin.http"`).
+- `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). Still a successful egress call — `builtin.http` surfaces it as a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
+- `ScriptedHttpResponse::egress_error(url_substr, error)` — scripts a runtime egress failure (`Err(RuntimeHttpEgressError)` from `execute`) instead of a body, driving `builtin.http`'s error-mapping paths (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`).
 
 Requests that match no scripted response fall back to the recording egress default body. The keyed matcher is the canonical HTTP-scripting API; new per-URL response needs fold into `ScriptedHttpResponse` rather than adding a parallel matcher.
 
