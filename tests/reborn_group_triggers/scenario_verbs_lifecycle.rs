@@ -121,17 +121,23 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // pause: found the cross-thread trigger and marked it paused.
     let paused = manager.tool_result_output("builtin.trigger_pause").await?;
-    if paused["updated"] != json!(true) || paused["trigger"]["state"] != json!("paused") {
+    if paused["updated"] != json!(true)
+        || paused["trigger"]["state"] != json!("paused")
+        || paused["trigger"]["trigger_id"] != json!(trigger_id)
+    {
         return Err(format!("pause must mark the trigger paused: {paused}").into());
     }
     // resume: state returns to scheduled.
     let resumed = manager.tool_result_output("builtin.trigger_resume").await?;
-    if resumed["updated"] != json!(true) || resumed["trigger"]["state"] != json!("scheduled") {
+    if resumed["updated"] != json!(true)
+        || resumed["trigger"]["state"] != json!("scheduled")
+        || resumed["trigger"]["trigger_id"] != json!(trigger_id)
+    {
         return Err(format!("resume must return the trigger to scheduled: {resumed}").into());
     }
     // remove: the trigger is deleted.
     let removed = manager.tool_result_output("builtin.trigger_remove").await?;
-    if removed["removed"] != json!(true) {
+    if removed["removed"] != json!(true) || removed["trigger"]["trigger_id"] != json!(trigger_id) {
         return Err(format!("remove must delete the trigger: {removed}").into());
     }
     // final list: the removed id is absent — non-vacuity guard proving remove
