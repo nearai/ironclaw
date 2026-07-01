@@ -37,6 +37,43 @@ use ironclaw_wasm::{
 };
 use serde_json::json;
 
+macro_rules! github_wasm_services_for_test {
+    (
+        $network:expr,
+        $secret_store:expr,
+        $account_access_secret:expr $(,)?
+    ) => {{
+        HostRuntimeServices::new(
+            Arc::new(registry_with_github_package()),
+            Arc::new(filesystem_with_github_package()),
+            Arc::new(governor_with_default_limit(sample_account())),
+            Arc::new(ObligatingAuthorizer::new(vec![
+                Obligation::ApplyNetworkPolicy {
+                    policy: github_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: SecretHandle::new("github_runtime_token").unwrap(),
+                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                    provider_scopes: Vec::new(),
+                    requester_extension: ExtensionId::new("github").unwrap(),
+                },
+            ])),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        )
+        .with_secret_store($secret_store)
+        .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+            result: Ok($account_access_secret),
+        }))
+        .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+        .try_with_host_http_egress($network)
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+        .unwrap()
+    }};
+}
+
 macro_rules! google_wasm_services_for_test {
     (
         $package_id:expr,
@@ -775,36 +812,12 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_github_package()),
-        Arc::new(filesystem_with_github_package()),
-        Arc::new(governor_with_default_limit(sample_account())),
-        Arc::new(ObligatingAuthorizer::new(vec![
-            Obligation::ApplyNetworkPolicy {
-                policy: github_policy(),
-            },
-            Obligation::InjectCredentialAccountOnce {
-                handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
-                provider_scopes: Vec::new(),
-                requester_extension: ExtensionId::new("github").unwrap(),
-            },
-        ])),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
-        result: Ok(account_access_secret.clone()),
-    }))
-    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
-    .try_with_host_http_egress(network.clone())
-    .unwrap()
-    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
     secret_store
         .put(
             scope.clone(),
@@ -830,6 +843,85 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
         network.requests().is_empty(),
         "guest validation failures must block before HTTP egress"
     );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_github_search_validation_status_to_invalid_input() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_status_body(
+        422,
+        br#"{"message":"Validation Failed","errors":[{"message":"\"YYYY-MM-DD\" is not a recognized date/time format.","resource":"Search","field":"q","code":"invalid"}],"status":"422"}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"query": "author:serrrfirat is:pr created:YYYY-MM-DD", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert_eq!(network.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn host_runtime_services_keeps_github_non_validation_422_as_operation_failed() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_status_body(
+        422,
+        br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
+            .to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"query": "author:serrrfirat is:pr created:YYYY-MM-DD", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_eq!(network.requests().len(), 1);
 }
 
 #[tokio::test]

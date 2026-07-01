@@ -12,6 +12,7 @@ mod exit_helpers;
 mod failure_explanation;
 mod gates;
 mod input;
+mod latency;
 mod loop_exit;
 mod mapping;
 mod model;
@@ -190,6 +191,15 @@ enum TurnCompletedStep {
         summary: TurnSummary,
     },
     Exit(LoopExit),
+}
+
+impl TurnCompletedStep {
+    fn iteration_or(&self, fallback: u32) -> u32 {
+        match self {
+            Self::Continue { state, .. } => state.iteration,
+            Self::Exit(_) => fallback,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -5,10 +5,16 @@ import { Icon } from "../design-system/icons.js";
 import { useT } from "../lib/i18n.js";
 import { cn } from "../utils/cn.js";
 import { TeeShield } from "./tee-shield.js";
+import { NotificationCenter } from "./notification-center.js";
 
 const DOCS_URL = "https://docs.ironclaw.com";
 
-export function PageHeader({ threadsState, onToggleSidebar, sidebarOpen = true }) {
+export function PageHeader({
+  threadsState,
+  notificationsState,
+  onToggleSidebar,
+  sidebarOpen = true,
+}) {
   const t = useT();
   const location = useLocation();
 
@@ -92,26 +98,31 @@ export function PageHeader({ threadsState, onToggleSidebar, sidebarOpen = true }
           `}
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        <${NotificationCenter} state=${notificationsState} />
         <${TeeShield} />
         <${NavLink}
           to="/logs"
+          data-testid="header-logs-link"
           className=${({ isActive }) =>
             cn(
-              "inline-flex h-8 items-center rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+              "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
               isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
             )}
           title=${t("nav.logs")}
+          aria-label=${t("nav.logs")}
         >
-          ${t("nav.logs")}
+          <${Icon} name="terminal" className="h-4 w-4" />
         <//>
         <a
           href=${DOCS_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex h-8 items-center rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+          data-testid="header-docs-link"
+          className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           title=${t("nav.docs")}
+          aria-label=${t("nav.docs")}
         >
-          ${t("nav.docs")}
+          <${Icon} name="bookOpen" className="h-4 w-4" />
         </a>
       </div>
     </header>

@@ -90,6 +90,20 @@ async fn webui_event_stream_projects_unknown_failure_summary_without_echoing_cod
     .await;
 }
 
+// Regression: a terminal capability failure reaches the projection as the
+// `capability_protocol_error` category (from `LoopFailureKind::as_str()`).
+// With no explainer wired, the projection must carry the specific fallback
+// summary end-to-end instead of degrading to the generic failure summary.
+#[tokio::test]
+async fn webui_event_stream_projects_capability_protocol_error_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-capability-protocol-thread",
+        "capability_protocol_error",
+        "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening.",
+    )
+    .await;
+}
+
 #[test]
 fn failure_summary_covers_every_loop_failure_kind_category() {
     let expected = [

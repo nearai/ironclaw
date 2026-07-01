@@ -4,7 +4,7 @@ use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
         CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
     },
 };
 use std::sync::Arc;
@@ -402,7 +402,11 @@ async fn webui_event_stream_projects_live_tool_failure() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::Authorization,
+                reason_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary: Some(
+                    LoopSafeSummary::new("invalid JSON: expected value at line 1")
+                        .expect("safe summary"),
+                ),
             },
         })
         .await
@@ -440,5 +444,152 @@ async fn webui_event_stream_projects_live_tool_failure() {
     assert_eq!(&activity.capability_id, &capability_id);
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
     assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
-    assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    // Regression: the sanitized failure summary on the milestone must reach the
+    // live activity view's `error_detail`, so the per-tool UI card shows the
+    // real reason instead of only the bare kind.
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("invalid JSON: expected value at line 1")
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_redacts_live_tool_failure_filename_detail() {
+    let fixture = live_projection_fixture("webui-live-tool-failed-redacted");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.read_file").unwrap();
+    let activity_id = CapabilityActivityId::new();
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: None,
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: Some(
+                    LoopSafeSummary::new("failed to read AGENTS.md").expect("safe summary"),
+                ),
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activity = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.iter()),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|item| match item {
+            ProductProjectionItem::CapabilityActivity(activity) => Some(activity),
+            _ => None,
+        })
+        .expect("live failed activity");
+
+    assert_eq!(
+        activity.invocation_id,
+        InvocationId::from_uuid(activity_id.as_uuid())
+    );
+    assert_eq!(activity.thread_id.as_ref(), Some(&thread_id));
+    assert_eq!(&activity.capability_id, &capability_id);
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("operation_failed"));
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("can't access your workspace file")
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_preserves_redacted_loop_safe_failure_detail() {
+    let fixture = live_projection_fixture("webui-live-tool-failed-redacted-safe-summary");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let activity_id = CapabilityActivityId::new();
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: None,
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: Some(LoopSafeSummary::capability_failure_summary(
+                    "provider returned ghp_live_secret",
+                )),
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activity = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.iter()),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|item| match item {
+            ProductProjectionItem::CapabilityActivity(activity) => Some(activity),
+            _ => None,
+        })
+        .expect("live failed activity");
+
+    assert_eq!(
+        activity.invocation_id,
+        InvocationId::from_uuid(activity_id.as_uuid())
+    );
+    assert_eq!(activity.thread_id.as_ref(), Some(&thread_id));
+    assert_eq!(&activity.capability_id, &capability_id);
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("operation_failed"));
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("the tool failure details were redacted")
+    );
 }

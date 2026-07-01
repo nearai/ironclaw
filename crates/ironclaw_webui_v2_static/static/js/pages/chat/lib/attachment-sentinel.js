@@ -1,1 +1,1 @@
-export const ATTACHMENTS_ONLY_CONTENT = "\x1Fironclaw:attachments-only:v1\x1F";
+export const ATTACHMENTS_ONLY_CONTENT = "__ironclaw_attachments_only_v1__";

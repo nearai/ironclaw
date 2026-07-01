@@ -33,13 +33,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, UserId,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
-    ResolveBindingRequest, ResolvedBinding,
+    DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -48,15 +46,15 @@ use ironclaw_turns::{
     TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::group::{GroupCapability, GroupSharedStorage, assemble_thread_runtime};
+use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{
     HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
-    RecordedCapabilityResult, test_product_scope,
+    RecordedCapabilityResult,
 };
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
-use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use super::test_adapter::RebornTestIngress;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -195,10 +193,12 @@ impl RebornIntegrationHarnessBuilder {
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///
-    /// Constructs a one-thread `GroupSharedStorage` (matching this builder's
-    /// capability/storage/live_shell/keyed_http_responses selections) and
-    /// delegates to `assemble_thread_runtime`. Behavior is byte-identical to
-    /// the old inline build — existing tests are unaffected (R1/R5).
+    /// Routes through an internal, degenerate one-thread `RebornIntegrationGroup`
+    /// (matching this builder's capability/storage/live_shell/keyed_http_responses
+    /// selections) so there is exactly ONE assembly path for both groups and
+    /// single-shot harnesses (design §3: no de-facto fork). Behavior is
+    /// byte-identical to the old inline build — existing tests are unaffected
+    /// (R1/R5).
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         apply_hermetic_env();
 
@@ -231,29 +231,19 @@ impl RebornIntegrationHarnessBuilder {
             }
         };
 
-        // --- product workflow + storage ------------------------------------
-        let scope = test_product_scope(
-            "tenant-itest",
-            "host-user",
-            "agent-itest",
-            Some("project-itest"),
-        );
-        let product_harness =
-            super::product_workflow::RebornProductWorkflowHarness::filesystem_temp(scope)?;
-        let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
-            build_storage_composite(self.storage, turn_root.path()).await?;
-
-        let shared = Arc::new(GroupSharedStorage {
-            composite,
-            libsql_db_path,
-            turn_root,
-            product_harness,
-            capability: group_capability,
-        });
-        let capability_mode = shared.capability.mode();
-
-        assemble_thread_runtime(shared, &self.conversation_id, self.replies, capability_mode).await
+        // Routed through the group/thread builder (one assembly path for both
+        // groups and single-shot harnesses). A single-shot harness is a
+        // degenerate one-thread group and submits as the default
+        // `HARNESS_ACTOR_ID`.
+        let group: RebornIntegrationGroup = RebornIntegrationGroup::builder()
+            .storage(self.storage)
+            .build_with_capability(group_capability)
+            .await?;
+        group
+            .thread(self.conversation_id)
+            .script(self.replies)
+            .build()
+            .await
     }
 }
 
@@ -271,7 +261,6 @@ pub struct RebornIntegrationHarness {
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
     /// harness's `resume_with_gate` path.
     pub(crate) coordinator: Arc<dyn TurnCoordinator>,
-    pub(crate) scheduler_handle: Option<ironclaw_host_runtime::TurnRunSchedulerHandle>,
     pub(crate) event_seq: AtomicU64,
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
@@ -356,6 +345,26 @@ impl RebornIntegrationHarness {
             .ok_or("blocked approval run missing gate ref")?;
         if !gate_ref.as_str().starts_with("gate:approval-") {
             return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
+        }
+        Ok((run_id, gate_ref))
+    }
+
+    /// Submit a user turn and wait until it blocks on an **auth** gate, returning
+    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
+    /// capability whose credential account resolves to `AuthRequired` blocks here
+    /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
+    pub async fn submit_turn_until_auth_blocked(
+        &self,
+        text: &str,
+    ) -> HarnessResult<(TurnRunId, GateRef)> {
+        let run_id = self.submit_turn_async(text).await?;
+        let state = self
+            .wait_for_status(run_id, TurnStatus::BlockedAuth)
+            .await?;
+        let gate_ref = state.gate_ref.ok_or("blocked auth run missing gate ref")?;
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
         Ok((run_id, gate_ref))
     }
@@ -697,13 +706,11 @@ impl RebornIntegrationHarness {
     }
 }
 
-impl Drop for RebornIntegrationHarness {
-    fn drop(&mut self) {
-        // Scheduler shutdown is async and cannot run from Drop; dropping the
-        // handle closes the command channel and the supervisor task exits.
-        let _ = self.scheduler_handle.take();
-    }
-}
+// Scheduler shutdown: the group's `TurnRunSchedulerHandle` lives on
+// `GroupSharedStorage` (not on any per-thread `RebornIntegrationHarness`), so
+// no `Drop` impl is needed here. `TurnRunSchedulerHandle::drop` synchronously
+// cancels the scheduler loop when the last `Arc<GroupSharedStorage>` (held by
+// every harness's `_shared` field) goes away.
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -822,37 +829,6 @@ pub(crate) fn binding_request(
     }
 }
 
-/// Resolve the canonical subject `UserId` that turns submitted under
-/// [`HARNESS_ACTOR_ID`] run as. Product binding resolution maps the external
-/// actor (`"host-user"`) to a hashed canonical `UserId`; the turn scope owner,
-/// the capability dispatch scope, the auto-approve key, and the approval-gate
-/// evidence lookup must all agree on THAT user. The group sets its capability
-/// harness to execute under this user (via `with_user_id`) so a real approval
-/// gate is persisted and verified under one consistent `(tenant, user)` —
-/// matching production, where the run owner is the capability user. The actor →
-/// canonical mapping is deterministic, so the throwaway probe binding here yields
-/// the same user every thread will resolve to.
-pub(crate) async fn resolve_canonical_subject_user(
-    product_harness: &super::product_workflow::RebornProductWorkflowHarness,
-) -> HarnessResult<UserId> {
-    let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-    let ingress = RebornTestIngress::new(adapter);
-    let probe = ingress.verified_text_envelope_with_trigger(
-        "subject-user-probe",
-        HARNESS_ACTOR_ID,
-        "conv-subject-user-probe",
-        "hi",
-        ProductTriggerReason::DirectChat,
-    )?;
-    let binding = product_harness
-        .binding_service()?
-        .resolve_binding(binding_request(&probe))
-        .await?;
-    binding
-        .subject_user_id
-        .ok_or_else(|| "resolved binding missing subject user id".into())
-}
-
 pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessResult<ThreadScope> {
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
@@ -866,5 +842,7 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
     })
 }
 
-// `assemble_thread_runtime` lives in `group.rs` (imported above) — that
-// module owns `GroupSharedStorage` and the capability mode types.
+// The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)
+// and per-thread harness assembly (`RebornThreadBuilder::build`) live in
+// `group.rs` (imported above) — that module owns `GroupSharedStorage` and the
+// capability mode types.

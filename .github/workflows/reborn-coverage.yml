@@ -1,0 +1,141 @@
+# Reborn integration-tier coverage
+#
+# Runs cargo-llvm-cov over the Reborn in-process integration-tier test binaries
+# (tests/reborn_integration_*.rs + tests/reborn_group_*/) and reports a
+# Reborn-crate-scoped line-coverage percentage in the PR's job summary.
+#
+# This is the measurable signal behind the Reborn backend's "100% int-tier
+# coverage" goal (task T0-COV): it yields a per-PR percentage and a per-crate
+# hole list. It is INFORMATIONAL only — it
+# does not gate the PR on a coverage threshold.
+#
+# Scope notes:
+# - Features: default (postgres + libsql + html-to-markdown + tui), matching
+#   how scripts/ci/run-reborn-root-partition.sh runs these same suites. No live
+#   Postgres is needed; the suites skip Postgres backends when DATABASE_URL is
+#   unset (backend_matrix stays libsql-only per the roadmap).
+# - The % is filtered to the Reborn crate families (crates/ironclaw_reborn*,
+#   ironclaw_product*, ironclaw_architecture, the v2 channel adapters,
+#   ironclaw_webui_v2*) via scripts/ci/reborn-coverage-summary.sh.
+
+name: Reborn Coverage
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The sticky coverage comment upserts a PR comment via the issues API.
+  pull-requests: write
+
+concurrency:
+  # PR number (not head_ref) for pull_request: two fork PRs can share a branch
+  # name (main/fix/…), and head_ref grouping + cancel-in-progress would let one
+  # cancel the other's run. number is null off-PR, so fall back to github.ref.
+  group: reborn-coverage-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tests must never touch the real OS keychain (see reborn-tests.yml).
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # Keep instrumented build/runtime disk and time bounded.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  reborn-coverage:
+    name: Reborn Coverage
+    runs-on: ubuntu-latest
+    # Generous backstop, not a tight bound: a cold-cache instrumented build of
+    # the Reborn closure is heavy (no mold), so this only catches a runaway/hung
+    # run — it sits well above any real build yet halves GitHub's 360-minute
+    # default, which would otherwise tie up a runner for hours.
+    timeout-minutes: 180
+    env:
+      # Reborn suites must not reach a live LLM (mirrors reborn-tests.yml).
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-coverage
+          # Instrumented target dirs are multi-GB. Only save on main so the ~10 GB
+          # repo cache LRU holds ONE shared, main-seeded instrumented cache that
+          # every PR restores — instead of each PR writing a branch-scoped copy
+          # (invisible to other PRs) that evicts the useful seed.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
+
+      - name: Generate Reborn integration-tier coverage
+        run: |
+          set -euo pipefail
+          # Process substitution hides the discovery script's exit code, so
+          # guard the array explicitly (mirrors run-reborn-root-partition.sh).
+          mapfile -t test_args < <(scripts/ci/reborn-coverage-int-tier-tests.sh)
+          if [ "${#test_args[@]}" -eq 0 ]; then
+            echo "No Reborn integration-tier test arguments discovered" >&2
+            exit 1
+          fi
+          echo "Running coverage over Reborn int-tier binaries:"
+          printf '  %s %s\n' "${test_args[@]}"
+
+          cargo llvm-cov clean --workspace
+          # Combined run+report in ONE invocation: --workspace scopes the report
+          # to every member crate (incl. the linked-but-not-root Reborn crates),
+          # which the standalone `report` subcommand cannot do. The named root
+          # `--test` targets still run only in the root package. Default features,
+          # matching scripts/ci/run-reborn-root-partition.sh.
+          cargo llvm-cov --workspace "${test_args[@]}" \
+            --json --output-path reborn-llvm-cov.json -- --nocapture
+
+      - name: Render Reborn coverage summary
+        run: |
+          set -euo pipefail
+          scripts/ci/reborn-coverage-summary.sh reborn-llvm-cov.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Surface the same %/hole-list as a sticky PR comment so it lives in the
+      # conversation, not just the job summary. PR-only, and non-fatal by design:
+      # fork PRs get a read-only GITHUB_TOKEN and the comment API 403s, which must
+      # never red the check. This is visibility, never a gate.
+      - name: Post sticky coverage comment
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/ci/reborn-coverage-comment.sh reborn-llvm-cov.json
+
+      # The JSON export is the full per-file detail behind the summary table —
+      # the "real hole list" — kept as an artifact for offline inspection.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-coverage
+          path: reborn-llvm-cov.json
+          if-no-files-found: warn

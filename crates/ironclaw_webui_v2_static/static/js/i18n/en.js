@@ -42,6 +42,19 @@ registerPack("en", {
   // Header
   "header.signOut": "Sign out",
 
+  // Notifications
+  "notifications.open": "Open notifications",
+  "notifications.close": "Close notifications",
+  "notifications.title": "Notifications",
+  "notifications.emptyTitle": "No notifications",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "All caught up",
+  "notifications.unreadCount": "{count} new",
+  "notifications.unread": "Unread",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "online",
   "status.offline": "offline",
@@ -130,6 +143,7 @@ registerPack("en", {
   "approval.always": "Always",
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
+  "approval.globalAutoApproveLink": "Automatically approve and execute all actions",
   "approval.thisTool": "this tool",
   "approval.viewFullCommand": "View full command",
   "approval.showCommandPreview": "Show preview",

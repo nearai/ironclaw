@@ -81,6 +81,7 @@ function AuthenticatedLayout({ auth }) {
         isChecking=${auth.isChecking}
         isAdmin=${auth.isAdmin}
         rebornProjectsEnabled=${auth.rebornProjectsEnabled}
+        globalAutoApproveEnabled=${auth.globalAutoApproveEnabled}
         onSignOut=${auth.signOut}
       />
     <//>

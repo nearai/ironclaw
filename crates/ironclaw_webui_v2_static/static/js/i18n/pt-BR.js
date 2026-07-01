@@ -42,6 +42,19 @@ registerPack("pt-BR", {
   // Header
   "header.signOut": "Sair",
 
+  // Notifications
+  "notifications.open": "Abrir notificações",
+  "notifications.close": "Fechar notificações",
+  "notifications.title": "Notificações",
+  "notifications.emptyTitle": "Nenhuma notificação",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "Tudo em dia",
+  "notifications.unreadCount": "{count} novas",
+  "notifications.unread": "Não lida",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "online",
   "status.offline": "offline",
@@ -125,6 +138,7 @@ registerPack("pt-BR", {
   "approval.always": "Sempre",
   "approval.approveAndAlways": "Aprovar e sempre permitir",
   "approval.alwaysAllowToolLabel": "Sempre permitir {tool} sem perguntar",
+  "approval.globalAutoApproveLink": "Aprovar e executar automaticamente todas as ações",
   "approval.thisTool": "esta ferramenta",
   "approval.viewFullCommand": "Ver comando completo",
   "approval.showCommandPreview": "Mostrar prévia",

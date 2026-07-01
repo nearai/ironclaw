@@ -432,6 +432,35 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   assert.equal(toolCard.toolResultPreview, "ok");
 });
 
+test("mergeFullRefresh anchors preserved runtime bubbles at their original positions", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "msg-user-2", role: "user" },
+    ],
+    [
+      { id: "msg-user-1", role: "user" },
+      { id: "thinking-live", role: "thinking", content: "working" },
+      { id: "msg-assistant-1", role: "assistant" },
+      { id: "err-run-1", role: "error", content: "run failed" },
+      { id: "msg-user-2", role: "user" },
+    ],
+    {
+      preserveClientOnly: true,
+    },
+  );
+
+  assert.equal(
+    merged.map((m) => m.id).join(","),
+    "msg-user-1,thinking-live,msg-assistant-1,msg-user-2,err-run-1",
+  );
+});
+
 test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);

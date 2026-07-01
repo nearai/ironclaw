@@ -42,6 +42,19 @@ registerPack("ko", {
   // Header
   "header.signOut": "로그아웃",
 
+  // Notifications
+  "notifications.open": "알림 열기",
+  "notifications.close": "알림 닫기",
+  "notifications.title": "알림",
+  "notifications.emptyTitle": "알림 없음",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "모두 확인함",
+  "notifications.unreadCount": "새 알림 {count}개",
+  "notifications.unread": "읽지 않음",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "온라인",
   "status.offline": "오프라인",
@@ -125,6 +138,7 @@ registerPack("ko", {
   "approval.always": "항상 허용",
   "approval.approveAndAlways": "승인 및 항상 허용",
   "approval.alwaysAllowToolLabel": "묻지 않고 항상 {tool} 허용",
+  "approval.globalAutoApproveLink": "모든 작업을 자동으로 승인하고 실행",
   "approval.thisTool": "이 도구",
   "approval.viewFullCommand": "전체 명령 보기",
   "approval.showCommandPreview": "미리보기 표시",

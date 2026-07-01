@@ -64,6 +64,10 @@ use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
+// Session bootstrap must stay cheap and non-blocking: this flag only tunes
+// initial approval UI state. It is mutable through `/settings/tools`, so do
+// not cache it across requests; the settings route remains authoritative.
+const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(250);
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
@@ -96,6 +100,11 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Effective global auto-approve setting for the authenticated caller.
+    /// The browser treats it as a bootstrap UI flag and does not inspect the
+    /// operator settings payload shape. Settings mutations should update local
+    /// UI state directly or re-fetch `/session`; this field is only a snapshot.
+    pub global_auto_approve: bool,
 }
 
 /// `GET /api/webchat/v2/session`
@@ -104,15 +113,44 @@ pub async fn get_session(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
+    let tenant_id = caller.tenant_id.to_string();
+    let user_id = caller.user_id.to_string();
+    let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
     Json(WebUiV2SessionResponse {
-        tenant_id: caller.tenant_id.to_string(),
-        user_id: caller.user_id.to_string(),
+        tenant_id,
+        user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            global_auto_approve,
         },
         attachments: webui_attachment_capabilities(),
     })
+}
+
+async fn global_auto_approve_enabled(
+    state: &WebUiV2State,
+    caller: WebUiAuthenticatedCaller,
+) -> bool {
+    match tokio::time::timeout(
+        GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT,
+        state.services().global_auto_approve_enabled(caller),
+    )
+    .await
+    {
+        Ok(Ok(enabled)) => enabled,
+        Ok(Err(error)) => {
+            tracing::debug!(?error, "failed to read global auto-approve session feature");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(
+                timeout_ms = GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT.as_millis(),
+                "timed out reading global auto-approve session feature"
+            );
+            false
+        }
+    }
 }
 
 /// `POST /api/webchat/v2/threads`
@@ -928,6 +966,8 @@ pub async fn list_threads(
     let request = WebUiListThreadsRequest {
         limit: query.limit,
         cursor: query.cursor,
+        candidate_thread_id: query.candidate_thread_id,
+        needs_approval: query.needs_approval,
     };
     let response = state.services().list_threads(caller, request).await?;
     Ok(Json(response))
@@ -939,6 +979,10 @@ pub struct ListThreadsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub candidate_thread_id: Option<String>,
+    #[serde(default)]
+    pub needs_approval: bool,
 }
 
 /// `GET /api/webchat/v2/automations`

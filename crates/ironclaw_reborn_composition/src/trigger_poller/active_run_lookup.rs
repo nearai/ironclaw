@@ -124,7 +124,12 @@ impl<S> LocalTriggerTurnSnapshotSource<S> {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Durable filesystem store (libSQL/Postgres, without `inmemory-turn-state`):
+// async `Result`.
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 #[async_trait]
 impl<F> TriggerTurnSnapshotSource
     for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStore<F>>
@@ -139,7 +144,12 @@ where
     }
 }
 
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+// In-memory authority (no-DB builds, or any build with `inmemory-turn-state`):
+// sync infallible snapshot.
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
 #[async_trait]
 impl TriggerTurnSnapshotSource
     for LocalTriggerTurnSnapshotSource<ironclaw_turns::InMemoryTurnStateStore>
@@ -149,7 +159,10 @@ impl TriggerTurnSnapshotSource
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 fn trigger_backend_error(error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: error.to_string(),

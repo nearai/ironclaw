@@ -97,14 +97,14 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
         """
     )
 
-    async def fulfill_json(route, body, status=200) -> None:
+    async def fulfill_json(route, body, status=200):
         await route.fulfill(
             status=status,
             content_type="application/json",
             body=json.dumps(body),
         )
 
-    async def handle_session(route) -> None:
+    async def handle_session(route):
         auth_header = route.request.headers.get("authorization", "")
         session_requests.append(auth_header)
         if auth_header == "Bearer token-user-a":
@@ -130,10 +130,10 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
             },
         )
 
-    async def handle_threads(route) -> None:
+    async def handle_threads(route):
         await fulfill_json(route, {"threads": [], "next_cursor": None})
 
-    async def handle_logout(route) -> None:
+    async def handle_logout(route):
         await fulfill_json(route, {"status": "logged_out"})
 
     await page.route("**/api/webchat/v2/session", handle_session)
@@ -153,7 +153,7 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
                 timeout=5000,
             )
 
-        await page.locator("button[title='Sign out']").click()
+        await page.locator(SEL_V2["sign_out_button"]).click()
         await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
         await page.locator(SEL_V2["login_token"]).fill("token-user-b")
         await page.get_by_role("button", name="Connect").click()

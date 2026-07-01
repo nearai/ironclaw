@@ -555,7 +555,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     assert_eq!(failure.kind, RuntimeFailureKind::Backend);
     assert_eq!(
         failure.message.as_deref(),
-        Some("dispatch failed: UndeclaredCapability")
+        Some("the tool used an undeclared capability")
     );
     assert_event_kinds(
         &events,

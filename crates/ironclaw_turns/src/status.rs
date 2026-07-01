@@ -38,6 +38,20 @@ impl TurnStatus {
         )
     }
 
+    /// Whether the run is parked on a gate (approval/auth/resource/dependent
+    /// run/external tool). Used to decide when a transition changed the set of
+    /// gate-blocked runs and therefore needs durable persistence.
+    pub fn is_blocked(self) -> bool {
+        matches!(
+            self,
+            Self::BlockedApproval
+                | Self::BlockedAuth
+                | Self::BlockedResource
+                | Self::BlockedDependentRun
+                | Self::BlockedExternalTool
+        )
+    }
+
     pub fn keeps_active_lock(self) -> bool {
         !self.is_terminal()
     }

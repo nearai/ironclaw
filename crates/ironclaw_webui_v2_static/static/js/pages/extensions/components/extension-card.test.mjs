@@ -273,7 +273,7 @@ test("card class keeps grid siblings at natural height", () => {
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async (t) => {
   // --- Setup state: kind=channel, state=setup_required ---
   await t.test(
-    "kind=channel in setup_required state includes Setup overflow action",
+    "kind=channel in setup_required state does not duplicate primary Configure as Setup overflow",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
@@ -285,7 +285,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("setup"), `Expected 'setup' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("setup"), `Expected no duplicate 'setup' overflow action, got: ${JSON.stringify(ids)}`);
     },
   );
 
@@ -309,7 +309,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
 
   // --- Setup state: kind=wasm_channel, state=setup_required ---
   await t.test(
-    "kind=wasm_channel in setup_required state includes Setup overflow action",
+    "kind=wasm_channel in setup_required state does not duplicate primary Configure as Setup overflow",
     () => {
       const ext = {
         package_ref: { id: "some-wasm-channel" },
@@ -321,7 +321,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("setup"), `Expected 'setup' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("setup"), `Expected no duplicate 'setup' overflow action, got: ${JSON.stringify(ids)}`);
     },
   );
 
@@ -437,9 +437,9 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup action calls onConfigure ---
+  // --- Failed-state Setup action calls onConfigure ---
   await t.test(
-    "Setup overflow action invokes onConfigure with the correct payload",
+    "Failed-state Setup overflow action invokes onConfigure with the correct payload",
     () => {
       let configurePayload = null;
       const context = makeContext();
@@ -449,7 +449,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       const ext = {
         package_ref: { id: "telegram" },
         kind: "channel",
-        onboarding_state: "setup_required",
+        onboarding_state: "failed",
         display_name: "Telegram",
       };
       const rendered = ExtensionCard({
@@ -468,7 +468,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       setupAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
-      assert.equal(configurePayload.onboardingState, "setup_required");
+      assert.equal(configurePayload.onboardingState, "failed");
     },
   );
 

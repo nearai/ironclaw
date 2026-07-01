@@ -6,13 +6,14 @@ import {
   listThreads,
 } from "../../../lib/api.js";
 import { queryClient } from "../../../lib/query-client.js";
+import { upsertThreadInCache } from "../lib/thread-cache.js";
 
 export function useThreads() {
-  // No polling: the sidebar refreshes via `queryClient.invalidateQueries`
-  // after a local `createThread` succeeds, and the v2 deployment has no
-  // out-of-band thread producers (no Telegram channel, no background
-  // routine) in this binary. The fork's 5s poll was inherited from a v1
-  // multi-channel context that doesn't apply here.
+  // No polling: the sidebar is kept current by local cache writes after
+  // create/send and by invalidating after delete. The v2 deployment has no
+  // out-of-band thread producers (no Telegram channel, no background routine)
+  // in this binary. The fork's 5s poll was inherited from a v1 multi-channel
+  // context that doesn't apply here.
   const query = useQuery({
     queryKey: ["threads"],
     queryFn: () => listThreads({}),
@@ -35,7 +36,7 @@ export function useThreads() {
     const createPromise = (async () => {
       try {
         const data = await createThreadRequest(projectId ? { projectId } : undefined);
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
+        upsertThreadInCache(data?.thread);
         // RebornCreateThreadResponse → { thread: SessionThreadRecord }.
         // SessionThreadRecord uses `thread_id`, not `id`.
         const threadId = data?.thread?.thread_id;

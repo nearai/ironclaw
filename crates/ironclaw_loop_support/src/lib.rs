@@ -132,7 +132,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -1474,6 +1474,16 @@ pub trait HostManagedModelGateway: Send + Sync {
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
+    /// Production gateways return None (identity) → host uses `self` unchanged.
+    /// Test harnesses override this to route per-thread scripted gateways.
+    fn resolve_for_scope(
+        &self,
+        _scope: &TurnScope,
+    ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
+        None
     }
 }
 

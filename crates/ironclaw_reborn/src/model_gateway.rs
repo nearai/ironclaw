@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -29,6 +30,7 @@ use ironclaw_loop_support::{
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
@@ -60,6 +62,42 @@ const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of 
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
+
+fn trace_model_latency_ok(
+    operation: &'static str,
+    replay_identity: &ProviderReplayIdentity,
+    provider_turn_scope: Option<&str>,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "model_gateway",
+        operation,
+        started_at,
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope = provider_turn_scope.unwrap_or(""),
+        "model gateway operation completed",
+    );
+}
+
+fn trace_model_latency_error<E: ?Sized>(
+    operation: &'static str,
+    replay_identity: &ProviderReplayIdentity,
+    provider_turn_scope: Option<&str>,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "model_gateway",
+        operation,
+        started_at,
+        "model_gateway_error",
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope = provider_turn_scope.unwrap_or(""),
+        "model gateway operation failed",
+    );
+}
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -847,12 +885,31 @@ where
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
-            let response = provider
-                .complete_with_tools(tool_request.clone())
-                .await
-                .map_err(map_provider_error)?;
+            let provider_started_at = live_latency_started_at();
+            let response = match provider.complete_with_tools(tool_request.clone()).await {
+                Ok(response) => {
+                    trace_model_latency_ok(
+                        "provider_complete_with_tools",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        provider_started_at,
+                    );
+                    response
+                }
+                Err(error) => {
+                    trace_model_latency_error(
+                        "provider_complete_with_tools",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        provider_started_at,
+                        &error,
+                    );
+                    return Err(map_provider_error(error));
+                }
+            };
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
+            let host_response_started_at = live_latency_started_at();
             match tool_response_to_host(
                 response.clone(),
                 Arc::clone(&capabilities),
@@ -864,8 +921,23 @@ where
             )
             .await
             {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    trace_model_latency_ok(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                    );
+                    return Ok(response);
+                }
                 Err(error) if is_repairable_provider_tool_output_error(&error) => {
+                    trace_model_latency_error(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                        &error,
+                    );
                     debug!(
                         safe_summary = error.safe_summary.as_str(),
                         "reborn model gateway retrying after repairable provider tool output"
@@ -878,16 +950,35 @@ where
                             error.safe_summary.as_str(),
                         ));
                     let rejected_response = response;
-                    let response = provider
-                        .complete_with_tools(repair_request)
-                        .await
-                        .map_err(map_provider_error)?;
+                    let retry_started_at = live_latency_started_at();
+                    let response = match provider.complete_with_tools(repair_request).await {
+                        Ok(response) => {
+                            trace_model_latency_ok(
+                                "provider_complete_with_tools_repair",
+                                &replay_identity,
+                                provider_turn_scope.as_deref(),
+                                retry_started_at,
+                            );
+                            response
+                        }
+                        Err(error) => {
+                            trace_model_latency_error(
+                                "provider_complete_with_tools_repair",
+                                &replay_identity,
+                                provider_turn_scope.as_deref(),
+                                retry_started_at,
+                                &error,
+                            );
+                            return Err(map_provider_error(error));
+                        }
+                    };
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
                     )?;
                     accumulate_tool_response_usage(&mut response, &rejected_response);
-                    return tool_response_to_host(
+                    let repair_host_started_at = live_latency_started_at();
+                    let result = tool_response_to_host(
                         response,
                         capabilities,
                         provider_turn_scope
@@ -897,8 +988,33 @@ where
                         unavailable_capability_guard.as_ref(),
                     )
                     .await;
+                    match &result {
+                        Ok(_) => trace_model_latency_ok(
+                            "tool_response_to_host_repair",
+                            &replay_identity,
+                            provider_turn_scope.as_deref(),
+                            repair_host_started_at,
+                        ),
+                        Err(error) => trace_model_latency_error(
+                            "tool_response_to_host_repair",
+                            &replay_identity,
+                            provider_turn_scope.as_deref(),
+                            repair_host_started_at,
+                            error,
+                        ),
+                    }
+                    return result;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    trace_model_latency_error(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                        &error,
+                    );
+                    return Err(error);
+                }
             }
         }
         debug!(
@@ -910,10 +1026,28 @@ where
         );
     }
 
-    let response = provider
-        .complete(completion)
-        .await
-        .map_err(map_provider_error)?;
+    let provider_started_at = live_latency_started_at();
+    let response = match provider.complete(completion).await {
+        Ok(response) => {
+            trace_model_latency_ok(
+                "provider_complete",
+                &replay_identity,
+                provider_turn_scope.as_deref(),
+                provider_started_at,
+            );
+            response
+        }
+        Err(error) => {
+            trace_model_latency_error(
+                "provider_complete",
+                &replay_identity,
+                provider_turn_scope.as_deref(),
+                provider_started_at,
+                &error,
+            );
+            return Err(map_provider_error(error));
+        }
+    };
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),

@@ -108,6 +108,9 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "compaction_unavailable" => {
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread."
         }
+        "driver_protocol_violation" => {
+            "The run produced an invalid result and stopped before replying. Retry the run, and contact support if it keeps happening."
+        }
         "compaction_invalid_cut_point" => {
             "The run failed because context compaction selected an invalid cut point. Retry the run, and contact support if it keeps happening."
         }
@@ -241,6 +244,43 @@ mod tests {
             assert!(
                 !summary.contains("execution driver"),
                 "{category} leaked execution driver wording"
+            );
+        }
+    }
+
+    // Regression guard: categories emitted by `LoopFailureKind::as_str()`
+    // through the normal loop-exit path must map to specific, honest summaries
+    // instead of degrading to the generic fallback (which the LLM failure
+    // explainer then paraphrased into a vague "driver protocol error" that
+    // masked the real tool failure).
+    #[test]
+    fn reborn_failure_summary_describes_capability_protocol_error() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("capability_protocol_error")),
+            "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_maps_loop_failure_categories_specifically() {
+        let generic = reborn_failure_summary_for_category(None);
+        for category in [
+            "capability_protocol_error",
+            "model_error",
+            "context_build_failed",
+            "invalid_model_output",
+            "checkpoint_rejected",
+            "checkpoint_unavailable",
+            "transcript_write_failed",
+            "driver_bug",
+            "policy_denied",
+            "compaction_unavailable",
+            "driver_protocol_violation",
+        ] {
+            let summary = reborn_failure_summary_for_category(Some(category));
+            assert_ne!(
+                summary, generic,
+                "{category} still degrades to the generic failure summary"
             );
         }
     }

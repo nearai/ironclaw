@@ -42,6 +42,19 @@ registerPack("fr", {
   // Header
   "header.signOut": "Se déconnecter",
 
+  // Notifications
+  "notifications.open": "Ouvrir les notifications",
+  "notifications.close": "Fermer les notifications",
+  "notifications.title": "Notifications",
+  "notifications.emptyTitle": "Aucune notification",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "Tout est à jour",
+  "notifications.unreadCount": "{count} nouvelle(s)",
+  "notifications.unread": "Non lu",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "en ligne",
   "status.offline": "hors ligne",
@@ -125,6 +138,7 @@ registerPack("fr", {
   "approval.always": "Toujours",
   "approval.approveAndAlways": "Approuver et toujours autoriser",
   "approval.alwaysAllowToolLabel": "Toujours autoriser {tool} sans demander",
+  "approval.globalAutoApproveLink": "Approuver et exécuter automatiquement toutes les actions",
   "approval.thisTool": "cet outil",
   "approval.viewFullCommand": "Voir la commande complete",
   "approval.showCommandPreview": "Afficher l'aperçu",
