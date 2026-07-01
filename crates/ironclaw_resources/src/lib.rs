@@ -1183,14 +1183,26 @@ where
             let mut local = self.lock_unlimited_state()?;
             let local_state = local.state.clone();
             let local_initialized = local.initialized;
+            let setting_finite_limit = !limits.is_unlimited();
+            let local_account = account.clone();
+            let local_limits = limits.clone();
             let updated_state = self.store.update(move |snapshot| {
-                if local_initialized && !resource_state_has_finite_limits(&snapshot.state) {
-                    snapshot.state = local_state.clone();
+                if local_initialized
+                    && setting_finite_limit
+                    && !resource_state_has_finite_limits(&snapshot.state)
+                {
+                    merge_unlimited_fast_path_state(&mut snapshot.state, &local_state);
                 }
                 set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
                 Ok(snapshot.state.clone())
             })?;
-            local.state = updated_state;
+            if resource_state_has_finite_limits(&updated_state) {
+                local.state = updated_state;
+            } else if local_initialized {
+                set_limit_in_state(&mut local.state, local_account, local_limits, now);
+            } else {
+                local.state = sanitized_unlimited_fast_path_state(updated_state);
+            };
             local.initialized = true;
             return Ok(());
         }
@@ -1234,11 +1246,9 @@ where
             if resource_state_has_finite_limits(&snapshot.state) {
                 Ok(None)
             } else {
-                let mut state = snapshot.state.clone();
-                state.reserved_by_account.clear();
-                state.usage_by_account.clear();
-                state.reservations.clear();
-                Ok(Some(state))
+                Ok(Some(sanitized_unlimited_fast_path_state(
+                    snapshot.state.clone(),
+                )))
             }
         })
     }
@@ -1450,6 +1460,36 @@ struct UnlimitedFastPathState {
 
 fn resource_state_has_finite_limits(state: &ResourceState) -> bool {
     state.limits.values().any(|limits| !limits.is_unlimited())
+}
+
+fn sanitized_unlimited_fast_path_state(mut state: ResourceState) -> ResourceState {
+    state.reserved_by_account.clear();
+    state.usage_by_account.clear();
+    state.reservations.clear();
+    state
+}
+
+fn merge_unlimited_fast_path_state(target: &mut ResourceState, local: &ResourceState) {
+    for (account, tally) in &local.reserved_by_account {
+        target
+            .reserved_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(tally);
+    }
+    for (account, tally) in &local.usage_by_account {
+        target
+            .usage_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(tally);
+    }
+    for (id, record) in &local.reservations {
+        target.reservations.insert(*id, record.clone());
+    }
+    for (account, anchor) in &local.period_anchors {
+        target.period_anchors.insert(account.clone(), *anchor);
+    }
 }
 
 /// Snapshot of accumulated period-scoped spend + reserved.
