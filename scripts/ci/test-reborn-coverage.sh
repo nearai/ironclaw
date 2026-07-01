@@ -99,8 +99,11 @@ assert_not_contains() {
 assert_line_before() {
   local name="$1" haystack="$2" needle_a="$3" needle_b="$4"
   local line_a line_b
-  line_a="$(printf '%s\n' "${haystack}" | grep -n -F -- "${needle_a}" | head -n1 | cut -d: -f1)"
-  line_b="$(printf '%s\n' "${haystack}" | grep -n -F -- "${needle_b}" | head -n1 | cut -d: -f1)"
+  # `|| true`: a missing needle makes grep exit 1, which under `set -o pipefail`
+  # would abort the whole suite on assignment instead of falling through to the
+  # empty-check below and reporting a normal FAIL (the harness runs every case).
+  line_a="$(printf '%s\n' "${haystack}" | grep -n -F -- "${needle_a}" | head -n1 | cut -d: -f1 || true)"
+  line_b="$(printf '%s\n' "${haystack}" | grep -n -F -- "${needle_b}" | head -n1 | cut -d: -f1 || true)"
   if [ -n "${line_a}" ] && [ -n "${line_b}" ] && [ "${line_a}" -lt "${line_b}" ]; then
     report_pass "${name}"
   else
