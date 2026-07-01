@@ -1184,10 +1184,7 @@ where
             let local_state = local.state.clone();
             let local_initialized = local.initialized;
             let updated_state = self.store.update(move |snapshot| {
-                if local_initialized
-                    && !resource_state_has_finite_limits(&snapshot.state)
-                    && !resource_state_has_durable_activity(&snapshot.state)
-                {
+                if local_initialized && !resource_state_has_finite_limits(&snapshot.state) {
                     snapshot.state = local_state.clone();
                 }
                 set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
@@ -1234,12 +1231,14 @@ where
             return Ok(None);
         }
         self.store.inspect(|snapshot| {
-            if resource_state_has_finite_limits(&snapshot.state)
-                || resource_state_has_durable_activity(&snapshot.state)
-            {
+            if resource_state_has_finite_limits(&snapshot.state) {
                 Ok(None)
             } else {
-                Ok(Some(snapshot.state.clone()))
+                let mut state = snapshot.state.clone();
+                state.reserved_by_account.clear();
+                state.usage_by_account.clear();
+                state.reservations.clear();
+                Ok(Some(state))
             }
         })
     }
@@ -1451,12 +1450,6 @@ struct UnlimitedFastPathState {
 
 fn resource_state_has_finite_limits(state: &ResourceState) -> bool {
     state.limits.values().any(|limits| !limits.is_unlimited())
-}
-
-fn resource_state_has_durable_activity(state: &ResourceState) -> bool {
-    !state.reserved_by_account.is_empty()
-        || !state.usage_by_account.is_empty()
-        || !state.reservations.is_empty()
 }
 
 /// Snapshot of accumulated period-scoped spend + reserved.

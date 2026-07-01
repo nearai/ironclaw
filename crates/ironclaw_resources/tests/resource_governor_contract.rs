@@ -823,6 +823,74 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
 }
 
 #[test]
+fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+
+    let legacy_governor =
+        PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    let legacy_reservation = legacy_governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    legacy_governor
+        .reconcile(
+            legacy_reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    let before_fast_path = fs::read_to_string(&path).unwrap();
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.10)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.10),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks should still use local state"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        before_fast_path,
+        "legacy durable usage/reservations should not force unlimited fast-path writes"
+    );
+}
+
+#[test]
 fn persistent_governor_serializes_concurrent_reservations_across_handles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("resource-governor.json");
