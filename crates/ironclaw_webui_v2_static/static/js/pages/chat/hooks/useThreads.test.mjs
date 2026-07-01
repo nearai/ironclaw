@@ -62,7 +62,7 @@ function makeDeferredCreate() {
   };
 }
 
-function instantiate(createThreadRequest) {
+function instantiate(createThreadRequest, overrides = {}) {
   const context = {
     console,
     useQuery: () => ({ data: { threads: [] }, isLoading: false }),
@@ -71,7 +71,9 @@ function instantiate(createThreadRequest) {
     deleteThreadRequest: async () => {},
     listThreads: async () => ({ threads: [] }),
     queryClient: { invalidateQueries: () => {} },
+    upsertThreadInCache: () => {},
     globalThis: {},
+    ...overrides,
   };
   vm.runInNewContext(useThreadsSourceForTest(), context);
   return context.globalThis.__testExports.useThreads();
@@ -111,4 +113,22 @@ test("handleCreateThread still collapses concurrent creates within one project",
   // Both callers observe the single in-flight create's result.
   assert.equal(await first, "thread-project-a");
   assert.equal(await second, "thread-project-a");
+});
+
+test("handleCreateThread upserts the created thread without refetching the list", async () => {
+  const upserted = [];
+  const hook = instantiate(
+    async () => ({ thread: { thread_id: "thread-created", title: "Created" } }),
+    {
+      queryClient: {
+        invalidateQueries: () => {
+          throw new Error("create should not refetch the full thread list");
+        },
+      },
+      upsertThreadInCache: (thread) => upserted.push(thread),
+    },
+  );
+
+  assert.equal(await hook.createThread(), "thread-created");
+  assert.deepEqual(upserted, [{ thread_id: "thread-created", title: "Created" }]);
 });
