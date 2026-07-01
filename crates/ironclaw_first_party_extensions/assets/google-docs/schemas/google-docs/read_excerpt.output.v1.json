@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs read_excerpt output",
+  "description": "Bounded plain-text document excerpt with optional compact outline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document_id",
+    "title",
+    "excerpt",
+    "start_char",
+    "end_char",
+    "total_chars",
+    "truncated_before",
+    "truncated_after"
+  ],
+  "properties": {
+    "document_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "excerpt": { "type": "string" },
+    "start_char": { "type": "integer", "minimum": 0 },
+    "end_char": { "type": "integer", "minimum": 0 },
+    "total_chars": { "type": "integer", "minimum": 0 },
+    "truncated_before": { "type": "boolean" },
+    "truncated_after": { "type": "boolean" },
+    "outline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "style", "char_offset"],
+        "properties": {
+          "title": { "type": "string" },
+          "style": {
+            "enum": [
+              "TITLE",
+              "SUBTITLE",
+              "HEADING_1",
+              "HEADING_2",
+              "HEADING_3",
+              "HEADING_4",
+              "HEADING_5",
+              "HEADING_6"
+            ]
+          },
+          "char_offset": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

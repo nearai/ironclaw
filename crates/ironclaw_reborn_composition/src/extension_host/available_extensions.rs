@@ -1396,7 +1396,7 @@ macro_rules! google_wasm_assets {
 }
 
 fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
+    let mut assets = google_wasm_assets!(
         "google-docs",
         GOOGLE_DOCS_MANIFEST,
         "google_docs_tool.wasm",
@@ -1415,7 +1415,14 @@ fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
             "create_list",
             "batch_update"
         ]
-    )
+    );
+    assets.push(bytes_asset(
+        "schemas/google-docs/read_excerpt.output.v1.json",
+        include_bytes!(
+            "../../ironclaw_first_party_extensions/assets/google-docs/schemas/google-docs/read_excerpt.output.v1.json"
+        ),
+    ));
+    assets
 }
 
 fn google_drive_assets() -> Vec<AvailableExtensionAsset> {

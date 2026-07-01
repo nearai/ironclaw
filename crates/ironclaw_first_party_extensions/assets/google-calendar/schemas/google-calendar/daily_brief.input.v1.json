@@ -1,1 +1,118 @@
-{"type":"object","additionalProperties":false,"properties":{"calendar_id":{"type":"string","minLength":1,"maxLength":1024,"description":"Single Google Calendar id. Omit to use primary unless calendar_ids or include_all_calendars is provided."},"calendar_ids":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"string","minLength":1,"maxLength":1024},"description":"Specific calendar ids to merge."},"include_all_calendars":{"type":"boolean","description":"When true, discover available calendars and merge matching events."},"window":{"type":"string","enum":["today","tomorrow","week","this_week","upcoming"],"description":"Named agenda window. Defaults to today."},"time_zone":{"type":"string","pattern":"^(?:UTC|Z|[+-][0-2][0-9]:[0-5][0-9])$","description":"Fixed offset such as UTC or +03:00. Defaults to UTC."},"time_min":{"type":"string","minLength":1,"maxLength":128,"description":"RFC3339 lower bound. Overrides window start when provided with time_max."},"time_max":{"type":"string","minLength":1,"maxLength":128,"description":"RFC3339 upper bound. Overrides window end when provided with time_min."},"max_results":{"description":"Maximum agenda events after merging. Defaults to 10 and is capped at 100.","oneOf":[{"type":"integer","minimum":1,"maximum":100},{"type":"string","pattern":"^(?:[1-9]|[1-9][0-9]|100)$"}]},"max_events":{"description":"Alias for max_results when calling this daily brief capability.","oneOf":[{"type":"integer","minimum":1,"maximum":100},{"type":"string","pattern":"^(?:[1-9]|[1-9][0-9]|100)$"}]},"query":{"type":"string","minLength":1,"maxLength":512,"description":"Google Calendar text search for title, attendee, location, description, or keyword."},"description_chars":{"type":"integer","minimum":0,"maximum":4000,"description":"Maximum description preview characters per event. Defaults to 500."},"email_query":{"type":"string","minLength":1,"maxLength":2048,"description":"Gmail search query for attention items. Defaults to unread messages from the last 7 days."},"email_max_results":{"description":"Maximum compact email summaries. Defaults to 5 and is capped at 20.","oneOf":[{"type":"integer","minimum":1,"maximum":20},{"type":"string","pattern":"^(?:[1-9]|1[0-9]|20)$"}]},"body_preview_chars":{"type":"integer","minimum":1,"maximum":4000,"description":"Maximum email snippet/body preview characters per message. Defaults to 500."}},"allOf":[{"not":{"required":["calendar_id","calendar_ids"]}},{"not":{"required":["calendar_id","include_all_calendars"],"properties":{"include_all_calendars":{"const":true}}}},{"not":{"required":["calendar_ids","include_all_calendars"],"properties":{"include_all_calendars":{"const":true}}}}]}
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Calendar daily_brief",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "calendar_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Single Google Calendar id. Omit to use primary unless calendar_ids or include_all_calendars is provided."
+    },
+    "calendar_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+      "description": "Specific calendar ids to merge."
+    },
+    "include_all_calendars": {
+      "type": "boolean",
+      "description": "When true, discover available calendars and merge matching events."
+    },
+    "window": {
+      "type": "string",
+      "enum": ["today", "tomorrow", "week", "this_week", "upcoming"],
+      "description": "Named agenda window. Defaults to today."
+    },
+    "time_zone": {
+      "type": "string",
+      "pattern": "^(?:UTC|Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "description": "Fixed offset such as UTC or +03:00. Defaults to UTC."
+    },
+    "time_min": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "description": "RFC3339 lower bound. Must be provided with time_max."
+    },
+    "time_max": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "description": "RFC3339 upper bound. Must be provided with time_min."
+    },
+    "max_results": {
+      "description": "Maximum agenda events after merging. Defaults to 10 and is capped at 100. Do not combine with max_events.",
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 100 },
+        { "type": "string", "pattern": "^(?:[1-9]|[1-9][0-9]|100)$" }
+      ]
+    },
+    "max_events": {
+      "description": "Alias for max_results when calling this daily brief capability. Do not combine with max_results.",
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 100 },
+        { "type": "string", "pattern": "^(?:[1-9]|[1-9][0-9]|100)$" }
+      ]
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Google Calendar text search for title, attendee, location, description, or keyword."
+    },
+    "description_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4000,
+      "description": "Maximum description preview characters per event. Defaults to 500."
+    },
+    "email_query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "Gmail search query for attention items. Defaults to unread messages from the last 7 days."
+    },
+    "email_max_results": {
+      "description": "Maximum compact email summaries. Defaults to 5 and is capped at 20.",
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 20 },
+        { "type": "string", "pattern": "^(?:[1-9]|1[0-9]|20)$" }
+      ]
+    },
+    "body_preview_chars": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4000,
+      "description": "Maximum email snippet/body preview characters per message. Defaults to 500."
+    }
+  },
+  "allOf": [
+    { "not": { "required": ["calendar_id", "calendar_ids"] } },
+    {
+      "not": {
+        "required": ["calendar_id", "include_all_calendars"],
+        "properties": { "include_all_calendars": { "const": true } }
+      }
+    },
+    {
+      "not": {
+        "required": ["calendar_ids", "include_all_calendars"],
+        "properties": { "include_all_calendars": { "const": true } }
+      }
+    },
+    { "not": { "required": ["max_events", "max_results"] } },
+    {
+      "oneOf": [
+        { "required": ["time_min", "time_max"] },
+        {
+          "not": {
+            "anyOf": [{ "required": ["time_min"] }, { "required": ["time_max"] }]
+          }
+        }
+      ]
+    }
+  ]
+}

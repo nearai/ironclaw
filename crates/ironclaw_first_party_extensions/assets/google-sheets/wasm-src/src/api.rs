@@ -203,18 +203,30 @@ pub fn preview(
     let selected_sheet = select_sheet(&metadata, sheet_name)?;
     let max_rows = max_rows.clamp(1, MAX_PREVIEW_ROWS);
     let max_columns = max_columns.clamp(1, MAX_PREVIEW_COLUMNS);
+    let has_explicit_range = range.is_some();
     let range = range
         .map(ToString::to_string)
         .unwrap_or_else(|| preview_range(&selected_sheet.title, max_rows, max_columns));
     let values = read_values(spreadsheet_id, &range)?;
+    let returned_range = values.range.clone();
+    let effective_sheet = range_sheet_name(&returned_range)
+        .or_else(|| range_sheet_name(&range))
+        .map(|name| select_sheet(&metadata, Some(&name)))
+        .transpose()?
+        .unwrap_or(selected_sheet);
     let mut rows = values.values;
-    let headers: Vec<String> = rows
-        .first()
-        .map(|row| row.iter().map(cell_to_string).collect())
-        .unwrap_or_default();
-    if !rows.is_empty() {
-        rows.remove(0);
-    }
+    let headers: Vec<String> = if has_explicit_range {
+        Vec::new()
+    } else {
+        let headers = rows
+            .first()
+            .map(|row| row.iter().map(cell_to_string).collect())
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            rows.remove(0);
+        }
+        headers
+    };
     let sampled_column_count = rows
         .iter()
         .map(Vec::len)
@@ -227,10 +239,10 @@ pub fn preview(
         spreadsheet_id: metadata.spreadsheet_id,
         title: metadata.title,
         url: metadata.url,
-        sheet_name: selected_sheet.title,
+        sheet_name: effective_sheet.title,
         range,
-        row_count_estimate: selected_sheet.row_count,
-        column_count_estimate: selected_sheet.column_count,
+        row_count_estimate: effective_sheet.row_count,
+        column_count_estimate: effective_sheet.column_count,
         headers,
         rows,
         sampled_row_count,
@@ -264,6 +276,17 @@ fn preview_range(sheet_name: &str, max_rows: usize, max_columns: usize) -> Strin
         column_name(max_columns),
         max_rows
     )
+}
+
+fn range_sheet_name(range: &str) -> Option<String> {
+    let (sheet, _) = range.split_once('!')?;
+    if sheet.is_empty() {
+        return None;
+    }
+    if let Some(quoted) = sheet.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+        return Some(quoted.replace("''", "'"));
+    }
+    Some(sheet.to_string())
 }
 
 fn quote_sheet_name(sheet_name: &str) -> String {

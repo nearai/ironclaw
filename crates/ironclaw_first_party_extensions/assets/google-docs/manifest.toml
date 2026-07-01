@@ -75,7 +75,7 @@ runtime_credentials = [
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-docs/read_excerpt.input.v1.json"
-output_schema_ref = "schemas/google-docs/raw_output.v1.json"
+output_schema_ref = "schemas/google-docs/read_excerpt.output.v1.json"
 prompt_doc_ref = "prompts/google-docs/read_excerpt.md"
 required_host_ports = ["host.runtime.http_egress"]
 

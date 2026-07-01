@@ -296,6 +296,7 @@ pub struct CompactDriveFile {
     pub is_folder: bool,
     pub shared: bool,
     pub owned_by_me: bool,
+    pub trashed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }

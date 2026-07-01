@@ -1,1 +1,37 @@
-{"$schema":"http://json-schema.org/draft-07/schema#","title":"Google Sheets preview","description":"Preview a bounded sheet range with headers and sample rows.","type":"object","additionalProperties":false,"required":["spreadsheet_id"],"properties":{"spreadsheet_id":{"type":"string","minLength":1,"description":"Google Sheets spreadsheet ID, same as Drive file ID."},"sheet_name":{"type":["string","null"],"description":"Optional sheet tab name. Defaults to the first sheet."},"range":{"type":["string","null"],"description":"Optional A1 notation range. When omitted, reads from A1 using max_rows/max_columns."},"max_rows":{"type":"integer","minimum":1,"maximum":100,"description":"Maximum rows to preview. Defaults to 20."},"max_columns":{"type":"integer","minimum":1,"maximum":30,"description":"Maximum columns to preview. Defaults to 10."}}}
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets preview",
+  "description": "Preview a bounded sheet range with headers and sample rows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spreadsheet_id"],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Google Sheets spreadsheet ID, same as Drive file ID."
+    },
+    "sheet_name": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Optional sheet tab name. Defaults to the first sheet."
+    },
+    "range": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Optional A1 notation range. When omitted, reads from A1 using max_rows/max_columns."
+    },
+    "max_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Maximum rows to preview. Defaults to 20."
+    },
+    "max_columns": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30,
+      "description": "Maximum columns to preview. Defaults to 10."
+    }
+  }
+}

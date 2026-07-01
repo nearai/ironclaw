@@ -253,8 +253,45 @@ pub struct ReadExcerptResult {
 #[derive(Debug, Serialize)]
 pub struct DocumentOutlineItem {
     pub title: String,
-    pub style: String,
+    pub style: DocumentOutlineStyle,
     pub char_offset: usize,
+}
+
+/// Supported Google Docs outline styles.
+#[derive(Debug, Serialize)]
+pub enum DocumentOutlineStyle {
+    #[serde(rename = "TITLE")]
+    Title,
+    #[serde(rename = "SUBTITLE")]
+    Subtitle,
+    #[serde(rename = "HEADING_1")]
+    Heading1,
+    #[serde(rename = "HEADING_2")]
+    Heading2,
+    #[serde(rename = "HEADING_3")]
+    Heading3,
+    #[serde(rename = "HEADING_4")]
+    Heading4,
+    #[serde(rename = "HEADING_5")]
+    Heading5,
+    #[serde(rename = "HEADING_6")]
+    Heading6,
+}
+
+impl DocumentOutlineStyle {
+    pub(crate) fn from_named_style(value: &str) -> Option<Self> {
+        match value {
+            "TITLE" => Some(Self::Title),
+            "SUBTITLE" => Some(Self::Subtitle),
+            "HEADING_1" => Some(Self::Heading1),
+            "HEADING_2" => Some(Self::Heading2),
+            "HEADING_3" => Some(Self::Heading3),
+            "HEADING_4" => Some(Self::Heading4),
+            "HEADING_5" => Some(Self::Heading5),
+            "HEADING_6" => Some(Self::Heading6),
+            _ => None,
+        }
+    }
 }
 
 /// Result from insert_text, delete_content, replace_text.
