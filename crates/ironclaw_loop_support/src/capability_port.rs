@@ -381,6 +381,7 @@ fn capability_input_issue_display_text(value: &str) -> Option<String> {
                     '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
                 )
         })
+        || contains_capability_input_issue_sensitive_marker(trimmed)
     {
         return None;
     }
@@ -391,6 +392,51 @@ fn capability_input_issue_display_text(value: &str) -> Option<String> {
         )
         .text,
     )
+}
+
+fn contains_capability_input_issue_sensitive_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    for forbidden in [
+        "access token",
+        "access_token",
+        "api key",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "password",
+        "passwd",
+        "secret",
+        "tool input",
+        "tool_input",
+    ] {
+        if lower.contains(forbidden) {
+            return true;
+        }
+    }
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(|token| {
+            [
+                "sk-",
+                "sk-ant-",
+                "ghp_",
+                "github_pat_",
+                "gho_",
+                "ghu_",
+                "ghs_",
+                "ghr_",
+                "glpat-",
+                "gcp-",
+                "ya29.",
+                "aiza",
+            ]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+                || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
+        })
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -3407,6 +3453,28 @@ mod tests {
                     path: "payload</script>".to_string(),
                     code: CapabilityInputIssueCode::InvalidValue,
                     expected: Some("safe".to_string()),
+                    received: None,
+                    schema_path: None,
+                }],
+            }),
+        };
+
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("input schema validation failed")
+        );
+    }
+
+    #[test]
+    fn capability_failure_display_summary_skips_sensitive_input_issue_fields() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "input schema validation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "secret_api_key".to_string(),
+                    code: CapabilityInputIssueCode::TypeMismatch,
+                    expected: Some("password string".to_string()),
                     received: None,
                     schema_path: None,
                 }],
