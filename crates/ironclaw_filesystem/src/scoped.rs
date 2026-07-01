@@ -58,6 +58,7 @@ enum PathClass {
     Memory,
     Artifacts,
     Turns,
+    Resources,
     Other,
 }
 
@@ -68,6 +69,7 @@ impl PathClass {
             Self::Memory => "memory",
             Self::Artifacts => "artifacts",
             Self::Turns => "turns",
+            Self::Resources => "resources",
             Self::Other => "other",
         }
     }
@@ -79,7 +81,17 @@ fn scoped_path_class(path: &ScopedPath) -> PathClass {
         Some("memory") => PathClass::Memory,
         Some("artifacts") => PathClass::Artifacts,
         Some("turns") => PathClass::Turns,
+        Some("resources") => PathClass::Resources,
         _ => PathClass::Other,
+    }
+}
+
+fn scoped_path_detail(path: &ScopedPath) -> &'static str {
+    match path.as_str() {
+        "/turns/state.json" => "turn_state_snapshot",
+        "/resources/snapshot.json" => "resource_governor_snapshot",
+        "/resources/budget-gates.json" => "budget_gate_snapshot",
+        _ => "unknown",
     }
 }
 
@@ -113,12 +125,14 @@ fn trace_fs_latency<T>(
     bytes: Option<usize>,
 ) {
     let path_class = scoped_path_class(path);
+    let path_detail = scoped_path_detail(path);
     match result {
         Ok(_) => ironclaw_observability::live_latency_trace_ok!(
             "filesystem",
             operation,
             started_at,
             path_class = path_class.as_str(),
+            path_detail,
             bytes = bytes.unwrap_or(0),
             "filesystem operation completed",
         ),
@@ -128,6 +142,7 @@ fn trace_fs_latency<T>(
             started_at,
             filesystem_error_kind(error),
             path_class = path_class.as_str(),
+            path_detail,
             bytes = bytes.unwrap_or(0),
             "filesystem operation failed",
         ),
