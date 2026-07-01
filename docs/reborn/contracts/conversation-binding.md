@@ -1,7 +1,7 @@
 # Reborn Contract — Conversation Binding and Inbound Turns
 
-**Status:** Implemented semantic slice
-**Date:** 2026-05-06
+**Status:** Implemented semantic slice  
+**Date:** 2026-05-06  
 **Depends on:** [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md), [`migration-compatibility.md`](migration-compatibility.md)
 
 ---

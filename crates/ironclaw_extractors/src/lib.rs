@@ -97,6 +97,37 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
+/// Outcome of running the type-aware extractor over a document's bytes.
+/// Centralizes the extract+trim+empty classification so the consumers
+/// (chat attachments, agent file reads, capability download output) cannot
+/// drift as extractor behavior changes. Callers render their own model-facing
+/// text/markers and apply their own truncation from this outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentExtraction {
+    /// Non-empty extracted text, trimmed. NOT truncated — callers apply their own cap.
+    Text(String),
+    /// The extractor succeeded but produced no usable text.
+    Empty,
+    /// The extractor failed (unsupported/corrupt). Carries the error reason for
+    /// logging only; callers render a model-safe marker, never this string.
+    Failed(String),
+}
+
+/// Run the type-aware extractor and classify the outcome. See [`extract_text`].
+pub fn extract_document(data: &[u8], mime: &str, filename: Option<&str>) -> DocumentExtraction {
+    match extract_text(data, mime, filename) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                DocumentExtraction::Empty
+            } else {
+                DocumentExtraction::Text(trimmed.to_string())
+            }
+        }
+        Err(error) => DocumentExtraction::Failed(error),
+    }
+}
+
 /// Extract text from non-plain-text document formats inferred from a filename.
 ///
 /// This deliberately excludes UTF-8 passthrough formats such as `.txt`, `.json`,
@@ -127,8 +158,8 @@ pub fn extract_document_text_by_filename(
 }
 
 /// Read a zip entry into a string with configurable decompressed size limits.
-fn bounded_read_zip_entry_with_limits(
-    file: &mut zip::read::ZipFile<'_>,
+fn bounded_read_zip_entry_with_limits<R: Read + ?Sized>(
+    file: &mut zip::read::ZipFile<'_, R>,
     total_decompressed: &mut u64,
     max_entry: u64,
     max_total: u64,
@@ -197,8 +228,8 @@ fn bounded_read_zip_entry_with_limits(
 /// single entry at `MAX_DECOMPRESSED_ENTRY`. If the reader hits that cap
 /// exactly we fail closed — the entry was truncated, meaning the real size
 /// exceeds the limit.
-fn bounded_read_zip_entry(
-    file: &mut zip::read::ZipFile<'_>,
+fn bounded_read_zip_entry<R: Read + ?Sized>(
+    file: &mut zip::read::ZipFile<'_, R>,
     total_decompressed: &mut u64,
 ) -> Result<String, ExtractionError> {
     bounded_read_zip_entry_with_limits(
@@ -686,6 +717,39 @@ mod tests {
     }
 
     #[test]
+    fn extract_document_classifies_text() {
+        // A supported text format with content yields Text(trimmed).
+        let outcome = extract_document(b"  name,age\nAlice,30  ", "text/csv", Some("data.csv"));
+        assert_eq!(
+            outcome,
+            DocumentExtraction::Text("name,age\nAlice,30".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_document_classifies_empty() {
+        // The extractor succeeds (UTF-8 passthrough) but the text is all
+        // whitespace, so after trimming there is nothing usable.
+        let outcome = extract_document(b"   \n\t  ", "text/plain", None);
+        assert_eq!(outcome, DocumentExtraction::Empty);
+    }
+
+    #[test]
+    fn extract_document_classifies_failed() {
+        // An unsupported/opaque binary (PNG header bytes under image/png) is not
+        // a document type the extractor handles, so it fails.
+        let outcome = extract_document(
+            &[0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02],
+            "image/png",
+            Some("image.png"),
+        );
+        assert!(
+            matches!(outcome, DocumentExtraction::Failed(reason) if !reason.is_empty()),
+            "unsupported binary must classify as Failed with a reason"
+        );
+    }
+
+    #[test]
     fn extract_by_extension_txt() {
         let result = try_extract_by_extension(b"content", Some("notes.txt"));
         assert_eq!(result, Some("content".to_string()));
@@ -994,7 +1058,7 @@ mod tests {
     #[test]
     fn extract_pptx_rejects_oversized_slide() {
         use std::io::{Cursor, Write};
-        let big_slide = format!("<a:t>{}</a:t>", "x".repeat(60 * 1024 * 1024));
+        let big_slide = "<a:t>".to_string() + &"x".repeat(60 * 1024 * 1024) + "</a:t>";
         let buf = Vec::new();
         let cursor = Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);

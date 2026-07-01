@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -846,6 +846,60 @@ async fn replay_projection_service_projects_timeline_and_run_status_by_scope() {
 }
 
 #[tokio::test]
+async fn replay_projection_snapshot_reuses_run_state_checkpoints() {
+    let thread_id = ThreadId::new("thread-cache").unwrap();
+    let scope = scope_for_thread(thread_id);
+    let capability = capability_id();
+    let provider = provider_id();
+    let entries = vec![
+        EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: RuntimeEvent::dispatch_requested(scope.clone(), capability.clone()),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(2),
+            record: RuntimeEvent::runtime_selected(
+                scope.clone(),
+                capability.clone(),
+                provider.clone(),
+                RuntimeKind::Script,
+            ),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(3),
+            record: RuntimeEvent::dispatch_succeeded(
+                scope.clone(),
+                capability,
+                provider,
+                RuntimeKind::Script,
+                0,
+            ),
+        },
+    ];
+    let log = Arc::new(CountingDurableEventLog::new(entries));
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let request = ProjectionRequest {
+        scope: ProjectionScope::from_resource_scope(&scope),
+        after: None,
+        limit: 1,
+    };
+
+    service.snapshot(request.clone()).await.unwrap();
+    service.snapshot(request).await.unwrap();
+
+    let reads = log.reads();
+    let origin_reads = reads.iter().filter(|cursor| cursor.is_none()).count();
+    assert_eq!(
+        origin_reads, 3,
+        "two timeline reads plus one initial fold should start at origin; the second fold must resume from the cached head"
+    );
+    assert!(
+        reads.contains(&Some(EventCursor::new(3))),
+        "second run-state fold should probe from the cached head"
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_updates_return_rebase_signal_for_foreign_or_stale_cursor() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -1358,6 +1412,42 @@ async fn replay_projection_capability_activity_stays_metadata_only() {
 }
 
 #[tokio::test]
+async fn replay_projection_preserves_safe_capability_error_detail() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity-detail").unwrap());
+    let detail = "json parsing failed: unexpected comma at line 4";
+
+    log.append(
+        RuntimeEvent::capability_activity_failed(
+            scope.clone(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary(detail),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    let activity = &snapshot.capability_activities[0];
+    assert_eq!(activity.status, CapabilityActivityStatus::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(activity.error_detail.as_deref(), Some(detail));
+}
+
+#[tokio::test]
 async fn replay_projection_keeps_model_completed_running_until_reply_finalized() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -1826,6 +1916,85 @@ impl DurableEventLog for FailingDurableEventLog {
     }
 }
 
+struct CountingDurableEventLog {
+    entries: Vec<EventLogEntry<RuntimeEvent>>,
+    reads: Mutex<Vec<Option<EventCursor>>>,
+}
+
+impl CountingDurableEventLog {
+    fn new(entries: Vec<EventLogEntry<RuntimeEvent>>) -> Self {
+        Self {
+            entries,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reads(&self) -> Vec<Option<EventCursor>> {
+        match self.reads.lock() {
+            Ok(reads) => reads.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl DurableEventLog for CountingDurableEventLog {
+    async fn append(
+        &self,
+        _event: RuntimeEvent,
+    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "counting-log:append-not-supported".to_string(),
+        })
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        match self.reads.lock() {
+            Ok(mut reads) => reads.push(after),
+            Err(poisoned) => poisoned.into_inner().push(after),
+        }
+        let cutoff = after.unwrap_or_else(EventCursor::origin);
+        let visible = self
+            .entries
+            .iter()
+            .filter(|entry| entry.cursor > cutoff)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_cursor = visible.last().map(|entry| entry.cursor).unwrap_or(cutoff);
+        Ok(EventReplay {
+            entries: visible,
+            next_cursor,
+        })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let head = self
+            .entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .max()
+            .unwrap_or_else(EventCursor::origin);
+        if after.as_u64() > head.as_u64() {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: head,
+            });
+        }
+        Ok(head)
+    }
+}
+
 fn scope_for_thread(thread_id: ThreadId) -> ResourceScope {
     scope_for_thread_with_invocation(thread_id, InvocationId::new())
 }
@@ -1912,6 +2081,7 @@ async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_b
         process_id: Some(ProcessId::new()),
         output_bytes: None,
         error_kind: Some(raw.to_string()),
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2625,6 +2795,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)), // 64-char blake3 hex
         hook_point: Some("before_capability".to_string()),
         hook_trust_class: Some("installed".to_string()),
@@ -2644,6 +2815,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2663,6 +2835,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("fedcba9876543210".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2741,6 +2914,7 @@ async fn non_hook_runtime_events_project_with_no_hook_metadata() {
         process_id: Some(ProcessId::new()),
         output_bytes: Some(42),
         error_kind: None,
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2807,6 +2981,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2829,6 +3004,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2848,6 +3024,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2910,6 +3087,7 @@ async fn hook_only_runtime_events_default_run_status_to_running() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: Some("before_capability".to_string()),
         hook_trust_class: Some("installed".to_string()),

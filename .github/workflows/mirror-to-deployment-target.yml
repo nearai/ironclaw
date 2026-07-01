@@ -1,0 +1,123 @@
+name: Mirror to deployment target
+
+on:
+  push:
+    branches:
+      - native-matrix-channel-pilot
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    if: github.repository == 'theredspoon/ironclaw'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOYMENT_MIRROR_OWNER: ${{ vars.DEPLOYMENT_MIRROR_OWNER }}
+      DEPLOYMENT_MIRROR_REPOSITORY: ${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }}
+      DEPLOYMENT_MIRROR_REPOSITORY_NAME: ${{ vars.DEPLOYMENT_MIRROR_REPOSITORY_NAME }}
+      MIRROR_BRANCH: mirror/native-matrix-channel-pilot
+      TARGET_BRANCH: deployment-target
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate deployment mirror token
+        id: mirror_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.DEPLOYMENT_MIRROR_CLIENT_ID }}
+          private-key: ${{ secrets.DEPLOYMENT_MIRROR_PRIVATE_KEY }}
+          owner: ${{ vars.DEPLOYMENT_MIRROR_OWNER }}
+          repositories: ${{ vars.DEPLOYMENT_MIRROR_REPOSITORY_NAME }}
+
+      - name: Disable Dependabot on deployment mirror
+        run: |
+          set -euo pipefail
+          cat > .github/dependabot.yml <<'EOF'
+          # This repository is a deployment target. Dependency updates flow through
+          # upstream source branches and are mirrored here after review.
+          version: 2
+          updates:
+            - package-ecosystem: cargo
+              directory: "/"
+              schedule:
+                interval: weekly
+              open-pull-requests-limit: 0
+
+            - package-ecosystem: github-actions
+              directory: "/"
+              schedule:
+                interval: weekly
+              open-pull-requests-limit: 0
+          EOF
+
+          git config user.name "theredspoon mirror"
+          git config user.email "actions@github.com"
+          git add .github/dependabot.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: disable Dependabot on deployment mirror"
+          fi
+
+      - name: Push to deployment mirror ingress branch
+        env:
+          DEPLOYMENT_MIRROR_TOKEN: ${{ steps.mirror_token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git remote add deployment_mirror "https://x-access-token:${DEPLOYMENT_MIRROR_TOKEN}@github.com/${DEPLOYMENT_MIRROR_REPOSITORY}.git"
+          git fetch deployment_mirror "refs/heads/${TARGET_BRANCH}:refs/remotes/deployment_mirror/${TARGET_BRANCH}"
+          git fetch deployment_mirror "refs/heads/${MIRROR_BRANCH}:refs/remotes/deployment_mirror/${MIRROR_BRANCH}" || true
+          source_tree="$(git write-tree)"
+          target_parent="$(git rev-parse "refs/remotes/deployment_mirror/${TARGET_BRANCH}")"
+          deployment_commit="$(
+            git commit-tree "${source_tree}" \
+              -p "${target_parent}" \
+              -m "Deploy Matrix pilot source ${SOURCE_SHA:0:12}"
+          )"
+          git push --force-with-lease deployment_mirror "${deployment_commit}:refs/heads/${MIRROR_BRANCH}"
+
+      - name: Open or update deployment target PR
+        env:
+          GH_TOKEN: ${{ steps.mirror_token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(
+            gh api --method GET "repos/${DEPLOYMENT_MIRROR_REPOSITORY}/pulls" \
+              -F state=open \
+              -F base="${TARGET_BRANCH}" \
+              -F head="${DEPLOYMENT_MIRROR_OWNER}:${MIRROR_BRANCH}" \
+              --jq '.[0].number // empty'
+          )"
+
+          pr_body="$(
+            cat <<EOF
+          Mirrors reviewed source from theredspoon/ironclaw.
+
+          - source repository: \`${GITHUB_REPOSITORY}\`
+          - source branch: \`${GITHUB_REF_NAME}\`
+          - source sha: \`${SOURCE_SHA}\`
+          - target branch: \`${TARGET_BRANCH}\`
+
+          After this PR merges, \`${DEPLOYMENT_MIRROR_REPOSITORY}:${TARGET_BRANCH}\` triggers the pilot Linux artifact workflow.
+          EOF
+          )"
+
+          if [[ -n "${existing_pr}" ]]; then
+            gh pr edit "${existing_pr}" \
+              --repo "${DEPLOYMENT_MIRROR_REPOSITORY}" \
+              --title "Deploy Matrix pilot source ${SOURCE_SHA:0:12}" \
+              --body "${pr_body}"
+            echo "Updated existing deployment mirror PR #${existing_pr}"
+          else
+            gh pr create \
+              --repo "${DEPLOYMENT_MIRROR_REPOSITORY}" \
+              --base "${TARGET_BRANCH}" \
+              --head "${MIRROR_BRANCH}" \
+              --title "Deploy Matrix pilot source ${SOURCE_SHA:0:12}" \
+              --body "${pr_body}"
+          fi

@@ -521,12 +521,6 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Option<String>, DatabaseError>;
-    /// Return all (conversation_uuid, channel, user_id, external_thread_id) rows
-    /// where `thread_id IS NOT NULL`. Used at startup to seed the in-memory
-    /// thread map so channel-native room/chat IDs survive process restarts.
-    async fn list_external_thread_mappings(
-        &self,
-    ) -> Result<Vec<(Uuid, String, String, String)>, DatabaseError>;
 }
 
 #[async_trait]
@@ -1240,11 +1234,11 @@ pub trait ChannelPairingStore: Send + Sync {
 
 /// Generates an 8-character pairing code from an unambiguous alphabet.
 pub fn generate_pairing_code() -> String {
-    use rand::Rng;
+    use rand::RngExt as _;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     (0..8)
-        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
         .collect()
 }
 

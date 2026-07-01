@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
@@ -28,15 +29,17 @@ use super::{
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
     capability_failure_kind, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
-    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
-    push_completed_result, sanitized_strategy_summary,
+    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, failed_exit, honor_retry_alteration,
+    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
+const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
 
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
@@ -114,21 +117,20 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         }
 
         // A run resumed from a user-DENIED auth gate must not re-dispatch the
-        // parked capability (still-missing credential → re-block → infinite loop).
-        // Surface a model-visible Authorization failure (retry forbidden) for the
-        // denied call and let unrelated calls in the same batch proceed normally.
+        // parked capability (still-missing credential -> re-block -> infinite loop).
+        // Surface a model-visible gate-declined failure (retry forbidden) for
+        // the denied call and let unrelated calls in the same batch proceed
+        // normally.
         //
-        // We call `handle_capability_error` directly (not via
-        // `handle_capability_outcome(Failed(Authorization, ...))`) because
-        // `capability_failed_summary` builds a prefix containing `"authorization:"`
-        // which is banned by `validate_loop_safe_summary`.
+        // We call `handle_capability_error` directly so the planner-visible
+        // summary can stay distinct from the stable product-facing declined
+        // reason token.
         if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
             matches!(
                 p.disposition.as_ref(),
                 Some(ironclaw_turns::GateResumeDisposition::Denied)
             )
         }) {
-            let denied_cap_id = pending.capability_id.clone();
             let denied_activity_id = pending.activity_id_for_resume();
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
@@ -141,7 +143,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    denied_cap_id,
                     denied_activity_id,
                     "auth gate denied by user",
                     visible_calls,
@@ -162,9 +163,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         }
 
         // A run resumed from a user-DENIED approval gate must not re-dispatch
-        // the parked capability (re-dispatch → re-block → infinite loop).
+        // the parked capability (re-dispatch -> re-block -> infinite loop).
         // Mirror the auth-gate pattern above: surface a model-visible
-        // Authorization failure for only the denied call, let other parallel
+        // gate-declined failure for only the denied call, let other parallel
         // calls in the same batch proceed normally.
         if let Some(pending) = state.pending_approval_resume.as_ref().filter(|p| {
             matches!(
@@ -172,7 +173,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 Some(ironclaw_turns::GateResumeDisposition::Denied)
             )
         }) {
-            let denied_cap_id = pending.capability_id.clone();
             let denied_activity_id = pending.activity_id_for_resume();
             // Clear the slot unconditionally — even if the partition yields no
             // matching calls, a stale Denied disposition must not bleed into the
@@ -184,9 +184,45 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    denied_cap_id,
                     denied_activity_id,
                     "approval gate denied by user",
+                    visible_calls,
+                )
+                .await?
+            {
+                ControlFlow::Break(exit) => return Ok(exit),
+                ControlFlow::Continue((next, remaining)) => {
+                    state = next;
+                    visible_calls = remaining;
+                }
+            }
+            if visible_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+        }
+
+        // A run resumed from a cancelled/denied external-tool gate must not
+        // re-dispatch the parked client tool (no output was submitted →
+        // re-park → infinite loop). Surface a model-visible failure for the
+        // denied call and let other parallel calls proceed.
+        if let Some(pending) = state.pending_external_tool_resume.as_ref().filter(|p| {
+            matches!(
+                p.disposition.as_ref(),
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
+        }) {
+            let denied_activity_id = pending.activity_id_for_resume();
+            state.pending_external_tool_resume = None;
+            match self
+                .short_circuit_denied_resume(
+                    ctx,
+                    state,
+                    &mut signatures,
+                    &mut capability_batch,
+                    denied_activity_id,
+                    "external tool gate cancelled by client",
                     visible_calls,
                 )
                 .await?
@@ -348,6 +384,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -366,6 +403,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -389,6 +427,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -497,12 +536,21 @@ fn prefixed_capability_summary(
     prefix: String,
     safe_summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    let safe_summary = strategy_safe_capability_summary_detail(safe_summary);
     let detail = sanitized_strategy_summary(safe_summary)?;
     let detail = truncate_summary_detail(
         detail.as_str(),
         MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
     );
     sanitized_strategy_summary(format!("{prefix}{detail}"))
+}
+
+fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
+    if safe_summary == INPUT_ENCODE_HUMAN_SUMMARY {
+        STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string()
+    } else {
+        safe_summary
+    }
 }
 
 fn truncate_summary_detail(detail: &str, max_bytes: usize) -> &str {
@@ -550,6 +598,7 @@ impl CapabilityStage {
             CapabilityOutcome::Completed(result) => {
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -568,6 +617,7 @@ impl CapabilityStage {
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -620,6 +670,7 @@ impl CapabilityStage {
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 let auth_resume = auth_resume_for_gate(auth_resume, prior_approval.as_ref());
                 GateStage
                     .process(
@@ -644,6 +695,25 @@ impl CapabilityStage {
                             state,
                             call,
                             kind: GateKind::Resource,
+                            gate_ref,
+                            credential_requirements: Vec::new(),
+                            approval_resume: None,
+                            auth_resume: None,
+                        },
+                    )
+                    .await
+            }
+            CapabilityOutcome::ExternalToolPending { gate_ref, .. } => {
+                // The model called a client-supplied tool: park the run and
+                // return control to the API client. No resume payload here —
+                // the client submits the tool output on resume.
+                GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::ExternalTool,
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
@@ -781,6 +851,7 @@ impl CapabilityStage {
 
         clear_matching_pending_approval_resume(&mut state, &call);
         clear_matching_pending_auth_resume(&mut state, &call);
+        clear_matching_pending_external_tool_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner
@@ -953,7 +1024,7 @@ impl CapabilityStage {
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            LoopFailureKind::DriverBug,
+            exhausted_capability_failure_kind(summary.class),
             Some(checked.checkpoint_id),
         )?))
     }
@@ -1007,16 +1078,16 @@ impl CapabilityStage {
 
     /// Shared denied-resume short-circuit for both auth and approval gates.
     ///
-    /// Partitions `visible_calls` by `denied_cap_id`.  For every call that
-    /// matches the denied capability, synthesises a model-visible
-    /// `Authorization` failure (retry `Forbidden`) via `handle_capability_error`
-    /// and uses `planner_summary` as the planner-visible strategy summary
-    /// (must pass `validate_loop_safe_summary`).
+    /// Partitions `visible_calls` by the parked call's `activity_id`. For the
+    /// matching call, synthesises a model-visible `GateDeclined` failure (retry
+    /// `Forbidden`) via `handle_capability_error` and uses `planner_summary` as
+    /// the planner-visible strategy summary (must pass
+    /// `validate_loop_safe_summary`).
     ///
     /// Returns `ControlFlow::Break(step)` if `handle_capability_error` produced
     /// an `Exit` (caller should propagate it immediately), or
     /// `ControlFlow::Continue((state, remaining_calls))` with the surviving
-    /// state and the calls that did *not* match the denied capability.  The
+    /// state and the calls that did *not* match the parked activity.  The
     /// caller is responsible for checking whether `remaining_calls` is empty
     /// and calling `completed_turn` when it is.
     ///
@@ -1037,8 +1108,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
-        denied_cap_id: ironclaw_host_api::CapabilityId,
-        denied_activity_id: Option<CapabilityActivityId>,
+        denied_activity_id: CapabilityActivityId,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
     ) -> Result<
@@ -1047,25 +1117,25 @@ impl CapabilityStage {
     > {
         let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
             .into_iter()
-            .partition(|call| call.capability_id == denied_cap_id);
+            .partition(|call| call.activity_id == denied_activity_id);
 
-        let mut denied_activity_id = denied_activity_id;
         for call in denied_calls {
             push_call_signature_once(&mut state, signatures, &call)?;
-            if let Some(activity_id) = denied_activity_id.take() {
-                CheckpointStage
-                    .emit_progress(
-                        ctx,
-                        LoopProgressEvent::CapabilityActivityFailed {
-                            activity_id,
-                            capability_id: call.capability_id.clone(),
-                            reason_kind: CapabilityFailureKind::Authorization,
-                        },
-                    )
-                    .await;
-            }
+            CheckpointStage
+                .emit_progress(
+                    ctx,
+                    LoopProgressEvent::CapabilityActivityFailed {
+                        activity_id: denied_activity_id,
+                        capability_id: call.capability_id.clone(),
+                        reason_kind: CapabilityFailureKind::GateDeclined,
+                        // Gate denial carries no host-authored message; the
+                        // model-visible text is produced separately below.
+                        safe_summary: None,
+                    },
+                )
+                .await;
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
-                error_kind: CapabilityFailureKind::Authorization,
+                error_kind: CapabilityFailureKind::GateDeclined,
                 // Intentionally empty: model-visible text comes from
                 // `model_visible_capability_failure_observation` and the
                 // planner summary from `from_trusted_static` below.
@@ -1116,6 +1186,18 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn exhausted_capability_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
+    match class {
+        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
+        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
+        CapabilityErrorClass::Transient
+        | CapabilityErrorClass::Permanent
+        | CapabilityErrorClass::OperationFailed
+        | CapabilityErrorClass::Unavailable
+        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -1281,6 +1363,7 @@ mod tests {
     fn call(input: &str) -> CapabilityCallCandidate {
         let capability_id = ironclaw_host_api::CapabilityId::new("test.cap").unwrap();
         CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),
             capability_id: capability_id.clone(),
             effective_capability_ids: vec![capability_id],
@@ -1385,5 +1468,19 @@ mod tests {
             Err(AgentLoopExecutorError::PlannerContract { detail })
                 if detail == "host returned unsafe strategy summary"
         ));
+    }
+
+    #[test]
+    fn prefixed_capability_summary_rephrases_fixed_input_encode_summary() {
+        let summary = prefixed_capability_summary(
+            "capability failed with invalid_input: ".to_string(),
+            INPUT_ENCODE_HUMAN_SUMMARY.to_string(),
+        )
+        .expect("fixed input encode summary should be strategy-safe");
+
+        assert_eq!(
+            summary.as_str(),
+            "capability failed with invalid_input: input could not be encoded"
+        );
     }
 }

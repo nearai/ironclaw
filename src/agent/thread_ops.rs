@@ -39,7 +39,6 @@ pub(super) struct PersistToolCallsInput<'a> {
     pub thread_id: Uuid,
     pub channel: &'a str,
     pub user_id: &'a str,
-    pub external_thread_id: Option<&'a str>,
     pub turn_number: usize,
     pub tool_calls: &'a [crate::agent::session::TurnToolCall],
     pub narrative: Option<&'a str>,
@@ -354,22 +353,10 @@ impl Agent {
         message: &IncomingMessage,
         external_thread_id: &str,
     ) -> Option<String> {
-        // Resolve the internal conversation UUID.  Try direct UUID parse first
-        // (gateway sends UUIDs), then fall back to a thread-map lookup for
-        // channel-native IDs (e.g. Matrix room IDs, Telegram chat IDs) that
-        // were seeded from the DB at startup.
+        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
             Ok(id) => id,
-            Err(_) => {
-                match self
-                    .session_manager
-                    .lookup_thread_id(&message.user_id, &message.channel, external_thread_id)
-                    .await
-                {
-                    Some(id) => id,
-                    None => return None,
-                }
-            }
+            Err(_) => return None,
         };
 
         // Check if already in memory
@@ -777,7 +764,6 @@ impl Agent {
                 turn_number,
                 effective_content,
                 turn_started_at,
-                message.thread_id.as_ref().map(|t| t.as_str()),
             )
             .await;
 
@@ -821,13 +807,8 @@ impl Agent {
 
         if thread.state == ThreadState::Interrupted {
             drop(sess);
-            self.clear_conversation_live_state(
-                thread_id,
-                &message.channel,
-                &message.user_id,
-                message.thread_id.as_ref().map(|t| t.as_str()),
-            )
-            .await;
+            self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                .await;
             if let Some(turn_usage) = turn_usage_from_result(&result) {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
@@ -904,7 +885,6 @@ impl Agent {
                     thread_id,
                     channel: &message.channel,
                     user_id: &message.user_id,
-                    external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                     turn_number,
                     tool_calls: &tool_calls,
                     narrative: narrative.as_deref(),
@@ -916,7 +896,6 @@ impl Agent {
                     &message.channel,
                     &message.user_id,
                     &response,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
                 )
                 .await;
 
@@ -959,13 +938,8 @@ impl Agent {
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
                 drop(sess);
-                self.clear_conversation_live_state(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
-                )
-                .await;
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 let _ = self
@@ -1011,7 +985,6 @@ impl Agent {
                     thread_id,
                     channel: &message.channel,
                     user_id: &message.user_id,
-                    external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                     turn_number,
                     tool_calls: &tool_calls,
                     narrative: narrative.as_deref(),
@@ -1036,7 +1009,6 @@ impl Agent {
                     thread_id,
                     channel: &message.channel,
                     user_id: &message.user_id,
-                    external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                     turn_number,
                     tool_calls: &tool_calls,
                     narrative: narrative.as_deref(),
@@ -1044,13 +1016,8 @@ impl Agent {
                 })
                 .await;
                 drop(sess);
-                self.clear_conversation_live_state(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
-                )
-                .await;
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 self.spawn_autonomous_trace_contribution(
                     message.user_id.clone(),
                     thread_id,
@@ -1071,7 +1038,6 @@ impl Agent {
                     thread_id,
                     channel: &message.channel,
                     user_id: &message.user_id,
-                    external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                     turn_number,
                     tool_calls: &tool_calls,
                     narrative: narrative.as_deref(),
@@ -1079,13 +1045,8 @@ impl Agent {
                 })
                 .await;
                 drop(sess);
-                self.clear_conversation_live_state(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
-                )
-                .await;
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 self.spawn_autonomous_trace_contribution(
                     message.user_id.clone(),
                     thread_id,
@@ -1099,10 +1060,6 @@ impl Agent {
 
     /// Ensure a thread UUID is writable for `(channel, user_id)`.
     ///
-    /// `external_thread_id` is the channel-native room/chat ID (e.g. Matrix room ID,
-    /// Telegram chat ID). When provided it is persisted to the `thread_id` column of
-    /// the `conversations` table so that the mapping survives restarts.
-    ///
     /// Returns `false` for foreign/unowned conversation IDs or DB errors.
     async fn ensure_writable_conversation(
         &self,
@@ -1110,16 +1067,9 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
-        external_thread_id: Option<&str>,
     ) -> bool {
         match store
-            .ensure_conversation(
-                thread_id,
-                channel,
-                user_id,
-                external_thread_id,
-                Some(channel),
-            )
+            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
             .await
         {
             Ok(true) => true,
@@ -1166,7 +1116,6 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
-        external_thread_id: Option<&str>,
         live_state: ProcessingLiveState<'_>,
     ) {
         let store = match self.store() {
@@ -1175,7 +1124,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -1197,7 +1146,6 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
-        external_thread_id: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -1205,7 +1153,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -1231,7 +1179,6 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
@@ -1240,7 +1187,6 @@ impl Agent {
         turn_number: usize,
         user_input: &str,
         started_at: DateTime<Utc>,
-        external_thread_id: Option<&str>,
     ) -> Option<Uuid> {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -1248,7 +1194,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return None;
@@ -1263,7 +1209,6 @@ impl Agent {
                     thread_id,
                     channel,
                     user_id,
-                    external_thread_id,
                     ProcessingLiveState {
                         turn_number,
                         user_message_id: Some(user_message_id),
@@ -1280,7 +1225,6 @@ impl Agent {
                     thread_id,
                     channel,
                     user_id,
-                    external_thread_id,
                     ProcessingLiveState {
                         turn_number,
                         user_message_id: None,
@@ -1305,7 +1249,6 @@ impl Agent {
         channel: &str,
         user_id: &str,
         response: &str,
-        external_thread_id: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -1313,7 +1256,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -1549,7 +1492,6 @@ impl Agent {
             thread_id,
             channel,
             user_id,
-            external_thread_id,
             turn_number,
             tool_calls,
             narrative,
@@ -1616,7 +1558,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -1720,7 +1662,7 @@ impl Agent {
                     .unwrap_or_else(|| "gateway".to_string());
                 thread.interrupt();
                 drop(sess);
-                self.clear_conversation_live_state(thread_id, &channel, &user_id, None)
+                self.clear_conversation_live_state(thread_id, &channel, &user_id)
                     .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
             }
@@ -1788,7 +1730,7 @@ impl Agent {
         thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
         drop(sess);
-        self.clear_conversation_live_state(thread_id, &channel, &user_id, None)
+        self.clear_conversation_live_state(thread_id, &channel, &user_id)
             .await;
 
         // Clear undo history too
@@ -1963,7 +1905,6 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
                     ProcessingLiveState {
                         turn_number,
                         user_message_id,
@@ -2413,13 +2354,8 @@ impl Agent {
                     }
                 }
 
-                self.clear_conversation_live_state(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    message.thread_id.as_ref().map(|t| t.as_str()),
-                )
-                .await;
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
 
                 let _ = self
                     .channels
@@ -2509,7 +2445,6 @@ impl Agent {
                         thread_id,
                         channel: &message.channel,
                         user_id: &message.user_id,
-                        external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                         turn_number,
                         tool_calls: &tool_calls,
                         narrative: narrative.as_deref(),
@@ -2521,7 +2456,6 @@ impl Agent {
                         &message.channel,
                         &message.user_id,
                         &response,
-                        message.thread_id.as_ref().map(|t| t.as_str()),
                     )
                     .await;
                     if !suggestions.is_empty() {
@@ -2560,7 +2494,6 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
-                        message.thread_id.as_ref().map(|t| t.as_str()),
                     )
                     .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
@@ -2599,7 +2532,6 @@ impl Agent {
                         thread_id,
                         channel: &message.channel,
                         user_id: &message.user_id,
-                        external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                         turn_number,
                         tool_calls: &tool_calls,
                         narrative: narrative.as_deref(),
@@ -2624,7 +2556,6 @@ impl Agent {
                         thread_id,
                         channel: &message.channel,
                         user_id: &message.user_id,
-                        external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                         turn_number,
                         tool_calls: &tool_calls,
                         narrative: narrative.as_deref(),
@@ -2636,7 +2567,6 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
-                        message.thread_id.as_ref().map(|t| t.as_str()),
                     )
                     .await;
                     self.spawn_autonomous_trace_contribution(
@@ -2659,7 +2589,6 @@ impl Agent {
                         thread_id,
                         channel: &message.channel,
                         user_id: &message.user_id,
-                        external_thread_id: message.thread_id.as_ref().map(|t| t.as_str()),
                         turn_number,
                         tool_calls: &tool_calls,
                         narrative: narrative.as_deref(),
@@ -2671,7 +2600,6 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
-                        message.thread_id.as_ref().map(|t| t.as_str()),
                     )
                     .await;
                     self.spawn_autonomous_trace_contribution(
@@ -2702,7 +2630,6 @@ impl Agent {
                             &message.channel,
                             &message.user_id,
                             &rejection,
-                            message.thread_id.as_ref().map(|t| t.as_str()),
                         )
                         .await;
                     }
@@ -2753,7 +2680,6 @@ impl Agent {
                         &message.channel,
                         &message.user_id,
                         &instructions,
-                        message.thread_id.as_ref().map(|t| t.as_str()),
                     )
                     .await;
                 }
@@ -3319,6 +3245,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
         }
@@ -3471,6 +3398,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
 
@@ -3485,6 +3413,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

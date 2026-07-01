@@ -1302,7 +1302,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
     let body = after_first_line.get(body_start..)?.trim_start_matches('\n');
 
     // Parse YAML frontmatter
-    let yaml: serde_json::Value = serde_yml::from_str(yaml_str).ok()?;
+    let yaml: serde_json::Value = serde_norway::from_str(yaml_str).ok()?;
 
     let id_str = yaml.get("id")?.as_str()?;
     let id = uuid::Uuid::parse_str(id_str).ok()?;
@@ -1762,7 +1762,7 @@ impl Store for HybridStore {
         // for incident review, not a runtime integrity guarantee.
         if is_protected_orchestrator_doc(doc) {
             use sha2::{Digest, Sha256};
-            let hash = format!("{:x}", Sha256::digest(doc.content.as_bytes()));
+            let hash = hex::encode(Sha256::digest(doc.content.as_bytes()));
             if !stamped.metadata.is_object() {
                 stamped.metadata = serde_json::json!({});
             }

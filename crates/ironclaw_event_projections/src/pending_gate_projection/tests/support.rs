@@ -255,6 +255,7 @@ pub(super) fn blocked_event_with(
         blocked_gate: Some(TurnBlockedGateMetadata {
             gate_ref: GateRef::new(gate_ref).expect("gate ref"),
             gate_kind,
+            activity_id: None,
             credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("approval_required".to_string()),

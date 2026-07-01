@@ -15,8 +15,12 @@ export function AutomationsList({
   onFilterChange,
   onRefresh,
   isRefreshing,
+  isMutating,
   selectedAutomationId,
   onSelectAutomation,
+  onPauseAutomation,
+  onResumeAutomation,
+  onDeleteAutomation,
 }) {
   const t = useT();
   const filtered = filterAutomations(automations, filter);
@@ -44,7 +48,7 @@ export function AutomationsList({
 
           <div className="flex flex-wrap items-center gap-2">
             <div
-              className="inline-flex overflow-hidden rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
+              className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
               role="group"
               aria-label=${t("automations.filterLabel")}
             >
@@ -55,7 +59,7 @@ export function AutomationsList({
                   aria-pressed=${filter === item.value}
                   onClick=${() => onFilterChange(item.value)}
                   className=${cn(
-                    "h-9 px-3 text-xs font-semibold",
+                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight",
                     filter === item.value
                       ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                       : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
@@ -156,16 +160,8 @@ export function AutomationsList({
                             </td>
                             <td className="px-5 py-4 align-top">
                               <${StatusPill}
-                                tone=${automation.has_running_run
-                                  ? "info"
-                                  : automation.has_failed_runs
-                                    ? "danger"
-                                    : automation.state_tone}
-                                label=${automation.has_running_run
-                                  ? t("automations.status.running")
-                                  : automation.has_failed_runs
-                                    ? t("automations.status.needsReview")
-                                    : automation.state_label}
+                                tone=${automation.primary_status_tone}
+                                label=${automation.primary_status_label}
                               />
                             </td>
                           </tr>
@@ -176,7 +172,13 @@ export function AutomationsList({
                 </div>
               <//>
 
-              <${AutomationDetailPanel} automation=${selectedAutomation} />
+              <${AutomationDetailPanel}
+                automation=${selectedAutomation}
+                isMutating=${isMutating}
+                onPauseAutomation=${onPauseAutomation}
+                onResumeAutomation=${onResumeAutomation}
+                onDeleteAutomation=${onDeleteAutomation}
+              />
             </div>
           `}
     </div>

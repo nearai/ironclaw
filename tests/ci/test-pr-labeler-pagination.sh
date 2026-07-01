@@ -14,15 +14,15 @@ if [[ "$1" == "pr" && "$2" == "edit" ]]; then
   exit 1
 fi
 
-if [[ "$1" == "api" && "$2" == "repos/enjimi/ironclaw/issues/26/labels" ]]; then
+if [[ "$1" == "api" && "$2" == "repos/${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }}/issues/26/labels" ]]; then
   exit 0
 fi
 
-if [[ "$1" == "api" && "$2" == "--method" && "$3" == "POST" && "$4" == "repos/enjimi/ironclaw/issues/26/labels" ]]; then
+if [[ "$1" == "api" && "$2" == "--method" && "$3" == "POST" && "$4" == "repos/${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }}/issues/26/labels" ]]; then
   exit 0
 fi
 
-if [[ "$1" == "api" && "$2" == "repos/enjimi/ironclaw/pulls/26/files" ]]; then
+if [[ "$1" == "api" && "$2" == "repos/${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }}/pulls/26/files" ]]; then
   case "$*" in
     *".changes]"*)
       printf '4976\n0\n'
@@ -37,7 +37,7 @@ if [[ "$1" == "api" && "$2" == "repos/enjimi/ironclaw/pulls/26/files" ]]; then
   exit 0
 fi
 
-if [[ "$1" == "api" && "$2" == "repos/enjimi/ironclaw/pulls/26" ]]; then
+if [[ "$1" == "api" && "$2" == "repos/${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }}/pulls/26" ]]; then
   printf 'mirror-bot\n'
   exit 0
 fi
@@ -56,7 +56,7 @@ chmod +x "$tmpdir/bin/gh"
 output="$(
   PATH="$tmpdir/bin:$PATH" \
     PR_NUMBER=26 \
-    REPO=enjimi/ironclaw \
+    REPO=${{ vars.DEPLOYMENT_MIRROR_REPOSITORY }} \
     bash .github/scripts/pr-labeler.sh
 )"
 

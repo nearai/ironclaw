@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Automations · one-shot completed UX mockup</title>
+<style>
+  /* ---- v2 dark theme tokens (copied from static/styles/app.css) ---- */
+  :root[data-theme="dark"]{
+    --v2-canvas:#111114; --v2-canvas-strong:#0d0d10;
+    --v2-surface:#1b1b1f; --v2-surface-soft:rgba(255,255,255,.03); --v2-surface-muted:rgba(255,255,255,.07);
+    --v2-card-bg:#1b1b1f; --v2-card-shadow:0 10px 30px rgba(0,0,0,.18);
+    --v2-panel-border:rgba(255,255,255,.1); --v2-rail:#151519;
+    --v2-text:rgba(255,255,255,.82); --v2-text-strong:#fff; --v2-text-muted:rgba(255,255,255,.6); --v2-text-faint:rgba(255,255,255,.45);
+    --v2-accent:#4ca7e6; --v2-accent-strong:#2882c8; --v2-accent-soft:rgba(76,167,230,.14); --v2-accent-text:#8fc8f2;
+    --v2-positive-soft:rgba(32,210,154,.13); --v2-positive-text:#20d29a;
+    --v2-warning-soft:rgba(245,193,91,.14); --v2-warning-text:#f5c15b;
+    --v2-danger-soft:rgba(255,100,128,.13); --v2-danger-text:#ff6480;
+    --v2-info-soft:rgba(76,167,230,.14); --v2-info-text:#8fc8f2;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--v2-canvas);color:var(--v2-text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    padding:32px;max-width:1080px;margin:0 auto}
+  h1{color:var(--v2-text-strong);font-size:20px;margin:0 0 4px}
+  .sub{color:var(--v2-text-muted);margin:0 0 28px}
+  h2{color:var(--v2-text-strong);font-size:15px;margin:34px 0 4px;display:flex;align-items:center;gap:8px}
+  .note{color:var(--v2-text-faint);font-size:12.5px;margin:0 0 14px}
+  .panel{background:var(--v2-card-bg);border:1px solid var(--v2-panel-border);border-radius:14px;
+    box-shadow:var(--v2-card-shadow);overflow:hidden}
+  /* filter bar */
+  .tabs{display:flex;gap:6px;padding:14px 16px;border-bottom:1px solid var(--v2-panel-border);flex-wrap:wrap}
+  .tab{border:1px solid var(--v2-panel-border);background:transparent;color:var(--v2-text-muted);
+    border-radius:999px;padding:5px 14px;font-size:12.5px;cursor:pointer}
+  .tab:hover{color:var(--v2-text)}
+  .tab.active{background:var(--v2-accent-soft);border-color:color-mix(in srgb,var(--v2-accent) 44%,var(--v2-panel-border));color:var(--v2-accent-text)}
+  .tab.new{outline:1px dashed var(--v2-accent);outline-offset:2px}
+  /* table */
+  table{width:100%;border-collapse:collapse}
+  thead th{text-align:left;padding:12px 20px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--v2-text-faint);border-bottom:1px solid var(--v2-panel-border);font-weight:600}
+  tbody td{padding:16px 20px;vertical-align:top;border-bottom:1px solid var(--v2-panel-border);color:var(--v2-text)}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:rgba(255,255,255,.03)}
+  .name{color:var(--v2-text-strong);font-weight:600}
+  .id{margin-top:3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--v2-text-faint)}
+  .muted-row td{opacity:.62}
+  .dim{color:var(--v2-text-faint)}
+  /* run dots + pills */
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot.ok{background:var(--v2-positive-text)} .dot.muted{background:var(--v2-text-faint)}
+  .runs{color:var(--v2-text-muted);font-size:12.5px}
+  .pill{display:inline-block;border-radius:999px;padding:3px 11px;font-size:12px;font-weight:600;border:1px solid transparent}
+  .pill.signal{background:var(--v2-info-soft);color:var(--v2-info-text)}
+  .pill.success{background:var(--v2-positive-soft);color:var(--v2-positive-text)}
+  .pill.warning{background:var(--v2-warning-soft);color:var(--v2-warning-text)}
+  .legend{margin:8px 2px 0;font-size:12px;color:var(--v2-text-faint)}
+  .hint{display:inline-block;margin-left:6px;font-size:11px;color:var(--v2-accent-text)}
+  button.toggle{margin:0 0 0 auto;border:1px solid var(--v2-panel-border);background:var(--v2-rail);
+    color:var(--v2-text);border-radius:8px;padding:6px 12px;font-size:12.5px;cursor:pointer}
+  .row-tag{font-size:10.5px;color:var(--v2-accent-text);margin-left:8px;border:1px dashed var(--v2-accent);
+    border-radius:6px;padding:1px 6px;vertical-align:middle}
+</style>
+</head>
+<body>
+  <h1>Automations — one-shot “Completed” UX</h1>
+  <p class="sub">Same data both options. A fired one-shot soft-completes (state → <code>Completed</code>), is retained, but the default list excludes it today. Pick how the page should surface it.</p>
+
+  <!-- ===================== OPTION A ===================== -->
+  <h2>Option A — default active-only + a “Completed” filter tab <span class="hint">(recommended)</span></h2>
+  <p class="note">Default view unchanged. A new <b>Completed</b> tab (dashed) requests <code>?include_completed=true</code>. Use the button to preview both states.</p>
+  <div class="panel">
+    <div class="tabs">
+      <button class="tab" data-a="all">All</button>
+      <button class="tab active" data-a="active">Active</button>
+      <button class="tab" data-a="running">Running</button>
+      <button class="tab" data-a="failures">Failures</button>
+      <button class="tab" data-a="paused">Paused</button>
+      <button class="tab new" data-a="completed">Completed</button>
+      <button class="toggle" id="toggleA">Preview: Active ▸ switch to Completed</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Schedule</th><th>Next run</th><th>Runs</th><th>Status</th></tr></thead>
+      <tbody id="tbodyA"></tbody>
+    </table>
+  </div>
+  <p class="legend">Active tab → only the still-pending one-shot. Completed tab → the fired one-shot appears (Next run “—”, <b>Completed</b> pill).</p>
+
+  <!-- ===================== OPTION B ===================== -->
+  <h2>Option B — show completed inline by default (badge)</h2>
+  <p class="note">No new tab; remove the default exclusion. Fired one-shots stay in the list, slightly muted. Trade-off: completed entries accumulate in the active view.</p>
+  <div class="panel">
+    <div class="tabs">
+      <button class="tab active" data-a="all">All</button>
+      <button class="tab" data-a="active">Active</button>
+      <button class="tab" data-a="running">Running</button>
+      <button class="tab" data-a="failures">Failures</button>
+      <button class="tab" data-a="paused">Paused</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Schedule</th><th>Next run</th><th>Runs</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><div class="name">Weekly report</div><div class="id">7e5b·c0a4</div></td>
+          <td>Once on Jun 28, 9:00&nbsp;AM (UTC)</td>
+          <td>Jun 28, 9:00&nbsp;AM</td>
+          <td><span class="runs"><span class="dot muted"></span>no runs</span></td>
+          <td><span class="pill signal">Scheduled</span></td>
+        </tr>
+        <tr>
+          <td><div class="name">Daily standup digest</div><div class="id">a1d2·9f3</div></td>
+          <td>Every day at 9:00&nbsp;AM (UTC)</td>
+          <td>Jun 22, 9:00&nbsp;AM</td>
+          <td><span class="runs"><span class="dot ok"></span>5 runs</span></td>
+          <td><span class="pill success">Scheduled</span></td>
+        </tr>
+        <tr class="muted-row">
+          <td><div class="name">NEAR AI Health Check</div><div class="id">b1f2·c3</div></td>
+          <td>Once on Jun 21, 1:33&nbsp;PM (UTC)</td>
+          <td class="dim">—</td>
+          <td><span class="runs"><span class="dot ok"></span>1 run</span></td>
+          <td><span class="pill success">Completed</span><span class="row-tag">stays in list</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    // Option A data: pending one-shot + a recurring (active); completed one-shot only shown when "completed" view on.
+    const activeRows = [
+      {name:"Weekly report", id:"7e5b·c0a4", schedule:"Once on Jun 28, 9:00&nbsp;AM (UTC)", next:"Jun 28, 9:00&nbsp;AM", runs:'<span class="dot muted"></span>no runs', pill:'<span class="pill signal">Scheduled</span>'},
+      {name:"Daily standup digest", id:"a1d2·9f3", schedule:"Every day at 9:00&nbsp;AM (UTC)", next:"Jun 22, 9:00&nbsp;AM", runs:'<span class="dot ok"></span>5 runs', pill:'<span class="pill success">Scheduled</span>'},
+    ];
+    const completedRow = {name:"NEAR AI Health Check", id:"b1f2·c3", schedule:"Once on Jun 21, 1:33&nbsp;PM (UTC)", next:'<span class="dim">—</span>', runs:'<span class="dot ok"></span>1 run', pill:'<span class="pill success">Completed</span>'};
+    function render(rows){
+      document.getElementById("tbodyA").innerHTML = rows.map(r=>`
+        <tr><td><div class="name">${r.name}</div><div class="id">${r.id}</div></td>
+        <td>${r.schedule}</td><td>${r.next}</td>
+        <td><span class="runs">${r.runs}</span></td><td>${r.pill}</td></tr>`).join("");
+    }
+    let showCompleted=false;
+    render(activeRows);
+    const btn=document.getElementById("toggleA");
+    const tabs=[...document.querySelectorAll('[data-a]')].filter(t=>t.closest('.panel'));
+    btn.onclick=()=>{
+      showCompleted=!showCompleted;
+      render(showCompleted?[...activeRows,completedRow]:activeRows);
+      btn.textContent= showCompleted ? "Preview: Completed ▸ switch to Active" : "Preview: Active ▸ switch to Completed";
+      // reflect active tab in the first panel
+      const panelTabs=document.querySelectorAll('.panel:first-of-type .tab');
+      panelTabs.forEach(t=>t.classList.remove('active'));
+      document.querySelector(`.panel:first-of-type .tab[data-a="${showCompleted?'completed':'active'}"]`).classList.add('active');
+    };
+  </script>
+</body>
+</html>

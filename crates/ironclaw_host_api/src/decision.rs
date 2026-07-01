@@ -79,6 +79,29 @@ pub enum Obligation {
     },
 }
 
+impl Obligation {
+    /// Maps an `InjectCredentialAccountOnce` obligation to the auth requirement
+    /// the WebUI manual-token card / auth_prompt consumer needs to surface the
+    /// correct provider and setup flow. All other obligation variants return `None`.
+    pub fn credential_auth_requirement(&self) -> Option<RuntimeCredentialAuthRequirement> {
+        match self {
+            Obligation::InjectCredentialAccountOnce {
+                provider,
+                setup,
+                provider_scopes,
+                requester_extension,
+                ..
+            } => Some(RuntimeCredentialAuthRequirement {
+                provider: provider.clone(),
+                setup: setup.clone(),
+                requester_extension: requester_extension.clone(),
+                provider_scopes: provider_scopes.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialAuthRequirement {
     pub provider: RuntimeCredentialAccountProviderId,
@@ -246,6 +269,55 @@ impl Obligation {
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
             Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn github_credential_obligation() -> Obligation {
+        Obligation::InjectCredentialAccountOnce {
+            handle: SecretHandle::new("github_pat").unwrap(),
+            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: vec!["repo".to_string()],
+            requester_extension: ExtensionId::new("github").unwrap(),
+        }
+    }
+
+    #[test]
+    fn credential_auth_requirement_maps_inject_credential_account_once() {
+        let obligation = github_credential_obligation();
+        let req = obligation
+            .credential_auth_requirement()
+            .expect("InjectCredentialAccountOnce must produce Some");
+
+        assert_eq!(
+            req.provider,
+            RuntimeCredentialAccountProviderId::new("github").unwrap()
+        );
+        assert_eq!(req.setup, RuntimeCredentialAccountSetup::ManualToken);
+        assert_eq!(req.requester_extension, ExtensionId::new("github").unwrap());
+        assert_eq!(req.provider_scopes, vec!["repo".to_string()]);
+    }
+
+    #[test]
+    fn credential_auth_requirement_returns_none_for_non_credential_obligations() {
+        let non_credential = [
+            Obligation::AuditBefore,
+            Obligation::AuditAfter,
+            Obligation::RedactOutput,
+            Obligation::InjectSecretOnce {
+                handle: SecretHandle::new("some_secret").unwrap(),
+            },
+        ];
+        for obligation in &non_credential {
+            assert!(
+                obligation.credential_auth_requirement().is_none(),
+                "{obligation:?} must return None from credential_auth_requirement"
+            );
         }
     }
 }

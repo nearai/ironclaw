@@ -47,8 +47,8 @@ use ironclaw_processes::{
     ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    build_reborn_event_stores,
+    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
+    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
@@ -72,7 +72,7 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRequest, WitToolRuntime,
+    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
 
@@ -99,6 +99,7 @@ mod production_services;
 mod production_wiring;
 mod runtime_adapters;
 mod wasm_diagnostics;
+mod wasm_execution;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -377,6 +378,12 @@ where
 
     pub fn security_audit_sink(&self) -> Option<Arc<dyn SecurityAuditSink>> {
         self.security_audit_sink.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wasm_runtime_credential_provider_captured_for_test(&self) -> bool {
+        self.component_types
+            .wasm_runtime_credential_provider_captured
     }
 
     /// Builds a runtime dispatcher with every configured runtime adapter.

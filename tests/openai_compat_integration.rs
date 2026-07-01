@@ -107,6 +107,7 @@ impl LlmProvider for MockLlmProvider {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -118,6 +119,7 @@ impl LlmProvider for MockLlmProvider {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -175,6 +177,7 @@ impl LlmProvider for FixedModelProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 

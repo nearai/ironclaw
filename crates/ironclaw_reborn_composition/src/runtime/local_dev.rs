@@ -31,16 +31,19 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    LoopResultRef,
+    ExternalToolCatalog, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
         LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
     },
 };
 
-use crate::local_dev_authorization::local_dev_effects_require_approval;
+use crate::local_dev_authorization::{
+    StoreApprovalSettingsProvider, local_dev_effects_require_approval,
+};
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
@@ -48,6 +51,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
 mod refreshing_capability_port;
@@ -95,8 +99,20 @@ pub(super) fn capability_wiring(
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts =
+        local_runtime.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        local_runtime.tool_permission_overrides.clone();
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        local_runtime.auto_approve_settings.clone();
+    let approval_settings: Arc<dyn ApprovalSettingsProvider> =
+        Arc::new(StoreApprovalSettingsProvider::new(
+            tool_permission_overrides,
+            auto_approve_settings,
+            local_runtime.persistent_approval_policies.clone(),
+        ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
         local_runtime.runtime_policy.as_ref(),
         policy.as_ref(),
@@ -120,6 +136,11 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    // Shared per-runtime catalog (owned by local_runtime services) so the
+    // OpenAI-compatible Responses surface and this loop host see the same
+    // run-scoped external-tool state.
+    let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
+        Arc::clone(&local_runtime.external_tool_catalog);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
@@ -127,6 +148,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             memory_mounts,
+            system_extensions_lifecycle_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
@@ -136,8 +158,10 @@ pub(super) fn capability_wiring(
             trajectory_observer,
             outbound_preferences_facade,
             outbound_delivery_target_set_requires_approval,
+            approval_settings,
             approval_requests,
             capability_leases,
+            external_tool_catalog,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -159,6 +183,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -168,8 +193,13 @@ struct LocalDevLoopCapabilityPortFactory {
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Per-runtime catalog of client-supplied ("external") tools. Shared across
+    /// all runs in this runtime so a parked external-tool call and its later
+    /// client-submitted output (across a pause/resume) hit the same store.
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
 #[async_trait::async_trait]
@@ -191,6 +221,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             workspace_mounts: self.workspace_mounts.clone(),
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: self.system_extensions_lifecycle_mounts.clone(),
             extension_surface_source: self.extension_surface_source.clone(),
             input_resolver: Arc::clone(&self.input_resolver),
             result_writer: Arc::clone(&self.result_writer),
@@ -204,8 +235,10 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             outbound_preferences_facade: self.outbound_preferences_facade.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
+            approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            external_tool_catalog: Arc::clone(&self.external_tool_catalog),
         })
         .await
     }
@@ -290,6 +323,7 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityDisplayPreviewStatus,
     ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
             return None;
@@ -306,7 +340,7 @@ impl LocalDevCapabilityIo {
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
                 invocation_id,
                 capability_id: capability_id.clone(),
-                status: CapabilityDisplayPreviewStatus::Completed,
+                status,
                 title: record.title,
                 subtitle: record.subtitle,
                 input_summary: record.input_summary,
@@ -333,7 +367,11 @@ impl LocalDevCapabilityIo {
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: durable_previews.thread_scope.clone(),
+                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                    &durable_previews.thread_scope,
+                    &run_context.scope,
+                    run_context.actor(),
+                ),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,
@@ -499,7 +537,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
-            &tool_call.name,
+            tool_call.name.as_str(),
             &tool_call.arguments,
         );
         Ok(input_ref)
@@ -580,7 +618,12 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Completed,
+            )
             .await
         {
             self.display_previews
@@ -601,6 +644,36 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+    }
+
+    async fn stage_capability_failure_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        self.display_previews.record_failure_preview(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            capability_id,
+            summary,
+        );
+        // Persist the failure preview to the durable timeline (status Failed)
+        // so the detail survives refresh/replay, mirroring the success path in
+        // `write_capability_result`.
+        if let Some(message_id) = self
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Failed,
+            )
+            .await
+        {
+            self.display_previews
+                .attach_timeline_message_id(invocation_id, message_id);
+        }
     }
 
     async fn update_capability_result(
@@ -829,25 +902,31 @@ fn local_dev_resource_scope_for_run(
     scope
 }
 
+struct LocalDevVisibleCapabilityInputs<'a> {
+    workspace_mounts: &'a MountView,
+    skill_mounts: &'a MountView,
+    memory_mounts: &'a MountView,
+    system_extensions_lifecycle_mounts: &'a MountView,
+    policy: &'a LocalDevCapabilityPolicy,
+    extension_surface: &'a LocalDevExtensionSurface,
+}
+
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
-    workspace_mounts: MountView,
-    skill_mounts: MountView,
-    memory_mounts: MountView,
-    policy: &LocalDevCapabilityPolicy,
-    extension_surface: &LocalDevExtensionSurface,
+    inputs: LocalDevVisibleCapabilityInputs<'_>,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let mut grants = policy.builtin_grants(
+    let mut grants = inputs.policy.builtin_grants(
         &extension_id,
-        &workspace_mounts,
-        &skill_mounts,
-        &memory_mounts,
+        inputs.workspace_mounts,
+        inputs.skill_mounts,
+        inputs.memory_mounts,
+        inputs.system_extensions_lifecycle_mounts,
     );
     grants
         .grants
-        .extend(extension_surface.grants(&extension_id));
+        .extend(inputs.extension_surface.grants(&extension_id));
     let user_id = run_context
         .scope
         .explicit_owner_user_id()
@@ -874,21 +953,21 @@ fn local_dev_visible_capability_request(
     context.validate().map_err(host_api_agent_loop_error)?;
 
     let builtin_provider =
-        ExtensionId::new(policy.provider.id.as_str()).map_err(host_api_agent_loop_error)?;
+        ExtensionId::new(inputs.policy.provider.id.as_str()).map_err(host_api_agent_loop_error)?;
     let mut provider_trust = BTreeMap::new();
     provider_trust.insert(
         builtin_provider,
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: policy.provider.authority_effects.clone(),
+                allowed_effects: inputs.policy.provider.authority_effects.clone(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
             evaluated_at: Utc::now(),
         },
     );
-    provider_trust.extend(extension_surface.provider_trust());
+    provider_trust.extend(inputs.extension_surface.provider_trust());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,

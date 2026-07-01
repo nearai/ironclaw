@@ -19,7 +19,6 @@ fn channels_cfg(v1_enabled: bool, v1_telegram_listed: bool, v2_enabled: bool) ->
         cli: CliConfig { enabled: false },
         http: None,
         gateway: None,
-        matrix: None,
         signal: None,
         tui: None,
         wasm_channels_dir: PathBuf::from("/tmp/channels"),

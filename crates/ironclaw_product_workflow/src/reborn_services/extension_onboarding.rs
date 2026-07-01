@@ -299,7 +299,7 @@ mod tests {
             Vec::new(),
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
-                instructions: "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.".to_string(),
+                instructions: "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.".to_string(),
                 credential_instructions: Some("No credentials are required for Web Access.".to_string()),
                 setup_url: None,
                 credential_next_step: Some("Activate Web Access to publish its tools.".to_string()),
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(
             onboarding.instructions.as_deref(),
             Some(
-                "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available."
+                "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available."
             )
         );
     }

@@ -48,7 +48,43 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChatInput({ onCancel, setCalls = [] } = {}) {
+function templateProps(node) {
+  const props = {};
+  for (let index = 0; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
+}
+
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node.strings) && predicate(node)) return node;
+  if (!Array.isArray(node.values)) return null;
+  for (const value of node.values) {
+    const found = findNode(value, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function flushAsyncHandlers() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+function renderChatInput({
+  onSend = async () => {},
+  onCancel,
+  setCalls = [],
+  refs = [],
+  disabled = true,
+  sendDisabled,
+  canCancel = true,
+  draft = "",
+  draftKey,
+  authScopeFn = () => "test-scope",
+  setDraftCalls = [],
+} = {}) {
   const components = {
     Button() {},
     Icon() {},
@@ -59,7 +95,11 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     React: {
       useCallback: (fn) => fn,
       useEffect: () => {},
-      useRef: () => ({ current: null }),
+      useRef: (initial = null) => {
+        const ref = { current: initial };
+        refs.push(ref);
+        return ref;
+      },
       useState: (initial) => {
         const index = stateIndex++;
         let value = typeof initial === "function" ? initial() : initial;
@@ -75,7 +115,7 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
-    authScope: () => "test-scope",
+    authScope: authScopeFn,
     stageFiles: async () => ({ staged: [], errors: [] }),
     useAttachmentConfig: () => ({
       accept: [],
@@ -86,19 +126,25 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},
-    getDraft: () => "",
+    getDraft: () => draft,
     getStagedAttachments: () => [],
-    setDraft: () => {},
+    setDraft: (key, text) => setDraftCalls.push({ key, text }),
     setStagedAttachments: () => {},
-    window: { requestAnimationFrame: (fn) => fn() },
+    window: {
+      clearTimeout: () => {},
+      requestAnimationFrame: (fn) => fn(),
+      setTimeout: () => 1,
+    },
   };
 
   vm.runInNewContext(chatInputSourceForTest(), context);
   const tree = context.globalThis.__testExports.ChatInput({
-    onSend: async () => {},
+    onSend,
     onCancel,
-    disabled: true,
-    canCancel: true,
+    disabled,
+    sendDisabled,
+    canCancel,
+    draftKey,
   });
   return { tree, components };
 }
@@ -146,4 +192,342 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
     { index: 4, value: true },
     { index: 4, value: false },
   ]);
+});
+
+test("ChatInput keeps the textarea editable when only submit is disabled", () => {
+  const { tree, components } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "next thought",
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  assert.equal(textareaProps.disabled, false);
+  assert.equal(textareaProps.value, "next thought");
+
+  const sendButton = findComponent(tree, components.Button);
+  const sendProps = componentProps(sendButton, components.Button);
+  assert.equal(sendProps.disabled, true);
+});
+
+test("ChatInput blocks Enter send when only submit is disabled", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+});
+
+test("ChatInput blocks Enter send from current DOM disabled state", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    currentTarget: { dataset: { sendDisabled: "true" } },
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+});
+
+test("ChatInput preserves draft when caller refuses send", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+      return null;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+
+  assert.equal(sendCalls, 2);
+  assert.deepEqual(
+    setCalls
+      .filter((call) => call.index === 0)
+      .map((call) => call.value),
+    ["", "draft while busy", "", "draft while busy"],
+  );
+});
+
+test("ChatInput clears the textarea as soon as send starts", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "ship it now",
+    onSend: async () =>
+      new Promise(() => {
+        sendCalls += 1;
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  assert.equal(sendCalls, 1);
+  assert.equal(setCalls[0].index, 3);
+  assert.equal(setCalls[0].value, true);
+  assert.equal(setCalls[1].index, 0);
+  assert.equal(setCalls[1].value, "");
+  assert.equal(setCalls[2].index, 1);
+  assert.equal(setCalls[2].value.length, 0);
+});
+
+test("ChatInput does not restore stale send text into a switched conversation", async () => {
+  const refs = [];
+  const setCalls = [];
+  const setDraftCalls = [];
+  let resolveSend;
+  const { tree } = renderChatInput({
+    refs,
+    setCalls,
+    setDraftCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "thread a draft",
+    draftKey: "thread-a",
+    onSend: async () =>
+      new Promise((resolve) => {
+        resolveSend = () => resolve(null);
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  const currentDraftKeyRef = refs[1];
+  currentDraftKeyRef.current = "thread-b";
+  resolveSend();
+  await flushAsyncHandlers();
+
+  assert.deepEqual(
+    setCalls
+      .filter((call) => call.index === 0)
+      .map((call) => call.value),
+    [""],
+  );
+  assert.deepEqual(setDraftCalls, [
+    { key: "thread-a", text: "thread a draft" },
+  ]);
+});
+
+test("ChatInput does not persist stale send text over a new same-thread draft", async () => {
+  const refs = [];
+  const setCalls = [];
+  const setDraftCalls = [];
+  let resolveSend;
+  const { tree } = renderChatInput({
+    refs,
+    setCalls,
+    setDraftCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "submitted draft",
+    draftKey: "thread-a",
+    onSend: async () =>
+      new Promise((resolve) => {
+        resolveSend = () => resolve(null);
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  const textRef = refs[0];
+  textRef.current = "new draft";
+  resolveSend();
+  await flushAsyncHandlers();
+
+  assert.deepEqual(
+    setCalls
+      .filter((call) => call.index === 0)
+      .map((call) => call.value),
+    [""],
+  );
+  assert.deepEqual(setDraftCalls, []);
+});
+
+test("ChatInput does not restore submitted draft after auth scope changes", async () => {
+  const setCalls = [];
+  const setDraftCalls = [];
+  let currentScope = "scope-a";
+  let resolveSend;
+  const { tree } = renderChatInput({
+    setCalls,
+    setDraftCalls,
+    authScopeFn: () => currentScope,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "private draft",
+    draftKey: "thread-a",
+    onSend: async () =>
+      new Promise((resolve) => {
+        resolveSend = () => resolve(null);
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  currentScope = "scope-b";
+  resolveSend();
+  await flushAsyncHandlers();
+
+  assert.deepEqual(
+    setCalls
+      .filter((call) => call.index === 0)
+      .map((call) => call.value),
+    [""],
+  );
+  assert.deepEqual(setDraftCalls, []);
+});
+
+test("ChatInput keeps Enter blocked when submit becomes disabled during send", async () => {
+  const refs = [];
+  let sendCalls = 0;
+  let resolveSend;
+  const { tree } = renderChatInput({
+    refs,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () =>
+      new Promise((resolve) => {
+        sendCalls += 1;
+        resolveSend = () => resolve(null);
+      }),
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  // Re-render in production would update submitDisabledRef before the original
+  // async send closure reaches finally.
+  const submitDisabledRef = refs[5];
+  submitDisabledRef.current = true;
+  resolveSend();
+  await flushAsyncHandlers();
+
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+
+  assert.equal(sendCalls, 1);
 });

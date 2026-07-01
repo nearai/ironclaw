@@ -44,6 +44,7 @@ function useExtensionsForTest({ extensions, registry }) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
     listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
@@ -54,6 +55,8 @@ function useExtensionsForTest({ extensions, registry }) {
       isLoading: false,
     }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useT: () => (key, params = {}) =>
+      `${key}${params.name ? `:${params.name}` : ""}`,
     window: { clearInterval: () => {}, setInterval: () => 1 },
   };
   vm.runInNewContext(useExtensionsSourceForTest(), context);

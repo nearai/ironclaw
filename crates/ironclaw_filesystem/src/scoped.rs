@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
 };
+use ironclaw_observability::live_latency_started_at;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -50,6 +51,104 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PathClass {
+    Workspace,
+    Memory,
+    Artifacts,
+    Turns,
+    Resources,
+    Other,
+}
+
+impl PathClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Memory => "memory",
+            Self::Artifacts => "artifacts",
+            Self::Turns => "turns",
+            Self::Resources => "resources",
+            Self::Other => "other",
+        }
+    }
+}
+
+fn scoped_path_class(path: &ScopedPath) -> PathClass {
+    match path.as_str().split('/').nth(1) {
+        Some("workspace") => PathClass::Workspace,
+        Some("memory") => PathClass::Memory,
+        Some("artifacts") => PathClass::Artifacts,
+        Some("turns") => PathClass::Turns,
+        Some("resources") => PathClass::Resources,
+        _ => PathClass::Other,
+    }
+}
+
+fn scoped_path_detail(path: &ScopedPath) -> &'static str {
+    match path.as_str() {
+        "/turns/state.json" => "turn_state_snapshot",
+        "/resources/snapshot.json" => "resource_governor_snapshot",
+        "/resources/budget-gates.json" => "budget_gate_snapshot",
+        _ => "unknown",
+    }
+}
+
+fn filesystem_error_kind(error: &FilesystemError) -> &'static str {
+    match error {
+        FilesystemError::Contract(_) => "contract",
+        FilesystemError::PermissionDenied { .. } => "permission_denied",
+        FilesystemError::MountNotFound { .. } => "mount_not_found",
+        FilesystemError::NotFound { .. } => "not_found",
+        FilesystemError::PathOutsideMount { .. } => "path_outside_mount",
+        FilesystemError::SymlinkEscape { .. } => "symlink_escape",
+        FilesystemError::MountConflict { .. } => "mount_conflict",
+        FilesystemError::Backend { .. } => "backend",
+        FilesystemError::VersionMismatch { .. } => "version_mismatch",
+        FilesystemError::Unsupported { .. } => "unsupported",
+        FilesystemError::IndexConflict { .. } => "index_conflict",
+        FilesystemError::DescriptorOverclaims { .. } => "descriptor_overclaims",
+        FilesystemError::SerializeIndexed { .. } => "serialize_indexed",
+        FilesystemError::DeserializeIndexed { .. } => "deserialize_indexed",
+        FilesystemError::CorruptRecordVersion { .. } => "corrupt_record_version",
+        FilesystemError::IndexSpecMissingAfterUpsert { .. } => "index_spec_missing_after_upsert",
+        FilesystemError::BackendInfrastructure { .. } => "backend_infrastructure",
+    }
+}
+
+fn trace_fs_latency<T>(
+    operation: &'static str,
+    path: &ScopedPath,
+    started_at: Option<Instant>,
+    result: &Result<T, FilesystemError>,
+    bytes: Option<usize>,
+) {
+    let path_class = scoped_path_class(path);
+    let path_detail = scoped_path_detail(path);
+    match result {
+        Ok(_) => ironclaw_observability::live_latency_trace_ok!(
+            "filesystem",
+            operation,
+            started_at,
+            path_class = path_class.as_str(),
+            path_detail,
+            bytes = bytes.unwrap_or(0),
+            "filesystem operation completed",
+        ),
+        Err(error) => ironclaw_observability::live_latency_trace_error!(
+            "filesystem",
+            operation,
+            started_at,
+            filesystem_error_kind(error),
+            path_class = path_class.as_str(),
+            path_detail,
+            bytes = bytes.unwrap_or(0),
+            "filesystem operation failed",
+        ),
+    }
+}
+
 impl<F> ScopedFilesystem<F>
 where
     F: RootFilesystem + ?Sized,
@@ -94,6 +193,23 @@ where
         (self.resolver)(scope).map_err(FilesystemError::from)
     }
 
+    /// Capabilities advertised by the underlying [`RootFilesystem`].
+    ///
+    /// Exposed so capability-gated helpers (such as
+    /// [`cas_update`](crate::cas_update)) can fail closed before a
+    /// read-modify-write loop when the backend cannot honor compare-and-swap.
+    ///
+    /// Note on the composite router: a
+    /// [`CompositeRootFilesystem`](crate::CompositeRootFilesystem) returns
+    /// [`BackendCapabilities::default`] here because it routes per-path and
+    /// cannot answer capabilities without a concrete path. Callers that gate on
+    /// this value must therefore treat the *default/empty* shape as "unknown,
+    /// defer to op-time" rather than "no CAS", and still map an op-time
+    /// `Unsupported(WriteFile)` to their capability-missing error.
+    pub fn capabilities(&self) -> crate::BackendCapabilities {
+        self.root.capabilities()
+    }
+
     // ─── Unified entry plane ──────────────────────────────────────────────
 
     /// Write an [`Entry`] at `path` with a CAS precondition.
@@ -104,9 +220,13 @@ where
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let bytes = entry.body.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
-        self.root.put(&virtual_path, entry, cas).await
+        let result = self.root.put(&virtual_path, entry, cas).await;
+        trace_fs_latency("put", path, started_at, &result, Some(bytes));
+        result
     }
 
     /// Read the entry at `path`, returning `None` if absent.
@@ -115,9 +235,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
-        self.root.get(&virtual_path).await
+        let result = self.root.get(&virtual_path).await;
+        trace_fs_latency("get", path, started_at, &result, None);
+        result
     }
 
     /// Filtered query over `prefix`.
@@ -128,9 +251,12 @@ where
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::Query)?;
-        self.root.query(&virtual_path, filter, page).await
+        let result = self.root.query(&virtual_path, filter, page).await;
+        trace_fs_latency("query", prefix, started_at, &result, None);
+        result
     }
 
     /// Declare an index on the mount under `prefix`.
@@ -140,9 +266,12 @@ where
         prefix: &ScopedPath,
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
-        self.root.ensure_index(&virtual_path, spec).await
+        let result = self.root.ensure_index(&virtual_path, spec).await;
+        trace_fs_latency("ensure_index", prefix, started_at, &result, None);
+        result
     }
 
     /// Begin a multi-key transaction (capability-gated).
@@ -157,10 +286,13 @@ where
         scope: &ResourceScope,
         prefix: &ScopedPath,
     ) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let view = self.mount_view(scope)?;
         let virtual_path =
             resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
-        let inner = self.root.begin(&virtual_path).await?;
+        let result = self.root.begin(&virtual_path).await;
+        trace_fs_latency("begin", prefix, started_at, &result, None);
+        let inner = result?;
         let permissions = view.resolve_with_grant(prefix)?.1.permissions.clone();
         Ok(Box::new(ScopedStorageTxn {
             inner,
@@ -178,9 +310,32 @@ where
         path: &ScopedPath,
         payload: Vec<u8>,
     ) -> Result<SeqNo, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let bytes = payload.len();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
-        self.root.append(&virtual_path, payload).await
+        let result = self.root.append(&virtual_path, payload).await;
+        trace_fs_latency("append", path, started_at, &result, Some(bytes));
+        result
+    }
+
+    /// Append multiple `payloads` to the event log at `path` in one backend
+    /// round-trip, returning the assigned SeqNos in payload order. The mount /
+    /// permission is resolved once for the shared path; the multi-row write
+    /// itself happens in the backend's [`RootFilesystem::append_batch`].
+    pub async fn append_batch(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let bytes = payloads.iter().map(Vec::len).sum();
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
+        let result = self.root.append_batch(&virtual_path, payloads).await;
+        trace_fs_latency("append_batch", path, started_at, &result, Some(bytes));
+        result
     }
 
     /// Read events at `path` starting just after `from`.
@@ -190,8 +345,29 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
-        self.root.tail(&virtual_path, from).await
+        let result = self.root.tail(&virtual_path, from).await;
+        trace_fs_latency("tail", path, started_at, &result, None);
+        result
+    }
+
+    /// Read at most `max_records` events at `path` starting just after `from`.
+    pub async fn tail_bounded(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
+        let result = self
+            .root
+            .tail_bounded(&virtual_path, from, max_records)
+            .await;
+        trace_fs_latency("tail_bounded", path, started_at, &result, None);
+        result
     }
 
     /// Return the highest seq present at `path` with `seq > from`, or `None`
@@ -203,9 +379,26 @@ where
         path: &ScopedPath,
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
-        self.root.head_seq(&virtual_path, from).await
+        let result = self.root.head_seq(&virtual_path, from).await;
+        trace_fs_latency("head_seq", path, started_at, &result, None);
+        result
+    }
+
+    /// Reserve a path-local monotonic sequence number.
+    pub async fn reserve_sequence(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<SeqNo, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)?;
+        let result = self.root.reserve_sequence(&virtual_path).await;
+        trace_fs_latency("reserve_sequence", path, started_at, &result, None);
+        result
     }
 
     // ─── Legacy bytes-plane methods (DEPRECATED — transitional) ───────────
@@ -217,9 +410,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<u8>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
-        self.root.read_file(&virtual_path).await
+        let result = self.root.read_file(&virtual_path).await;
+        trace_fs_latency("read_file", path, started_at, &result, None);
+        result
     }
 
     /// **DEPRECATED — use [`write_bytes`](Self::write_bytes) or
@@ -230,9 +426,12 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
-        self.root.write_file(&virtual_path, bytes).await
+        let result = self.root.write_file(&virtual_path, bytes).await;
+        trace_fs_latency("write_file", path, started_at, &result, Some(bytes.len()));
+        result
     }
 
     /// Write bytes using an already-authorized mount view instead of the
@@ -246,16 +445,26 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
-        self.root
+        let result = self
+            .root
             .put(
                 &virtual_path,
                 Entry::bytes(bytes.to_vec()),
                 CasExpectation::Any,
             )
             .await
-            .map(|_| ())
+            .map(|_| ());
+        trace_fs_latency(
+            "write_bytes_with_mount_view",
+            path,
+            started_at,
+            &result,
+            Some(bytes.len()),
+        );
+        result
     }
 
     /// **DEPRECATED — no direct replacement on the unified surface.** Use
@@ -267,9 +476,12 @@ where
         path: &ScopedPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::AppendFile)?;
-        self.root.append_file(&virtual_path, bytes).await
+        let result = self.root.append_file(&virtual_path, bytes).await;
+        trace_fs_latency("append_file", path, started_at, &result, Some(bytes.len()));
+        result
     }
 
     pub async fn list_dir(
@@ -277,9 +489,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        self.root.list_dir(&virtual_path).await
+        let result = self.root.list_dir(&virtual_path).await;
+        trace_fs_latency("list_dir", path, started_at, &result, None);
+        result
     }
 
     pub async fn list_dir_bounded(
@@ -288,9 +503,12 @@ where
         path: &ScopedPath,
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        self.root.list_dir_bounded(&virtual_path, max_entries).await
+        let result = self.root.list_dir_bounded(&virtual_path, max_entries).await;
+        trace_fs_latency("list_dir_bounded", path, started_at, &result, None);
+        result
     }
 
     pub async fn stat(
@@ -298,8 +516,11 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<FileStat, FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Stat)?;
-        self.root.stat(&virtual_path).await
+        let result = self.root.stat(&virtual_path).await;
+        trace_fs_latency("stat", path, started_at, &result, None);
+        result
     }
 
     pub async fn delete(
@@ -307,9 +528,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
-        self.root.delete(&virtual_path).await
+        let result = self.root.delete(&virtual_path).await;
+        trace_fs_latency("delete", path, started_at, &result, None);
+        result
     }
 
     /// **DEPRECATED — the unified entry plane infers directories from path
@@ -319,9 +543,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::CreateDirAll)?;
-        self.root.create_dir_all(&virtual_path).await
+        let result = self.root.create_dir_all(&virtual_path).await;
+        trace_fs_latency("create_dir_all", path, started_at, &result, None);
+        result
     }
 
     // ─── Convenience helpers for byte-only callers ────────────────────────
@@ -408,11 +635,12 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         | FilesystemOperation::CreateDirAll
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::ReserveSeq => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
-        FilesystemOperation::MountLocal => false,
+        FilesystemOperation::MountLocal | FilesystemOperation::Connect => false,
         FilesystemOperation::Query => permissions.read && permissions.list,
         FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
@@ -485,511 +713,4 @@ impl StorageTxn for ScopedStorageTxn {
 }
 
 #[cfg(test)]
-mod tests {
-    //! Caller-level tests for the operation gates added with the unified
-    //! storage surface. The matrix below exercises each `MountPermissions`
-    //! axis against each new op and asserts that the permission denial
-    //! happens at the `ScopedFilesystem` boundary — before any backend
-    //! dispatch.
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
-    };
-
-    use super::*;
-    use crate::in_memory::InMemoryBackend;
-    use crate::{
-        CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
-        IndexName, IndexSpec, Page, RecordKind, SeqNo,
-    };
-
-    fn test_scope() -> ResourceScope {
-        ResourceScope {
-            tenant_id: TenantId::new("tenant_test").unwrap(),
-            user_id: UserId::new("user_test").unwrap(),
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        }
-    }
-
-    fn expect_err<T>(result: Result<T, FilesystemError>) -> FilesystemError {
-        match result {
-            Ok(_) => panic!("expected an error"),
-            Err(err) => err,
-        }
-    }
-
-    fn scoped_in_memory(permissions: MountPermissions) -> ScopedFilesystem<InMemoryBackend> {
-        ScopedFilesystem::with_fixed_view(
-            Arc::new(InMemoryBackend::new()),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/workspace").unwrap(),
-                VirtualPath::new("/engine/scoped_test").unwrap(),
-                permissions,
-            )])
-            .unwrap(),
-        )
-    }
-
-    fn no_op(read: bool, write: bool, list: bool, delete: bool) -> MountPermissions {
-        MountPermissions {
-            read,
-            write,
-            list,
-            delete,
-            execute: false,
-        }
-    }
-
-    fn record_with_scope(scope: &str) -> Entry {
-        Entry::record(
-            RecordKind::new("test_kind").unwrap(),
-            &serde_json::json!({}),
-        )
-        .unwrap()
-        .with_indexed(
-            IndexKey::new("scope").unwrap(),
-            crate::IndexValue::Text(scope.into()),
-        )
-    }
-
-    #[tokio::test]
-    async fn query_denies_when_read_missing_even_with_list() {
-        let scoped = scoped_in_memory(no_op(false, false, true, false));
-        let err = scoped
-            .query(
-                &test_scope(),
-                &ScopedPath::new("/workspace").unwrap(),
-                &Filter::All,
-                Page::default(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::Query,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn query_denies_when_list_missing_even_with_read() {
-        let scoped = scoped_in_memory(no_op(true, false, false, false));
-        let err = scoped
-            .query(
-                &test_scope(),
-                &ScopedPath::new("/workspace").unwrap(),
-                &Filter::All,
-                Page::default(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::Query,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn query_succeeds_with_read_and_list() {
-        let scoped = scoped_in_memory(no_op(true, true, true, false));
-        scoped
-            .put(
-                &test_scope(),
-                &ScopedPath::new("/workspace/a").unwrap(),
-                record_with_scope("acme"),
-                CasExpectation::Absent,
-            )
-            .await
-            .unwrap();
-        let results = scoped
-            .query(
-                &test_scope(),
-                &ScopedPath::new("/workspace").unwrap(),
-                &Filter::All,
-                Page::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn read_bytes_bounded_enforces_size_at_scoped_boundary() {
-        let scoped = scoped_in_memory(no_op(true, true, false, false));
-        scoped
-            .write_bytes(
-                &test_scope(),
-                &ScopedPath::new("/workspace/large.txt").unwrap(),
-                b"large body".to_vec(),
-            )
-            .await
-            .unwrap();
-
-        let body = scoped
-            .read_bytes_bounded(
-                &test_scope(),
-                &ScopedPath::new("/workspace/large.txt").unwrap(),
-                4,
-            )
-            .await
-            .unwrap();
-        assert_eq!(body, None);
-    }
-
-    #[tokio::test]
-    async fn read_bytes_bounded_denies_when_read_missing() {
-        let scoped = scoped_in_memory(no_op(false, true, false, false));
-        let err = scoped
-            .read_bytes_bounded(
-                &test_scope(),
-                &ScopedPath::new("/workspace/large.txt").unwrap(),
-                4,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::ReadFile,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn ensure_index_denies_when_write_missing() {
-        let scoped = scoped_in_memory(no_op(true, false, true, false));
-        let spec = IndexSpec::new(
-            IndexName::new("by_scope").unwrap(),
-            vec![IndexKey::new("scope").unwrap()],
-            IndexKind::Exact,
-        );
-        let err = scoped
-            .ensure_index(
-                &test_scope(),
-                &ScopedPath::new("/workspace").unwrap(),
-                &spec,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::EnsureIndex,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn ensure_index_succeeds_with_write() {
-        let scoped = scoped_in_memory(no_op(false, true, false, false));
-        let spec = IndexSpec::new(
-            IndexName::new("by_scope").unwrap(),
-            vec![IndexKey::new("scope").unwrap()],
-            IndexKind::Exact,
-        );
-        scoped
-            .ensure_index(
-                &test_scope(),
-                &ScopedPath::new("/workspace").unwrap(),
-                &spec,
-            )
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn append_event_denies_when_write_missing() {
-        let scoped = scoped_in_memory(no_op(true, false, true, false));
-        let err = scoped
-            .append(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                b"x".to_vec(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::Append,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn append_event_succeeds_with_write_and_returns_monotonic_seq() {
-        let scoped = scoped_in_memory(no_op(false, true, false, false));
-        let s1 = scoped
-            .append(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                b"a".to_vec(),
-            )
-            .await
-            .unwrap();
-        let s2 = scoped
-            .append(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                b"b".to_vec(),
-            )
-            .await
-            .unwrap();
-        assert!(s2 > s1);
-    }
-
-    #[tokio::test]
-    async fn tail_denies_when_read_missing() {
-        let scoped = scoped_in_memory(no_op(false, true, true, false));
-        let err = scoped
-            .tail(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                SeqNo::ZERO,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::Tail,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn tail_succeeds_with_read_and_write() {
-        let scoped = scoped_in_memory(no_op(true, true, false, false));
-        let s1 = scoped
-            .append(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                b"hello".to_vec(),
-            )
-            .await
-            .unwrap();
-        let events = scoped
-            .tail(
-                &test_scope(),
-                &ScopedPath::new("/workspace/log").unwrap(),
-                SeqNo::ZERO,
-            )
-            .await
-            .unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].seq, s1);
-    }
-
-    #[tokio::test]
-    async fn begin_denies_when_write_missing() {
-        let scoped = scoped_in_memory(no_op(true, false, true, false));
-        let err = expect_err(
-            scoped
-                .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-                .await,
-        );
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::BeginTxn,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn begin_with_write_propagates_backend_unsupported() {
-        let scoped = scoped_in_memory(no_op(false, true, false, false));
-        let err = expect_err(
-            scoped
-                .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-                .await,
-        );
-        assert!(
-            matches!(
-                err,
-                FilesystemError::Unsupported {
-                    operation: FilesystemOperation::BeginTxn,
-                    ..
-                }
-            ),
-            "expected Unsupported (gate let it through), got {err:?}"
-        );
-    }
-
-    #[derive(Default)]
-    struct TxnStubBackend;
-
-    #[async_trait]
-    impl RootFilesystem for TxnStubBackend {
-        async fn list_dir(
-            &self,
-            _path: &VirtualPath,
-        ) -> Result<Vec<crate::DirEntry>, FilesystemError> {
-            Ok(Vec::new())
-        }
-
-        async fn stat(&self, path: &VirtualPath) -> Result<crate::FileStat, FilesystemError> {
-            Ok(crate::FileStat {
-                path: path.clone(),
-                file_type: crate::FileType::Directory,
-                len: 0,
-                modified: None,
-                sensitive: false,
-            })
-        }
-
-        async fn begin(&self, _path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
-            Ok(Box::new(StubTxn::default()))
-        }
-    }
-
-    #[derive(Default)]
-    struct StubTxn {
-        seen_put: Option<VirtualPath>,
-        seen_get: Option<VirtualPath>,
-        seen_delete: Option<VirtualPath>,
-    }
-
-    #[async_trait]
-    impl StorageTxn for StubTxn {
-        async fn put(
-            &mut self,
-            path: &VirtualPath,
-            _entry: Entry,
-            _cas: CasExpectation,
-        ) -> Result<RecordVersion, FilesystemError> {
-            self.seen_put = Some(path.clone());
-            Ok(RecordVersion::from_backend(1))
-        }
-
-        async fn get(
-            &mut self,
-            path: &VirtualPath,
-        ) -> Result<Option<VersionedEntry>, FilesystemError> {
-            self.seen_get = Some(path.clone());
-            Ok(None)
-        }
-
-        async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
-            self.seen_delete = Some(path.clone());
-            Ok(())
-        }
-
-        async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
-            Ok(())
-        }
-
-        async fn rollback(self: Box<Self>) {}
-    }
-
-    fn scoped_txn_stub(permissions: MountPermissions) -> ScopedFilesystem<TxnStubBackend> {
-        ScopedFilesystem::with_fixed_view(
-            Arc::new(TxnStubBackend),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/workspace").unwrap(),
-                VirtualPath::new("/engine/scoped_txn").unwrap(),
-                permissions,
-            )])
-            .unwrap(),
-        )
-    }
-
-    #[tokio::test]
-    async fn scoped_txn_rejects_put_outside_mount_prefix() {
-        let scoped = scoped_txn_stub(MountPermissions::read_write());
-        let mut txn = scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await
-            .unwrap();
-        let escape = VirtualPath::new("/secrets/api_key").unwrap();
-        let err = txn
-            .put(&escape, Entry::bytes(b"leak".to_vec()), CasExpectation::Any)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
-    }
-
-    #[tokio::test]
-    async fn scoped_txn_rejects_get_outside_mount_prefix() {
-        let scoped = scoped_txn_stub(MountPermissions::read_write());
-        let mut txn = scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await
-            .unwrap();
-        let escape = VirtualPath::new("/secrets/api_key").unwrap();
-        let err = txn.get(&escape).await.unwrap_err();
-        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
-    }
-
-    #[tokio::test]
-    async fn scoped_txn_rejects_delete_outside_mount_prefix() {
-        let scoped = scoped_txn_stub(MountPermissions {
-            read: true,
-            write: true,
-            list: true,
-            delete: true,
-            execute: false,
-        });
-        let mut txn = scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await
-            .unwrap();
-        let escape = VirtualPath::new("/secrets/api_key").unwrap();
-        let err = txn.delete(&escape).await.unwrap_err();
-        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
-    }
-
-    #[tokio::test]
-    async fn scoped_txn_allows_put_inside_mount_prefix() {
-        let scoped = scoped_txn_stub(MountPermissions::read_write());
-        let mut txn = scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await
-            .unwrap();
-        let inside = VirtualPath::new("/engine/scoped_txn/file").unwrap();
-        txn.put(&inside, Entry::bytes(b"ok".to_vec()), CasExpectation::Any)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn scoped_txn_per_op_acl_blocks_write_without_write_permission() {
-        let scoped = scoped_txn_stub(MountPermissions::read_write());
-        let mut txn = scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await
-            .unwrap();
-        let inside = VirtualPath::new("/engine/scoped_txn/file").unwrap();
-        let err = txn.delete(&inside).await.unwrap_err();
-        match err {
-            FilesystemError::Backend {
-                operation: FilesystemOperation::Delete,
-                reason,
-                ..
-            } => {
-                assert!(
-                    reason.contains("permission"),
-                    "expected permission-denial reason, got {reason}"
-                );
-            }
-            other => panic!("expected Backend(permission), got {other:?}"),
-        }
-    }
-}
+mod tests;

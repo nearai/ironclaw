@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
@@ -27,7 +28,7 @@ use ironclaw_auth::{
 };
 use ironclaw_first_party_extensions::GoogleCredentialResolver;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, ExtensionId, InvocationId, Principal, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_llm::{
     LlmConfig, LlmProvider, NearAiConfig, ProviderProtocol, RegistryProviderConfig, SessionConfig,
@@ -363,8 +364,24 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         );
     }
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    seed_qa_auto_approve(&runtime).await;
     seed_static_outbound_delivery_targets(&runtime);
     runtime
+}
+
+async fn seed_qa_auto_approve(runtime: &RebornRuntime) {
+    let auto_approve = runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("QA runtime exposes local-dev auto-approve settings");
+    auto_approve
+        .set(AutoApproveSettingInput {
+            scope: qa_recording_resource_scope(),
+            enabled: true,
+            updated_by: Principal::User(UserId::new(QA_USER).expect("QA user id")),
+        })
+        .await
+        .expect("seed QA global auto-approve");
 }
 
 fn seed_static_outbound_delivery_targets(runtime: &RebornRuntime) {
@@ -475,7 +492,7 @@ async fn seed_live_credentials_for_fixture(
         live_secret_values.push((seed.label, access_material.expose_secret().to_string()));
         let access_handle = SecretHandle::new(seed.access_handle).expect("access handle");
         secret_store
-            .put(scope.clone(), access_handle.clone(), access_material)
+            .put(scope.clone(), access_handle.clone(), access_material, None)
             .await
             .expect("seed Reborn access secret");
 
@@ -500,7 +517,7 @@ async fn seed_live_credentials_for_fixture(
                 live_secret_values.push((seed.label, refresh_material.expose_secret().to_string()));
                 let handle = SecretHandle::new(refresh_handle).expect("refresh handle");
                 secret_store
-                    .put(scope.clone(), handle.clone(), refresh_material)
+                    .put(scope.clone(), handle.clone(), refresh_material, None)
                     .await
                     .expect("seed Reborn refresh secret");
                 Some(handle)

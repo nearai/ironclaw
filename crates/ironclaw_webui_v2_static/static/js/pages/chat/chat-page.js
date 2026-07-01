@@ -3,19 +3,20 @@ import { React, html } from "../../lib/html.js";
 import { Chat } from "./chat.js";
 
 export function ChatPage() {
-  const { threadsState, gatewayStatus } = useOutletContext();
+  const { threadsState, gatewayStatus, globalAutoApproveEnabled = false } = useOutletContext();
   const { threadId: urlThreadId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
   const composerDraft = location.state?.composerDraft || "";
+  const routeThreadId = urlThreadId || null;
 
   React.useEffect(() => {
-    if (urlThreadId && urlThreadId !== threadsState.activeThreadId) {
-      threadsState.setActiveThreadId(urlThreadId);
-    } else if (!urlThreadId) {
+    if (routeThreadId && routeThreadId !== threadsState.activeThreadId) {
+      threadsState.setActiveThreadId(routeThreadId);
+    } else if (!routeThreadId) {
       threadsState.setActiveThreadId(null);
     }
-  }, [urlThreadId]);
+  }, [routeThreadId]);
 
   const handleSelectThread = React.useCallback(
     (id, options = {}) => {
@@ -33,12 +34,13 @@ export function ChatPage() {
   return html`
     <${Chat}
       threads=${threadsState.threads}
-      activeThreadId=${threadsState.activeThreadId}
+      activeThreadId=${routeThreadId}
       onSelectThread=${handleSelectThread}
       isCreatingThread=${threadsState.isCreating}
       composerDraft=${composerDraft}
       composerResetKey=${location.key}
       gatewayStatus=${gatewayStatus}
+      globalAutoApproveEnabled=${globalAutoApproveEnabled}
     />
   `;
 }

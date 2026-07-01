@@ -64,15 +64,15 @@ export function ProjectsPage() {
         type: "error",
         message: error.message || t("projects.chatAutoFail"),
       });
+      return;
     }
 
-    navigate("/chat", {
+    navigate(nextThreadId ? `/chat/${nextThreadId}` : "/chat", {
       state: {
         composerDraft: t("projects.creationDraft"),
-        threadId: nextThreadId,
       },
     });
-  }, [navigate, threadsState]);
+  }, [navigate, threadsState, t]);
 
   const handleOpenThread = React.useCallback((nextThreadId) => {
     navigate(`/projects/${projectId}/threads/${nextThreadId}`);
@@ -85,7 +85,7 @@ export function ProjectsPage() {
     setChatFlowError(null);
     try {
       const newThreadId = await threadsState.createThread(projectId);
-      navigate("/chat", { state: { threadId: newThreadId } });
+      navigate(newThreadId ? `/chat/${newThreadId}` : "/chat");
       workspaceState.invalidate();
     } catch (error) {
       setChatFlowError({

@@ -11,6 +11,7 @@ mod checkpoint;
 mod exit_helpers;
 mod gates;
 mod input;
+mod latency;
 mod loop_exit;
 mod mapping;
 mod model;
@@ -28,9 +29,10 @@ use capability_helpers::{
     append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
-    gate_tool_result_summary, model_visible_capability_failure_observation,
-    pending_approval_resume_candidate, pending_auth_resume_candidate, push_call_signature_once,
-    push_completed_result,
+    clear_matching_pending_external_tool_resume, gate_tool_result_summary,
+    model_visible_capability_failure_observation, pending_approval_resume_candidate,
+    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
+    push_call_signature_once, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
@@ -187,6 +189,15 @@ enum TurnCompletedStep {
         summary: TurnSummary,
     },
     Exit(LoopExit),
+}
+
+impl TurnCompletedStep {
+    fn iteration_or(&self, fallback: u32) -> u32 {
+        match self {
+            Self::Continue { state, .. } => state.iteration,
+            Self::Exit(_) => fallback,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

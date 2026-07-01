@@ -31,15 +31,16 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAddMemberRequest,
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
@@ -61,8 +62,9 @@ use ironclaw_product_workflow::{
     RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -76,21 +78,26 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
+    caller_for_user("user-alpha")
+}
+
+fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
-        UserId::new("user-alpha").expect("user"),
+        UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     )
 }
 
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
-    router_with_capabilities(services, WebUiV2Capabilities::default())
+    router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
-fn router_with_capabilities(
+fn router_with_caller(
     services: Arc<dyn RebornServicesApi>,
     capabilities: WebUiV2Capabilities,
+    caller: WebUiAuthenticatedCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
@@ -99,8 +106,23 @@ fn router_with_capabilities(
     // Production composition runs the bearer-token middleware that
     // constructs this `Extension`; tests bypass auth and inject the
     // caller directly so the regression target is the handler itself.
-    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(capabilities))
+}
+
+fn router_with_capabilities(
+    services: Arc<dyn RebornServicesApi>,
+    capabilities: WebUiV2Capabilities,
+) -> Router {
+    router_with_caller(services, capabilities, caller())
+}
+
+fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
+    webui_v2_router(WebUiV2State::new(
+        services,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
 }
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
@@ -116,6 +138,7 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
+type LogsCall = RebornLogQueryRequest;
 type OperatorLogsCall = RebornOperatorLogsQuery;
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
@@ -220,13 +243,21 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    global_auto_approve_enabled: Mutex<bool>,
+    global_auto_approve_calls: Mutex<usize>,
+    stall_global_auto_approve: Mutex<bool>,
+    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    pause_automation_calls: Mutex<Vec<String>>,
+    resume_automation_calls: Mutex<Vec<String>>,
+    delete_automation_calls: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
@@ -236,12 +267,14 @@ struct StubServices {
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
+    operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
     next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     get_operator_diagnostics_calls: Mutex<usize>,
     get_operator_status_calls: Mutex<usize>,
+    query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     list_extensions_calls: Mutex<usize>,
@@ -265,6 +298,9 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
+    /// so the handler test can assert the request body reaches the facade.
+    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -287,6 +323,10 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_delete_automation(&self, error: RebornServicesError) {
+        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -339,6 +379,25 @@ impl StubServices {
 
 #[async_trait]
 impl RebornServicesApi for StubServices {
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        *self.global_auto_approve_calls.lock().expect("lock") += 1;
+        if *self.stall_global_auto_approve.lock().expect("lock") {
+            std::future::pending::<()>().await;
+        }
+        if let Some(error) = self
+            .next_global_auto_approve_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(*self.global_auto_approve_enabled.lock().expect("lock"))
+    }
+
     async fn create_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -705,6 +764,67 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn pause_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.pause_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-paused",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.resume_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-resumed",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.delete_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        if let Some(error) = self
+            .next_delete_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
+        })
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -762,6 +882,24 @@ impl RebornServicesApi for StubServices {
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .push(enabled);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
     }
 
     async fn list_connectable_channels(
@@ -850,7 +988,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         *self.list_operator_config_calls.lock().expect("lock") += 1;
         Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
+            entries: self.operator_config_entries.lock().expect("lock").clone(),
             precedence: Vec::new(),
             diagnostics: Vec::new(),
         })
@@ -865,6 +1003,16 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(key.clone());
+        if let Some(entry) = self
+            .operator_config_entries
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|entry| entry.key == key)
+            .cloned()
+        {
+            return Ok(RebornOperatorConfigGetResponse { entry });
+        }
         Ok(RebornOperatorConfigGetResponse {
             entry: operator_config_entry(key, serde_json::json!("configured")),
         })
@@ -927,6 +1075,32 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
+    }
+
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        if request.tail && request.follow {
+            return Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("follow".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            });
+        }
+
+        self.query_logs_calls.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: true,
+            follow_supported: true,
+        })
     }
 
     async fn query_operator_logs(
@@ -1425,6 +1599,40 @@ async fn send_message_rejected_busy_wire_shape() {
     );
 }
 
+// Test-through-the-caller: the handler must forward the request body's
+// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
+// hardcoded value. Posting `false` and asserting the facade recorded `false`
+// catches the arg-loss class (e.g. a handler that always passes `true`).
+#[tokio::test]
+async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/auto-activate-learned")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![false],
+        "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
@@ -1868,6 +2076,66 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
+async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let pause_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/pause")
+                .body(Body::empty())
+                .expect("pause request"),
+        )
+        .await
+        .expect("pause oneshot");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+    let pause_body = read_json(pause_response).await;
+    assert_eq!(pause_body["updated"], true);
+    assert_eq!(
+        pause_body["automation"]["automation_id"],
+        "automation-paused"
+    );
+
+    let resume_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/resume")
+                .body(Body::empty())
+                .expect("resume request"),
+        )
+        .await
+        .expect("resume oneshot");
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    let resume_body = read_json(resume_response).await;
+    assert_eq!(resume_body["updated"], true);
+    assert_eq!(
+        resume_body["automation"]["automation_id"],
+        "automation-resumed"
+    );
+
+    assert_eq!(
+        services
+            .pause_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .resume_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -1918,6 +2186,99 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("note")
             .contains("authoritative ledger is server-side")
     );
+}
+
+#[tokio::test]
+async fn delete_automation_dispatches_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert!(body.get("automation").is_none() || body["automation"].is_null());
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "service_unavailable",
+            true,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_delete_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .body(Body::empty())
+                    .expect("delete request"),
+            )
+            .await
+            .expect("delete oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .delete_automation_calls
+                .lock()
+                .expect("lock")
+                .clone(),
+            vec!["automation-alpha".to_string()]
+        );
+    }
 }
 
 #[tokio::test]
@@ -2003,6 +2364,105 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_true_forwarded_to_facade() {
+    // ?include_completed=true must be parsed and forwarded as `true` in the
+    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].include_completed,
+        "include_completed=true must be forwarded to the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_absent_defaults_to_false() {
+    // No ?include_completed query param → `include_completed` must default to
+    // false so existing callers that do not set the flag are unaffected.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].include_completed,
+        "absent include_completed must default to false (active-only)"
+    );
+}
+
+// Regression: malformed `?include_completed=garbage` must be rejected at the
+// Query extractor level (400 Bad Request) before the handler or facade run.
+// The field is a plain `bool`; `serde_urlencoded` does not silently default
+// unparseable values — it returns a deserialization error, which axum maps to
+// 400. There is no silent fallback to `false`.
+#[tokio::test]
+async fn list_automations_malformed_include_completed_rejected_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed include_completed must be rejected at query deserialization with 400, \
+         not silently defaulted to false"
+    );
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "malformed include_completed must be rejected before reaching the facade"
+    );
 }
 
 #[tokio::test]
@@ -2335,6 +2795,161 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
     }
 }
 
+// The approval card hint needs the effective global auto-approve setting. Keep
+// that as a narrow facade read surfaced through the session bootstrap feature,
+// not an operator config key lookup from the browser or route handler.
+#[tokio::test]
+async fn get_session_reports_global_auto_approve_feature_from_facade() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        *services.global_auto_approve_enabled.lock().expect("lock") = enabled;
+        let router = webui_v2_router(WebUiV2State::new(
+            services.clone(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["global_auto_approve"], enabled,
+            "features.global_auto_approve must mirror the facade flag (enabled={enabled})"
+        );
+        assert_eq!(
+            *services.global_auto_approve_calls.lock().expect("lock"),
+            1,
+            "session handler should read the feature through the narrow facade"
+        );
+        assert!(
+            services
+                .get_operator_config_key_calls
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "session handler must not read arbitrary operator config keys"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_refreshes_global_auto_approve_feature_between_requests() {
+    let services = Arc::new(StubServices::default());
+    let state = WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
+    let router = webui_v2_router(state)
+        .layer(axum::Extension(caller_for_user("user-alpha")))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = false;
+    let initial = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(initial).await["features"]["global_auto_approve"],
+        false
+    );
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = true;
+    let refreshed = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(refreshed).await["features"]["global_auto_approve"],
+        true,
+        "session bootstrap must reflect the mutable tenant/user settings flag"
+    );
+    assert_eq!(
+        *services.global_auto_approve_calls.lock().expect("lock"),
+        2,
+        "session handler should re-read the mutable flag on each bootstrap request"
+    );
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails() {
+    let services = Arc::new(StubServices::default());
+    *services
+        .next_global_auto_approve_error
+        .lock()
+        .expect("lock") = Some(service_unavailable_error(false));
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
+    let services = Arc::new(StubServices::default());
+    *services.stall_global_auto_approve.lock().expect("lock") = true;
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
+}
+
 #[tokio::test]
 async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
@@ -2434,7 +3049,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2504,6 +3119,8 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     );
     assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
     assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    assert!(operator_log_calls[0].follow);
+    assert!(!operator_log_calls[0].tail);
     drop(operator_log_calls);
     assert_eq!(
         services
@@ -2516,7 +3133,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
 }
 
 #[tokio::test]
-async fn operator_routes_require_operator_capability() {
+async fn operator_config_routes_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
 
@@ -2554,6 +3171,368 @@ async fn operator_routes_require_operator_capability() {
             .expect("lock")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_do_not_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        1
+    );
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" })
+            )
+        ]
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_caller_only(services.clone());
+
+    for (method, uri, body) in [
+        (Method::GET, "/api/webchat/v2/settings/tools", ""),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools",
+            r#"{"enabled":true}"#,
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools/ext.search",
+            r#"{"state":"always_allow"}"#,
+        ),
+    ] {
+        let mut request = Request::builder().method(method).uri(uri);
+        if !body.is_empty() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body)).expect("request"))
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        0
+    );
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_expose_only_tool_approval_config() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true),
+            ),
+            operator_config_entry(
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" }),
+            ),
+            operator_config_entry("provider.default".to_string(), serde_json::json!("openai")),
+            operator_config_entry("secret.api_key".to_string(), serde_json::json!("redacted")),
+        ]);
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let keys = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["key"].as_str().expect("key"))
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["agent.auto_approve_tools", "tool.ext.search"]);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"disabled"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(false)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "disabled" })
+            )
+        ],
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_writes_fail_closed_when_config_service_unwired() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_operator_config_key(service_unavailable_error(false));
+    let router = router_with_capabilities(services, WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn settings_tool_permission_rejects_invalid_state_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"sometimes"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_permission_rejects_overlong_capability_id_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+    let capability_id = "x".repeat(125);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/webchat/v2/settings/tools/{capability_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "capability_id");
+    assert_eq!(body["validation_code"], "too_long");
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn operator_logs_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services
+            .query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn logs_are_available_without_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let log_calls = services.query_logs_calls.lock().expect("lock");
+    assert_eq!(log_calls.len(), 1);
+    assert_eq!(log_calls[0].limit, Some(25));
+    assert_eq!(log_calls[0].cursor.as_deref(), Some("after-1"));
+    assert_eq!(log_calls[0].thread_id.as_deref(), Some("thread-a"));
+    assert_eq!(log_calls[0].run_id.as_deref(), Some("run-a"));
+    assert_eq!(log_calls[0].turn_id.as_deref(), Some("turn-a"));
+    assert_eq!(log_calls[0].tool_call_id.as_deref(), Some("tool-a"));
+    assert_eq!(log_calls[0].tool_name.as_deref(), Some("shell"));
+    assert_eq!(log_calls[0].source.as_deref(), Some("slack"));
+    assert!(log_calls[0].follow);
+    assert!(!log_calls[0].tail);
+}
+
+#[tokio::test]
+async fn logs_reject_ambiguous_tail_follow_modes() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?tail=true&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "follow");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -3759,6 +4738,7 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_detail: None,
             subtitle: None,
             input_summary: None,
             updated_at: chrono::Utc::now(),

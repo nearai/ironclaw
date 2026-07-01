@@ -56,7 +56,11 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChat({ hookState, activeThreadId = "thread-1" }) {
+function renderChat({
+  hookState,
+  activeThreadId = "thread-1",
+  globalAutoApproveEnabled = false,
+}) {
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -66,6 +70,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ConnectionStatus() {},
     EmptyState() {},
     KeyboardShortcuts() {},
+    Link() {},
     MessageList() {},
     RecoveryNotice() {},
     SuggestionChips() {},
@@ -77,20 +82,13 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useCallback: (fn) => fn,
       useEffect: () => {},
       useMemo: (fn) => fn(),
+      useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
     },
+    NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
-    buildScopedLogsPath: (
-      { threadId, runId } = {},
-      { absolute = false } = {},
-    ) => {
-      const params = [];
-      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
-      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
-      const query = params.length > 0 ? `?${params.join("&")}` : "";
-      return `${absolute ? "/v2" : ""}/logs${query}`;
-    },
     buildRuntimeContext: () => ({}),
+    buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: () => {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -101,11 +99,12 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
 
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
-    threads: [{ id: activeThreadId }],
+    threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
+    globalAutoApproveEnabled,
   });
   return { tree, components };
 }
@@ -142,6 +141,72 @@ test("Chat cancel button routes through active thread run cancellation", async (
   assert.deepEqual(cancelReasons, ["user_requested"]);
 });
 
+test("Chat leaves the composer editable while a run is processing", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(props.disabled, false);
+  assert.equal(props.sendDisabled, true);
+});
+
+test("Chat refuses composer sends while a run is processing", async () => {
+  let sendCalls = 0;
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => {
+        sendCalls += 1;
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  const response = await props.onSend("draft while busy");
+
+  assert.equal(response, null);
+  assert.equal(sendCalls, 0);
+});
+
 test("Chat cancel button ignores active runs from another thread", () => {
   const { tree, components } = renderChat({
     hookState: {
@@ -171,7 +236,7 @@ test("Chat cancel button ignores active runs from another thread", () => {
   assert.equal(props.canCancel, false);
 });
 
-test("Chat keeps composer cancel disabled while a gate owns the run decision", () => {
+test("Chat keeps composer send blocked while a gate owns the run decision", async () => {
   const pendingGate = {
     kind: "gate",
     requestId: "request-1",
@@ -179,6 +244,7 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
     description: "",
     parameters: "",
   };
+  let sendCount = 0;
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -191,7 +257,10 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
       cooldownSeconds: 0,
       recoveryNotice: null,
       activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
-      send: async () => ({}),
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
       cancelRun: async () => {},
       retryMessage: () => {},
       approve: () => {},
@@ -205,6 +274,58 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+  assert.equal(props.sendDisabled, true);
+  assert.equal(
+    props.statusText,
+    "Resolve the approval request before sending another message.",
+  );
+  await assert.rejects(
+    props.onSend("draft while approval is open"),
+    /Resolve the approval request before sending another message/,
+  );
+  assert.equal(sendCount, 0);
+});
+
+test("Chat keeps the new-conversation composer sendable while a prior run is settling", async () => {
+  let sentBody = null;
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    hookState: {
+      messages: [],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async (content, options) => {
+        sentBody = { content, options };
+        return { thread_id: "thread-2" };
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const props = componentProps(emptyState, components.EmptyState);
+  assert.equal(props.sendDisabled, false);
+  assert.equal(props.canCancel, false);
+
+  await props.onSend("hi how are you");
+
+  assert.equal(sentBody.content, "hi how are you");
+  assert.equal(sentBody.options.threadId, null);
+  assert.equal(sentBody.options.images.length, 0);
+  assert.equal(sentBody.options.attachments.length, 0);
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
@@ -214,7 +335,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       messages: [],
       isProcessing: false,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -231,7 +351,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -243,13 +362,12 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
-test("Chat links to scoped logs for the active thread run", () => {
-  const { tree } = renderChat({
+test("Chat does not render a top-level logs header for the active thread run", () => {
+  const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -265,16 +383,29 @@ test("Chat links to scoped logs for the active thread run", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
-  const logsLink = findNode(tree, (node) =>
-    node.strings.some((part) => part.includes("<a") && part.includes("href=")),
+  assert.equal(
+    findComponent(tree, components.Link),
+    null,
+    "active chat should not render an extra run logs router link outside message actions",
   );
-  assert.ok(logsLink, "active chat should render a scoped logs link");
-  assert.ok(logsLink.values.includes("/v2/logs?thread_id=thread-1&run_id=run-1"));
-  assert.ok(logsLink.values.includes("nav.logs"));
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).logsPath,
+    "/logs?thread_id=thread-1",
+    "chat should pass a prebuilt thread-scoped logs path down to MessageList",
+  );
+  assert.equal(
+    findNode(tree, (node) =>
+      node.strings.some((part) =>
+        part.includes("justify-end border-b border-[var(--v2-panel-border)]")
+      )
+    ),
+    null,
+    "active run logs link should not render as a duplicate top header bar",
+  );
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {
@@ -311,6 +442,7 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
 
   const approvalCard = findComponent(tree, components.ApprovalCard);
   const props = componentProps(approvalCard, components.ApprovalCard);
+  assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
 });

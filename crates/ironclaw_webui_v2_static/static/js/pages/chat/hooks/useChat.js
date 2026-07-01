@@ -5,11 +5,6 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
-import {
-  listConnectableChannels,
-  looksLikeChannelConnectCommand,
-  resolveChannelConnectCommand,
-} from "../../../lib/channel-connect.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
@@ -17,6 +12,7 @@ import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
+  timelineMessageIdFromAcceptedRef,
 } from "../lib/pending-messages.js";
 import {
   createToolActivityState,
@@ -30,6 +26,7 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -51,12 +48,25 @@ function credentialStoredGateResolutionError(cause) {
   return error;
 }
 
+function approvalGatePendingSendError() {
+  const error = new Error(
+    "Resolve the approval request before sending another message.",
+  );
+  error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
+  return error;
+}
+
 function threadNeedsSidebarRefresh(threadId) {
   const cached = queryClient.getQueryData?.(["threads"]);
   const threads = cached?.threads;
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
+}
+
+function busyNoticeKey(threadId, gate) {
+  if (!threadId || !gate?.runId || !gate?.gateRef) return null;
+  return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -102,21 +112,6 @@ function parseOAuthCallbackStoragePayload(value) {
   }
 }
 
-async function resolveConnectAction(content) {
-  if (!looksLikeChannelConnectCommand(content)) return null;
-  try {
-    const channelsResponse = await queryClient.fetchQuery({
-      queryKey: ["connectable-channels"],
-      queryFn: listConnectableChannels,
-    });
-    const channels = channelsResponse?.channels || [];
-    return resolveChannelConnectCommand(content, channels);
-  } catch (err) {
-    console.error("Failed to resolve connectable channels:", err);
-    return null;
-  }
-}
-
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -124,6 +119,7 @@ async function resolveConnectAction(content) {
 //   a v1-style `requestId`.
 // - cancelRun is a first-class action and posts to the v2 cancel route.
 export function useChat(threadId) {
+  const threadIdRef = React.useRef(threadId);
   const pendingMessagesRef = React.useRef(new Map());
   const pendingSeqRef = React.useRef(1);
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
@@ -144,8 +140,6 @@ export function useChat(threadId) {
   React.useEffect(() => {
     activeRunRef.current = activeRun;
   }, [activeRun]);
-  const [channelConnectAction, setChannelConnectAction] = React.useState(null);
-
   const getPendingMessages = React.useCallback(
     () => pendingMessagesRef.current.get(threadId || "__new__") || [],
     [threadId],
@@ -169,11 +163,29 @@ export function useChat(threadId) {
     isLoading: historyLoading,
     loadError: historyLoadError,
     loadHistory,
+    seedThreadMessages,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
-  const [isProcessing, setIsProcessing] = React.useState(false);
-  const [pendingGate, setPendingGate] = React.useState(null);
+  const [isProcessing, setIsProcessingState] = React.useState(false);
+  const isProcessingRef = React.useRef(isProcessing);
+  const setIsProcessing = React.useCallback((next) => {
+    const value =
+      typeof next === "function" ? next(isProcessingRef.current) : next;
+    isProcessingRef.current = value;
+    setIsProcessingState(value);
+  }, []);
+  const [pendingGate, setPendingGateState] = React.useState(null);
+  const pendingGateRef = React.useRef(pendingGate);
+  const [busyGateNotice, setBusyGateNotice] = React.useState(null);
+  const setPendingGate = React.useCallback((next) => {
+    const current = pendingGateRef.current;
+    const value =
+      typeof next === "function" ? next(current) : next;
+    if (Object.is(value, current)) return;
+    pendingGateRef.current = value;
+    setPendingGateState(value);
+  }, []);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
@@ -182,6 +194,8 @@ export function useChat(threadId) {
     credentialRef: null,
     inFlight: false,
   });
+  const submitBusyRef = React.useRef(false);
+  const localRunAdmissionRef = React.useRef(null);
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -212,11 +226,37 @@ export function useChat(threadId) {
   // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
-    setIsProcessing(false);
-    setPendingGate(null);
+    setIsProcessingState(false);
+    setPendingGateState(null);
+    setBusyGateNotice(null);
     setActiveRunState(null);
-    setChannelConnectAction(null);
   }
+
+  React.useEffect(() => {
+    threadIdRef.current = threadId;
+  }, [threadId]);
+  React.useEffect(
+    () => () => {
+      if (localRunAdmissionRef.current?.threadId === threadId) {
+        localRunAdmissionRef.current = null;
+      }
+    },
+    [threadId],
+  );
+
+  React.useEffect(() => {
+    pendingGateRef.current = pendingGate;
+  }, [pendingGate]);
+  React.useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
+
+  React.useEffect(() => {
+    const currentKey = busyNoticeKey(threadId, pendingGate);
+    setBusyGateNotice((current) =>
+      current && current.gateKey !== currentKey ? null : current,
+    );
+  }, [pendingGate, threadId]);
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
@@ -307,8 +347,26 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      const localRunAdmission = localRunAdmissionRef.current;
+      if (localRunAdmission?.runId === _runId) {
+        localRunAdmissionRef.current = null;
+      } else if (_runId && localRunAdmission && !localRunAdmission.runId) {
+        // The terminal SSE can arrive before the POST response exposes run_id.
+        localRunAdmissionRef.current = {
+          ...localRunAdmission,
+          runId: _runId,
+          settledBeforeResponse: true,
+        };
+      }
+      // submitBusyRef is released by send()'s `finally` when the POST settles —
+      // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
+      // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
       if (success) setPendingMessages([]);
-      loadHistory(undefined, { preserveClientOnly: true });
+      loadHistory(undefined, {
+        preserveClientOnly: true,
+        finalReplyTimestampByRun:
+          _runId && success ? { [_runId]: new Date().toISOString() } : null,
+      });
     },
   });
 
@@ -333,22 +391,50 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
-        opts;
+      const {
+        threadId: targetThreadId,
+        attachments: stagedAttachments = [],
+        displayContent,
+      } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
+      const renderContent =
+        typeof displayContent === "string" ? displayContent : content;
 
-      // Channel-connect slash commands ("/connect telegram") never carry
-      // attachments; skip that detection when files are staged so an
-      // upload is never misread as a command and dropped.
-      if (stagedAttachments.length === 0) {
-        const connectable = await resolveConnectAction(content);
-        if (connectable) {
-          setChannelConnectAction(connectable);
-          return { channel_connect_action: connectable };
-        }
+      if (pendingGate || pendingGateRef.current) {
+        throw approvalGatePendingSendError();
       }
-      setChannelConnectAction(null);
+      // Admission: block a send only when the *destination* thread is the one
+      // that's busy. The destination is `targetThreadId` when the caller names
+      // one, otherwise the open thread (the same `targetThreadId || threadId`
+      // resolved below). BOTH the in-flight-run guard and the viewed-thread
+      // `isProcessing` flag must key on that destination — a running thread
+      // carries both, so narrowing only one still drops a parallel send to
+      // another thread, or a new chat, just because the thread on screen is
+      // running. Keying either guard on the viewed thread (or on the mere
+      // absence of a target) is what broke parallel threads and "new chat
+      // while a run is active".
+      const sendTargetThreadId = targetThreadId || threadId;
+      const activeRunForSend = activeRunRef.current;
+      const activeRunBlocksSend =
+        Boolean(activeRunForSend) &&
+        Boolean(sendTargetThreadId) &&
+        activeRunForSend.threadId === sendTargetThreadId;
+      const processingBlocksSend =
+        isProcessingRef.current &&
+        Boolean(sendTargetThreadId) &&
+        sendTargetThreadId === threadId;
+      const localRunBlocksSend =
+        Boolean(sendTargetThreadId) &&
+        localRunAdmissionRef.current?.threadId === sendTargetThreadId;
+      if (
+        submitBusyRef.current ||
+        processingBlocksSend ||
+        activeRunBlocksSend ||
+        localRunBlocksSend
+      ) {
+        return null;
+      }
 
       let sendThreadId = targetThreadId || threadId;
 
@@ -365,28 +451,58 @@ export function useChat(threadId) {
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
-        content,
+        content: renderContent,
         attachments: renderAttachments,
+        retryContent: content,
+        retryDisplayContent: renderContent,
+        retryAttachments: stagedAttachments,
         timestamp: new Date().toISOString(),
+        isOptimistic: true,
+      };
+      const pendingRenderMessage = {
+        id: pendingRecord.id,
+        role: "user",
+        content: renderContent,
+        attachments: renderAttachments,
+        retryContent: content,
+        retryDisplayContent: renderContent,
+        retryAttachments: stagedAttachments,
+        timestamp: pendingRecord.timestamp,
         isOptimistic: true,
       };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
       const optimisticId = pendingRecord.id;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: optimisticId,
-          role: "user",
-          content,
-          attachments: renderAttachments,
-          timestamp: pendingRecord.timestamp,
-          isOptimistic: true,
-        },
-      ]);
+      const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
+      const updateCurrentThread = (updater) => {
+        if (shouldRenderInCurrentThread) setMessages(updater);
+      };
+      const updateSeededTarget = (updater) => {
+        if (sendThreadId !== threadId) seedThreadMessages(sendThreadId, updater);
+      };
+      const updateCurrentRunState = (updater) => {
+        if (shouldRenderInCurrentThread) updater();
+      };
+      // Only the rendered thread has an SSE settle path in this hook. Background
+      // target sends are left to the server's rejected_busy response instead.
+      const shouldTrackLocalRun = shouldRenderInCurrentThread;
+      if (shouldTrackLocalRun) {
+        localRunAdmissionRef.current = {
+          threadId: sendThreadId,
+          runId: null,
+          settledBeforeResponse: false,
+        };
+      }
+      submitBusyRef.current = true;
+      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
+      updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
 
-      setIsProcessing(true);
-      setPendingGate(null);
+      updateCurrentRunState(() => {
+        setIsProcessing(true);
+        if (!pendingGateRef.current) {
+          setPendingGate(null);
+        }
+      });
 
       try {
         const response = await sendMessage({
@@ -400,7 +516,32 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id) {
+        let runSettledBeforeResponse = false;
+        if (response?.run_id && shouldTrackLocalRun) {
+          const localRunAdmission = localRunAdmissionRef.current;
+          runSettledBeforeResponse = Boolean(
+            localRunAdmission &&
+              localRunAdmission.threadId === sendThreadId &&
+              localRunAdmission.runId === response.run_id &&
+              localRunAdmission.settledBeforeResponse,
+          );
+          if (runSettledBeforeResponse) {
+            localRunAdmissionRef.current = null;
+          } else {
+            localRunAdmissionRef.current = {
+              threadId: sendThreadId,
+              runId: response.run_id,
+              settledBeforeResponse: false,
+            };
+          }
+        } else if (shouldTrackLocalRun) {
+          localRunAdmissionRef.current = null;
+        }
+        if (
+          response?.run_id &&
+          shouldRenderInCurrentThread &&
+          !runSettledBeforeResponse
+        ) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -408,51 +549,88 @@ export function useChat(threadId) {
             source: "local",
           });
         }
-        const timelineMessageId = recordAcceptedMessageRef(
-          pendingMessagesRef.current,
-          pendingKey,
-          optimisticId,
-          response?.accepted_message_ref,
-        );
+        const timelineMessageId =
+          recordAcceptedMessageRef(
+            pendingMessagesRef.current,
+            pendingKey,
+            optimisticId,
+            response?.accepted_message_ref,
+          ) || timelineMessageIdFromAcceptedRef(response?.accepted_message_ref);
         if (timelineMessageId) {
-          setMessages((prev) =>
+          const markAccepted = (prev) =>
             prev.map((m) =>
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
-            ),
-          );
+            );
+          updateCurrentThread(markAccepted);
+          updateSeededTarget(markAccepted);
         }
         // When the thread was busy, the message is rejected (not deferred).
         // Mark the optimistic user message as failed and display the
         // server's notice (if present) as a system message so the user
         // knows to resend.
         if (response?.outcome === "rejected_busy") {
-          setMessages((prev) =>
+          if (shouldTrackLocalRun) {
+            localRunAdmissionRef.current = null;
+          }
+          const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
                 ? { ...m, isOptimistic: false, status: "error" }
                 : m,
-            ),
-          );
+            );
+          updateCurrentThread(markRejected);
+          updateSeededTarget(markRejected);
           if (response?.notice) {
-            setMessages((prev) => [
-              ...prev,
-              {
+            const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
+              const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
                 role: "system",
                 content: response.notice,
                 timestamp: new Date().toISOString(),
                 isOptimistic: false,
-              },
-            ]);
+              };
+              const appendNotice = (prev) => [
+                ...prev,
+                noticeMessage,
+              ];
+              if (renderCurrent) setMessages(appendNotice);
+              if (!renderCurrent || sendThreadId !== threadId) {
+                seedThreadMessages(sendThreadId, appendNotice);
+              }
+            };
+            const liveShouldRenderInCurrentThread =
+              !threadIdRef.current || threadIdRef.current === sendThreadId;
+            if (liveShouldRenderInCurrentThread) {
+              const currentNoticeKey = busyNoticeKey(sendThreadId, pendingGateRef.current);
+              if (currentNoticeKey) {
+                setBusyGateNotice({
+                  gateKey: currentNoticeKey,
+                  content: response.notice,
+                });
+              } else {
+                appendSystemNotice();
+              }
+            } else {
+              appendSystemNotice(false);
+            }
           }
-          setIsProcessing(false);
+          updateCurrentRunState(() => setIsProcessing(false));
+          submitBusyRef.current = false;
+        } else if (!response?.run_id) {
+          if (shouldTrackLocalRun) {
+            localRunAdmissionRef.current = null;
+          }
+          submitBusyRef.current = false;
         }
         return response;
       } catch (err) {
+        if (shouldTrackLocalRun) {
+          localRunAdmissionRef.current = null;
+        }
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        setMessages((prev) =>
+        const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
               ? {
@@ -462,11 +640,27 @@ export function useChat(threadId) {
                   error: err.message,
                 }
               : m,
-          ),
-        );
-        setIsProcessing(false);
+          );
+        updateCurrentThread(markFailed);
+        updateSeededTarget(markFailed);
+        updateCurrentRunState(() => setIsProcessing(false));
+        submitBusyRef.current = false;
+        if (err && typeof err === "object") {
+          err.optimisticMessageId = optimisticId;
+          err.optimisticThreadId = sendThreadId;
+        }
         throw err;
       } finally {
+        // Release the re-entrancy guard once the send POST settles — that is
+        // the window it exists to protect (one in-flight submit at a time).
+        // It must NOT stay held until the run settles: clearing it only in
+        // `onRunSettled` (delivered over the *current* thread's SSE) deadlocks
+        // the moment the user navigates to a new chat while a run is in
+        // flight — that thread's SSE is torn down, its settle event never
+        // arrives, the guard stays `true`, and every later send is silently
+        // dropped. Blocking a resubmit into a still-running thread is the job
+        // of the per-destination run guards above, not this.
+        submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
         // failure we mark the optimistic with `status: "error"` in
@@ -478,7 +672,15 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, setMessages],
+    [
+      threadId,
+      pendingGate,
+      setMessages,
+      seedThreadMessages,
+      setIsProcessing,
+      setPendingGate,
+      setActiveRun,
+    ],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
@@ -505,7 +707,7 @@ export function useChat(threadId) {
         resolution,
         outcome,
       });
-      if (resolution === "denied" && outcome === "resumed") {
+      if (isDeclinedGateResolution(resolution) && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
       setPendingGate(null);
@@ -613,6 +815,14 @@ export function useChat(threadId) {
       setPendingGate(null);
       setIsProcessing(false);
       setActiveRun(null);
+      submitBusyRef.current = false;
+      const localRunAdmission = localRunAdmissionRef.current;
+      if (
+        localRunAdmission?.runId === runId ||
+        localRunAdmission?.threadId === threadId
+      ) {
+        localRunAdmissionRef.current = null;
+      }
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
@@ -642,18 +852,71 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
-  // Fork chat.js expects these as stubs: v2 stream is deterministic
-  // enough that retry / suggestions / recovery are not necessary in
-  // local-dev. Wire them as no-ops so the chat UI renders without
-  // additional branches.
   const noop = React.useCallback(() => {}, []);
+  const retryMessage = React.useCallback(
+    async (message) => {
+      if (!message || message.status !== "error") return;
+      const content =
+        typeof message.retryContent === "string"
+          ? message.retryContent
+          : typeof message.content === "string"
+            ? message.content
+            : "";
+      const attachments = Array.isArray(message.retryAttachments)
+        ? message.retryAttachments
+        : [];
+      if (!content && attachments.length === 0) return;
+
+      const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
+      const restoreFailedIfNoReplacement = (prev) => {
+        const hasReplacement = prev.some(
+          (item) =>
+            item.id !== message.id &&
+            item.role === "user" &&
+            item.status === "error" &&
+            item.retryContent === content,
+        );
+        return hasReplacement || prev.some((item) => item.id === message.id)
+          ? prev
+          : [...prev, message];
+      };
+      setMessages(removeFailed);
+      if (threadId) seedThreadMessages(threadId, removeFailed);
+      try {
+        const response = await send(content, {
+          threadId,
+          attachments,
+          displayContent:
+            typeof message.retryDisplayContent === "string"
+              ? message.retryDisplayContent
+              : message.content,
+        });
+        if (response === null) {
+          setMessages(restoreFailedIfNoReplacement);
+          if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
+        }
+      } catch (err) {
+        if (err?.optimisticMessageId) {
+          setMessages(removeFailed);
+          if (threadId) seedThreadMessages(threadId, removeFailed);
+          return;
+        }
+        // `send` renders a replacement failed optimistic message after
+        // admission. If admission failed before that point, restore the
+        // original retryable error bubble.
+        setMessages(restoreFailedIfNoReplacement);
+        if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
+      }
+    },
+    [send, seedThreadMessages, setMessages, threadId],
+  );
 
   return {
     // v2-native
     messages,
     isProcessing,
     pendingGate,
-    channelConnectAction,
+    busyGateNotice,
     activeRun,
     sseStatus,
     historyLoading,
@@ -665,15 +928,18 @@ export function useChat(threadId) {
     submitAuthToken,
     cancelRun,
     loadMore,
-    dismissChannelConnectAction: () => setChannelConnectAction(null),
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
-    retryMessage: noop,
+    retryMessage,
     approve,
     recoverHistory: noop,
     recoveryNotice: null,
   };
+}
+
+function isDeclinedGateResolution(resolution) {
+  return resolution === "denied" || resolution === "cancelled";
 }
 
 function retryAfterMs(err) {

@@ -55,6 +55,7 @@ fn make_skill(
         manifest: SkillManifest {
             name: name.to_string(),
             version: "1.0.0".to_string(),
+            auto_activate: true,
             description: format!("{} skill", name),
             activation: ActivationCriteria::default(),
             credentials,
@@ -111,7 +112,7 @@ credentials:
       test_url: "https://www.googleapis.com/oauth2/v1/userinfo"
     setup_instructions: "Enable Gmail API in Google Cloud Console"
 "#;
-    let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+    let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
 
     assert_eq!(manifest.name, "gmail");
     assert_eq!(manifest.credentials.len(), 1);
@@ -174,7 +175,7 @@ credentials:
         extra_params:
           grant_type: refresh_token
 "#;
-    let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+    let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
     assert_eq!(manifest.credentials.len(), 2);
 
     // GitHub: reauthorize_only
@@ -232,7 +233,7 @@ credentials:
       name: access_token
     hosts: ["api.example.com"]
 "#;
-    let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+    let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
     assert_eq!(manifest.credentials.len(), 4);
 
     assert!(matches!(
@@ -618,7 +619,7 @@ credentials:
         strategy: reauthorize_only
     setup_instructions: "Create a PAT at https://github.com/settings/tokens"
 "#;
-    let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+    let manifest: SkillManifest = serde_norway::from_str(yaml).expect("parse failed");
 
     // Step 2: Validate
     for spec in &manifest.credentials {

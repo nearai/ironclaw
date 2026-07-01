@@ -165,10 +165,11 @@ export function createThread({ clientActionId: clientId, requestedThreadId, proj
   });
 }
 
-export function listThreads({ limit, cursor } = {}) {
+export function listThreads({ limit, cursor, projectId } = {}) {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
+  if (projectId) url.searchParams.set("project_id", projectId);
   return apiFetch(url.pathname + url.search);
 }
 
@@ -221,12 +222,40 @@ export function projectFileContentUrl({ threadId, path } = {}) {
 
 // --- Automations ---
 
-export function listAutomations({ limit, runLimit } = {}) {
+export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
   if (runLimit != null) params.set("run_limit", String(runLimit));
+  if (includeCompleted === true) params.set("include_completed", "true");
   const query = params.toString();
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
+}
+
+export function pauseAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/pause`, {
+    method: "POST",
+  });
+}
+
+export function resumeAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/resume`, {
+    method: "POST",
+  });
+}
+
+export function deleteAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
+    method: "DELETE",
+  });
 }
 
 // --- Projects (first-class entity + membership ACL) ---
@@ -332,6 +361,36 @@ export function setOutboundPreferences({ finalReplyTargetId } = {}) {
 
 // --- Operator logs ---
 
+export function queryLogs({
+  limit,
+  cursor,
+  level,
+  target,
+  threadId,
+  runId,
+  turnId,
+  toolCallId,
+  toolName,
+  source,
+  tail,
+  follow,
+} = {}) {
+  const url = new URL(`${V2_BASE}/logs`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  if (level) url.searchParams.set("level", level);
+  if (target) url.searchParams.set("target", target);
+  if (threadId) url.searchParams.set("thread_id", threadId);
+  if (runId) url.searchParams.set("run_id", runId);
+  if (turnId) url.searchParams.set("turn_id", turnId);
+  if (toolCallId) url.searchParams.set("tool_call_id", toolCallId);
+  if (toolName) url.searchParams.set("tool_name", toolName);
+  if (source) url.searchParams.set("source", source);
+  if (tail) url.searchParams.set("tail", "true");
+  if (follow) url.searchParams.set("follow", "true");
+  return apiFetch(url.pathname + url.search);
+}
+
 export function queryOperatorLogs({
   limit,
   cursor,
@@ -343,6 +402,8 @@ export function queryOperatorLogs({
   toolCallId,
   toolName,
   source,
+  tail,
+  follow,
 } = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -355,6 +416,8 @@ export function queryOperatorLogs({
   if (toolCallId) url.searchParams.set("tool_call_id", toolCallId);
   if (toolName) url.searchParams.set("tool_name", toolName);
   if (source) url.searchParams.set("source", source);
+  if (tail) url.searchParams.set("tail", "true");
+  if (follow) url.searchParams.set("follow", "true");
   return apiFetch(url.pathname + url.search);
 }
 

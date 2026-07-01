@@ -54,6 +54,40 @@ test("ActivityRun auto-expands running tool activity", () => {
   assert.ok(hasComponentNamed(tree, "ActivityItem"));
 });
 
+test("ActivityRun auto-expands declined tool activity", () => {
+  const context = {
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    Icon() {},
+    MarkdownRenderer() {},
+    React: {
+      useEffect: () => {},
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    summarizeActivity: () => ({
+      label: "Activity - 1 tool, 1 declined",
+      hasError: false,
+      hasDeclined: true,
+    }),
+    ToolActivity() {},
+  };
+
+  vm.runInNewContext(activityRunSourceForTest(), context);
+  const tree = context.globalThis.__testExports.ActivityRun({
+    activity: [
+      {
+        id: "tool-activate",
+        role: "tool_activity",
+        toolName: "extension_activate",
+        toolStatus: "declined",
+      },
+    ],
+  });
+
+  assert.ok(tree.values.includes("true"));
+  assert.ok(hasComponentNamed(tree, "ActivityItem"));
+});
+
 function hasComponentNamed(node, name) {
   if (!node || typeof node !== "object" || !Array.isArray(node.values)) return false;
   if (node.values.some((value) => typeof value === "function" && value.name === name)) {

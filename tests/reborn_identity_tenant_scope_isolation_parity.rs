@@ -5,7 +5,7 @@ mod support;
 
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
@@ -46,7 +46,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "tenant alpha identity reply",
@@ -62,7 +62,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
     )
     .await
     .expect("tenant alpha harness");
-    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "tenant beta identity reply",
@@ -188,10 +188,21 @@ impl TenantIdentityKey {
     }
 }
 
-#[derive(Default)]
 struct TenantIdentitySource {
     identities: RwLock<HashMap<TenantIdentityKey, HostIdentityContextCandidate>>,
     seen: RwLock<Vec<TenantIdentityKey>>,
+    identity_changed: watch::Sender<()>,
+}
+
+impl Default for TenantIdentitySource {
+    fn default() -> Self {
+        let (identity_changed, _) = watch::channel(());
+        Self {
+            identities: RwLock::new(HashMap::new()),
+            seen: RwLock::new(Vec::new()),
+            identity_changed,
+        }
+    }
 }
 
 impl TenantIdentitySource {
@@ -209,6 +220,7 @@ impl TenantIdentitySource {
             },
             candidate,
         );
+        let _ = self.identity_changed.send(());
     }
 
     async fn seen_keys(&self) -> Vec<TenantIdentityKey> {
@@ -236,13 +248,16 @@ impl HostIdentityContextSource for TenantIdentitySource {
                 seen.push(key.clone());
             }
         }
-        self.identities
-            .read()
-            .await
-            .get(&key)
-            .cloned()
-            .map(|candidate| vec![candidate])
-            .ok_or(HostIdentityContextBuildError::SourceUnavailable)
+        let mut changed = self.identity_changed.subscribe();
+        loop {
+            if let Some(candidate) = self.identities.read().await.get(&key).cloned() {
+                return Ok(vec![candidate]);
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| HostIdentityContextBuildError::SourceUnavailable)?;
+        }
     }
 
     async fn resolve_identity_message_content(

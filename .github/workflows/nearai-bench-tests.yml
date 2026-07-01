@@ -28,7 +28,7 @@ permissions:
 jobs:
   parser:
     name: parser regex + guard fixtures
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout

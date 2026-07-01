@@ -105,6 +105,13 @@ fn compose_provider_client_with_runtime(
         clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
         dcr_providers.push(provider);
     }
+    tracing::debug!(
+        provider_count = clients.len(),
+        providers = ?clients.iter().map(|(provider, _)| *provider).collect::<Vec<_>>(),
+        dcr_provider_count = dcr_providers.len(),
+        google_gate_provider_count = gate_providers.len(),
+        "product-auth OAuth provider clients composed"
+    );
     let dcr_registry =
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
     let gate_registry = (!gate_providers.is_empty())
@@ -175,10 +182,14 @@ impl MultiplexAuthProviderClient {
     }
 
     fn client_for(&self, provider: &str) -> Result<Arc<dyn AuthProviderClient>, AuthProductError> {
-        self.providers
-            .get(provider)
-            .cloned()
-            .ok_or(AuthProductError::BackendUnavailable)
+        self.providers.get(provider).cloned().ok_or_else(|| {
+            tracing::warn!(
+                provider,
+                configured_providers = ?self.providers.keys().collect::<Vec<_>>(),
+                "product-auth OAuth provider client is not configured"
+            );
+            AuthProductError::BackendUnavailable
+        })
     }
 }
 
@@ -399,6 +410,7 @@ mod tests {
                 resource_scope,
                 old_refresh.clone(),
                 SecretString::from("stored-google-refresh".to_string()),
+                None,
             )
             .await
             .expect("seed refresh token");
@@ -487,7 +499,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn composed_google_provider_marks_refresh_failed_on_non_200_token_response() {
+    async fn composed_google_provider_marks_revoked_on_invalid_grant_token_response() {
+        // A3: invalid_grant responses must set status Revoked (permanent revocation),
+        // not RefreshFailed (transient). The original test used the same body but
+        // expected RefreshFailed — updated to reflect the new classification.
         let egress = Arc::new(RecordingEgress::with_status(
             400,
             br#"{"error":"invalid_grant"}"#.to_vec(),
@@ -502,6 +517,7 @@ mod tests {
                 resource_scope,
                 old_refresh.clone(),
                 SecretString::from("stored-google-refresh".to_string()),
+                None,
             )
             .await
             .expect("seed refresh token");
@@ -548,14 +564,19 @@ mod tests {
         assert!(!report.refreshed);
         assert_eq!(
             report.account.status,
-            CredentialAccountStatus::RefreshFailed
+            CredentialAccountStatus::Revoked,
+            "invalid_grant must produce Revoked status (permanent revocation, not transient failure)"
         );
         let stored = shared
             .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
             .await
             .expect("lookup")
             .expect("failed refresh account");
-        assert_eq!(stored.status, CredentialAccountStatus::RefreshFailed);
+        assert_eq!(
+            stored.status,
+            CredentialAccountStatus::Revoked,
+            "stored account must reflect Revoked status after invalid_grant"
+        );
         assert_eq!(stored.access_secret, Some(old_access));
         assert_eq!(stored.refresh_secret, Some(old_refresh));
         assert_eq!(

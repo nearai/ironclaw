@@ -15,7 +15,9 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -48,7 +50,11 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let temp = tempfile::tempdir().unwrap();
     let engine_root = temp.path().join("engine");
     let event_root = temp.path().join("events");
-    let first = durable_services(&engine_root, &event_root).await;
+    // Shared backend gives all three service-graph instances visibility into
+    // the same run-state and approval-request records, mirroring durability
+    // that production gets from the database-backed filesystem.
+    let shared_run_state = Arc::new(InMemoryBackend::new());
+    let first = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     let first_runtime = first.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants_for_scope(sample_scope(InvocationId::new()));
     let scope = context.resource_scope.clone();
@@ -70,7 +76,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     )
     .await;
 
-    let second = durable_services(&engine_root, &event_root).await;
+    let second = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     assert_blocked_run(
         second.run_state.as_ref(),
         &scope,
@@ -121,7 +127,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         CapabilityLeaseStatus::Consumed
     );
 
-    let third = durable_services(&engine_root, &event_root).await;
+    let third = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     let completed_run = third
         .run_state
         .get(&scope, context.invocation_id)
@@ -138,6 +144,157 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
             .status,
         CapabilityLeaseStatus::Consumed,
         "consumed lease state must survive restart"
+    );
+
+    let replay = third
+        .events
+        .events
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    let kinds = replay
+        .entries
+        .iter()
+        .map(|entry| entry.record.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+
+    let second_resume = third
+        .services
+        .host_runtime_for_local_testing()
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            json!({"message": "restart approval"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+}
+
+/// PR #5234 review (Medium): the test above shares one `Arc<InMemoryBackend>`
+/// across all three `durable_services` calls, so it never actually reopens
+/// the run-state/approval backend — it only rebuilds the service graph
+/// around a still-live in-memory store. This test proves the CAS-migrated
+/// run-state/approval records survive a *real* durable backend reopen by
+/// pointing each service-graph rebuild at a fresh `LibSqlRootFilesystem`
+/// opened over the same on-disk libSQL file, mirroring
+/// `libsql_root()` in
+/// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine_root = temp.path().join("engine");
+    let event_root = temp.path().join("events");
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state.db");
+
+    let first = durable_services_with_libsql_run_state(&engine_root, &event_root, &db_path).await;
+    let first_runtime = first.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants_for_scope(sample_scope(InvocationId::new()));
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "restart approval"});
+
+    let gate = block_for_approval(
+        &first_runtime,
+        context.clone(),
+        estimate.clone(),
+        input.clone(),
+    )
+    .await;
+    assert_blocked_run(
+        first.run_state.as_ref(),
+        &scope,
+        context.invocation_id,
+        gate.approval_request_id,
+    )
+    .await;
+
+    let second = durable_services_with_libsql_run_state(&engine_root, &event_root, &db_path).await;
+    assert_blocked_run(
+        second.run_state.as_ref(),
+        &scope,
+        context.invocation_id,
+        gate.approval_request_id,
+    )
+    .await;
+    assert!(
+        second
+            .approval_requests
+            .get(&scope, gate.approval_request_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "pending approval must be readable after durable libsql reopen"
+    );
+    let lease =
+        approve_dispatch_for_services(&second.services, &scope, gate.approval_request_id).await;
+
+    let resumed = second
+        .services
+        .host_runtime_for_local_testing()
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match resumed {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, input);
+        }
+        other => panic!("expected completed resume outcome, got {other:?}"),
+    }
+    assert_eq!(
+        second
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Consumed
+    );
+
+    let third = durable_services_with_libsql_run_state(&engine_root, &event_root, &db_path).await;
+    let completed_run = third
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .expect("run state must survive durable libsql reopen");
+    assert_eq!(completed_run.status, RunStatus::Completed);
+    assert_eq!(
+        third
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Consumed,
+        "consumed lease state must survive durable libsql reopen"
     );
 
     let replay = third
@@ -334,21 +491,58 @@ type DurableHostRuntimeServices = HostRuntimeServices<
     FilesystemProcessResultStore<LocalFilesystem>,
 >;
 
-struct DurableServices {
+struct DurableServices<F = InMemoryBackend>
+where
+    F: RootFilesystem,
+{
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<LocalFilesystem>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<LocalFilesystem>>,
+    run_state: Arc<FilesystemRunStateStore<F>>,
+    approval_requests: Arc<FilesystemApprovalRequestStore<F>>,
     capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
     events: RebornEventStores,
 }
 
-async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServices {
+/// Build a [`ScopedFilesystem`] wrapping a run-state/approval-request
+/// backend, generic over the backend type so the same mount shape can be
+/// reused for the shared in-memory backend (service-graph-restart coverage)
+/// and a real durable backend like [`LibSqlRootFilesystem`] (durable-reopen
+/// coverage). `LocalFilesystem` rejects the record-shaped entries
+/// (`entry.kind = Some(RecordKind::new(…))`) these stores write, so callers
+/// must pick a backend whose `BackendCapabilities` accept them.
+fn scoped_run_state_filesystem<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/run-state").unwrap(),
+                VirtualPath::new("/run-state").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/approvals").unwrap(),
+                VirtualPath::new("/approvals").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
+        ])
+        .unwrap(),
+    ))
+}
+
+async fn durable_services(
+    engine_root: &Path,
+    event_root: &Path,
+    shared_run_state_backend: Arc<InMemoryBackend>,
+) -> DurableServices<InMemoryBackend> {
     let event_stores = jsonl_event_stores(event_root).await;
-    // All three filesystem-backed stores now take `Arc<ScopedFilesystem<F>>`
-    // (run_state migrated in commit 475588153; capability lease in 34e3c68cb).
     let scoped_fs = scoped_engine_filesystem(engine_root);
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped_fs)));
+    let run_state_fs = scoped_run_state_filesystem(shared_run_state_backend);
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &run_state_fs,
+    )));
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
@@ -366,6 +560,60 @@ async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServi
         capability_leases,
         events: event_stores,
     }
+}
+
+/// Durable-libSQL sibling of `durable_services`: instead of sharing one live
+/// `Arc<InMemoryBackend>` across service-graph rebuilds, this opens a fresh
+/// [`LibSqlRootFilesystem`] over the same on-disk `db_path` on every call —
+/// proving run-state/approval CAS records actually survive a real backend
+/// reopen, not just a service-graph rebuild around a still-live store.
+/// Mirrors `libsql_root()` in
+/// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
+#[cfg(feature = "libsql")]
+async fn durable_services_with_libsql_run_state(
+    engine_root: &Path,
+    event_root: &Path,
+    db_path: &Path,
+) -> DurableServices<LibSqlRootFilesystem> {
+    let event_stores = jsonl_event_stores(event_root).await;
+    let scoped_fs = scoped_engine_filesystem(engine_root);
+    let run_state_fs = scoped_libsql_run_state_filesystem(db_path).await;
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &run_state_fs,
+    )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
+    let services = base_services(
+        engine_root,
+        event_stores.clone(),
+        Arc::new(ApprovalThenGrantAuthorizer),
+    )
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases));
+
+    DurableServices {
+        services,
+        run_state,
+        approval_requests,
+        capability_leases,
+        events: event_stores,
+    }
+}
+
+/// Open a fresh [`LibSqlRootFilesystem`] over `db_path`, run migrations, and
+/// mount it with the same `/run-state` + `/approvals` shape as
+/// `scoped_run_state_filesystem`. Called once per simulated process restart
+/// so each call is a real reopen of the on-disk libSQL file, not a
+/// reconnect to a still-live in-process handle.
+#[cfg(feature = "libsql")]
+async fn scoped_libsql_run_state_filesystem(
+    db_path: &Path,
+) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = LibSqlRootFilesystem::new(db);
+    filesystem.run_migrations().await.unwrap();
+    scoped_run_state_filesystem(Arc::new(filesystem))
 }
 
 fn base_services(

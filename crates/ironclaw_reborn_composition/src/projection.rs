@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-#[cfg(test)]
-use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
-    CapabilityActivityStatus, EventProjectionService, ProjectionCursor as EventProjectionCursor,
-    ProjectionReplay, ProjectionScope as EventProjectionScope, ProjectionSnapshot,
-    ReplayEventProjectionService, RunProjectionStatus, RunStatusProjection,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionCursor as EventProjectionCursor, ProjectionReplay,
+    ProjectionScope as EventProjectionScope, ProjectionSnapshot, ReplayEventProjectionService,
+    RunProjectionStatus, RunStatusProjection,
 };
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
@@ -44,9 +43,14 @@ use display_preview::{
     NoopCapabilityDisplayPreviewSource,
 };
 use live_progress::{
-    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
-    product_items_for_live_update,
+    LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
+// Crate-visible under `root-llm-provider` so the skill-learning sink can name
+// the publisher type; otherwise a module-private import for internal use only.
+#[cfg(feature = "root-llm-provider")]
+pub(crate) use live_progress::LiveProjectionPublisher;
+#[cfg(not(feature = "root-llm-provider"))]
+use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
@@ -333,6 +337,7 @@ async fn consume_buffered_runtime_items(
 
 struct WebuiProjectionBatch {
     cursor: WebuiProjectionCursor,
+    pending_runtime_cursor_advance: Option<EventProjectionCursor>,
     runtime_payloads_pushed: usize,
     payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
 }
@@ -341,6 +346,7 @@ impl WebuiProjectionBatch {
     fn new(cursor: WebuiProjectionCursor) -> Self {
         Self {
             cursor,
+            pending_runtime_cursor_advance: None,
             runtime_payloads_pushed: 0,
             payloads: Vec::new(),
         }
@@ -372,7 +378,7 @@ impl WebuiProjectionBatch {
             self.cursor.runtime = Some(max_projection_cursor(final_cursor, item_cursor));
             self.cursor.runtime_item = None;
             self.cursor.runtime_payloads_delivered = 0;
-            self.push(ProductOutboundPayload::KeepAlive);
+            self.push_runtime_or_live(ProductOutboundPayload::KeepAlive);
             return Ok(true);
         }
 
@@ -401,7 +407,7 @@ impl WebuiProjectionBatch {
                 self.cursor.runtime_item = Some(item_cursor.runtime);
                 self.cursor.runtime_payloads_delivered = delivered;
             }
-            self.push(payload);
+            self.push_runtime_or_live(payload);
         }
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
@@ -416,8 +422,42 @@ impl WebuiProjectionBatch {
         }
         self.runtime_payloads_pushed += 1;
         self.cursor.live = Some(cursor);
-        self.push(payload);
+        self.push_runtime_or_live(payload);
         true
+    }
+
+    fn push_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) -> bool {
+        if cursor.runtime.as_u64() == 0 {
+            return true;
+        }
+        if self.runtime_cursor_covers(&cursor) {
+            return true;
+        }
+        self.defer_runtime_cursor_advance(cursor);
+        true
+    }
+
+    fn runtime_cursor_covers(&self, cursor: &EventProjectionCursor) -> bool {
+        self.cursor
+            .runtime
+            .as_ref()
+            .or(self.pending_runtime_cursor_advance.as_ref())
+            .is_some_and(|current| current.runtime >= cursor.runtime)
+    }
+
+    fn defer_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) {
+        self.pending_runtime_cursor_advance = Some(cursor);
+    }
+
+    fn flush_pending_runtime_cursor_advance(&mut self) {
+        let Some(cursor) = self.pending_runtime_cursor_advance.take() else {
+            return;
+        };
+        self.cursor.runtime = Some(cursor);
+        self.cursor.runtime_item = None;
+        self.cursor.runtime_payloads_delivered = 0;
+        self.payloads
+            .push((self.cursor.clone(), ProductOutboundPayload::KeepAlive));
     }
 
     async fn push_runtime_item(
@@ -453,6 +493,9 @@ impl WebuiProjectionBatch {
                 RuntimePayloadItem::Live { cursor, payload } => {
                     return Ok(self.push_live_payload(cursor, payload));
                 }
+                RuntimePayloadItem::CursorAdvance { cursor } => {
+                    return Ok(self.push_runtime_cursor_advance(cursor));
+                }
             }
         }
         Ok(true)
@@ -464,16 +507,22 @@ impl WebuiProjectionBatch {
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
         self.cursor.turn = Some(cursor);
-        self.push(payload);
+        self.push_preserving_runtime_cursor_advance(payload);
     }
 
-    fn push(&mut self, payload: ProductOutboundPayload) {
+    fn push_runtime_or_live(&mut self, payload: ProductOutboundPayload) {
+        self.pending_runtime_cursor_advance = None;
+        self.push_preserving_runtime_cursor_advance(payload);
+    }
+
+    fn push_preserving_runtime_cursor_advance(&mut self, payload: ProductOutboundPayload) {
         self.payloads.push((self.cursor.clone(), payload));
     }
 
     fn into_payloads(
-        self,
+        mut self,
     ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+        self.flush_pending_runtime_cursor_advance();
         self.payloads.into_iter()
     }
 }
@@ -688,6 +737,9 @@ enum RuntimePayloadItem {
         cursor: EventProjectionCursor,
         payload: ProductOutboundPayload,
     },
+    CursorAdvance {
+        cursor: EventProjectionCursor,
+    },
 }
 
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
@@ -727,7 +779,7 @@ async fn snapshot_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -767,7 +819,7 @@ async fn replay_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -886,6 +938,8 @@ async fn runtime_payload_from_candidate(
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             let activity_order = activity.activity_order_cursor().as_u64();
+            let error_detail =
+                capability_activity_runtime_error_detail(&activity, display_previews);
             // Surface the staged input on the still-running activity frame so
             // the row shows `tool   <arg>` (and a populated Parameters tab)
             // live, instead of a bare tool name until the result lands.
@@ -903,6 +957,12 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                // Runtime activity transitions can reach the browser before
+                // the separate display-preview payload is delivered. Prefer
+                // the durable event summary, then fall back to a staged
+                // failure preview so the live card shows the same
+                // host-authored copy as the refresh path.
+                error_detail,
                 subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                 input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,
@@ -1037,11 +1097,13 @@ fn run_status_projection_state(
 }
 
 fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
-    // Runtime replay categories intentionally use the event-projection namespace
-    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
-    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
-    // Both are sanitized product categories; clients must treat the field as an
-    // opaque category and prefer failure_summary for user-facing copy.
+    // `error_kind` is a sanitized product category sourced from the runtime
+    // event log (see `ironclaw_event_projections::apply_run_event`). At
+    // `Failed`/`Killed` status its concrete values are the dispatcher error
+    // codes (`missing_runtime_backend`, `unknown_capability`, ...), the
+    // `LoopFailureKind` codes (`model_error`, `iteration_limit`, ...), or the
+    // process fallback `unknown`. Clients must treat the field as an opaque
+    // category and prefer `failure_summary` for user-facing copy.
     matches!(
         run.status,
         RunProjectionStatus::Failed | RunProjectionStatus::Killed
@@ -1060,15 +1122,31 @@ fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
 }
 
 fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    // `category` comes from `RunStatusProjection.error_kind` (see
+    // `run_failure_category`). The only sanitized value that resolves to a
+    // dedicated message is the process fallback `unknown`; every other
+    // produced value (dispatcher codes, `LoopFailureKind` codes) intentionally
+    // falls through to the generic summary.
     match category {
-        "model_failed" => "The run failed while waiting for the model.",
-        "dispatch_failed" => "The run failed while executing a capability.",
-        "process_failed" => "The run failed while executing a runtime process.",
-        "process_killed" => "The run stopped because its runtime process was killed.",
-        "hook_failed" => "The run failed while evaluating a runtime hook.",
-        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        "unknown" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
+}
+
+fn capability_activity_runtime_error_detail(
+    activity: &CapabilityActivityProjection,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Option<String> {
+    if !matches!(
+        activity.status,
+        CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
+    ) {
+        return None;
+    }
+    activity
+        .error_detail
+        .clone()
+        .or_else(|| display_previews.failure_error_detail(activity))
 }
 
 fn capability_activity_status_wire(

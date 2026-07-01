@@ -35,6 +35,10 @@ const paths = {
 
   pin: html`<path d="M9 3.5h6l-1 5 3 3.5H7l3-3.5-1-5Z" /><path d="M12 15.5V21" />`,
 
+  pause: html`<path d="M8.5 5.5v13" /><path d="M15.5 5.5v13" />`,
+
+  play: html`<path d="M8 5.5 18.5 12 8 18.5V5.5Z" />`,
+
   folder: html`<path
     d="M3.5 7h6.2l1.9 2h8.9v9.2a2.3 2.3 0 0 1-2.3 2.3H5.8a2.3 2.3 0 0 1-2.3-2.3V7Z"
   />`,
@@ -46,6 +50,10 @@ const paths = {
   list: html`<path d="M8.5 6.5h11M8.5 12h11M8.5 17.5h11" /><path
       d="M4.5 6.5h.1M4.5 12h.1M4.5 17.5h.1"
     />`,
+
+  logs: html`<path d="M4.5 5.5h15v13h-15v-13Z" /><path
+      d="m7.5 10 2 2-2 2"
+    /><path d="M11.5 14h4.5" />`,
 
   lock: html`<path d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10" /><path
       d="M5.5 10h13v10.5h-13V10Z"

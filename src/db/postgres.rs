@@ -299,12 +299,6 @@ impl ConversationStore for PgBackend {
             .get_conversation_source_channel(conversation_id)
             .await
     }
-
-    async fn list_external_thread_mappings(
-        &self,
-    ) -> Result<Vec<(Uuid, String, String, String)>, DatabaseError> {
-        self.store.list_external_thread_mappings().await
-    }
 }
 
 // ==================== JobStore ====================

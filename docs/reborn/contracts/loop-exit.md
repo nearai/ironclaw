@@ -1,7 +1,7 @@
 # Reborn Contract — Loop Exit Handshake
 
-**Status:** Contract-freeze draft
-**Date:** 2026-05-06
+**Status:** Contract-freeze draft  
+**Date:** 2026-05-06  
 **Depends on:** [`turn-runner.md`](turn-runner.md), [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md)
 
 ---

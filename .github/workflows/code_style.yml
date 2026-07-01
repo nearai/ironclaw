@@ -29,11 +29,10 @@ env:
 jobs:
   changes:
     name: Detect code changes
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_boundary_check: ${{ steps.non_pr.outputs.has_boundary_check || steps.diff.outputs.has_boundary_check }}
-      has_live_canary_policy: ${{ steps.non_pr.outputs.has_live_canary_policy || steps.diff.outputs.has_live_canary_policy }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
     steps:
       - id: non_pr
@@ -41,7 +40,6 @@ jobs:
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
-          echo "has_live_canary_policy=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -56,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|\.gitignore$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -69,12 +67,6 @@ jobs:
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(\.github/workflows/(code_style|live-canary)\.yml$|scripts/test-live-canary-fork-policy\.sh$)'; then
-            echo "has_live_canary_policy=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_live_canary_policy=false" >> "$GITHUB_OUTPUT"
-          fi
-
           if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
@@ -85,7 +77,7 @@ jobs:
     name: Configure clippy matrix
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -104,7 +96,7 @@ jobs:
     name: Formatting
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -121,7 +113,7 @@ jobs:
     name: Gateway JS syntax
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -140,36 +132,41 @@ jobs:
     name: cargo-deny
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install cargo-deny
-        run: |
-          set -euo pipefail
-          version="0.19.0"
-          install_dir="${RUNNER_TEMP}/cargo-deny-${version}"
-          mkdir -p "${install_dir}"
-          curl --fail --location --silent --show-error \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}/cargo-deny-${version}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C "${install_dir}" --strip-components=1
-          echo "${install_dir}" >> "$GITHUB_PATH"
       - name: Run cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
+
+  tracked-ignored-files:
+    name: Tracked ignored files
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Reject tracked files that match .gitignore
         run: |
-          cargo-deny --version
-          cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features check
+          tracked_ignored="$(git ls-files -ci --exclude-standard)"
+          if [ -n "$tracked_ignored" ]; then
+            echo "Tracked files match .gitignore; remove them from source control or update .gitignore:"
+            printf '%s\n' "$tracked_ignored"
+            exit 1
+          fi
 
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: [changes, clippy-matrix]
     if: needs.changes.outputs.has_code == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
@@ -181,6 +178,13 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
+      - name: Install Node.js for WebUI bundle builds
+        if: contains(matrix.flags, '--all-features')
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
@@ -193,10 +197,10 @@ jobs:
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
     needs: [changes, clippy-matrix]
-    if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push' && github.repository_owner == 'nearai'
+    if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
@@ -208,6 +212,13 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
+      - name: Install Node.js for WebUI bundle builds
+        if: contains(matrix.flags, '--all-features')
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
@@ -219,7 +230,7 @@ jobs:
     name: Reborn CLI smoke tests
     needs: changes
     if: needs.changes.outputs.has_reborn_cli == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -251,7 +262,7 @@ jobs:
     name: No panics in production code
     needs: changes
     if: needs.changes.outputs.has_code == 'true' && github.event_name != 'push'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -270,7 +281,7 @@ jobs:
     name: Gateway platform/feature boundaries
     needs: changes
     if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -284,35 +295,9 @@ jobs:
       - name: Self-test the boundary script
         run: python3 scripts/check_gateway_boundaries.py test
 
-  live-canary-policy-github-hosted:
-    name: Live canary fork policy (GitHub-hosted)
-    needs: changes
-    if: needs.changes.outputs.has_live_canary_policy == 'true' && github.repository_owner != 'enjimi'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Check fork live canary policy
-        run: scripts/test-live-canary-fork-policy.sh
-
-  live-canary-policy-self-hosted:
-    name: Live canary fork policy (self-hosted)
-    needs: changes
-    if: needs.changes.outputs.has_live_canary_policy == 'true' && github.repository_owner == 'enjimi'
-    runs-on: [self-hosted, ci-standard]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Check fork live canary policy
-        run: scripts/test-live-canary-fork-policy.sh
-
   code-style:
     name: Code Style (fmt + clippy)
-    runs-on: [self-hosted, ci-standard]
+    runs-on: ubuntu-latest
     if: always()
     needs:
       - changes
@@ -322,22 +307,13 @@ jobs:
       - clippy
       - clippy-windows
       - deny-check
+      - tracked-ignored-files
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
-      - live-canary-policy-github-hosted
-      - live-canary-policy-self-hosted
     steps:
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
-            if [[ "${{ needs.live-canary-policy-github-hosted.result }}" != "success" && "${{ needs.live-canary-policy-github-hosted.result }}" != "skipped" ]]; then
-              echo "live-canary-policy-github-hosted failed: ${{ needs.live-canary-policy-github-hosted.result }}"
-              exit 1
-            fi
-            if [[ "${{ needs.live-canary-policy-self-hosted.result }}" != "success" && "${{ needs.live-canary-policy-self-hosted.result }}" != "skipped" ]]; then
-              echo "live-canary-policy-self-hosted failed: ${{ needs.live-canary-policy-self-hosted.result }}"
-              exit 1
-            fi
             echo "No code changes — style checks skipped correctly"
             exit 0
           fi
@@ -347,6 +323,7 @@ jobs:
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
+            "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
@@ -359,9 +336,7 @@ jobs:
           for job_result in \
             "no-panics=${{ needs.no-panics.result }}" \
             "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \
-            "clippy-windows=${{ needs.clippy-windows.result }}" \
-            "live-canary-policy-github-hosted=${{ needs.live-canary-policy-github-hosted.result }}" \
-            "live-canary-policy-self-hosted=${{ needs.live-canary-policy-self-hosted.result }}"; do
+            "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then

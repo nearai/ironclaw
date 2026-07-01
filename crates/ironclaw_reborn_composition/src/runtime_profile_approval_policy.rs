@@ -57,6 +57,20 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
         self.exempt_capabilities.contains(capability)
     }
 
+    fn effects_force_approval(&self, effects: &[EffectKind]) -> bool {
+        // Hard floor (#4776): the highest-risk effects always require an
+        // explicit approval gate and can never be auto-approved or satisfied by
+        // a stored always-allow grant — independent of profile or policy. Kept
+        // deliberately narrow so the yolo/Minimal-bypass behaviour for ordinary
+        // write/spawn effects is unchanged.
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                EffectKind::Financial | EffectKind::ModifyApproval | EffectKind::ModifyBudget
+            )
+        })
+    }
+
     fn effects_require_approval(
         &self,
         approval_policy: ApprovalPolicy,
@@ -96,6 +110,28 @@ mod tests {
                 vec![EffectKind::SpawnProcess],
             ),
         )
+    }
+
+    #[test]
+    fn hard_floor_forces_approval_for_high_risk_effects_on_real_policy() {
+        // The production gate policy must hard-floor these even under the most
+        // permissive profile (yolo), so global auto-approve / always-allow can
+        // never bypass them.
+        let p = policy(RuntimeProfile::LocalYolo);
+        for effect in [
+            EffectKind::Financial,
+            EffectKind::ModifyApproval,
+            EffectKind::ModifyBudget,
+        ] {
+            assert!(
+                p.effects_force_approval(&[effect]),
+                "{effect:?} must be hard-floored by the production policy"
+            );
+        }
+        // Ordinary effects and the empty set are not floored.
+        assert!(!p.effects_force_approval(&[EffectKind::WriteFilesystem]));
+        assert!(!p.effects_force_approval(&[EffectKind::SpawnProcess]));
+        assert!(!p.effects_force_approval(&[]));
     }
 
     #[test]

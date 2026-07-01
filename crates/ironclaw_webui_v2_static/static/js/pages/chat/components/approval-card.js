@@ -11,6 +11,7 @@
  * actual persistence scope.
  */
 import { React, html } from "../../../lib/html.js";
+import { Link } from "react-router";
 import { useT } from "../../../lib/i18n.js";
 import { Button } from "../../../design-system/button.js";
 import { Badge } from "../../../design-system/badge.js";
@@ -35,14 +36,26 @@ function approvalPayloadPreview(value, expanded) {
   return `${value.slice(0, APPROVAL_PAYLOAD_PREVIEW_LIMIT).trimEnd()}\n...`;
 }
 
-export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
+export function ApprovalCard({
+  gate,
+  globalAutoApproveEnabled = null,
+  onApprove,
+  onDeny,
+  onAlways,
+}) {
   const t = useT();
   const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
   const [always, setAlways] = React.useState(false);
   const [expandedPayload, setExpandedPayload] = React.useState(false);
+  const [isResolving, setIsResolving] = React.useState(false);
+  const isResolvingRef = React.useRef(false);
+  const currentGateRef = React.useRef(gate);
+  currentGateRef.current = gate;
 
   React.useEffect(() => {
     setExpandedPayload(false);
+    isResolvingRef.current = false;
+    setIsResolving(false);
   }, [gate]);
 
   const risk = React.useMemo(
@@ -52,17 +65,33 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const toolLabel = toolName || t("approval.thisTool");
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
   const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
+  const showGlobalAutoApproveLink =
+    allowAlways && globalAutoApproveEnabled === false;
+
+  const resolve = React.useCallback(async (handler) => {
+    if (isResolvingRef.current) return;
+    const gateAtStart = currentGateRef.current;
+    isResolvingRef.current = true;
+    setIsResolving(true);
+    try {
+      await handler?.();
+    } finally {
+      if (currentGateRef.current === gateAtStart) {
+        isResolvingRef.current = false;
+        setIsResolving(false);
+      }
+    }
+  }, []);
 
   const onPrimary = React.useCallback(() => {
-    if (always && allowAlways) {
-      onAlways?.();
-    } else {
-      onApprove?.();
-    }
-  }, [always, allowAlways, onAlways, onApprove]);
+    resolve(always && allowAlways ? onAlways : onApprove);
+  }, [always, allowAlways, onAlways, onApprove, resolve]);
 
   return html`
-    <div className="mx-auto max-w-lg rounded-xl border border-copper/30 bg-copper/10 p-4">
+    <div
+      data-testid="approval-card"
+      className="mx-auto max-w-lg rounded-xl border border-copper/30 bg-copper/10 p-4"
+    >
       <div className="mb-3 flex items-center gap-2">
         <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-copper/10 text-copper">
           <${Icon} name="lock" className="h-4 w-4" />
@@ -116,17 +145,32 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
             type="checkbox"
             checked=${always}
             onChange=${(event) => setAlways(event.currentTarget.checked)}
+            disabled=${isResolving}
             className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
           />
           ${t("approval.alwaysAllowToolLabel", { tool: toolLabel })}
         </label>
       `}
 
+      ${showGlobalAutoApproveLink &&
+      html`
+        <${Link}
+          to="/settings/tools"
+          className="mb-3 block text-xs font-medium text-[var(--v2-accent-text)] hover:text-[var(--v2-accent)]"
+        >
+          ${t("approval.globalAutoApproveLink")}
+        <//>
+      `}
+
       <div className="flex flex-wrap gap-2">
-        <${Button} variant="primary" onClick=${onPrimary}>
+        <${Button} variant="primary" onClick=${onPrimary} disabled=${isResolving}>
           ${always && allowAlways ? t("approval.approveAndAlways") : t("approval.approve")}
         <//>
-        <${Button} variant="secondary" onClick=${() => onDeny?.()}>
+        <${Button}
+          variant="secondary"
+          onClick=${() => resolve(onDeny)}
+          disabled=${isResolving}
+        >
           ${t("approval.deny")}
         <//>
       </div>

@@ -33,6 +33,8 @@ mod budget;
 mod budget_events;
 mod bundled_skills;
 mod communication_context;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -77,10 +79,13 @@ mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
+mod operator_service_lifecycle;
 mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod product_auth_refresh_lock;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -106,6 +111,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod skill_learning;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
@@ -137,6 +143,8 @@ mod slack_personal_binding_pairing_serve;
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_setup;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trace_capture;
@@ -192,6 +200,7 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
@@ -212,8 +221,9 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
+    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
+    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use nearai_mcp::{
@@ -254,9 +264,10 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
-    TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
@@ -292,9 +303,10 @@ pub use slack_egress::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
+    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
+    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_triggered_run_delivery_hook,
+    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -350,48 +362,73 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
+#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+pub use ironclaw_reborn::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
 /// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
 /// direct `ironclaw_reborn` dependency (the
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
-/// boundary forbids that). The store is a reborn-owned repository;
-/// [`open_local_trigger_access_store`] opens it so the libSQL substrate handle
-/// stays private to this facade and callers never construct one.
+/// boundary forbids that). The store is a reborn-owned repository. Local-dev
+/// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
+/// callers use the filesystem-backed store through the host filesystem
+/// abstraction.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
+    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 
 #[cfg(feature = "webui-v2-beta")]
+struct LocalTriggerAccessFireChecker {
+    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl LocalTriggerAccessFireChecker {
+    fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
+        Self { store }
+    }
+}
+
+/// Wrap a backend-neutral local trigger access store as the runtime fire-time
+/// authorizer.
+#[cfg(feature = "webui-v2-beta")]
+pub fn local_trigger_access_fire_checker(
+    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
+) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
+    std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
+}
+
+#[cfg(feature = "webui-v2-beta")]
 #[async_trait::async_trait]
-impl runtime_input::TriggerFireAccessChecker for RebornLibSqlLocalTriggerAccessStore {
+impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
     async fn check_trigger_fire_access(
         &self,
         request: runtime_input::TriggerFireAccessCheck,
     ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
     {
-        self.has_active_local_access(
-            &request.tenant_id,
-            &request.creator_user_id,
-            request.agent_id.as_ref(),
-            request.project_id.as_ref(),
-        )
-        .await
-        .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
-            reason: error.to_string(),
-        })
-        .map(|allowed| {
-            if allowed {
-                runtime_input::TriggerFireAccessDecision::Allowed
-            } else {
-                runtime_input::TriggerFireAccessDecision::Denied {
-                    reason: "trigger creator does not have active local access for this scope"
-                        .to_string(),
+        self.store
+            .has_active_local_access(
+                &request.tenant_id,
+                &request.creator_user_id,
+                request.agent_id.as_ref(),
+                request.project_id.as_ref(),
+            )
+            .await
+            .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
+                reason: error.to_string(),
+            })
+            .map(|allowed| {
+                if allowed {
+                    runtime_input::TriggerFireAccessDecision::Allowed
+                } else {
+                    runtime_input::TriggerFireAccessDecision::Denied {
+                        reason: "trigger creator does not have active local access for this scope"
+                            .to_string(),
+                    }
                 }
-            }
-        })
+            })
     }
 }
 
@@ -475,9 +512,7 @@ pub async fn open_local_trigger_access_store(
 #[cfg(all(test, feature = "webui-v2-beta"))]
 mod webui_user_access_checker_tests {
     use super::*;
-    use crate::runtime_input::{
-        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    };
+    use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     #[tokio::test]
@@ -504,7 +539,9 @@ mod webui_user_access_checker_tests {
             .await
             .expect("seed local access");
 
-        let allowed = store
+        let checker = local_trigger_access_fire_checker(store);
+
+        let allowed = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id: tenant_id.clone(),
                 creator_user_id: user_id,
@@ -517,7 +554,7 @@ mod webui_user_access_checker_tests {
             .expect("check access");
         assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
 
-        let denied = store
+        let denied = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id,
                 creator_user_id: other_user_id,
@@ -785,6 +822,11 @@ pub(crate) fn slack_host_state_mount_view(
             MountPermissions::read_write_list_delete(),
         ),
         MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
             MountAlias::new("/engine/product_workflow/idempotency")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
@@ -840,6 +882,8 @@ where
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
+    #[error("invalid reborn production configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]
@@ -1037,6 +1081,11 @@ mod mount_view_tests {
                 "/tenant-shared/slack-channel-routes",
                 "/tenant-shared/slack-channel-routes/install/team/route.json",
                 "slack-channel-routes/install/team/route.json",
+            ),
+            (
+                "/tenant-shared/slack-setup",
+                "/tenant-shared/slack-setup/installation.json",
+                "slack-setup/installation.json",
             ),
             (
                 "/engine/product_workflow/idempotency",
@@ -1242,6 +1291,7 @@ mod two_tenant_isolation_tests {
                 scope_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("alice-secret".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1250,6 +1300,7 @@ mod two_tenant_isolation_tests {
                 scope_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bob-secret".to_string()),
+                None,
             )
             .await
             .unwrap();

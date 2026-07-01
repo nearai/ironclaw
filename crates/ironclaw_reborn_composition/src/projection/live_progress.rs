@@ -13,7 +13,7 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
     ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
@@ -119,6 +119,49 @@ impl LiveProjectionPublisher {
         }
     }
 
+    /// Publish a "learned a new skill" live item to the run's thread stream,
+    /// reusing the [`ThreadLiveProjectionItem::SkillActivation`] projection
+    /// (rendered as a chat bubble). Called post-run by the skill-learning sink:
+    /// the in-run [`SkillActivationObserver`] only fires at prompt-build for
+    /// skill *selection*, so a learned-skill notification has no producer
+    /// otherwise. Best-effort — drops silently if names/feedback sanitize empty.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn publish_skill_learned(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        skill_name: &str,
+        feedback: &str,
+    ) {
+        let name = sanitize_bounded_model_visible_text(skill_name, PROJECTION_SKILL_NAME_MAX_BYTES);
+        let note =
+            sanitize_bounded_model_visible_text(feedback, PROJECTION_SKILL_FEEDBACK_MAX_BYTES);
+        if name.is_empty() && note.is_empty() {
+            return;
+        }
+        let sequence = self.next_live_sequence();
+        self.publish_live_item(
+            owner,
+            scope,
+            sequence,
+            ThreadLiveProjectionItem::SkillActivation {
+                id: skill_activation_id(run_id, sequence),
+                run_id,
+                skill_names: if name.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![name]
+                },
+                feedback: if note.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![note]
+                },
+            },
+        );
+    }
+
     /// Build the projection scope for a live item. The stream key is keyed
     /// to the per-run `owner` (the authenticated caller) when one is
     /// threaded through, falling back to the runtime owner only for host
@@ -169,6 +212,7 @@ pub(super) fn product_items_for_live_update(
                 runtime,
                 output_bytes,
                 error_kind,
+                error_detail,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -182,6 +226,7 @@ pub(super) fn product_items_for_live_update(
                     process_id: None,
                     output_bytes: *output_bytes,
                     error_kind: error_kind.clone(),
+                    error_detail: error_detail.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                     input_summary: running.and_then(|input| input.input_summary),
                     updated_at: Utc::now(),
@@ -280,6 +325,7 @@ impl LiveProgressMilestoneSink {
                 runtime: terminal.runtime,
                 output_bytes: terminal.output_bytes,
                 error_kind: terminal.error_kind,
+                error_detail: terminal.error_detail,
             },
         );
     }
@@ -401,6 +447,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: Some(*runtime),
                         output_bytes: Some(*output_bytes),
                         error_kind: None,
+                        error_detail: None,
                     },
                 );
             }
@@ -410,6 +457,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 self.publish_capability_activity(
                     &milestone,
@@ -421,6 +469,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: *runtime,
                         output_bytes: None,
                         error_kind: Some(reason_kind.as_str().to_string()),
+                        error_detail: sanitized_capability_error_detail(
+                            safe_summary.as_ref().map(LoopSafeSummary::as_str),
+                        ),
                     },
                 );
             }
@@ -433,12 +484,22 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     }
 }
 
+/// Sanitize and bound a host-authored capability failure summary for the live
+/// activity card. Returns `None` for absent/empty input so the card falls back
+/// to the bare error kind. The product-adapter boundary re-validates length and
+/// control chars.
+fn sanitized_capability_error_detail(safe_summary: Option<&str>) -> Option<String> {
+    let summary = safe_summary?;
+    sanitize_error_summary(summary)
+}
+
 #[derive(Default)]
 struct TerminalCapabilityActivity {
     provider: Option<ExtensionId>,
     runtime: Option<RuntimeKind>,
     output_bytes: Option<u64>,
     error_kind: Option<String>,
+    error_detail: Option<String>,
 }
 
 fn live_capability_activity_status(

@@ -62,6 +62,10 @@ trace_*.json
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
 
+# Generated WebUI v2 bundle. Cargo builds and embeds this from OUT_DIR when
+# `webui-v2-beta` is enabled; the reviewable source lives under static/js/.
+/crates/ironclaw_webui_v2_static/static/dist/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -78,3 +82,14 @@ tests/fixtures/llm_traces/live/*.log
 # Local test artifacts
 .anvil/
 .codegraph/
+
+# Downstream sync exception: nearai/main currently tracks these
+# source/control assets even though broad local-ignore rules also
+# match them. Keep the explicit exceptions in generated sync PRs so
+# the tracked-ignored-files guard rejects only accidental local output.
+!.claude/
+!.claude/**
+!.codegraph/
+!.codegraph/.gitignore
+!crates/ironclaw_webui_v2_static/static/dist/
+!crates/ironclaw_webui_v2_static/static/dist/**
