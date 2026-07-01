@@ -761,7 +761,12 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        // Durable filesystem store: async `Result`; in-memory authority
+        // (no-DB builds or `inmemory-turn-state`): sync infallible.
+        #[cfg(all(
+            any(feature = "libsql", feature = "postgres"),
+            not(feature = "inmemory-turn-state")
+        ))]
         {
             self.turn_state
                 .persistence_snapshot()
@@ -774,7 +779,10 @@ impl LocalDevApprovalTurnRunLocator {
                     approval_turn_locator_unavailable()
                 })
         }
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        #[cfg(any(
+            feature = "inmemory-turn-state",
+            not(any(feature = "libsql", feature = "postgres"))
+        ))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -970,6 +978,12 @@ fn snapshot_run_actor_matches(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+// Only referenced by the durable filesystem snapshot path (async `Result`);
+// the in-memory authority's snapshot is infallible.
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),

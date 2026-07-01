@@ -123,14 +123,17 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
+use ironclaw_turns::InMemoryTurnStateStore;
 use ironclaw_turns::{
     CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
     LoopCheckpointStore,
 };
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_turns::{
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
-};
+use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -230,9 +233,18 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// The in-memory turn-state authority wins whenever `inmemory-turn-state` is on
+// (the runtime-wedge fix), and is also the only option in pure-memory builds.
+// Otherwise the durable per-user filesystem CAS store is used.
+#[cfg(all(
+    not(feature = "inmemory-turn-state"),
+    any(feature = "libsql", feature = "postgres")
+))]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
 pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1827,8 +1839,10 @@ fn build_local_dev_store_graph(
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state_scope =
         local_dev_nearai_mcp_owner_scope(owner_user_id.clone(), local_runtime_identity.as_ref())?;
+    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state_filesystem =
         owner_turn_state_filesystem(Arc::clone(&filesystem), &turn_state_scope)
             .map_err(RebornBuildError::Mount)?;
@@ -1844,6 +1858,16 @@ fn build_local_dev_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
+    // Runtime-wedge fix: with `inmemory-turn-state`, the whole local-dev/hosted
+    // runtime family (incl. hosted-single-tenant-volume) coordinates turn state
+    // in one in-process authority — no per-user `state.json` CAS livelock.
+    // Otherwise the durable filesystem store is used. `LocalDevTurnStateStore`
+    // resolves to the matching concrete type via the same feature cfg, so both
+    // arms satisfy every downstream consumer (coordinator, `LoopCheckpointStore`,
+    // `RuntimeTurnStateStore`) with no trait-object plumbing.
+    #[cfg(feature = "inmemory-turn-state")]
+    let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
+    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(
         FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
