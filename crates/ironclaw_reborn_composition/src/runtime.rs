@@ -3089,15 +3089,23 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
-    // Steering/followup input queue. When a durable run-scoped filesystem is
-    // available (local-dev/libSQL/Postgres), use the durable
-    // `FilesystemHostInputQueue` so a message queued while a run is busy
-    // survives a daemon restart — the scheduler re-claims the run from its
-    // checkpoint and drains the persisted input. The in-memory queue is the
-    // fallback only where no durable filesystem is wired (pure in-memory
-    // profiles), and matches the prior behavior there. Mirrors the
-    // `Some(local_runtime) => durable / None => fallback` shape used for the
-    // identity/profile sources below.
+    // Steering/followup input queue. When a local runtime is composed (local-dev
+    // with libSQL/Postgres), it carries a durable run-scoped filesystem, so use
+    // the durable `FilesystemHostInputQueue`: a message queued while a run is
+    // busy then survives a daemon restart — the scheduler re-claims the run from
+    // its checkpoint and drains the persisted input.
+    //
+    // DEGRADATION (not silent): the production-graph path (`local_runtime: None`)
+    // does not expose a durable filesystem handle in this composition facade
+    // yet, so it falls back to the in-memory queue even under the
+    // libSQL/Postgres build. In-memory queuing still delivers follow-ups within
+    // a single daemon lifetime; only messages queued-but-undrained across a
+    // restart are lost. This mirrors the same `Some(local_runtime) => real /
+    // None => degraded` deferral the identity/profile sources use below, and is
+    // owned by the production durable-composition follow-up (host
+    // runtime/event-store wiring; see the production_runtime_parts note and
+    // #5013). Failing closed here is deliberately NOT done — it would reject all
+    // busy-thread follow-ups in production rather than degrade gracefully.
     let (host_input_queue_reader, host_input_enqueue): (
         Arc<dyn ironclaw_loop_support::HostInputQueue>,
         Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,

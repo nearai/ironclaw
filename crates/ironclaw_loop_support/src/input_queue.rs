@@ -313,12 +313,24 @@ impl HostInputQueue for InMemoryHostInputQueue {
                 if queue.acked.contains(&token) {
                     continue;
                 }
-                if let Some(entry) = queue
+                // Fail loud on a token that matches no live entry and is not
+                // already acked. Committing an unknown token into `acked` would
+                // poison state: a later entry minted for that same sequence
+                // would be skipped forever by `next_after`. A redelivered ack
+                // lands in `queue.acked` above; anything else is a genuine
+                // fault (stale/forged token), not a no-op.
+                let Some(entry) = queue
                     .entries
                     .iter()
                     .find(|entry| entry.envelope.ack_token == token)
-                    && let Some(update) = &entry.queued_message
-                {
+                else {
+                    return Err(HostInputQueueError::InvalidCursor {
+                        reason: "ack token references an input that is neither live nor already \
+                                 acked for this run"
+                            .to_string(),
+                    });
+                };
+                if let Some(update) = &entry.queued_message {
                     updates.push(update.clone());
                 }
                 tokens_to_ack.push(token);

@@ -127,11 +127,15 @@ fn validate_optional_display_text(
 
 /// Sensitive markers that must never appear in a boundary-facing safe summary.
 ///
-/// Mirrors the forbidden-pattern set enforced by `validate_loop_safe_summary`
-/// in `ironclaw_turns`'s run-profile host, which is what produces
-/// `error_summary` upstream. The adapter re-applies the same strength so a
-/// producer regression (or a different producer that skips the upstream guard)
-/// cannot leak raw secrets, host paths, or backend detail to the browser.
+/// Kept deliberately aligned with the forbidden-pattern set that
+/// `validate_loop_safe_summary` in `ironclaw_turns`'s run-profile host applies
+/// to the upstream `error_summary` producer. That upstream list is a private
+/// inline array, so this is an independent second copy rather than a shared
+/// source of truth: the two can drift. This local denylist exists as
+/// defense-in-depth so a producer regression (or a different producer that
+/// skips the upstream guard) still cannot leak raw secrets, host paths, or
+/// backend detail to the browser — it is not a proof of exact parity. Update
+/// both sites together when either changes.
 const SAFE_SUMMARY_FORBIDDEN_MARKERS: &[&str] = &[
     "access token",
     "api key",
@@ -156,9 +160,11 @@ const SAFE_SUMMARY_FORBIDDEN_MARKERS: &[&str] = &[
 /// Validate an optional boundary-facing safe summary (`error_summary`).
 ///
 /// Beyond the length + control-character guard of [`validate_bounded_text`],
-/// this re-applies the upstream [`SAFE_SUMMARY_FORBIDDEN_MARKERS`] +
-/// payload/path-delimiter + API-key-token rejection so the adapter boundary is
-/// not a weaker gate than the upstream `validate_loop_safe_summary` producer.
+/// this applies the [`SAFE_SUMMARY_FORBIDDEN_MARKERS`] denylist plus the
+/// payload/path-delimiter and API-key-token rejection. The intent is to keep
+/// this adapter boundary no weaker than the upstream `validate_loop_safe_summary`
+/// producer; the alignment is maintained by convention (see
+/// [`SAFE_SUMMARY_FORBIDDEN_MARKERS`]), not enforced by a shared source.
 fn validate_optional_safe_summary(
     kind: &'static str,
     value: Option<&str>,

@@ -1342,6 +1342,62 @@ async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
     );
 }
 
+#[tokio::test]
+async fn ack_rejects_unknown_token_instead_of_poisoning_state() {
+    // An ack token that matches no live entry and is not already acked must fail
+    // loud, not be silently committed into `acked`. Committing it would poison
+    // the queue: a later entry minted for that same sequence would be skipped
+    // forever by `next_after`.
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue = InMemoryHostInputQueue::new(thread_service);
+    let run_id = TurnRunId::new();
+
+    // Create the run's queue with a single live entry.
+    queue
+        .enqueue_queued_message(ironclaw_loop_support::EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ThreadScope {
+                tenant_id: TenantId::new("ghost-tenant").unwrap(),
+                agent_id: AgentId::new("ghost-agent").unwrap(),
+                project_id: None,
+                owner_user_id: None,
+                mission_id: None,
+            },
+            thread_id: ThreadId::new("ghost-thread").unwrap(),
+            message_id: ironclaw_threads::ThreadMessageId::new(),
+            input: LoopInput::Steering {
+                message_ref: ironclaw_turns::LoopMessageRef::new("msg:live").unwrap(),
+            },
+        })
+        .await
+        .expect("enqueue");
+
+    // Ack a forged token for an input that was never enqueued.
+    let forged = LoopInputAckToken::new("input-ack:999".to_string()).unwrap();
+    let result = queue.ack_consumed(run_id, vec![forged]).await;
+    assert!(
+        matches!(result, Err(HostInputQueueError::InvalidCursor { .. })),
+        "unknown ack token must be rejected, got {result:?}"
+    );
+
+    // The live entry is untouched and still deliverable.
+    let batch = queue
+        .next_after(
+            run_id,
+            LoopInputCursorToken::new("input-cursor:origin".to_string()).unwrap(),
+            8,
+        )
+        .await
+        .expect("next_after");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the live entry remains deliverable after a rejected forged ack"
+    );
+}
+
 /// Records the transcript status of the queued message at the moment its
 /// steering input becomes drainable (i.e. when `enqueue_queued_message` runs).
 struct StatusObservingInputEnqueue {

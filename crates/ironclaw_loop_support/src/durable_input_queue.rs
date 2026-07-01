@@ -14,11 +14,24 @@
 //! shared helpers in [`crate::input_queue`], so the loop's persisted input
 //! cursor stays valid across a restart.
 //!
-//! The queue is keyed by the globally-unique `run_id`, under a single fixed
-//! owner [`ResourceScope`] (the runtime owner). This matches the existing
-//! in-memory queue's flat, run-keyed granularity; finer per-user path scoping
-//! would require carrying the scope through the `HostInputQueue` trait methods
-//! (which only receive `run_id`) and is intentionally deferred.
+//! Scope preservation: the queue document is written through a
+//! [`ScopedFilesystem`] under the owner [`ResourceScope`] the composition
+//! passes at construction (built from the run's tenant / user / agent /
+//! project). In multi-tenant composition the mount-view resolver rewrites that
+//! scope into the virtual path prefix (`/tenants/<tenant>/users/<user>/…`), so
+//! the record *is* tenant/user-partitioned at the storage boundary — the scope
+//! is not dropped. The path itself is then keyed by the globally-unique
+//! `run_id` (a UUID), which guarantees no cross-run or cross-tenant collision
+//! and lets the resumed run find its own queue. The per-message [`ThreadScope`]
+//! that drives the `Queued → Submitted` status flip travels in the record
+//! payload ([`DurableStatusUpdate`]).
+//!
+//! What is *deferred*: finer per-run path granularity inside that owner scope
+//! (e.g. a per-thread subtree). The `HostInputQueue` trait methods
+//! (`next_after`, `ack_consumed`) receive only `run_id`, not a scope, so
+//! per-run path partitioning would need either a `run_id → scope` map or a
+//! trait change. `run_id` uniqueness makes that unnecessary for correctness or
+//! isolation, so it is intentionally left out here.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -294,9 +307,21 @@ where
                 if already.contains(&sequence) {
                     continue;
                 }
-                if let Some(entry) = queue.entries.iter().find(|e| e.sequence == sequence) {
-                    status_updates.push(entry.status.clone());
-                }
+                // Fail loud on a token for a sequence that is neither live nor
+                // already acked. Committing an unknown sequence into `acked`
+                // would poison durable state: when that sequence is eventually
+                // enqueued, its (now pre-acked) entry would be skipped forever
+                // by `next_after`. A stale/forged token is a genuine fault, not
+                // a redelivered ack (which lands in `already` above).
+                let Some(entry) = queue.entries.iter().find(|e| e.sequence == sequence) else {
+                    return Err(HostInputQueueError::InvalidCursor {
+                        reason: format!(
+                            "ack token references sequence {sequence} that is neither live \
+                             nor already acked for this run"
+                        ),
+                    });
+                };
+                status_updates.push(entry.status.clone());
                 newly_acked.push(sequence);
             }
             if newly_acked.is_empty() {
@@ -630,5 +655,51 @@ mod tests {
 
         let batch = queue.next_after(run_id, origin(), 8).await.expect("poll");
         assert_eq!(batch.inputs.len(), 1, "dedup keeps a single queue entry");
+    }
+
+    #[tokio::test]
+    async fn ack_rejects_unknown_sequence_instead_of_poisoning_state() {
+        // An ack token for a sequence that is neither live nor already acked
+        // must fail loud rather than be committed into `acked`. Committing it
+        // would poison durable state: when that sequence is later enqueued, its
+        // now-pre-acked entry would be skipped forever by `next_after`.
+        let backend = Arc::new(InMemoryBackend::new());
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(InMemorySessionThreadService::default());
+        let queue = FilesystemHostInputQueue::new(
+            make_fs(Arc::clone(&backend)),
+            owner_scope(),
+            thread_service,
+        );
+        let run_id = TurnRunId::new();
+        // Create the queue document with a single live entry at sequence 0.
+        queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: ghost_scope(),
+                thread_id: ThreadId::new("ghost").unwrap(),
+                message_id: ThreadMessageId::new(),
+                input: steering("msg:live"),
+            })
+            .await
+            .expect("enqueue");
+
+        // Ack a forged token for a sequence that was never enqueued.
+        let forged = LoopInputAckToken::new("input-ack:999".to_string()).unwrap();
+        let result = queue.ack_consumed(run_id, vec![forged]).await;
+        assert!(
+            matches!(result, Err(HostInputQueueError::InvalidCursor { .. })),
+            "unknown ack sequence must be rejected, got {result:?}"
+        );
+
+        // State is untouched: sequence 999 was NOT recorded as acked, so a
+        // later real entry at that sequence would still be delivered.
+        let batch = queue.next_after(run_id, origin(), 8).await.expect("poll");
+        assert_eq!(
+            batch.inputs.len(),
+            1,
+            "the live entry remains deliverable after a rejected forged ack"
+        );
     }
 }
