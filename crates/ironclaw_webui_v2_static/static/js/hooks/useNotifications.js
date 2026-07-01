@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { React } from "../lib/html.js";
 import { listThreads } from "../lib/api.js";
 import { useI18n } from "../lib/i18n.js";
-import { THREAD_STATE } from "../lib/thread-state.js";
+import { THREAD_STATE, useThreadStates } from "../lib/thread-state.js";
 import {
   approvalThreadNotifications,
   getNotificationState,
@@ -39,6 +39,7 @@ export function useNotifications({
   activeThreadId = null,
 } = {}) {
   const { t } = useI18n();
+  const threadStates = useThreadStates();
   const scope = profileScope(profile);
   const [notificationState, setNotificationState] = React.useState(() =>
     scope ? getNotificationState(scope) : emptyNotificationState(),
@@ -74,8 +75,8 @@ export function useNotifications({
       ...normalizeThread(record),
       state: record?.state || THREAD_STATE.NEEDS_ATTENTION,
     }));
-    return approvalThreadNotifications(approvalThreads, new Map(), t);
-  }, [query.data, scope, t]);
+    return approvalThreadNotifications(approvalThreads, threadStates, t);
+  }, [query.data, scope, t, threadStates]);
 
   const messages = React.useMemo(
     () =>

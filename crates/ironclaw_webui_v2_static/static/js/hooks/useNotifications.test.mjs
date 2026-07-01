@@ -150,7 +150,6 @@ function instantiate(queryState, options = {}) {
             ? { tenant_id: "tenant", user_id: "user" }
             : options.profile,
         activeThreadId: options.activeThreadId || null,
-        threads: options.threads || [],
       });
       if (!react.didScheduleUpdate()) break;
     }
@@ -259,7 +258,6 @@ test("does not include locally known non-automation approval threads", () => {
     },
     {
       threadStates: new Map([["thread-local", "needs_attention"]]),
-      threads: [{ id: "thread-local", title: "Local approval", updated_at: "2026-06-30T10:00:00Z" }],
       approvalThreadNotifications: (threads) =>
         threads.map((thread) => ({
           id: `approval:${thread.id}`,
@@ -279,6 +277,32 @@ test("does not include locally known non-automation approval threads", () => {
     [],
   );
   assert.equal(harness.hook.messages.length, 0);
+});
+
+test("passes local thread state to approval notification presenter for backend records", () => {
+  const threadStates = new Map([["thread-1", "needs_attention"]]);
+  const harness = instantiate(
+    {
+      data: { threads: [{ id: "thread-1", state: "idle" }] },
+      isLoading: false,
+      isSuccess: true,
+      error: null,
+      refetch: () => {},
+    },
+    {
+      threadStates,
+      approvalThreadNotifications: (threads, states) =>
+        threads
+          .filter((thread) => states.get(thread.id) === "needs_attention")
+          .map((thread) => ({
+            id: `approval:${thread.id}`,
+            href: `/chat/${thread.id}`,
+          })),
+    },
+  );
+
+  assert.equal(harness.notificationInputs.at(-1).threadStates, threadStates);
+  assert.equal(harness.hook.unreadCount, 1);
 });
 
 test("shows approval messages until they are dismissed", () => {
