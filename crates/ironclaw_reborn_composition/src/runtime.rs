@@ -481,6 +481,13 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
+    /// flush the full snapshot durably (recovering in-flight turns on the next
+    /// restart, not just gate-blocked ones). `None` when no local runtime is
+    /// wired (e.g. production-parts launches); the durable filesystem store
+    /// already persists every transition, so it needs no shutdown flush.
+    #[cfg(feature = "inmemory-turn-state")]
+    turn_state_flush: Option<Arc<LocalDevTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -764,7 +771,12 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        // Durable filesystem store: async `Result`; in-memory authority
+        // (no-DB builds or `inmemory-turn-state`): sync infallible.
+        #[cfg(all(
+            any(feature = "libsql", feature = "postgres"),
+            not(feature = "inmemory-turn-state")
+        ))]
         {
             self.turn_state
                 .persistence_snapshot()
@@ -777,7 +789,10 @@ impl LocalDevApprovalTurnRunLocator {
                     approval_turn_locator_unavailable()
                 })
         }
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        #[cfg(any(
+            feature = "inmemory-turn-state",
+            not(any(feature = "libsql", feature = "postgres"))
+        ))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -972,7 +987,12 @@ fn snapshot_run_actor_matches(
         .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Only referenced by the durable filesystem snapshot path (async `Result`);
+// the in-memory authority's snapshot is infallible.
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -2116,6 +2136,16 @@ impl RebornRuntime {
         self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
+        }
+        // Everything that mutates turn state (trigger poller, credential-refresh
+        // worker, scheduler/runner) is now stopped, so the in-memory authority is
+        // quiescent. Flush its full snapshot durably so a planned restart recovers
+        // in-flight turns, not just gate-blocked ones. No-op unless a durable sink
+        // is attached; the durable filesystem store persists every transition and
+        // needs no shutdown flush (hence this is only wired under the feature).
+        #[cfg(feature = "inmemory-turn-state")]
+        if let Some(turn_state) = &self.turn_state_flush {
+            turn_state.flush().await;
         }
         Ok(())
     }
@@ -3588,9 +3618,16 @@ pub async fn build_reborn_runtime(
         )
     });
 
+    // Concrete in-memory store handle for the graceful-shutdown flush (see the
+    // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
+    // doesn't disturb its later use.
+    #[cfg(feature = "inmemory-turn-state")]
+    let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        #[cfg(feature = "inmemory-turn-state")]
+        turn_state_flush,
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,

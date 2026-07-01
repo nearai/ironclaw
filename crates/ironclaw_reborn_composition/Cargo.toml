@@ -12,6 +12,20 @@ publish = false
 
 [features]
 default = []
+# Use the single-process in-memory turn-state authority for the local-dev /
+# hosted runtime family instead of the per-user `state.json` filesystem CAS
+# store, even in libSQL/Postgres builds. This is the runtime-wedge fix: all of a
+# user's concurrent turns (foreground + routines) coordinate in one in-process
+# `InMemoryTurnStateStore` (no per-step CAS livelock) rather than contending on a
+# single per-user turn-state document. Durability trade-off: in-flight compute
+# turns are volatile across a process restart (short-lived, re-triggerable), but
+# turns parked on a human gate (approval/auth) are persisted off the hot path via
+# persist-on-block and rehydrated on startup, so a deploy does not silently drop
+# an "Approve"-pending turn. Intended to be enabled by the
+# hosted-single-tenant-volume deployment build; see
+# `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for the
+# contention measurements that motivated it.
+inmemory-turn-state = []
 # Wire a host-managed LLM model gateway into the assembled runtime via
 # ironclaw_reborn's `LlmProviderModelGateway`. Off by default so this crate
 # stays substrate-only when callers don't want a model gateway in the
