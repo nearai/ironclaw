@@ -58,19 +58,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -d /mnt/static-runner-cache && -w /mnt/static-runner-cache ]]; then
-            release_cache_root="/mnt/static-runner-cache/ironclaw/pilot-linux-artifact"
-          else
-            release_cache_root="${RUNNER_TEMP}/ironclaw-pilot-linux-artifact-cache"
-            echo "::notice::ci-release mounted cache is unavailable; using ${release_cache_root}"
+
+          release_cache_root=""
+          cache_candidates=()
+          if [[ -n "${STATIC_RUNNER_WORK_CACHE:-}" ]]; then
+            cache_candidates+=("${STATIC_RUNNER_WORK_CACHE}/pilot-linux-artifact")
           fi
-          mkdir -p \
-            "${release_cache_root}/cargo-home" \
-            "${release_cache_root}/cargo-target" \
-            "${release_cache_root}/rustup-home"
+          if [[ -d /mnt/static-runner-cache && -w /mnt/static-runner-cache ]]; then
+            cache_candidates+=("/mnt/static-runner-cache/ironclaw/pilot-linux-artifact")
+          fi
+          cache_candidates+=("${RUNNER_TEMP}/ironclaw-pilot-linux-artifact-cache")
+
+          for candidate in "${cache_candidates[@]}"; do
+            if mkdir -p "${candidate}/cargo-home" "${candidate}/rustup-home" 2>/dev/null; then
+              release_cache_root="${candidate}"
+              break
+            fi
+          done
+
+          if [[ -z "${release_cache_root}" ]]; then
+            echo "::error::unable to create release cache"
+            exit 1
+          fi
+          if [[ "${release_cache_root}" == "${RUNNER_TEMP}/"* ]]; then
+            echo "::notice::ci-release persistent cache is unavailable; using ${release_cache_root}"
+          fi
+
           {
             echo "CARGO_HOME=${release_cache_root}/cargo-home"
-            echo "CARGO_TARGET_DIR=${release_cache_root}/cargo-target"
             echo "RUSTUP_HOME=${release_cache_root}/rustup-home"
           } >> "$GITHUB_ENV"
 
@@ -172,7 +187,7 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: ${{ steps.source.outputs.rust_toolchain }}
-          targets: ${{ steps.source.outputs.target }}
+          targets: ${{ steps.source.outputs.target }},wasm32-wasip2
 
       - name: Check out exact source SHA
         if: steps.preflight.outputs.skip != 'true'
@@ -208,7 +223,7 @@ jobs:
           stage_dir="${dist_dir}/stage"
           mkdir -p "${stage_dir}"
 
-          cp "${CARGO_TARGET_DIR}/${TARGET}/release/ironclaw" "${stage_dir}/ironclaw"
+          cp "target/${TARGET}/release/ironclaw" "${stage_dir}/ironclaw"
           chmod 0755 "${stage_dir}/ironclaw"
 
           cat > "${stage_dir}/BUILD-INFO.txt" <<EOF
