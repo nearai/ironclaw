@@ -216,6 +216,43 @@ assert_contains "A5: zero-covered crate row shows 0%" "${CAP_OUT}" "| \`ironclaw
 assert_line_before "A5: zero-covered crate sorted to top (lowest-covered first)" "${CAP_OUT}" \
   "\`ironclaw_reborn_zero\`" "\`ironclaw_reborn_half\`"
 
+# A6: allowlist boundary — two exact-match single crates, one family-prefix
+# crate, and a lookalike (ironclaw_architecture_extra) that must be dropped:
+# it is not one of the four exact-match crates and does not start with a
+# reborn/product/webui_v2 family prefix.
+cat > "${fixtures_dir}/a6_allowlist_boundary.json" <<'JSON'
+{
+  "data": [
+    {
+      "files": [
+        { "filename": "/work/ironclaw/crates/ironclaw_architecture/src/a.rs", "summary": { "lines": { "covered": 5, "count": 10 } } },
+        { "filename": "/work/ironclaw/crates/ironclaw_slack_v2_adapter/src/a.rs", "summary": { "lines": { "covered": 3, "count": 10 } } },
+        { "filename": "/work/ironclaw/crates/ironclaw_reborn_config/src/a.rs", "summary": { "lines": { "covered": 8, "count": 10 } } },
+        { "filename": "/work/ironclaw/crates/ironclaw_architecture_extra/src/a.rs", "summary": { "lines": { "covered": 0, "count": 999 } } }
+      ]
+    }
+  ]
+}
+JSON
+
+capture "${summary_sh}" "${fixtures_dir}/a6_allowlist_boundary.json"
+assert_exit_code "A6: allowlist boundary fixture summary exits 0" 0 "${CAP_RC}"
+assert_contains "A6: table includes exact-match ironclaw_architecture row" "${CAP_OUT}" \
+  "| \`ironclaw_architecture\` | 50% | 5 / 10 |"
+assert_contains "A6: table includes exact-match ironclaw_slack_v2_adapter row" "${CAP_OUT}" \
+  "| \`ironclaw_slack_v2_adapter\` | 30% | 3 / 10 |"
+assert_contains "A6: table includes family-prefix ironclaw_reborn_config row" "${CAP_OUT}" \
+  "| \`ironclaw_reborn_config\` | 80% | 8 / 10 |"
+assert_not_contains "A6: lookalike ironclaw_architecture_extra excluded from table" "${CAP_OUT}" \
+  "ironclaw_architecture_extra"
+assert_contains "A6: aggregate drops lookalike's 999 lines (16/30, not 16/1029)" "${CAP_OUT}" \
+  '**Line coverage (Reborn crates): 53.33%** — 16 / 30 lines'
+
+# A7: missing coverage JSON -> non-zero exit + not-found error on stderr.
+capture "${summary_sh}" "${fixtures_dir}/does_not_exist.json"
+assert_exit_code "A7: summary exits non-zero for missing coverage JSON" 1 "${CAP_RC}"
+assert_contains "A7: summary reports missing coverage JSON" "${CAP_ERR}" "coverage JSON not found"
+
 # ---------------------------------------------------------------------------
 # B. reborn-coverage-summary.sh --zero-crates
 # ---------------------------------------------------------------------------
@@ -460,6 +497,26 @@ capture env -u GITHUB_REPOSITORY \
   "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
 assert_exit_code "C6: GITHUB_REPOSITORY unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C6: GITHUB_REPOSITORY unset reports the missing-var guard" "${CAP_ERR}" "GITHUB_REPOSITORY must be set"
+
+# C7: missing coverage JSON -> the "if [ ! -f ]" guard at the top of
+# comment.sh fires before GH_TOKEN/GITHUB_REPOSITORY/PR_NUMBER are even
+# consulted, so no `gh` call — and therefore no mutation — is ever recorded.
+c7_log="${tmp_root}/c7-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c7_log}" \
+  "${comment_sh}" "${fixtures_dir}/does_not_exist.json"
+assert_exit_code "C7: comment script exits non-zero for missing coverage JSON" 1 "${CAP_RC}"
+assert_contains "C7: comment script reports missing coverage JSON" "${CAP_ERR}" "coverage JSON not found"
+if [ -f "${c7_log}" ]; then
+  report_fail "C7: fake gh did not record a mutation (guard fires before gh use)"
+else
+  report_pass "C7: fake gh did not record a mutation (guard fires before gh use)"
+fi
 
 # ---------------------------------------------------------------------------
 # D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
