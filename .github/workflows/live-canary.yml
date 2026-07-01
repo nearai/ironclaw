@@ -61,12 +61,20 @@ on:
         type: string
         required: false
         default: ""
+      tool_disclosure:
+        description: "THROWAWAY A/B: REBORN_TOOL_DISCLOSURE value (off|bridged)."
+        type: string
+        required: false
+        default: "off"
 
 permissions:
   contents: read
 
 concurrency:
-  group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
+  # THROWAWAY A/B branch: a dedicated group keyed by the disclosure value + PR so
+  # the off and on runs never supersede each other, and neither collides with the
+  # shared `/canary` group used by other PRs.
+  group: live-canary-disclosure-ab-${{ inputs.tool_disclosure || 'off' }}-${{ inputs.target_pr }}
   cancel-in-progress: false
 
 env:
@@ -75,10 +83,11 @@ env:
   ALLOW_LOCAL_TOOLS: "true"
   AGENT_AUTO_APPROVE_TOOLS: "true"
   RUST_LOG: ironclaw=info
-  # THROWAWAY canary branch only (canary/reborn-disclosure-on): force the
-  # flag-ON path so we can A/B the disclosure decorator against the default-off
-  # run. Do NOT merge — the feature ships default-off.
-  REBORN_TOOL_DISCLOSURE: bridged
+  # THROWAWAY canary branch only (canary/reborn-disclosure-on): drive the
+  # disclosure flag from the dispatch input so one branch can run both the
+  # default-off and flag-on A/B sides. Do NOT merge — the feature ships
+  # default-off.
+  REBORN_TOOL_DISCLOSURE: ${{ inputs.tool_disclosure || 'off' }}
 
 jobs:
   auth-smoke:
