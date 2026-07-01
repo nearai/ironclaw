@@ -25,6 +25,31 @@ use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// The two model-visible tool-error outcome classes a capability can surface
+/// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
+/// can render the SAME reason token (e.g. `policy_denied` is both
+/// `CapabilityFailureKind::PolicyDenied` and the `Denied` reason), so
+/// [`assert_tool_error`](RebornIntegrationHarness::assert_tool_error) takes the
+/// class as a typed argument rather than trusting a needle prefix — the class is
+/// then discriminated structurally, not by convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorClass {
+    Failed,
+    Denied,
+}
+
+impl ToolErrorClass {
+    /// The `safe_summary` prefix the executor writes for this class — see
+    /// `capability_{failed,denied}_summary` in
+    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    fn summary_prefix(self) -> &'static str {
+        match self {
+            Self::Failed => "capability failed with ",
+            Self::Denied => "capability denied with ",
+        }
+    }
+}
+
 impl RebornIntegrationHarness {
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
     pub async fn assert_egress_count(&self, expected: usize) -> HarnessResult<()> {
@@ -108,6 +133,67 @@ impl RebornIntegrationHarness {
         }
         Err(format!(
             "egress request to {url_substr:?} body {body:?} does not contain {body_substr:?}"
+        )
+        .into())
+    }
+
+    /// Assert a model-visible tool error of `class` carrying `reason` was
+    /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
+    /// reads the in-process recorder, populated only on the *Completed* write
+    /// path), a `Failed`/`Denied` capability outcome is persisted through a
+    /// different pipeline — `append_capability_result_ref` →
+    /// `append_tool_result_reference` — as a `MessageKind::ToolResultReference`
+    /// message whose `content` is the JSON-serialized `ToolResultReferenceEnvelope`.
+    /// Reaching this state at all (rather than a terminal `driver_unavailable`)
+    /// also proves the failure was a recoverable, model-visible tool error.
+    ///
+    /// This parses the envelope and checks its **`safe_summary` field** — NOT a
+    /// raw-JSON substring — so `reason` cannot match incidentally inside
+    /// `model_observation`/`result_ref`, and JSON escaping can't skew the match.
+    /// The summary reads `"capability <failed|denied> with <token>: …"`; the
+    /// assertion requires the summary to start with [`class`](ToolErrorClass)'s
+    /// prefix AND contain `reason`. `class` therefore discriminates
+    /// Failed-vs-Denied structurally: a regression that flips one into the other
+    /// fails even when both classes render the same `reason` token (e.g.
+    /// `policy_denied`).
+    ///
+    /// **Scans the full thread history, not baseline-sliced** (unlike the
+    /// sibling `assert_egress_*`/`assert_tool_result_contains`, which slice
+    /// `[baseline..]` off the shared in-process recorder). Every current caller
+    /// is a single-turn, single-tool-call harness, so there is at most one
+    /// `ToolResultReference` message and no earlier-thread bleed-through is
+    /// reachable. A future multi-turn or group-thread reuse of this assertion
+    /// MUST add baseline scoping first (thread a `baseline_history_len` through
+    /// harness construction, mirroring `baseline_egress_count` etc.) — do not
+    /// assume this helper is safe to reuse as-is once a thread has more than one
+    /// turn.
+    pub async fn assert_tool_error(
+        &self,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        let summaries: Vec<String> = history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| {
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
+            })
+            .map(|envelope| envelope.safe_summary.as_str().to_string())
+            .collect();
+        let prefix = class.summary_prefix();
+        if summaries
+            .iter()
+            .any(|summary| summary.starts_with(prefix) && summary.contains(reason))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no persisted tool-error summary of class {class:?} with reason {reason:?}; saw {summaries:?}"
         )
         .into())
     }

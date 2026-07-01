@@ -2551,6 +2551,20 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// Install a sticky scripted `builtin.shell` process result on the inert
+    /// recording process port (mirrors `install_http_responses`). Errors if the
+    /// harness has no recording port (e.g. the `.with_live_shell()` path).
+    pub(crate) fn install_process_script(
+        &self,
+        result: super::process::ScriptedProcessResult,
+    ) -> HarnessResult<()> {
+        self.process_port
+            .as_ref()
+            .ok_or("host runtime harness has no recording process port to script")?
+            .set_scripted(result);
+        Ok(())
+    }
+
     fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         self.network_egress
             .as_ref()
@@ -3612,21 +3626,38 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let request_bytes = request.body.len() as u64;
-        // Resolve the keyed body BEFORE recording the request: pushing moves the
-        // request into the log and (via its `Drop`) zeroizes its URL/headers.
-        let keyed_body = {
+        // Resolve the keyed outcome BEFORE recording the request: `push(request)`
+        // moves `request` by value into the log, so any code reading its fields
+        // (the `.matches()` lookup) must run first. (`RuntimeHttpEgressRequest`
+        // does implement `Drop`/`ZeroizeOnDrop` to scrub its URL/headers, but that
+        // fires later when the logged entry is actually dropped, not on push.)
+        let keyed_outcome = {
             let scripted = self.scripted.lock().unwrap();
             scripted
                 .iter()
                 .find(|response| response.matches(&request))
-                .map(|response| response.body_bytes())
+                .map(|response| response.outcome())
         };
         self.requests.lock().unwrap().push(request);
-        let body = keyed_body
-            .or_else(|| self.response_bodies.lock().unwrap().pop_front())
-            .unwrap_or_else(|| self.default_body.clone());
+        // A scripted egress error short-circuits with `Err`, driving the tool's
+        // error mapping. A body outcome (or the FIFO/default fallback) returns
+        // `Ok` with the scripted status/body.
+        let (status, body) = match keyed_outcome {
+            Some(super::http_matcher::ScriptedHttpOutcome::Error(error)) => return Err(error),
+            Some(super::http_matcher::ScriptedHttpOutcome::Body { status, bytes }) => {
+                (status, bytes)
+            }
+            None => (
+                200,
+                self.response_bodies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| self.default_body.clone()),
+            ),
+        };
         Ok(RuntimeHttpEgressResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
             saved_body: None,
