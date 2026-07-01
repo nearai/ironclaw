@@ -75,6 +75,10 @@ env:
   ALLOW_LOCAL_TOOLS: "true"
   AGENT_AUTO_APPROVE_TOOLS: "true"
   RUST_LOG: ironclaw=info
+  # THROWAWAY canary branch only (canary/reborn-disclosure-on): force the
+  # flag-ON path so we can A/B the disclosure decorator against the default-off
+  # run. Do NOT merge — the feature ships default-off.
+  REBORN_TOOL_DISCLOSURE: bridged
 
 jobs:
   auth-smoke:
