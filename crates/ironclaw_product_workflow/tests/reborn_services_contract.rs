@@ -756,6 +756,7 @@ impl RecordingLifecycleFacade {
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
+            shared_credentials: Vec::new(),
             onboarding: self.onboarding.clone(),
         };
         Some(LifecycleProductPayload::ExtensionList {
@@ -9344,6 +9345,7 @@ fn extension_summary(
         visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,
+        shared_credentials: Vec::new(),
         onboarding,
     }
 }

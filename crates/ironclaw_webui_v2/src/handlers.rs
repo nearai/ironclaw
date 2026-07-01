@@ -1227,6 +1227,36 @@ pub async fn import_extension(
     Ok(Json(response))
 }
 
+/// Body for [`set_shared_credential`]. `value` is a raw secret — never logged
+/// or echoed back in responses.
+#[derive(serde::Deserialize)]
+pub struct SetSharedCredentialRequest {
+    pub handle: String,
+    pub value: String,
+}
+
+/// `POST /api/webchat/v2/operator/shared-credentials` — an admin sets a
+/// tenant-shared, admin-managed tool credential (#5459 P3). Operator-gated; the
+/// stored key then satisfies every user of the tenant (the runtime resolves
+/// `InjectSecretOnce` caller-first, then the tenant-shared scope). The raw value
+/// is never logged or returned.
+pub async fn set_shared_credential(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(request): Json<SetSharedCredentialRequest>,
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let SetSharedCredentialRequest { handle, value } = request;
+    state
+        .services()
+        .set_shared_credential(caller, handle.clone(), value)
+        .await?;
+    Ok(Json(
+        serde_json::json!({ "success": true, "handle": handle }),
+    ))
+}
+
 /// `POST /api/webchat/v2/extensions/{package_id}/activate`
 pub async fn activate_extension(
     State(state): State<WebUiV2State>,

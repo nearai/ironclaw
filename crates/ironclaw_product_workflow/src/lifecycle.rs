@@ -350,6 +350,8 @@ pub struct LifecycleExtensionSummary {
     pub visible_read_only_capability_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_credentials: Vec<LifecycleSharedCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<LifecycleExtensionOnboarding>,
 }
@@ -374,6 +376,17 @@ pub struct LifecycleExtensionCredentialRequirement {
     pub provider: String,
     pub required: bool,
     pub setup: LifecycleExtensionCredentialSetup,
+}
+
+/// A tenant-shared, admin-managed credential declared by an extension via a
+/// `[[capabilities.runtime_credentials]]` entry with a `secret_handle` source.
+/// One key the admin sets once at the tenant-shared scope; every user inherits
+/// it. Distinct from `LifecycleExtensionCredentialRequirement`, which is a
+/// per-user product-auth account (OAuth / manual token).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSharedCredential {
+    pub handle: String,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -518,6 +531,24 @@ pub trait LifecycleProductFacade: Send + Sync {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Err(ProductWorkflowError::InvalidBindingRequest {
             reason: "extension import is not supported by this runtime".to_string(),
+        })
+    }
+
+    /// Set a tenant-shared, admin-managed credential (#5459 P3): store the raw
+    /// secret value at the caller tenant's shared scope so every user of the
+    /// tenant resolves it (the "admin sets the key once, the whole usergroup
+    /// inherits" model), rather than each user provisioning their own. The
+    /// caller must be an operator/admin (enforced at the route boundary). The
+    /// raw `value` must never be logged or echoed back. Default is unavailable;
+    /// only the local runtime facade implements it.
+    async fn set_shared_credential(
+        &self,
+        _context: LifecycleProductContext,
+        _handle: String,
+        _value: String,
+    ) -> Result<(), ProductWorkflowError> {
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "shared credential provisioning is not supported by this runtime".to_string(),
         })
     }
 }

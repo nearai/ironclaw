@@ -5,7 +5,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
+    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialRequirementSource, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::product_adapter_sections;
 use ironclaw_product_adapters::ProductSurfaceKind;
@@ -13,7 +14,7 @@ use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
-    LifecyclePackageRef, ProductWorkflowError,
+    LifecyclePackageRef, LifecycleSharedCredential, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -141,6 +142,7 @@ impl AvailableExtensionPackage {
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
+            shared_credentials: shared_credentials(self),
             onboarding: onboarding(&self.package_ref),
         }
     }
@@ -274,6 +276,40 @@ fn credential_requirements(
             }
         })
         .collect()
+}
+
+/// Tenant-shared, admin-managed credentials declared by the manifest via
+/// `[[capabilities.runtime_credentials]]` with a `secret_handle` source. These
+/// are one-key-per-tenant secrets an admin sets once (not per-user product-auth
+/// accounts), so they surface separately from `credential_requirements`. Dedups
+/// by handle, merging `required` with OR. Host-managed credential extensions
+/// (e.g. NEAR AI) return empty, mirroring `credential_requirements`.
+fn shared_credentials(package: &AvailableExtensionPackage) -> Vec<LifecycleSharedCredential> {
+    if is_host_managed_credential_extension(&package.package_ref) {
+        return Vec::new();
+    }
+
+    let mut shared: Vec<LifecycleSharedCredential> = Vec::new();
+    for capability in &package.package.manifest.capabilities {
+        for requirement in &capability.runtime_credentials {
+            if !matches!(
+                requirement.source,
+                RuntimeCredentialRequirementSource::SecretHandle
+            ) {
+                continue;
+            }
+            let handle = requirement.handle.as_str().to_string();
+            if let Some(seen) = shared.iter_mut().find(|seen| seen.handle == handle) {
+                seen.required |= requirement.required;
+                continue;
+            }
+            shared.push(LifecycleSharedCredential {
+                handle,
+                required: requirement.required,
+            });
+        }
+    }
+    shared
 }
 
 struct CredentialRequirementGroup {

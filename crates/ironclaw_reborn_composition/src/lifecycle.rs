@@ -219,6 +219,7 @@ pub(crate) struct RebornLocalLifecycleFacade {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
+    secret_store: Option<Arc<dyn ironclaw_secrets::SecretStore>>,
 }
 
 impl RebornLocalLifecycleFacade {
@@ -228,7 +229,19 @@ impl RebornLocalLifecycleFacade {
             extension_management: None,
             runtime_http_egress: None,
             credential_accounts: None,
+            secret_store: None,
         }
+    }
+
+    /// Wire the raw secret store so the facade can provision tenant-shared,
+    /// admin-managed credentials (#5459 P3). Kept `Option` so runtimes that
+    /// never expose shared-credential setup can skip it.
+    pub(crate) fn with_secret_store(
+        mut self,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    ) -> Self {
+        self.secret_store = Some(secret_store);
+        self
     }
 
     pub(crate) fn with_extension_management(
@@ -498,6 +511,40 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
             });
         };
         extension_management.import_bundle(&bundle).await
+    }
+
+    async fn set_shared_credential(
+        &self,
+        context: LifecycleProductContext,
+        handle: String,
+        value: String,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(secret_store) = &self.secret_store else {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "shared credential storage is not available in this runtime".to_string(),
+            });
+        };
+        let handle = ironclaw_host_api::SecretHandle::new(handle).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("invalid shared credential handle: {error}"),
+            }
+        })?;
+        // Store at the caller tenant's SHARED admin-managed scope so every user
+        // of the tenant resolves this one key (the runtime InjectSecretOnce path
+        // falls back caller -> tenant-shared). Never log `value`.
+        let shared_scope = lifecycle_resource_scope(&context)?.tenant_shared_managed_scope();
+        secret_store
+            .put(
+                shared_scope,
+                handle,
+                ironclaw_secrets::SecretMaterial::from(value),
+                None,
+            )
+            .await
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("failed to store shared credential: {error}"),
+            })?;
+        Ok(())
     }
 }
 

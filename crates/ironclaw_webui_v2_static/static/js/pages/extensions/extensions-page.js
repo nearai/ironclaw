@@ -1,4 +1,4 @@
-import { Navigate, useParams } from "react-router";
+import { Navigate, useOutletContext, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { ActionToast } from "./components/action-toast.js";
 import { ChannelsTab } from "./components/channels-tab.js";
@@ -9,6 +9,10 @@ import { useExtensions } from "./hooks/useExtensions.js";
 
 export function ExtensionsPage() {
   const { tab = "registry" } = useParams();
+  // Admin (operator_webui_config) unlocks the tenant-wide shared-key affordance
+  // in the Configure modal; non-admins never see it. Same session-capability
+  // gate the settings operator tabs use, threaded from the gateway outlet.
+  const { isAdmin = false } = useOutletContext() || {};
   const [configuring, setConfiguring] = React.useState(null);
 
   const {
@@ -122,6 +126,7 @@ export function ExtensionsPage() {
       html`
         <${ConfigureModal}
           extension=${configuring}
+          isAdmin=${isAdmin}
           onActivate=${handleActivateFromModal}
           onClose=${handleCloseModal}
           onSaved=${handleSaved}

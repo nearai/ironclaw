@@ -494,6 +494,7 @@ mod tests {
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements,
+                shared_credentials: Vec::new(),
                 onboarding,
             },
             phase,

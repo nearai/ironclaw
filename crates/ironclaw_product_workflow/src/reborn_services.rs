@@ -137,8 +137,8 @@ pub use types::{
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
     RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSharedCredential,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse,
@@ -2083,6 +2083,21 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// Admin sets a tenant-shared, admin-managed credential (#5459 P3): one
+    /// key, stored at the tenant's shared scope, satisfies every user of the
+    /// tenant (the runtime's `InjectSecretOnce` resolution falls back
+    /// caller -> tenant-shared). Route-layer must gate this on operator/admin
+    /// capability. The raw `value` is never logged or echoed. Default is
+    /// unavailable so non-local impls and test stubs need no change.
+    async fn set_shared_credential(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _handle: String,
+        _value: String,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3892,6 +3907,16 @@ impl RebornServicesApi for RebornServices {
         bundle: Vec<u8>,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
+    }
+
+    async fn set_shared_credential(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        handle: String,
+        value: String,
+    ) -> Result<(), RebornServicesError> {
+        extensions::set_shared_credential(self.lifecycle_facade.as_ref(), caller, handle, value)
+            .await
     }
 
     async fn activate_extension(
