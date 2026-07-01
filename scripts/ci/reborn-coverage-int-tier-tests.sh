@@ -3,8 +3,7 @@
 # Print the cargo `--test <name>` arguments for the Reborn in-process
 # integration-tier test binaries, one per line.
 #
-# Integration-tier is defined (docs/reborn/reborn-backend-coverage-roadmap.md)
-# as the in-process suites:
+# Integration-tier (task T0-COV) is the set of in-process suites:
 #   - tests/reborn_integration_*.rs        (single-file root test binaries)
 #   - tests/reborn_group_*/                ([[test]] binaries; name == dir name)
 #

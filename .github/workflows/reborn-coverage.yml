@@ -4,9 +4,9 @@
 # (tests/reborn_integration_*.rs + tests/reborn_group_*/) and reports a
 # Reborn-crate-scoped line-coverage percentage in the PR's job summary.
 #
-# This is the measurable signal behind the "100% int-tier coverage" goal in
-# docs/reborn/reborn-backend-coverage-roadmap.md (task T0-COV): it yields a
-# per-PR percentage and a per-crate hole list. It is INFORMATIONAL only — it
+# This is the measurable signal behind the Reborn backend's "100% int-tier
+# coverage" goal (task T0-COV): it yields a per-PR percentage and a per-crate
+# hole list. It is INFORMATIONAL only — it
 # does not gate the PR on a coverage threshold.
 #
 # Scope notes:
@@ -33,7 +33,10 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: reborn-coverage-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  # PR number (not head_ref) for pull_request: two fork PRs can share a branch
+  # name (main/fix/…), and head_ref grouping + cancel-in-progress would let one
+  # cancel the other's run. number is null off-PR, so fall back to github.ref.
+  group: reborn-coverage-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
