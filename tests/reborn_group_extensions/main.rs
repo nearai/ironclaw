@@ -17,11 +17,13 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-// Declared in execution order (install → remove → activate) to match the run
-// sequence in `extensions_group_e2e` below.
+// Scenario modules, declared alphabetically because rustfmt reorders `mod`
+// declarations. The execution order — install → remove → activate — is set by
+// the `report.record(...)` call sequence in `extensions_group_e2e` below, not
+// by declaration order.
+mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_remove_then_absent_cross_thread;
-mod scenario_activate_then_active_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
