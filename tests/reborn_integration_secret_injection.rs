@@ -63,4 +63,41 @@ async fn injects_credential_onto_github_egress() {
         )
         .await
         .expect("injected credential present on github egress request");
+
+    // Negative-path coverage on the SAME captured request: a regression that
+    // ignored the url/header-name/value inputs must not let this assertion
+    // pass vacuously (review comment on PR #5483).
+    let wrong_url = harness
+        .assert_network_egress_header_contains(
+            "api.github.com/repos/nonexistent/repo",
+            "authorization",
+            "Bearer ghp_fake_fixture_token",
+        )
+        .await
+        .expect_err("no captured request should match an unrelated url");
+    assert!(
+        wrong_url
+            .to_string()
+            .contains("no captured network egress request matching url")
+    );
+
+    let wrong_header_name = harness
+        .assert_network_egress_header_contains(
+            "api.github.com/repos/nearai/ironclaw",
+            "x-not-a-real-header",
+            "Bearer ghp_fake_fixture_token",
+        )
+        .await
+        .expect_err("matching url has no such header name");
+    assert!(wrong_header_name.to_string().contains("has header"));
+
+    let wrong_value = harness
+        .assert_network_egress_header_contains(
+            "api.github.com/repos/nearai/ironclaw",
+            "authorization",
+            "Bearer wrong-token",
+        )
+        .await
+        .expect_err("matching url/header present but value doesn't match");
+    assert!(wrong_value.to_string().contains("has header"));
 }
