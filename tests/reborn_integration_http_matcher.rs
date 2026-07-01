@@ -133,3 +133,96 @@ async fn capability_keyed_response_matches_and_mismatch_falls_through_to_second_
         "wrong-capability entry must not match a builtin.http call"
     );
 }
+
+const ERR_URL: &str = "https://api.example.test/v1/err";
+
+/// Error path — HTTP 5xx status. A scripted `500` is NOT an egress error: the
+/// `builtin.http` tool surfaces it as a *successful* (Completed) tool result
+/// carrying `"status":500`, so the run completes and the model can react. Proves
+/// a server-error status is model-visible, not a terminal driver failure.
+#[tokio::test]
+async fn http_5xx_status_surfaces_as_completed_result_with_status() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([
+            ScriptedHttpResponse::for_url(ERR_URL, br#"{"error":"boom"}"#).with_status(500),
+        ])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch").await.expect("turn completes");
+    h.assert_tool_result_contains("\"status\":500")
+        .await
+        .expect("5xx status surfaced in the model-visible tool result");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized");
+}
+
+/// Error path — network-policy-denied egress. The scripted egress `Err` maps
+/// (`policy_denied` reason) to a model-visible `Denied` capability outcome, so
+/// the run continues to completion rather than dying with `driver_unavailable`.
+/// Asserts the `denied` category surfaced (not merely that the run completed).
+#[tokio::test]
+async fn http_network_policy_denied_surfaces_recoverable_denied() {
+    use ironclaw_host_api::RuntimeHttpEgressError;
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::egress_error(
+            ERR_URL,
+            RuntimeHttpEgressError::Network {
+                reason: "policy_denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch").await.expect("turn completes");
+    h.assert_tool_error_summary_contains("policy_denied")
+        .await
+        .expect("policy-denied surfaced as a model-visible Denied tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
+/// Error path — oversize response body. The scripted egress
+/// `response_body_limit_exceeded` error maps to a model-visible
+/// `Failed{OutputTooLarge}` capability outcome; the run recovers to completion.
+#[tokio::test]
+async fn http_oversize_response_surfaces_recoverable_failed() {
+    use ironclaw_host_api::{
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressError,
+    };
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::egress_error(
+            ERR_URL,
+            RuntimeHttpEgressError::Response {
+                reason: RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED.to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch").await.expect("turn completes");
+    h.assert_tool_error_summary_contains("output_too_large")
+        .await
+        .expect("oversize response surfaced as a model-visible Failed tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}

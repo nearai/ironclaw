@@ -19,7 +19,22 @@
 // under `-D warnings`. Module-level allow matches the sibling support modules.
 #![allow(dead_code)]
 
-use ironclaw_host_api::RuntimeHttpEgressRequest;
+use ironclaw_host_api::{RuntimeHttpEgressError, RuntimeHttpEgressRequest};
+
+/// What a matched [`ScriptedHttpResponse`] yields at the runtime HTTP egress
+/// boundary: either a successful response (status + body) or a scripted egress
+/// error. The error arm lets tests exercise the runtime error paths
+/// (`policy_denied`, `response_body_limit_exceeded`, …) that the real
+/// `HostHttpEgressService` produces but the recording egress otherwise cannot —
+/// the egress *is* the vendor/network seam this tier fakes, so scripting an
+/// error here is the same seam as scripting a body.
+#[derive(Debug, Clone)]
+pub enum ScriptedHttpOutcome {
+    /// A successful egress response with the given HTTP status and body.
+    Body { status: u16, bytes: Vec<u8> },
+    /// A scripted egress error (`Err(RuntimeHttpEgressError)` from `execute`).
+    Error(RuntimeHttpEgressError),
+}
 
 /// One scripted HTTP response keyed by request attributes. Matching is
 /// first-match-wins in scripted order. A response with only a URL substring
@@ -37,19 +52,50 @@ pub struct ScriptedHttpResponse {
     method: Option<String>,
     /// Optional: the request's capability id must equal this exactly.
     capability_id: Option<String>,
-    /// Scripted response body returned when this response matches.
-    body: Vec<u8>,
+    /// Scripted outcome returned when this response matches.
+    outcome: ScriptedHttpOutcome,
 }
 
 impl ScriptedHttpResponse {
-    /// Script `body` for any request whose URL contains `url_substr`.
+    /// Script a `200` response with `body` for any request whose URL contains
+    /// `url_substr`. Use [`with_status`] to script a non-2xx status (which the
+    /// `builtin.http` tool surfaces as a *successful* tool result carrying the
+    /// status), or [`egress_error`] for a runtime egress error.
+    ///
+    /// [`with_status`]: ScriptedHttpResponse::with_status
+    /// [`egress_error`]: ScriptedHttpResponse::egress_error
     pub fn for_url(url_substr: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             url_contains: url_substr.into(),
             method: None,
             capability_id: None,
-            body: body.into(),
+            outcome: ScriptedHttpOutcome::Body {
+                status: 200,
+                bytes: body.into(),
+            },
         }
+    }
+
+    /// Script a runtime egress error for any request whose URL contains
+    /// `url_substr`. The `execute` boundary returns `Err(error)`, driving the
+    /// `builtin.http` tool's error mapping (e.g. `policy_denied` → `Denied`,
+    /// `response_body_limit_exceeded` → `Failed{OutputTooLarge}`).
+    pub fn egress_error(url_substr: impl Into<String>, error: RuntimeHttpEgressError) -> Self {
+        Self {
+            url_contains: url_substr.into(),
+            method: None,
+            capability_id: None,
+            outcome: ScriptedHttpOutcome::Error(error),
+        }
+    }
+
+    /// Override the HTTP status of a body response (default `200`). No-op on an
+    /// [`egress_error`](ScriptedHttpResponse::egress_error) response.
+    pub fn with_status(mut self, status: u16) -> Self {
+        if let ScriptedHttpOutcome::Body { status: s, .. } = &mut self.outcome {
+            *s = status;
+        }
+        self
     }
 
     /// Narrow the key to a specific HTTP method (lowercase, e.g. `"post"`).
@@ -82,8 +128,8 @@ impl ScriptedHttpResponse {
         true
     }
 
-    /// The scripted body to return on a match.
-    pub(crate) fn body_bytes(&self) -> Vec<u8> {
-        self.body.clone()
+    /// The scripted outcome to return on a match.
+    pub(crate) fn outcome(&self) -> ScriptedHttpOutcome {
+        self.outcome.clone()
     }
 }

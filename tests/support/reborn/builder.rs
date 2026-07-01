@@ -52,6 +52,7 @@ use super::harness::{
     RecordedCapabilityResult,
 };
 use super::http_matcher::ScriptedHttpResponse;
+use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -117,6 +118,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Slice 5: when `true`, the `BuiltinHttpTools` backend uses the real
     /// `LocalHostProcessPort` instead of the inert `RecordingProcessPort`.
     live_shell: bool,
+    /// Sticky scripted result for the inert recording process port (error-path
+    /// coverage): a non-zero exit code or a `run_command` error.
+    scripted_process: Option<ScriptedProcessResult>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -155,6 +159,26 @@ impl RebornIntegrationHarnessBuilder {
     pub fn with_live_shell(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.live_shell = true;
+        self
+    }
+
+    /// Script the inert recording process port so `builtin.shell` returns a
+    /// non-zero exit code (error-path coverage). The tool still surfaces a
+    /// *Completed* result carrying `exit_code`/`success: false`. Implies
+    /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.scripted_process = Some(ScriptedProcessResult::ExitCode(exit_code));
+        self
+    }
+
+    /// Script the inert recording process port so `builtin.shell` returns a
+    /// timeout error (`RuntimeProcessError::Timeout`), which the tool maps to a
+    /// recoverable model-visible `Failed{Resource}` capability error. Implies
+    /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_shell_timeout(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.scripted_process = Some(ScriptedProcessResult::Timeout);
         self
     }
 
@@ -217,6 +241,9 @@ impl RebornIntegrationHarnessBuilder {
                     HostRuntimeCapabilityHarness::core_builtin_tools().await?
                 };
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
+                if let Some(scripted_process) = self.scripted_process {
+                    host_runtime.install_process_script(scripted_process)?;
+                }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
@@ -292,6 +319,7 @@ impl RebornIntegrationHarness {
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
             live_shell: false,
+            scripted_process: None,
         }
     }
 

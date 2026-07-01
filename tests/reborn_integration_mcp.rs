@@ -104,3 +104,82 @@ async fn assert_mcp_tool_called_fails_when_no_mcp_call_ran() {
     h.submit_turn("just talk").await.expect("turn completes");
     assert!(h.assert_mcp_tool_called("search").await.is_err());
 }
+
+/// Error path — MCP `tools/call` returns a JSON-RPC `error` object. The client
+/// surfaces this as `Failed{Backend}` (a recoverable, model-visible tool
+/// error), so the run continues to completion rather than dying with
+/// `driver_unavailable`. Distinct wire path from the 5xx case below: this trips
+/// the client's JSON-RPC error-field guard, not its HTTP status gate.
+#[tokio::test]
+async fn mcp_tool_call_error_surfaces_recoverable_failed() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": []}),
+    }])
+    .await;
+    server.set_tool_call_error(-32602, "unknown tool");
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn completes");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool was invoked before the error");
+    h.assert_tool_error_summary_contains("backend")
+        .await
+        .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
+/// Error path — MCP server returns HTTP 5xx on the tool call. The client
+/// surfaces this as `Failed{Backend}` (recoverable, model-visible), and the run
+/// completes. Distinct wire path from the JSON-RPC-error case above: this trips
+/// the client's HTTP status gate, not its JSON-RPC error-field guard.
+#[tokio::test]
+async fn mcp_server_5xx_surfaces_recoverable_failed() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": []}),
+    }])
+    .await;
+    server.force_http_status(500);
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn completes");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool call reached the server before the 5xx");
+    h.assert_tool_error_summary_contains("backend")
+        .await
+        .expect("server 5xx surfaced as a model-visible Failed tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
+// MCP "auth mismatch" (HTTP 401/403) is deliberately NOT covered here: unlike
+// the two cases above, a 401/403 maps to `McpClientError::AuthRequired` — an
+// auth *gate* (park-and-resume), not a model-visible `Failed`/`Denied` tool
+// error. Exercising a credentialed-backend 401 through to a raised auth gate
+// requires a capability-backend credential stub that this tier does not yet
+// have; it is the same "live-401 re-auth arm" already deferred in
+// `reborn_integration_auth_failure.rs`. Track with that follow-up.

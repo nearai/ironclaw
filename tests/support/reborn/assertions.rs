@@ -112,6 +112,46 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert a model-visible tool ERROR carrying `needle` was persisted for
+    /// this thread. Unlike [`assert_tool_result_contains`] (which reads the
+    /// in-process recorder, populated only on the *Completed* write path), a
+    /// `Failed`/`Denied` capability outcome is persisted through a different
+    /// pipeline — `append_capability_result_ref` →
+    /// `append_tool_result_reference` — as a `MessageKind::ToolResultReference`
+    /// message whose `content` is the JSON-serialized `ToolResultReferenceEnvelope`.
+    /// That envelope's `safe_summary` reads `"capability failed with <kind>: …"`
+    /// / `"capability denied with <reason>: …"` (and, for `Failed`, a
+    /// `model_observation` naming the same failure kind), so `needle` such as
+    /// `"policy_denied"`, `"output_too_large"`, `"resource"`, or `"backend"`
+    /// discriminates the surfaced category. Reaching this state at all (rather
+    /// than a terminal `driver_unavailable`) also proves the failure was a
+    /// recoverable, model-visible tool error.
+    pub async fn assert_tool_error_summary_contains(&self, needle: &str) -> HarnessResult<()> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        let matched = history.iter().any(|message| {
+            message.kind == ironclaw_threads::MessageKind::ToolResultReference
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(needle))
+        });
+        if matched {
+            return Ok(());
+        }
+        let seen: Vec<String> = history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .filter_map(|message| message.content.clone())
+            .collect();
+        Err(format!(
+            "no persisted tool-result-reference message containing {needle:?}; saw {seen:?}"
+        )
+        .into())
+    }
+
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed
     /// scripted body actually surfaced back to the model as a tool result.
