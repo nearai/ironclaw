@@ -6,8 +6,9 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
-    ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, ResourceEstimate,
+    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -137,10 +138,7 @@ fn validate_loop_safe_identifier(
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err(format!("{label} must not contain API-key-like tokens"));
     }
     Ok(value)
@@ -148,6 +146,9 @@ fn validate_loop_safe_identifier(
 
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    if value == INPUT_ENCODE_HUMAN_SUMMARY {
+        return Ok(value);
+    }
     if value.chars().any(|character| {
         matches!(
             character,
@@ -186,13 +187,38 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err("loop safe summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(is_secret_like_token)
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
 macro_rules! bounded_loop_ref {
@@ -384,6 +410,24 @@ pub struct LoopSafeSummary(String);
 impl LoopSafeSummary {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         validate_loop_safe_summary(value.into()).map(Self)
+    }
+
+    /// Build a display-safe capability failure summary, replacing unsafe input
+    /// with a fixed redaction marker.
+    pub fn capability_failure_summary(value: impl Into<String>) -> Self {
+        Self::new(value).unwrap_or_else(|_| Self::tool_failure_details_redacted())
+    }
+
+    /// Fixed summary used when a capability failure detail was intentionally
+    /// redacted before reaching a user-visible or model-visible boundary.
+    pub fn tool_failure_details_redacted() -> Self {
+        Self("the tool failure details were redacted".to_string())
+    }
+
+    /// Fixed fallback for input-encoding failures when no narrower safe detail
+    /// is available.
+    pub fn tool_input_could_not_be_encoded() -> Self {
+        Self(INPUT_ENCODE_HUMAN_SUMMARY.to_string())
     }
 
     pub fn model_gateway_failed() -> Self {
@@ -2207,6 +2251,11 @@ pub enum LoopProgressEvent {
         activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
         reason_kind: CapabilityFailureKind,
+        /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
+        /// `"invalid JSON: ..."` message) so the live per-tool UI card can show
+        /// the real reason, not just the kind. Additive; `None` when no
+        /// host-authored summary is available.
+        safe_summary: Option<String>,
     },
     GateBlocked {
         iteration: u32,
@@ -2467,5 +2516,36 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn capability_failure_summary_redacts_secret_like_tokens() {
+        for raw_summary in [
+            "provider returned AKIAIOSFODNN7EXAMPLE",
+            "provider returned gcp-live-secret",
+            "provider returned sk-ant-live-secret",
+            "provider returned ghp_live_secret",
+            "provider returned github_pat_live_secret",
+        ] {
+            let summary = LoopSafeSummary::capability_failure_summary(raw_summary);
+            assert_eq!(
+                summary.as_str(),
+                "the tool failure details were redacted",
+                "summary must be redacted: {raw_summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_safe_summary_accepts_fixed_input_encode_summary() {
+        let summary = LoopSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
+            .expect("fixed host-authored input encode summary is safe");
+        assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+
+        let raw_input_summary = LoopSafeSummary::new("tool input contained raw payload");
+        assert!(
+            raw_input_summary.is_err(),
+            "only the fixed fallback summary should bypass the raw-input denylist"
+        );
     }
 }

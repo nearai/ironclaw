@@ -823,6 +823,127 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
 }
 
 #[test]
+fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let user_account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+    let unrelated_account = ResourceAccount::tenant(TenantId::new("tenant-unrelated").unwrap());
+
+    let legacy_governor =
+        PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    legacy_governor
+        .set_limit(tenant_account.clone(), ResourceLimits::default())
+        .unwrap();
+    let legacy_reservation = legacy_governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    legacy_governor
+        .reconcile(
+            legacy_reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    let legacy_usage = legacy_governor.usage_for(&tenant_account).unwrap();
+    assert_eq!(
+        legacy_usage.usd,
+        dec!(0.20),
+        "test setup must leave durable usage for the fast path to ignore"
+    );
+    let before_fast_path = fs::read_to_string(&path).unwrap();
+    let before_fast_path_json: serde_json::Value = serde_json::from_str(&before_fast_path).unwrap();
+    assert!(
+        before_fast_path_json["state"]["usage_by_account"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "legacy fixture must contain durable usage so the test exercises accounting cleanup"
+    );
+    assert!(
+        before_fast_path_json["state"]["reservations"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "legacy fixture must contain durable reservations so the test exercises accounting cleanup"
+    );
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    governor
+        .set_limit(unrelated_account, ResourceLimits::default())
+        .unwrap();
+    assert_eq!(
+        governor.usage_for(&user_account).unwrap(),
+        ResourceTally::default(),
+        "unlimited set_limit must not seed local fast-path state with legacy durable usage"
+    );
+    let after_unlimited_limit = fs::read_to_string(&path).unwrap();
+
+    let reservation = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.10)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.10),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks should still use local state"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        after_unlimited_limit,
+        "legacy durable usage/reservations should not force unlimited fast-path writes"
+    );
+
+    governor
+        .set_limit(
+            tenant_account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let reloaded = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    let snapshot = reloaded.account_snapshot(&tenant_account).unwrap().unwrap();
+    assert_eq!(
+        snapshot.ledger.spent.usd,
+        dec!(0.30),
+        "finite-limit transition should preserve legacy durable usage and merge fast-path usage"
+    );
+}
+
+#[test]
 fn persistent_governor_serializes_concurrent_reservations_across_handles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("resource-governor.json");

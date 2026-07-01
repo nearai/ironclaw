@@ -56,7 +56,11 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChat({ hookState, activeThreadId = "thread-1" }) {
+function renderChat({
+  hookState,
+  activeThreadId = "thread-1",
+  globalAutoApproveEnabled = false,
+}) {
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -65,7 +69,6 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
-    Icon() {},
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
@@ -84,17 +87,8 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
-    buildScopedLogsPath: (
-      { threadId, runId } = {},
-      { absolute = false } = {},
-    ) => {
-      const params = [];
-      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
-      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
-      const query = params.length > 0 ? `?${params.join("&")}` : "";
-      return `${absolute ? "/v2" : ""}/logs${query}`;
-    },
     buildRuntimeContext: () => ({}),
+    buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: () => {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -110,6 +104,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
+    globalAutoApproveEnabled,
   });
   return { tree, components };
 }
@@ -367,7 +362,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
-test("Chat links to scoped logs for the active thread run", () => {
+test("Chat does not render a top-level logs header for the active thread run", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -391,19 +386,25 @@ test("Chat links to scoped logs for the active thread run", () => {
     },
   });
 
-  const logsLink = findComponent(tree, components.Link);
-  assert.ok(logsLink, "active chat should render a scoped logs link");
   assert.equal(
-    componentProps(logsLink, components.Link).to,
-    "/v2/logs?thread_id=thread-1&run_id=run-1",
+    findComponent(tree, components.Link),
+    null,
+    "active chat should not render an extra run logs router link outside message actions",
   );
-  assert.ok(logsLink.values.includes("nav.logs"));
-
   const messageList = findComponent(tree, components.MessageList);
   assert.equal(
-    findComponent(messageList, components.Link),
+    componentProps(messageList, components.MessageList).logsPath,
+    "/logs?thread_id=thread-1",
+    "chat should pass a prebuilt thread-scoped logs path down to MessageList",
+  );
+  assert.equal(
+    findNode(tree, (node) =>
+      node.strings.some((part) =>
+        part.includes("justify-end border-b border-[var(--v2-panel-border)]")
+      )
+    ),
     null,
-    "active run logs link should not render in the message list footer near the composer",
+    "active run logs link should not render as a duplicate top header bar",
   );
 });
 
@@ -441,6 +442,7 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
 
   const approvalCard = findComponent(tree, components.ApprovalCard);
   const props = componentProps(approvalCard, components.ApprovalCard);
+  assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
 });

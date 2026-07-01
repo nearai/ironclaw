@@ -59,6 +59,8 @@ function runUseChatSource(context) {
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
   });
+  if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
+  if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
 }
 
@@ -351,6 +353,30 @@ test("useChat.send: stamps render attachments on the optimistic message", async 
       preview_url: "data:image/png;base64,cG5n",
     },
   ]);
+});
+
+test("useChat.send: touches sidebar cache without refetching thread list", async () => {
+  const threadId = "thread-1";
+  const { context } = createSendCaptureContext();
+  let touched = null;
+
+  context.queryClient.invalidateQueries = () => {
+    throw new Error("send should not refetch the full thread list");
+  };
+  context.touchThreadInCache = (update) => {
+    touched = update;
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("raw wire content", {
+    displayContent: "visible sidebar title",
+  });
+
+  assert.equal(touched.threadId, threadId);
+  assert.equal(touched.messageContent, "visible sidebar title");
+  assert.match(touched.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("useChat.send: target-thread send does not append into active thread", async () => {
@@ -1896,6 +1922,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
 test("useChat.send: ordinary Slack chat prompts submit to the model", async () => {
   let createThreadCalled = false;
   let sentContent = null;
+  let upsertedThread = null;
 
   const context = {
     AbortController,
@@ -1916,7 +1943,9 @@ test("useChat.send: ordinary Slack chat prompts submit to the model", async () =
     globalThis: {},
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
-      invalidateQueries: () => {},
+      invalidateQueries: () => {
+        throw new Error("first send should not refetch the full thread list");
+      },
     },
     recordAcceptedMessageRef,
     removePending,
@@ -1933,6 +1962,9 @@ test("useChat.send: ordinary Slack chat prompts submit to the model", async () =
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
+    upsertThreadInCache: (thread) => {
+      upsertedThread = thread;
+    },
     useChatEvents: () => () => {},
     useHistory: () => ({
       messages: [],
@@ -1955,6 +1987,7 @@ test("useChat.send: ordinary Slack chat prompts submit to the model", async () =
   assert.equal(sentContent, "setup a Slack regex for chat routing");
   assert.equal(response.channel_connect_action, undefined);
   assert.equal(response.thread_id, "thread-created");
+  assert.deepEqual(upsertedThread, { thread_id: "thread-created" });
 });
 
 test("useChat.send: rejected_busy appends system notice, marks optimistic failed, clears isProcessing", async () => {

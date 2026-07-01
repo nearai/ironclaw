@@ -87,6 +87,7 @@ function toolCardFromGate(gate, overrides = {}) {
     toolResultPreview: null,
     toolError: overrides.toolError || null,
     toolErrorKind: overrides.toolErrorKind || null,
+    toolErrorIsBareKind: !!overrides.toolErrorKind && !overrides.toolError,
     toolDurationMs: null,
     updatedAt: overrides.updatedAt || new Date().toISOString(),
     resultRef: null,
@@ -147,8 +148,9 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
-    toolError: incoming.toolError || current.toolError,
+    toolError: mergedToolError(current, incoming),
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
+    toolErrorIsBareKind: mergedToolErrorIsBareKind(current, incoming),
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
       : incoming.updatedAt || current.updatedAt,
@@ -166,6 +168,34 @@ function mergeToolActivity(current, incoming) {
     merged.gateActivity = false;
   }
   return merged;
+}
+
+// A capability failure surfaces its detail on two frames that race: the
+// runtime-payload `capability_activity` deliberately carries no `error_detail`
+// (its `toolError` is just the bare kind, e.g. "invalid_input"), while the
+// `capability_display_preview` carries the real reason. A plain
+// `incoming || current` lets a late bare-kind activity frame clobber a detail
+// already set by the preview. Never downgrade a richer error to the bare kind:
+// if the incoming error is only the kind string and the current one is a
+// different (detailed) message, keep the current one.
+function mergedToolError(current, incoming) {
+  const incomingError = incoming.toolError || null;
+  const currentError = current.toolError || null;
+  if (!incomingError) return currentError;
+  if (incoming.toolErrorIsBareKind && currentError && currentError !== incomingError) {
+    return currentError;
+  }
+  return incomingError;
+}
+
+function mergedToolErrorIsBareKind(current, incoming) {
+  const incomingError = incoming.toolError || null;
+  const currentError = current.toolError || null;
+  if (incoming.toolErrorIsBareKind && currentError && currentError !== incomingError) {
+    return !!current.toolErrorIsBareKind;
+  }
+  if (incomingError) return !!incoming.toolErrorIsBareKind;
+  return !!current.toolErrorIsBareKind;
 }
 
 function mergedActivityOrder(current, incoming) {
@@ -200,5 +230,6 @@ function normalizeToolCard(card) {
   return {
     ...card,
     toolName: normalizedName || card.toolName || "tool",
+    toolErrorIsBareKind: Boolean(card.toolErrorIsBareKind),
   };
 }

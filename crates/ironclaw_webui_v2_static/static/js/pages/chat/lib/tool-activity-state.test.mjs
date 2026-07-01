@@ -380,6 +380,84 @@ test("tool activity state preserves existing order when a gate is denied", () =>
   assert.equal(messages[0].activityOrder, 4);
 });
 
+test("tool activity state keeps preview failure detail when a bare-kind activity frame races in after it", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  // The display preview lands first with the real failure reason.
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromPreview({
+      invocation_id: "invocation-json",
+      capability_id: "builtin.json",
+      status: "failed",
+      error_kind: "invalid_input",
+      output_summary: "the tool input could not be encoded",
+    }),
+    stateRef,
+  );
+  assert.equal(messages[0].toolError, "the tool input could not be encoded");
+
+  // A runtime-payload activity frame (no error_detail → toolError is the bare
+  // kind) races in afterward and must NOT clobber the detailed reason.
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-json",
+      capability_id: "builtin.json",
+      status: "failed",
+      error_kind: "invalid_input",
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolError, "the tool input could not be encoded");
+  assert.equal(messages[0].toolErrorKind, "invalid_input");
+});
+
+test("tool activity state uses bare-kind flag instead of string equality", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-json",
+      capabilityId: "builtin.json",
+      toolName: "json",
+      toolStatus: "error",
+      toolError: "the tool input could not be encoded",
+      toolErrorKind: "invalid_input",
+      toolErrorIsBareKind: false,
+    },
+    stateRef,
+  );
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-json",
+      capabilityId: "builtin.json",
+      toolName: "json",
+      toolStatus: "error",
+      toolError: "invalid_input",
+      toolErrorKind: "invalidInput",
+      toolErrorIsBareKind: true,
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolError, "the tool input could not be encoded");
+});
+
 test("tool activity state applies durable projection order to live activity", () => {
   const runId = "run-projection-order";
   const stateRef = { current: createToolActivityState() };

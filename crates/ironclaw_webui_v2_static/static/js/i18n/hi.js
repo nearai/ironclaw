@@ -42,6 +42,19 @@ registerPack("hi", {
   // Header
   "header.signOut": "साइन आउट",
 
+  // Notifications
+  "notifications.open": "सूचनाएं खोलें",
+  "notifications.close": "सूचनाएं बंद करें",
+  "notifications.title": "सूचनाएं",
+  "notifications.emptyTitle": "कोई सूचना नहीं",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "सब देख लिया गया",
+  "notifications.unreadCount": "{count} नई",
+  "notifications.unread": "अपठित",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "ऑनलाइन",
   "status.offline": "ऑफलाइन",
@@ -125,6 +138,7 @@ registerPack("hi", {
   "approval.always": "हमेशा",
   "approval.approveAndAlways": "स्वीकृत करें और हमेशा अनुमति दें",
   "approval.alwaysAllowToolLabel": "बिना पूछे हमेशा {tool} की अनुमति दें",
+  "approval.globalAutoApproveLink": "सभी कार्रवाइयों को अपने-आप स्वीकृत और निष्पादित करें",
   "approval.thisTool": "यह टूल",
   "approval.viewFullCommand": "पूरा कमांड देखें",
   "approval.showCommandPreview": "पूर्वावलोकन दिखाएँ",

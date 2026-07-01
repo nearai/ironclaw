@@ -1,4 +1,5 @@
 import { React, html } from "../../../lib/html.js";
+import { Link } from "react-router";
 import { useT } from "../../../lib/i18n.js";
 import { ActivityRun } from "./activity-run.js";
 import { MessageBubble } from "./message-bubble.js";
@@ -7,6 +8,8 @@ import { groupMessages } from "../lib/message-groups.js";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
+const FLOATING_LOGS_BUTTON_CLASS =
+  "group absolute bottom-5 right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]";
 
 export function distanceFromBottom(el) {
   if (!el) return Number.POSITIVE_INFINITY;
@@ -44,6 +47,7 @@ export function MessageList({
   onLoadMore,
   onRetryMessage,
   threadId,
+  logsPath,
   pending = false,
   children,
 }) {
@@ -252,8 +256,20 @@ export function MessageList({
               />`
         )}
         ${children}
+        ${logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" />`}
       </div>
     </div>
+    ${logsPath &&
+    html`
+      <${Link}
+        to=${logsPath}
+        aria-label=${t("nav.logs")}
+        title=${t("nav.logs")}
+        className=${FLOATING_LOGS_BUTTON_CLASS}
+      >
+        <${Icon} name="logs" className="size-5" />
+      <//>
+    `}
     ${!atBottom &&
     html`
       <button

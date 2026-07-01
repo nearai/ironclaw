@@ -165,11 +165,19 @@ export function createThread({ clientActionId: clientId, requestedThreadId, proj
   });
 }
 
-export function listThreads({ limit, cursor, projectId } = {}) {
+export function listThreads({
+  limit,
+  cursor,
+  projectId,
+  needsApproval,
+  candidateThreadId,
+} = {}) {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   if (projectId) url.searchParams.set("project_id", projectId);
+  if (needsApproval) url.searchParams.set("needs_approval", "true");
+  if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
   return apiFetch(url.pathname + url.search);
 }
 

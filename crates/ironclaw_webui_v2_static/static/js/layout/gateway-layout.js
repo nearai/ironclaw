@@ -1,6 +1,7 @@
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
+import { useNotifications } from "../hooks/useNotifications.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
 import { useSidebar } from "../hooks/useSidebar.js";
@@ -22,12 +23,19 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
+  globalAutoApproveEnabled = false,
   onSignOut,
 }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
   const threadsState = useThreads();
+  const notificationsState = useNotifications({
+    profile,
+    enabled: Boolean(token),
+    activeThreadId: threadsState.activeThreadId,
+    threads: threadsState.threads,
+  });
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
@@ -128,6 +136,7 @@ export function GatewayLayout({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <${PageHeader}
           threadsState=${threadsState}
+          notificationsState=${notificationsState}
           onToggleSidebar=${sidebar.toggle}
           sidebarOpen=${sidebar.currentOpen}
         />
@@ -151,6 +160,7 @@ export function GatewayLayout({
               currentUser: profile,
               isChecking,
               isAdmin,
+              globalAutoApproveEnabled,
               threadsState,
             }}
           />

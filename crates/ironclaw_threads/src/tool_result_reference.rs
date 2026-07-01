@@ -1,4 +1,4 @@
-use ironclaw_host_api::{CapabilityId, ProviderToolName};
+use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
 use ironclaw_safety::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
     validate_provider_identity, validate_provider_token, validate_provider_tool_name,
@@ -349,6 +349,9 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
         return Err(
             "tool result summary must not contain raw payload or path delimiters".to_string(),
         );
+    }
+    if value == INPUT_ENCODE_HUMAN_SUMMARY {
+        return Ok(value);
     }
 
     let lower = value.to_ascii_lowercase();
@@ -828,7 +831,8 @@ mod tests {
     use ironclaw_host_api::{CapabilityId, ProviderToolName};
 
     use super::{
-        ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+        INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
+        ToolResultSafeSummary,
     };
 
     #[test]
@@ -848,6 +852,15 @@ mod tests {
     fn safe_summary_api_key_check_is_token_based() {
         assert!(ToolResultSafeSummary::new("sky-high confidence").is_ok());
         assert!(ToolResultSafeSummary::new("completed with sk-live-token").is_err());
+    }
+
+    #[test]
+    fn safe_summary_accepts_fixed_input_encode_summary() {
+        let summary = ToolResultSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
+            .expect("fixed host-authored input encode summary is safe");
+        assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+
+        assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
     }
 
     #[test]
