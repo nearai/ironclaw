@@ -396,6 +396,25 @@ fn capability_input_issue_display_text(value: &str) -> Option<String> {
 
 fn contains_capability_input_issue_sensitive_marker(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    for forbidden in [
+        "accesstoken",
+        "apikey",
+        "authtoken",
+        "authorization",
+        "bearer",
+        "password",
+        "passwd",
+        "secret",
+        "toolinput",
+    ] {
+        if normalized.contains(forbidden) {
+            return true;
+        }
+    }
     for forbidden in [
         "access token",
         "access_token",
@@ -3485,6 +3504,19 @@ mod tests {
             capability_failure_display_summary(&failure).as_deref(),
             Some("input schema validation failed")
         );
+    }
+
+    #[test]
+    fn capability_input_issue_display_text_rejects_sensitive_marker_variants() {
+        for value in [
+            "x-api-key",
+            "accessToken",
+            "auth_token",
+            "toolInput",
+            "secret_api_key",
+        ] {
+            assert_eq!(capability_input_issue_display_text(value), None, "{value}");
+        }
     }
 
     #[test]
