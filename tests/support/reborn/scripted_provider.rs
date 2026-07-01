@@ -3,6 +3,23 @@
 //! `RebornScriptedReply` façade and returns a `TraceLlm` to sit at the bottom of
 //! the real `ironclaw_llm` decorator chain (design §3.1/§3.3).
 
+// The parking provider (`ParkingModelGate`/`ParkingLlm`) is consumed only by the
+// `reborn_integration_cancel` test binary, so it reads as dead in the
+// `support_unit_tests` binary that compiles this tree without that consumer —
+// matching the file-level allow every sibling support module already carries.
+#![allow(dead_code)]
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use ironclaw::error::LlmError;
+use ironclaw_llm::{
+    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+    ToolCompletionResponse,
+};
+use rust_decimal::Decimal;
+use tokio::sync::oneshot;
+
 use super::reply::RebornScriptedReply;
 use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceTurn};
 
@@ -25,4 +42,123 @@ pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>
         }],
     );
     TraceLlm::from_trace(trace)
+}
+
+// ---------------------------------------------------------------------------
+// Parking model provider (E-GATEWAY seam) — mid-turn cancel coverage.
+// ---------------------------------------------------------------------------
+
+/// Synchronization handle for a [`ParkingLlm`]: the test waits until the model
+/// call parks, then releases it. Cloneable (shares one [`ParkingState`] over an
+/// `Arc`), so the test keeps a handle while a clone lives inside the provider.
+///
+/// Uses `oneshot` channels rather than `Notify` so signalling is lost-wakeup
+/// free: `oneshot::Sender::send` stores the value regardless of whether the
+/// receiver is already awaiting, so `release()` may run before or after the
+/// provider reaches its `await` without racing. The first model call parks; a
+/// second call (if any) delegates immediately.
+#[derive(Clone)]
+pub struct ParkingModelGate(Arc<ParkingState>);
+
+struct ParkingState {
+    parked_tx: Mutex<Option<oneshot::Sender<()>>>,
+    parked_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    release_tx: Mutex<Option<oneshot::Sender<()>>>,
+    release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl ParkingModelGate {
+    pub fn new() -> Self {
+        let (parked_tx, parked_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        Self(Arc::new(ParkingState {
+            parked_tx: Mutex::new(Some(parked_tx)),
+            parked_rx: Mutex::new(Some(parked_rx)),
+            release_tx: Mutex::new(Some(release_tx)),
+            release_rx: Mutex::new(Some(release_rx)),
+        }))
+    }
+
+    /// Await until the parked model call has signalled it is blocked. Returns
+    /// immediately on any subsequent call (the channel is consumed once).
+    pub async fn wait_until_parked(&self) {
+        let rx = lock(&self.0.parked_rx).take();
+        if let Some(rx) = rx {
+            let _ = rx.await;
+        }
+    }
+
+    /// Release the parked model call so it delegates to the inner trace and the
+    /// turn proceeds.
+    pub fn release(&self) {
+        if let Some(tx) = lock(&self.0.release_tx).take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Provider side: signal parked, then block until `release()` fires.
+    async fn park(&self) {
+        if let Some(tx) = lock(&self.0.parked_tx).take() {
+            let _ = tx.send(());
+        }
+        let rx = lock(&self.0.release_rx).take();
+        if let Some(rx) = rx {
+            let _ = rx.await;
+        }
+    }
+}
+
+impl Default for ParkingModelGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A raw `LlmProvider` that parks the first model call until the test releases
+/// it, then delegates to the inner scripted [`TraceLlm`]. Sits at the same
+/// vendor-SDK seam `scripted_trace_llm` fills, preserving the tier's
+/// single-fake invariant (the real `ironclaw_llm` decorator chain still runs
+/// on top).
+pub struct ParkingLlm {
+    inner: TraceLlm,
+    gate: ParkingModelGate,
+}
+
+/// Build a parking provider replaying `replies` once released via `gate`.
+pub fn parking_trace_llm(
+    gate: ParkingModelGate,
+    replies: impl IntoIterator<Item = RebornScriptedReply>,
+) -> ParkingLlm {
+    ParkingLlm {
+        inner: scripted_trace_llm(replies),
+        gate,
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ParkingLlm {
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.gate.park().await;
+        self.inner.complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.gate.park().await;
+        self.inner.complete_with_tools(request).await
+    }
 }
