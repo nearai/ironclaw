@@ -287,7 +287,7 @@ struct PreparedOAuthGateFlow {
     pkce_verifier: SecretString,
 }
 
-fn auth_scope_for_blocked_turn(
+pub(crate) fn auth_scope_for_blocked_turn(
     scope: &TurnScope,
     owner_user_id: &ironclaw_host_api::UserId,
 ) -> AuthProductScope {
@@ -305,7 +305,7 @@ fn auth_scope_for_blocked_turn(
     )
 }
 
-fn turn_gate_query(
+pub(crate) fn turn_gate_query(
     auth_scope: &AuthProductScope,
     turn_scope: &TurnScope,
     turn_run_ref: &TurnRunRef,
@@ -325,14 +325,16 @@ fn turn_gate_query(
     }
 }
 
-fn provider_scopes(raw_scopes: &[String]) -> Result<Vec<ProviderScope>, AuthProductError> {
+pub(crate) fn provider_scopes(raw_scopes: &[String]) -> Result<Vec<ProviderScope>, AuthProductError> {
     raw_scopes
         .iter()
         .map(|scope| ProviderScope::new(scope.clone()))
         .collect()
 }
 
-fn challenge_view_from_flow(flow: &AuthFlowRecord) -> Result<AuthChallengeView, AuthProductError> {
+pub(crate) fn challenge_view_from_flow(
+    flow: &AuthFlowRecord,
+) -> Result<AuthChallengeView, AuthProductError> {
     match flow.challenge.as_ref() {
         Some(AuthChallenge::OAuthUrl {
             authorization_url,
