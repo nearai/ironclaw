@@ -34,4 +34,5 @@ test-support = []
 
 [dev-dependencies]
 ironclaw_threads = { path = ".", features = ["test-support"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
