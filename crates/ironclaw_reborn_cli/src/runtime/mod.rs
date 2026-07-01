@@ -636,6 +636,9 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    if let Some(client) = resolve_slack_personal_oauth_config_from_env()? {
+        services_input = services_input.with_slack_personal_oauth_backend(client);
+    }
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -745,6 +748,50 @@ fn build_production_services_input(
 pub(crate) fn resolve_google_oauth_config_from_env()
 -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
     resolve_google_oauth_config(optional_nonempty_env)
+}
+
+/// Resolve the Slack personal (user-token) OAuth client config from env.
+///
+/// Single shared Slack app: point these at the same app that issues the
+/// workspace bot token. Returns `None` when no Slack-personal OAuth vars are
+/// set (the provider is simply not registered). Slack requires a client
+/// secret for token exchange, so a missing secret is warned about loudly.
+pub(crate) fn resolve_slack_personal_oauth_config_from_env()
+-> anyhow::Result<Option<OAuthClientConfig>> {
+    resolve_slack_personal_oauth_config(optional_nonempty_env)
+}
+
+fn resolve_slack_personal_oauth_config(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<OAuthClientConfig>> {
+    let client_id = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID");
+    let redirect_uri = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI");
+    let client_secret = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET");
+
+    if client_id.is_none() && redirect_uri.is_none() && client_secret.is_none() {
+        return Ok(None);
+    }
+
+    let client_id = client_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID is required for Slack personal OAuth setup"
+        )
+    })?;
+    let redirect_uri = redirect_uri.ok_or_else(|| {
+        anyhow::anyhow!(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI is required for Slack personal OAuth setup"
+        )
+    })?;
+    let client_secret = client_secret.map(SecretString::from);
+    if client_secret.is_none() {
+        tracing::warn!(
+            target = "ironclaw::reborn::cli::slack_personal_oauth",
+            "Slack personal OAuth config has no client secret; Slack requires one for token exchange",
+        );
+    }
+    let client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
+        .context("invalid Slack personal OAuth client configuration")?;
+    Ok(Some(client))
 }
 
 fn resolve_google_oauth_config(

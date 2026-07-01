@@ -37,10 +37,10 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
     GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
-    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge,
+    PkceVerifierSecret, ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SlackPersonalOAuthCallbackState, Timestamp,
+    TurnRunRef, binding_scope_owns_account, build_google_authorization_url,
+    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -71,6 +71,8 @@ pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/cal
 pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
 pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
+pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/slack_personal/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -352,6 +354,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
             .route(
                 GOOGLE_OAUTH_CALLBACK_PATH,
                 get(oauth::google_oauth_callback_handler),
+            )
+            .route(
+                SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
+                get(oauth::slack_personal_oauth_callback_handler),
             )
             .with_state(state),
         descriptors: product_auth_route_descriptors(),

@@ -1,4 +1,6 @@
-use crate::oauth_provider_client::{ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape};
+use crate::oauth_provider_client::{
+    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
+};
 
 pub(crate) const NOTION_PROVIDER_ID: &str = "notion";
 const NOTION_OAUTH_CAPABILITY: &str = "ironclaw_auth.notion_oauth";

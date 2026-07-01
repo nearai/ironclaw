@@ -1027,6 +1027,9 @@ fn compose_product_auth_services(
     if let Some(registry) = provider_composition.gate_registry {
         services = services.with_oauth_gate_registry(registry);
     }
+    if let Some(registry) = provider_composition.slack_gate_registry {
+        services = services.with_slack_oauth_gate_registry(registry);
+    }
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
     }
@@ -1430,6 +1433,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
                 };
+                let services = match provider_composition.slack_gate_registry.clone() {
+                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
+                    None => services,
+                };
                 let services = match security_audit_sink.clone() {
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
@@ -1457,6 +1464,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                };
+                let services = match provider_composition.slack_gate_registry.clone() {
+                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(

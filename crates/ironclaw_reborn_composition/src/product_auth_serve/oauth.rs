@@ -472,6 +472,122 @@ pub(super) async fn google_oauth_callback_handler(
     Ok(oauth_callback_response(&headers, response))
 }
 
+/// Slack personal (user-token) OAuth callback. Mirrors
+/// [`google_oauth_callback_handler`] but decodes a
+/// [`SlackPersonalOAuthCallbackState`] and skips Google-specific scope
+/// validation: Slack does not echo granted scopes on the redirect (they are in
+/// the token response under `authed_user.scope`), so the requested scopes from
+/// the encoded state are used directly.
+pub(super) async fn slack_personal_oauth_callback_handler(
+    State(state): State<ProductAuthRouteState>,
+    RawQuery(raw_query): RawQuery,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ProductAuthRouteFailure> {
+    validate_callback_raw_query(raw_query.as_deref())?;
+    let query = axum::extract::Query::<GoogleOAuthCallbackQuery>::try_from_uri(&uri)
+        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
+        .0;
+    validate_google_callback_query_fields(&query)?;
+    let state_value = query
+        .state
+        .as_ref()
+        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
+    let state_hash = opaque_state_hash(state_value.as_str())?;
+    let callback_state = SlackPersonalOAuthCallbackState::decode(state_value.as_str())
+        .map_err(ProductAuthRouteFailure::from)?;
+    let flow_id = callback_state.flow_id();
+    let callback_scope = callback_state.scope();
+
+    if query
+        .error
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+            RebornOAuthCallbackRequest {
+                scope: callback_scope.clone(),
+                flow_id,
+                opaque_state_hash: state_hash.clone(),
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            },
+        ))
+        .await;
+        state.remove_pkce_verifier(flow_id);
+        return oauth_callback_route_result_response(&headers, response);
+    }
+
+    let provider = match run_with_backend_timeout(
+        state
+            .product_auth
+            .ensure_oauth_callback_flow_known(callback_scope, flow_id),
+    )
+    .await
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            state.remove_pkce_verifier(flow_id);
+            return Err(error);
+        }
+    };
+    let Some(code) = query.code.as_ref() else {
+        state.remove_pkce_verifier(flow_id);
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    };
+    let pkce_verifier =
+        match pkce_verifier_for_known_callback_flow(&state, callback_scope, &provider, flow_id)
+            .await
+        {
+            Ok(pkce_verifier) => pkce_verifier,
+            Err(error) => {
+                state.remove_pkce_verifier(flow_id);
+                return Err(error);
+            }
+        };
+    let callback_scopes = callback_state.requested_scopes().to_vec();
+    let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
+    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
+
+    let response = match run_with_backend_timeout(
+        state
+            .product_auth
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: callback_scope.clone(),
+                flow_id,
+                opaque_state_hash: state_hash.clone(),
+                outcome: RebornOAuthCallbackOutcome::Authorized {
+                    provider_request: OAuthProviderCallbackRequest {
+                        provider: AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
+                            .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+                        account_label: callback_state.account_label().clone(),
+                        authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
+                            .map_err(ProductAuthRouteFailure::from)?,
+                        authorization_code_hash,
+                        pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
+                            .map_err(ProductAuthRouteFailure::from)?,
+                        pkce_verifier_hash,
+                        scopes: callback_scopes,
+                    },
+                },
+            }),
+    )
+    .await
+    {
+        Ok(response) => {
+            state.remove_pkce_verifier(flow_id);
+            response
+        }
+        Err(error) => {
+            if should_forget_pkce_verifier(error.body.code) {
+                state.remove_pkce_verifier(flow_id);
+            }
+            return Err(error);
+        }
+    };
+
+    Ok(oauth_callback_response(&headers, response))
+}
+
 fn oauth_callback_route_result_response(
     headers: &HeaderMap,
     response: Result<RebornOAuthCallbackResponse, ProductAuthRouteFailure>,
