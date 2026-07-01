@@ -8,10 +8,15 @@
 # computes an aggregate line-coverage percentage plus a per-crate breakdown
 # (the "hole list" — which Reborn crates are least covered).
 #
-# Usage: reborn-coverage-summary.sh <llvm-cov-json-export>
-#
-# Writes a GitHub-flavored Markdown report to stdout. The caller is responsible
-# for redirecting it into "$GITHUB_STEP_SUMMARY" (or anywhere else).
+# Usage:
+#   reborn-coverage-summary.sh <llvm-cov-json-export>
+#     Writes a GitHub-flavored Markdown report to stdout. The caller redirects
+#     it into "$GITHUB_STEP_SUMMARY" (or anywhere else).
+#   reborn-coverage-summary.sh --zero-crates <llvm-cov-json-export>
+#     Writes, one per line, the Reborn crates that have instrumented lines but
+#     zero of them covered (the "breadth" holes). Same crate filter and
+#     aggregation as the report — this script is the single owner of that
+#     computation so reborn-coverage-comment.sh never has to recompute it.
 #
 # The Reborn crate families mirror the package allowlist in
 # .github/workflows/reborn-tests.yml: ironclaw_reborn*, ironclaw_product*,
@@ -19,7 +24,13 @@
 
 set -euo pipefail
 
-json_path="${1:?usage: reborn-coverage-summary.sh <llvm-cov-json-export>}"
+mode="report"
+if [ "${1:-}" = "--zero-crates" ]; then
+  mode="zero-crates"
+  shift
+fi
+
+json_path="${1:?usage: reborn-coverage-summary.sh [--zero-crates] <llvm-cov-json-export>}"
 
 if [ ! -f "${json_path}" ]; then
   echo "coverage JSON not found: ${json_path}" >&2
@@ -35,7 +46,7 @@ fi
 # trailing "/" anchors the crate-name boundary in all cases.
 reborn_regex='/crates/(ironclaw_(reborn|product|webui_v2)[a-z0-9_]*|ironclaw_architecture|ironclaw_slack_v2_adapter|ironclaw_telegram_v2_adapter|ironclaw_wasm_product_adapters)/'
 
-jq -r --arg re "${reborn_regex}" '
+jq -r --arg re "${reborn_regex}" --arg mode "${mode}" '
   # Round to 2 decimal places.
   def round2: . * 100 | round / 100;
 
@@ -62,21 +73,31 @@ jq -r --arg re "${reborn_regex}" '
       | sort_by(.pct)
     ) as $byCrate
 
-  | "## Reborn integration-tier coverage",
-    "",
-    (if $total > 0
-     then "**Line coverage (Reborn crates): \($pct | round2)%** — \($hit) / \($total) lines"
-     else "**No Reborn crate coverage data found** (0 instrumented lines matched the Reborn crate filter)."
-     end),
-    "",
-    (if $total > 0
-     then ( "| Crate | Line % | Covered / Total |",
-            "|---|---:|---:|",
-            ( $byCrate[]
-              | "| `\(.crate)` | \(.pct | round2)% | \(.covered) / \(.count) |" ),
-            "",
-            "_Lowest-covered crates first. This signal is informational; it does not gate the PR._"
-          )
-     else empty
-     end)
+  # --zero-crates: just the breadth holes (crates instrumented but 0% covered),
+  # one crate name per line, sorted. The Markdown report is the default mode.
+  | if $mode == "zero-crates"
+    then ( $byCrate[] | select(.count > 0 and .covered == 0) | .crate )
+    else
+      "## Reborn integration-tier coverage",
+      "",
+      (if $total > 0
+       then "**Line coverage (Reborn crates): \($pct | round2)%** — \($hit) / \($total) lines"
+       else "**No Reborn crate coverage data found** (0 instrumented lines matched the Reborn crate filter)."
+       end),
+      "",
+      (if $total > 0
+       then ( "<details><summary>Per-crate breakdown (\($byCrate | length) crates, lowest-covered first)</summary>",
+              "",
+              "| Crate | Line % | Covered / Total |",
+              "|---|---:|---:|",
+              ( $byCrate[]
+                | "| `\(.crate)` | \(.pct | round2)% | \(.covered) / \(.count) |" ),
+              "",
+              "</details>",
+              "",
+              "_This signal is informational: coverage never gates the PR — not the percentage, not the per-crate holes, not the 0-coverage callout._"
+            )
+       else empty
+       end)
+    end
 ' "${json_path}"

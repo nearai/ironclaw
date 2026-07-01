@@ -29,6 +29,8 @@ on:
 
 permissions:
   contents: read
+  # The sticky coverage comment upserts a PR comment via the issues API.
+  pull-requests: write
 
 concurrency:
   group: reborn-coverage-${{ github.event_name }}-${{ github.head_ref || github.ref }}
@@ -106,6 +108,18 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci/reborn-coverage-summary.sh reborn-llvm-cov.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Surface the same %/hole-list as a sticky PR comment so it lives in the
+      # conversation, not just the job summary. PR-only, and non-fatal by design:
+      # fork PRs get a read-only GITHUB_TOKEN and the comment API 403s, which must
+      # never red the check. This is visibility, never a gate.
+      - name: Post sticky coverage comment
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/ci/reborn-coverage-comment.sh reborn-llvm-cov.json
 
       # The JSON export is the full per-file detail behind the summary table —
       # the "real hole list" — kept as an artifact for offline inspection.
