@@ -121,11 +121,6 @@ use ironclaw_triggers::{
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
-#[cfg(all(
-    feature = "inmemory-turn-state",
-    any(feature = "libsql", feature = "postgres")
-))]
-use ironclaw_turns::{FilesystemTurnStateBlockPersistence, TurnPersistenceSnapshot};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 #[cfg(any(
@@ -137,6 +132,11 @@ use ironclaw_turns::{
     CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
     LoopCheckpointStore,
 };
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+use ironclaw_turns::{FilesystemTurnStateBlockPersistence, TurnPersistenceSnapshot};
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 

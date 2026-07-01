@@ -346,6 +346,33 @@ impl InMemoryTurnStateStore {
         block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
     ) -> Self {
         self.block_persistence = Some(block_persistence);
+        // Seed the gate-persisted set from any runs that are *already* blocked —
+        // e.g. rehydrated from a recovery snapshot via
+        // `from_persistence_snapshot`. Without this, a run restored blocked then
+        // resumed would reach a terminal state with `is_gate_persisted == false`
+        // and skip its durable terminal-convergence write, so the next restart
+        // could resurrect the finished run as live. `mark_gate_persisted` only
+        // fires for runs that block *live* after the sink is attached, so the
+        // restore path must be seeded here.
+        let blocked: Vec<TurnRunId> = {
+            let inner = match self.inner.lock() {
+                Ok(inner) => inner,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            inner
+                .records
+                .iter()
+                .filter(|(_, record)| record.status.get().is_blocked())
+                .map(|(run_id, _)| *run_id)
+                .collect()
+        };
+        if !blocked.is_empty() {
+            let mut set = match self.gate_persisted_runs.lock() {
+                Ok(set) => set,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            set.extend(blocked);
+        }
         self
     }
 
@@ -535,7 +562,15 @@ impl InMemoryTurnStateStore {
         gate_persisted: bool,
         result: &Result<TurnRunState, TurnError>,
     ) {
-        if gate_persisted && result.is_ok() {
+        // Only converge on an actually-terminal outcome: `complete`/`cancel`/`fail`
+        // always land terminal here, but `record_runner_failure` may leave the run
+        // live (retry), and clearing the tracking there would drop a later real
+        // terminal write.
+        if gate_persisted
+            && result
+                .as_ref()
+                .is_ok_and(|state| state.status.is_terminal())
+        {
             self.persist_blocked_state().await;
             self.clear_gate_persisted(run_id);
         }
@@ -1723,13 +1758,23 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         &self,
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.runner_failure_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            request.failure,
-        )
+        // A runner failure can also terminate a run (Running → Failed,
+        // CancelRequested → Cancelled), so it must converge the durable snapshot
+        // for a gate-persisted run exactly like the other terminal paths —
+        // otherwise a restart could resurrect the finished run as live.
+        let gate_persisted = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.runner_failure_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                request.failure,
+            )
+        };
+        self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)
+            .await;
+        result
     }
 
     async fn relinquish_run(
