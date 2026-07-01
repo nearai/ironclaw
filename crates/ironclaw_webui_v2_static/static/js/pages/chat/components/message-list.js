@@ -1,4 +1,5 @@
 import { React, html } from "../../../lib/html.js";
+import { Link } from "react-router";
 import { useT } from "../../../lib/i18n.js";
 import { ActivityRun } from "./activity-run.js";
 import { MessageBubble } from "./message-bubble.js";
@@ -208,6 +209,7 @@ export function MessageList({
   React.useEffect(() => cancelScrollSync, [cancelScrollSync]);
 
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
+  const logsPath = threadId ? `/logs?thread_id=${encodeURIComponent(threadId)}` : null;
 
   return html`
     <div className="relative flex min-h-0 min-w-0 flex-1">
@@ -219,7 +221,7 @@ export function MessageList({
       onPointerDown=${markScrollbarDragIntent}
       onCopy=${onCopy}
       data-testid="message-list-scroll"
-      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
+      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-20 sm:px-5 lg:px-8"
     >
       <div
         ref=${contentRef}
@@ -254,6 +256,18 @@ export function MessageList({
         ${children}
       </div>
     </div>
+    ${logsPath &&
+    html`
+      <${Link}
+        to=${logsPath}
+        aria-label=${t("nav.logs")}
+        title=${t("nav.logs")}
+        className="absolute bottom-4 right-4 inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 text-xs font-semibold text-[var(--v2-text-muted)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] transition hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)]"
+      >
+        <${Icon} name="file" className="h-3.5 w-3.5" />
+        ${t("nav.logs")}
+      <//>
+    `}
     ${!atBottom &&
     html`
       <button

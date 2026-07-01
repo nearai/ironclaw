@@ -58,16 +58,6 @@ test("message timestamp and actions share a hover-only meta row", () => {
     /<div className="flex shrink-0 items-center gap-1">[\s\S]*<\$\{Icon\} name=\$\{copied \? "check" : "copy"\}/,
     "message actions should render in a non-shrinking group beside the timestamp",
   );
-  assert.match(
-    messageBubbleSource,
-    /const logsHref = threadId \? `\/v2\/logs\?thread_id=\$\{encodeURIComponent\(threadId\)\}` : null;/,
-    "message actions should build a thread-scoped logs URL when a thread is available",
-  );
-  assert.match(
-    messageBubbleSource,
-    /<a\s+href=\$\{logsHref\}[\s\S]*aria-label="View thread logs"[\s\S]*<\$\{Icon\} name="list"/,
-    "message actions should expose thread logs as a discreet icon link",
-  );
 
   const actionRow = messageBubbleSource.slice(
     messageBubbleSource.indexOf('"mt-1 flex min-h-7'),

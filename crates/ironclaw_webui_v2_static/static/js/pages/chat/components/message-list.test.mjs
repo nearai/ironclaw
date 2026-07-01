@@ -167,3 +167,26 @@ test("MessageList observes content growth from streamed markdown layout", () => 
     "resize-driven follow should still respect intentional user scrollback",
   );
 });
+
+test("MessageList renders a floating thread logs shortcut", () => {
+  assert.match(
+    messageListSource,
+    /import \{ Link \} from "react-router";/,
+    "thread logs shortcut should use React Router navigation",
+  );
+  assert.match(
+    messageListSource,
+    /const logsPath = threadId \? `\/logs\?thread_id=\$\{encodeURIComponent\(threadId\)\}` : null;/,
+    "thread logs shortcut should build a thread-scoped route",
+  );
+  assert.match(
+    messageListSource,
+    /className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-20 sm:px-5 lg:px-8"/,
+    "scroll area should keep bottom padding for floating controls",
+  );
+  assert.match(
+    messageListSource,
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*absolute bottom-4 right-4[\s\S]*<\$\{Icon\} name="file"[\s\S]*\$\{t\("nav\.logs"\)\}/,
+    "thread logs shortcut should render as a bottom-right floating pill button",
+  );
+});
