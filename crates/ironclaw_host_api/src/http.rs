@@ -414,6 +414,24 @@ pub trait RuntimeHttpEgress: Send + Sync {
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
+
+    /// Egress for an internal credential exchange (e.g. an OAuth token
+    /// endpoint). The response legitimately carries credential material that
+    /// the host auth system consumes directly — parsed and re-stored as a
+    /// secret handle — and never surfaces to the model. Response
+    /// leak-sanitization is therefore skipped: it would otherwise redact or
+    /// hard-block the very token this call exists to retrieve.
+    ///
+    /// The default forwards to [`RuntimeHttpEgress::execute`], which is correct
+    /// for implementations that never sanitize responses (e.g. test fakes).
+    /// The production host egress service overrides this to run the transport
+    /// pipeline without the response sanitizer.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
 }
 
 #[async_trait]
@@ -426,6 +444,13 @@ where
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.as_ref().execute(request).await
+    }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.as_ref().execute_credential_exchange(request).await
     }
 }
 

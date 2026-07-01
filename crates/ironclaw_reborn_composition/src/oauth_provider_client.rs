@@ -244,7 +244,7 @@ impl HostOAuthProviderClient {
         })?;
         let response = self
             .egress
-            .execute(RuntimeHttpEgressRequest {
+            .execute_credential_exchange(RuntimeHttpEgressRequest {
                 runtime: self.runtime,
                 scope,
                 capability_id: self.capability_id.clone(),
