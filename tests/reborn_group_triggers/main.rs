@@ -36,10 +36,7 @@ async fn triggers_group() {
 
     // HEADLINE: create a one-shot Once trigger + list it in thread A, then
     // pause → resume → remove it by id in thread B over the shared repo.
-    report.record(
-        "verbs_lifecycle",
-        scenario_verbs_lifecycle::run(&g).await,
-    );
+    report.record("verbs_lifecycle", scenario_verbs_lifecycle::run(&g).await);
 
     // TODO(triggered-turn follow-ups): coverage intentionally left OUT of this
     // binary because it needs a harness seam that does not exist yet — a way to

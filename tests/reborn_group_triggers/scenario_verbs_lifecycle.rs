@@ -61,7 +61,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     creator.submit_turn("create a one-shot reminder").await?;
-    creator.assert_tool_invoked("builtin.trigger_create").await?;
+    creator
+        .assert_tool_invoked("builtin.trigger_create")
+        .await?;
     creator.assert_tool_invoked("builtin.trigger_list").await?;
 
     // create output: once schedule, enabled + scheduled, server-minted id.
