@@ -2155,7 +2155,19 @@ impl Inner {
         let selected: Vec<&RunRecord> = self
             .records
             .values()
-            .filter(|record| !recovery || !record.status.get().is_terminal())
+            .filter(|record| {
+                !recovery
+                    || !record.status.get().is_terminal()
+                    // A *terminal* run that still roots a live spawn-tree
+                    // reservation must be retained: its reservation is kept
+                    // below, and `reserve_/release_tree_descendants` resolve the
+                    // root through `records` — dropping it would strand the
+                    // release with `ScopeNotFound` on the next restart.
+                    || self
+                        .tree_reservations
+                        .keys()
+                        .any(|key| key.root_run_id == record.run_id)
+            })
             .collect();
 
         // Referential-closure keys drive the `recovery` filters below; the `Full`
@@ -2170,16 +2182,8 @@ impl Inner {
         } else {
             HashSet::new()
         };
-        let kept_checkpoint_ids: HashSet<TurnCheckpointId> = if recovery {
-            selected
-                .iter()
-                .filter_map(|record| record.checkpoint_id)
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        // Tree roots still backing a non-terminal run keep their subagent-capacity
-        // reservation across restart.
+        // Tree roots whose record survives keep their subagent-capacity
+        // reservation across restart (every reservation root is retained above).
         let live_tree_roots: HashSet<TurnRunId> = if recovery {
             selected
                 .iter()
@@ -2208,12 +2212,14 @@ impl Inner {
             .cloned()
             .collect::<Vec<_>>();
         active_locks.sort_by_key(|record| record.acquired_at);
+        // Retain *every* checkpoint of a kept run, not just its latest
+        // (`record.checkpoint_id`): a run that blocked, resumed, and blocked
+        // again keeps historical gate checkpoints that `approval_run_for_actor_and_gate`
+        // scans to resolve a run by an earlier gate.
         let mut checkpoints = self
             .checkpoints
             .iter()
-            .filter(|checkpoint| {
-                !recovery || kept_checkpoint_ids.contains(&checkpoint.checkpoint_id)
-            })
+            .filter(|checkpoint| !recovery || kept_run_ids.contains(&checkpoint.run_id))
             .cloned()
             .collect::<Vec<_>>();
         checkpoints.sort_by(|a, b| {
@@ -2224,9 +2230,7 @@ impl Inner {
         let mut loop_checkpoints = self
             .loop_checkpoints
             .values()
-            .filter(|checkpoint| {
-                !recovery || kept_checkpoint_ids.contains(&checkpoint.checkpoint_id)
-            })
+            .filter(|checkpoint| !recovery || kept_run_ids.contains(&checkpoint.run_id))
             .cloned()
             .collect::<Vec<_>>();
         loop_checkpoints.sort_by(|a, b| {

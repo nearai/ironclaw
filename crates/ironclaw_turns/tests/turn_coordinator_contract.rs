@@ -1533,6 +1533,181 @@ async fn flush_recovery_snapshot_keeps_active_runs_drops_terminal_and_events() {
     );
 }
 
+/// Regression: a run that blocked on one gate, resumed, then blocked on another
+/// accumulates *two* historical checkpoints while `record.checkpoint_id` tracks
+/// only the latest. The recovery snapshot must retain every checkpoint of a kept
+/// run — `approval_run_for_actor_and_gate` scans historical checkpoints to
+/// resolve a run by an *earlier* gate, so keeping only the latest would make that
+/// lookup fail after a restart.
+#[tokio::test]
+async fn recovery_snapshot_retains_historical_gate_checkpoints_of_active_runs() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let thread = "thread-multi-gate";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread, "idem-multi-gate"))
+            .await
+            .unwrap(),
+    );
+    let gate_a = GateRef::new("multi-gate-a").unwrap();
+    let gate_b = GateRef::new("multi-gate-b").unwrap();
+
+    // Block on gate A.
+    let runner_a = TurnRunnerId::new();
+    let lease_a = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner_a,
+            lease_token: lease_a,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: runner_a,
+            lease_token: lease_a,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_a.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Resume gate A, then claim and block again on gate B — now two checkpoints.
+    store
+        .resume_turn(ResumeTurnRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_a.clone(),
+            source_binding_ref: SourceBindingRef::new("src-multi").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-multi").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-multi-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let runner_b = TurnRunnerId::new();
+    let lease_b = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner_b,
+            lease_token: lease_b,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: runner_b,
+            lease_token: lease_b,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_b.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Recover across a restart.
+    store.flush().await;
+    let snapshot = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+
+    // The earlier (gate-A) checkpoint survived, so the run is still resolvable by
+    // its first gate — not only its latest.
+    assert_eq!(
+        restored
+            .approval_run_for_actor_and_gate(&scope(thread), &actor(), &gate_a)
+            .unwrap(),
+        Some(run_id),
+        "historical gate-A checkpoint must survive recovery so the approval lookup resolves the run"
+    );
+}
+
+/// Regression: a *terminal* spawn-tree root that still backs a live descendant
+/// reservation must be retained in the recovery snapshot.
+/// `reserve_/release_tree_descendants` resolve the root through `records`, so
+/// dropping the terminal root would strand the release with `ScopeNotFound` after
+/// a restart and leak the reserved subagent capacity.
+#[tokio::test]
+async fn recovery_snapshot_keeps_terminal_spawn_tree_root_with_live_reservation() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-recover");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-tree-recover", "idem-tree-recover"))
+            .await
+            .unwrap(),
+    );
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(&store, parent_run_id, "thread-tree-recover").await;
+    // The root is now terminal but still roots a live descendant reservation.
+
+    store.flush().await;
+    let snapshot = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    assert!(
+        snapshot
+            .spawn_tree_reservations
+            .iter()
+            .any(|reservation| reservation.root_run_id == parent_run_id),
+        "a live reservation must survive recovery"
+    );
+    assert!(
+        snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == parent_run_id),
+        "the terminal root backing a live reservation must be retained so its release can resolve it"
+    );
+
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap(),
+    );
+    assert!(
+        restored
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "root record survives rehydration"
+    );
+    restored
+        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .await
+        .expect("release must resolve the retained terminal root, not fail ScopeNotFound");
+}
+
 #[tokio::test]
 async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
     let store = Arc::new(InMemoryTurnStateStore::default());
