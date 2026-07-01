@@ -573,7 +573,7 @@ impl ToolDisclosureCapabilityPort {
             };
             state
                 .catalog
-                .definition_by_name_for_capability(capability_id)
+                .definition_by_capability_id(capability_id)
                 .map(|definition| definition.name.to_string())
         };
         let Some(name) = name else {
@@ -1057,23 +1057,6 @@ impl ToolDisclosureCapabilityPort {
                     .find(|definition| definition_matches_provider_name(definition, provider_name))
             })
             .cloned()
-    }
-}
-
-trait CatalogLookupByCapability {
-    fn definition_by_name_for_capability(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Option<&ProviderToolDefinition>;
-}
-
-impl CatalogLookupByCapability for CapabilityCatalog {
-    fn definition_by_name_for_capability(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Option<&ProviderToolDefinition> {
-        self.definitions()
-            .find(|definition| &definition.capability_id == capability_id)
     }
 }
 

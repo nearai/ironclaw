@@ -158,6 +158,16 @@ impl CapabilityCatalog {
         self.entry_by_name(name).map(|entry| &entry.definition)
     }
 
+    /// Look up a definition by its capability id (linear scan; used on the
+    /// forgiving resolution path where only the capability id is known).
+    pub(crate) fn definition_by_capability_id(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ProviderToolDefinition> {
+        self.definitions()
+            .find(|definition| &definition.capability_id == capability_id)
+    }
+
     pub(crate) fn definitions(&self) -> impl Iterator<Item = &ProviderToolDefinition> {
         self.entries.iter().map(|entry| &entry.definition)
     }
