@@ -5788,6 +5788,18 @@ fn profile_attribution_claim_context_from_resolution(
     }
 }
 
+/// True when the resolved enrollment is missing the upload-claim issuer URL — a
+/// local *precondition* failure (enrollment incomplete), distinct from the
+/// transport/backend failures that surface later from the claim mint. Callers
+/// check this so a missing URL maps to `EnrollmentIncomplete` while post-check
+/// failures map to `Backend`, instead of collapsing everything into one code.
+fn upload_claim_issuer_missing(policy: &StandingTraceContributionPolicy) -> bool {
+    policy
+        .upload_token_issuer_url
+        .as_deref()
+        .is_none_or(|url| url.trim().is_empty())
+}
+
 /// Mint a short-lived profile-attribution token from the configured Trace
 /// Commons upload-claim issuer. The token authorizes community-profile
 /// management only and cannot submit traces.
@@ -5839,13 +5851,18 @@ async fn mint_profile_attribution_token_for_user_inner(
     let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)
         .map_err(ProfileAttributionError::PolicyRead)?
         .ok_or(ProfileAttributionError::NotEnrolled)?;
+    // Local precondition: a missing issuer URL is EnrollmentIncomplete.
+    if upload_claim_issuer_missing(&resolution.policy) {
+        return Err(ProfileAttributionError::EnrollmentIncomplete(
+            anyhow::anyhow!("Trace Commons upload-claim issuer URL is not configured"),
+        ));
+    }
     let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
-    // Missing-issuer-URL and incomplete-device-key failures both surface from
-    // the token mint; classify as EnrollmentIncomplete so the host contract
-    // stays typed without inspecting error strings.
+    // Post-precondition failures (issuer transport/status, serde, device-key)
+    // are Backend — not "re-run onboarding".
     mint_profile_attribution_token_with_context(&resolution.policy, &context, Some(sink))
         .await
-        .map_err(ProfileAttributionError::EnrollmentIncomplete)
+        .map_err(ProfileAttributionError::Backend)
 }
 
 async fn mint_profile_attribution_token_with_policy(
@@ -5950,12 +5967,22 @@ async fn set_community_profile_for_user_inner(
     let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)
         .map_err(ProfileAttributionError::PolicyRead)?
         .ok_or(ProfileAttributionError::NotEnrolled)?;
+    // Local preconditions (missing ingest URL or issuer URL) are
+    // EnrollmentIncomplete; the mint/PUT transport failures below are Backend.
     let url = community_profile_url_from_policy(&resolution.policy)
         .map_err(ProfileAttributionError::EnrollmentIncomplete)?;
+    if upload_claim_issuer_missing(&resolution.policy) {
+        return Err(
+            ProfileAttributionError::EnrollmentIncomplete(anyhow::anyhow!(
+                "Trace Commons upload-claim issuer URL is not configured"
+            ))
+            .into(),
+        );
+    }
     let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
     let token = mint_profile_attribution_token_with_context(&resolution.policy, &context, sink)
         .await
-        .map_err(ProfileAttributionError::EnrollmentIncomplete)?;
+        .map_err(ProfileAttributionError::Backend)?;
     let body = serde_json::json!({
         "display_handle": handle,
         "bio": bio,
@@ -6422,16 +6449,20 @@ async fn mint_account_login_link_inner(
         trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
     };
 
+    // Local precondition: a missing issuer URL is EnrollmentIncomplete; the
+    // claim mint's transport/status/device-key failures below are Backend.
+    if upload_claim_issuer_missing(&resolution.policy) {
+        return Err(AccountLoginLinkError::EnrollmentIncomplete(
+            anyhow::anyhow!("Trace Commons upload-claim issuer URL is not configured"),
+        ));
+    }
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
-    // Both the missing-issuer-URL and incomplete-device-key failures surface
-    // here; classify them as EnrollmentIncomplete so the host contract stays
-    // typed without inspecting error strings.
     let bearer = provider
         .bearer_token(&resolution.policy, &context, false)
         .await
-        .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
+        .map_err(AccountLoginLinkError::Backend)?;
     let url = account_login_links_url(&resolution.policy)
         .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
     let body = match &resolution.subject {
