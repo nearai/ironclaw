@@ -35,7 +35,6 @@ env:
   DEFAULT_RELEASE_TAG: pilot-native-matrix-channel-pilot
   DEFAULT_TARGET: x86_64-unknown-linux-gnu
   DEPLOYMENT_BRANCH: deployment-target
-  RUST_TOOLCHAIN: 1.96.0
 
 concurrency:
   group: pilot-linux-artifact-native-matrix-channel-pilot-x86_64-unknown-linux-gnu
@@ -110,6 +109,10 @@ jobs:
           release_tag="${INPUT_RELEASE_TAG:-${DEFAULT_RELEASE_TAG}}"
           cargo_features="${INPUT_CARGO_FEATURES:-${DEFAULT_CARGO_FEATURES}}"
           target="${INPUT_TARGET:-${DEFAULT_TARGET}}"
+          rust_toolchain="$(git show "${source_sha}:Cargo.toml" | sed -nE 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+          if [[ -z "${rust_toolchain}" ]]; then
+            rust_toolchain="stable"
+          fi
           short_sha="$(git rev-parse --short=12 "${source_sha}")"
           safe_features="$(printf '%s' "${cargo_features}" | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
           manifest_name="ironclaw-${target}.json"
@@ -120,6 +123,7 @@ jobs:
             echo "cargo_features=${cargo_features}"
             echo "manifest_name=${manifest_name}"
             echo "release_tag=${release_tag}"
+            echo "rust_toolchain=${rust_toolchain}"
             echo "safe_features=${safe_features}"
             echo "short_sha=${short_sha}"
             echo "source_ref=${source_ref}"
@@ -134,6 +138,7 @@ jobs:
           CARGO_FEATURES: ${{ steps.source.outputs.cargo_features }}
           MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
           RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          RUST_TOOLCHAIN: ${{ steps.source.outputs.rust_toolchain }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           TARGET: ${{ steps.source.outputs.target }}
         shell: bash
@@ -166,7 +171,7 @@ jobs:
         if: steps.preflight.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ steps.source.outputs.rust_toolchain }}
           targets: ${{ steps.source.outputs.target }}
 
       - name: Check out exact source SHA
@@ -191,6 +196,7 @@ jobs:
           CARGO_FEATURES: ${{ steps.source.outputs.cargo_features }}
           MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
           RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          RUST_TOOLCHAIN: ${{ steps.source.outputs.rust_toolchain }}
           SOURCE_REF: ${{ steps.source.outputs.source_ref }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           TARGET: ${{ steps.source.outputs.target }}
