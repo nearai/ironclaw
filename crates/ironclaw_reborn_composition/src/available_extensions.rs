@@ -988,6 +988,42 @@ fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset(
+            "schemas/google-calendar/agenda.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/agenda.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/agenda.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/agenda.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/daily_brief.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/meeting_prep.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/meeting_prep.output.v1.json"
+            ),
+        ),
+        bytes_asset(
             "schemas/google-calendar/get_event.input.v1.json",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.input.v1.json"
@@ -1081,6 +1117,24 @@ fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/google-calendar/list_events.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_events.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/agenda.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/agenda.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/daily_brief.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/daily_brief.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/meeting_prep.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/meeting_prep.md"
             ),
         ),
         bytes_asset(
@@ -1183,6 +1237,7 @@ fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
             "create_document",
             "get_document",
             "read_content",
+            "read_excerpt",
             "insert_text",
             "delete_content",
             "replace_text",
@@ -1203,6 +1258,8 @@ fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
         GOOGLE_DRIVE_WASM_MODULE,
         [
             "list_files",
+            "find_files_compact",
+            "recent_files",
             "get_file",
             "download_file",
             "upload_file",
@@ -1228,6 +1285,7 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
             "create_spreadsheet",
             "get_spreadsheet",
             "read_values",
+            "preview",
             "batch_read_values",
             "write_values",
             "append_values",
@@ -1341,6 +1399,18 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset(
+            "schemas/gmail/fetch_message_summaries.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/fetch_message_summaries.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/fetch_message_summaries.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/fetch_message_summaries.output.v1.json"
+            ),
+        ),
+        bytes_asset(
             "prompts/gmail/list_messages.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/list_messages.md"
@@ -1374,6 +1444,12 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/gmail/trash_message.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/trash_message.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/fetch_message_summaries.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/fetch_message_summaries.md"
             ),
         ),
     ]
