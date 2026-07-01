@@ -149,6 +149,14 @@ function mergeToolActivity(current, incoming) {
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
     toolError: incoming.toolError || current.toolError,
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
+    toolDetail: incoming.toolDetail || current.toolDetail || null,
+    toolParameters: incoming.toolParameters || current.toolParameters || null,
+    toolResultPreview: incoming.toolResultPreview || current.toolResultPreview || null,
+    toolDurationMs: incoming.toolDurationMs ?? current.toolDurationMs ?? null,
+    resultRef: incoming.resultRef || current.resultRef || null,
+    truncated: incoming.truncated ?? current.truncated ?? false,
+    outputBytes: incoming.outputBytes ?? current.outputBytes ?? null,
+    outputKind: incoming.outputKind || current.outputKind || null,
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
       : incoming.updatedAt || current.updatedAt,

@@ -1105,6 +1105,7 @@ fn response_status_from_projection_state(
         ProductProjectionItem::Text { .. }
         | ProductProjectionItem::Thinking { .. }
         | ProductProjectionItem::CapabilityActivity(_)
+        | ProductProjectionItem::CapabilityDisplayPreview(_)
         | ProductProjectionItem::WorkSummary { .. }
         | ProductProjectionItem::RunStatus { .. }
         | ProductProjectionItem::Gate { .. }

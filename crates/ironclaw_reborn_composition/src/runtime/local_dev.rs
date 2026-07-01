@@ -46,7 +46,10 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
     RebornServices,
-    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+    projection::{
+        CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
+        CompletedCapabilityPreviewLiveUpdate, LiveProjectionPublisher,
+    },
     runtime::LocalDevSelectableSkillContextSource,
 };
 
@@ -94,6 +97,7 @@ pub(super) fn capability_wiring(
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    live_projection_publisher: Option<Arc<LiveProjectionPublisher>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -132,6 +136,7 @@ pub(super) fn capability_wiring(
             thread_service,
             thread_scope,
         )
+        .with_live_projection_publisher(live_projection_publisher)
         .with_observer(trajectory_observer.clone()),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
@@ -255,6 +260,7 @@ struct LocalDevCapabilityIo {
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
     durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+    live_projection_publisher: Option<Arc<LiveProjectionPublisher>>,
     /// Optional consumer hook. This struct drives only the *result* half of the
     /// trajectory observer (via `write_capability_result`); the resolved
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
@@ -281,6 +287,7 @@ impl LocalDevCapabilityIo {
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
             durable_previews: None,
+            live_projection_publisher: None,
             observer: None,
         }
     }
@@ -298,8 +305,17 @@ impl LocalDevCapabilityIo {
                 thread_service,
                 thread_scope,
             }),
+            live_projection_publisher: None,
             observer: None,
         }
+    }
+
+    fn with_live_projection_publisher(
+        mut self,
+        live_projection_publisher: Option<Arc<LiveProjectionPublisher>>,
+    ) -> Self {
+        self.live_projection_publisher = live_projection_publisher;
+        self
     }
 
     /// Attach a trajectory observer (no-op when `None`).
@@ -590,7 +606,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             let mut results = self.results.lock().map_err(|_| capability_io_error())?;
             results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
         }
-        self.display_previews.record_result_with_preview(
+        let preview_invocation_id = self.display_previews.record_result_with_preview(
             CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
                 input_ref,
@@ -602,6 +618,30 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
+        let preview_record = self
+            .display_previews
+            .record_for_invocation(preview_invocation_id);
+        if let Some(publisher) = &self.live_projection_publisher {
+            if let Some(preview_record) = preview_record {
+                publisher.publish_completed_capability_preview(
+                    run_context.actor().map(|actor| &actor.user_id),
+                    &run_context.scope,
+                    CompletedCapabilityPreviewLiveUpdate {
+                        run_id: run_context.run_id,
+                        invocation_id: preview_invocation_id,
+                        capability_id: capability_id.clone(),
+                        output_bytes,
+                        preview: preview_record,
+                    },
+                );
+            } else {
+                tracing::debug!(
+                    invocation_id = %preview_invocation_id,
+                    capability_id = capability_id.as_str(),
+                    "capability display preview record missing after result staging"
+                );
+            }
+        }
         if let Some(observer) = &self.observer {
             // Best-effort, inline on the capability hot path: a panicking
             // observer must never unwind capability result staging. (Blocking
@@ -617,11 +657,11 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(run_context, preview_invocation_id, capability_id)
             .await
         {
             self.display_previews
-                .attach_timeline_message_id(invocation_id, message_id);
+                .attach_timeline_message_id(preview_invocation_id, message_id);
         }
         Ok(CapabilityWriteResult::from_output(
             result_ref,
@@ -632,12 +672,15 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
 
     fn record_running_invocation(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
-        self.display_previews
-            .record_running_invocation(invocation_id, input_ref);
+        self.display_previews.record_running_invocation(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            input_ref,
+        );
     }
 
     async fn update_capability_result(

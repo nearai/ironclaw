@@ -173,6 +173,118 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
 });
 
+test("useChatEvents: projection display preview upgrades a running tool card", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-preview",
+              turn_run_id: "run-preview",
+              thread_id: "thread-1",
+              capability_id: "builtin.extension_search",
+              status: "started",
+              activity_order: 7,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-preview");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].toolParameters, null);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_display_preview: {
+              invocation_id: "invocation-preview",
+              turn_run_id: "run-preview",
+              capability_id: "builtin.extension_search",
+              title: "builtin.extension_search",
+              status: "started",
+              subtitle: "gmail",
+              input_summary: '{\n  "query": "gmail"\n}',
+              activity_order: 7,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-preview");
+  assert.equal(harness.messages[0].toolName, "extension_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].toolDetail, "gmail");
+  assert.equal(harness.messages[0].toolParameters, '{\n  "query": "gmail"\n}');
+  assert.equal(harness.messages[0].activityOrder, 7);
+});
+
+test("useChatEvents: projection update applies completed preview beside activity", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-completed-preview",
+              turn_run_id: "run-completed-preview",
+              thread_id: "thread-1",
+              capability_id: "builtin.extension_search",
+              status: "completed",
+              output_bytes: 24,
+            },
+          },
+          {
+            capability_display_preview: {
+              invocation_id: "invocation-completed-preview",
+              turn_run_id: "run-completed-preview",
+              capability_id: "builtin.extension_search",
+              title: "builtin.extension_search",
+              status: "completed",
+              subtitle: "gmail",
+              input_summary: '{\n  "query": "gmail"\n}',
+              output_summary: "json output",
+              output_preview: '{\n  "installed": ["gmail"]\n}',
+              output_kind: "json",
+              output_bytes: 24,
+              result_ref: "result:completed-preview",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-completed-preview");
+  assert.equal(harness.messages[0].toolName, "extension_search");
+  assert.equal(harness.messages[0].toolStatus, "success");
+  assert.equal(harness.messages[0].toolDetail, "gmail");
+  assert.equal(harness.messages[0].toolParameters, '{\n  "query": "gmail"\n}');
+  assert.equal(
+    harness.messages[0].toolResultPreview,
+    '{\n  "installed": ["gmail"]\n}',
+  );
+  assert.equal(harness.messages[0].resultRef, "result:completed-preview");
+  assert.equal(harness.messages[0].outputKind, "json");
+});
+
 test("useChatEvents: auth gate stays visible through progress events", () => {
   const runId = "run-auth-1";
   const authGate = {

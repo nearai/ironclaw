@@ -458,13 +458,11 @@ function applyProjectionItems({
           promptRunIdRef.current = null;
         }
         // Reborn's projection bridge does not currently emit `Text` items
-        // for assistant replies, nor `capability_display_preview` items in
-        // the projection state — both the assistant reply and the rich tool
-        // input/output cards live only in the thread timeline. Reload the
-        // timeline on EVERY terminal status (not only success) so a failed,
-        // cancelled, or recovery-required run still recovers the tool
-        // previews for the tools that completed before it terminated. The
-        // reload preserves the client-side `err-*` failure bubble.
+        // for assistant replies. Reload the timeline on EVERY terminal
+        // status (not only success) so a failed, cancelled, or
+        // recovery-required run still recovers the final reply and any
+        // durable previews for tools that completed before it terminated.
+        // The reload preserves the client-side `err-*` failure bubble.
         settleRun(
           settledRunsRef,
           onRunSettled,
@@ -544,6 +542,17 @@ function applyProjectionItems({
         upsertToolActivityMessage(
           setMessages,
           toolCardFromActivity(activity),
+          toolActivityStateRef,
+        );
+      }
+    }
+
+    if (item.capability_display_preview) {
+      const preview = item.capability_display_preview;
+      if (preview.invocation_id) {
+        upsertToolActivityMessage(
+          setMessages,
+          toolCardFromPreview(preview),
           toolActivityStateRef,
         );
       }

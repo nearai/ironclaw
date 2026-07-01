@@ -1106,6 +1106,7 @@ pub enum ProductProjectionItem {
         body: String,
     },
     CapabilityActivity(CapabilityActivityView),
+    CapabilityDisplayPreview(CapabilityDisplayPreviewView),
     WorkSummary {
         id: String,
         run_id: TurnRunId,
@@ -1157,6 +1158,7 @@ impl ProductProjectionItem {
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
             Self::CapabilityActivity(activity) => activity.validate(),
+            Self::CapabilityDisplayPreview(preview) => preview.validate(),
             Self::WorkSummary { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text(
@@ -1268,6 +1270,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 body: String,
             },
             CapabilityActivity(CapabilityActivityView),
+            CapabilityDisplayPreview(CapabilityDisplayPreviewView),
             WorkSummary {
                 id: String,
                 run_id: TurnRunId,
@@ -1310,6 +1313,9 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             }
             Wire::CapabilityActivity(activity) => {
                 ProductProjectionItem::CapabilityActivity(activity)
+            }
+            Wire::CapabilityDisplayPreview(preview) => {
+                ProductProjectionItem::CapabilityDisplayPreview(preview)
             }
             Wire::WorkSummary {
                 id,
@@ -1594,6 +1600,51 @@ mod tests {
         );
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize capability activity projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_capability_display_preview_item() {
+        let invocation_id = InvocationId::new();
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::CapabilityDisplayPreview(
+                CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+                    timeline_message_id: Some("message-preview".to_string()),
+                    invocation_id,
+                    turn_run_id: Some(run_id),
+                    thread_id: Some(ThreadId::new("thread-1").unwrap()),
+                    capability_id: CapabilityId::new("builtin.extension_search").unwrap(),
+                    status: CapabilityActivityStatusView::Completed,
+                    error_kind: None,
+                    title: "builtin.extension_search".to_string(),
+                    subtitle: Some("gmail".to_string()),
+                    input_summary: Some("{\n  \"query\": \"gmail\"\n}".to_string()),
+                    output_summary: Some("installed gmail".to_string()),
+                    output_preview: Some("{\"ok\":true}".to_string()),
+                    output_kind: Some("json".to_string()),
+                    output_bytes: Some(24),
+                    result_ref: Some("result:preview".to_string()),
+                    truncated: false,
+                    updated_at: Utc::now(),
+                    activity_order: Some(7),
+                })
+                .expect("valid capability display preview"),
+            )],
+        )
+        .expect("valid capability display preview projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["capability_display_preview"]["capability_id"],
+            "builtin.extension_search"
+        );
+        assert_eq!(
+            value["items"][0]["capability_display_preview"]["input_summary"],
+            "{\n  \"query\": \"gmail\"\n}"
+        );
+        let decoded: ProductProjectionState = serde_json::from_value(value)
+            .expect("deserialize capability display preview projection");
         assert_eq!(decoded, state);
     }
 

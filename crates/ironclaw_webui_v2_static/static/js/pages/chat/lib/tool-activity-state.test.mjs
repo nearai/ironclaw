@@ -289,6 +289,92 @@ test("tool activity cards map gate-declined lifecycle frames to declined status"
   assert.equal(card.toolErrorKind, "gate_declined");
 });
 
+test("tool activity state preserves live preview details through later activity frames", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-preview",
+      turn_run_id: "run-preview",
+      capability_id: "builtin.extension_search",
+      status: "completed",
+    }),
+    stateRef,
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromPreview({
+      invocation_id: "invocation-preview",
+      turn_run_id: "run-preview",
+      capability_id: "builtin.extension_search",
+      title: "builtin.extension_search",
+      status: "completed",
+      subtitle: "gmail",
+      input_summary: '{\n  "query": "gmail"\n}',
+      output_preview: '{ "ok": true }',
+      result_ref: "result:preview",
+    }),
+    stateRef,
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-preview",
+      turn_run_id: "run-preview",
+      capability_id: "builtin.extension_search",
+      status: "completed",
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "success");
+  assert.equal(messages[0].toolDetail, "gmail");
+  assert.equal(messages[0].toolParameters, '{\n  "query": "gmail"\n}');
+  assert.equal(messages[0].toolResultPreview, '{ "ok": true }');
+  assert.equal(messages[0].resultRef, "result:preview");
+});
+
+test("tool activity state accepts newer preview truncated false", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+  const preview = (truncated, resultRef) =>
+    toolCardFromPreview({
+      invocation_id: "invocation-truncated",
+      turn_run_id: "run-truncated",
+      capability_id: "builtin.extension_search",
+      title: "builtin.extension_search",
+      status: "completed",
+      input_summary: '{\n  "query": "gmail"\n}',
+      output_preview: '{ "ok": true }',
+      result_ref: resultRef,
+      truncated,
+    });
+
+  upsertToolActivityMessage(
+    setMessages,
+    preview(true, "result:truncated"),
+    stateRef,
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    preview(false, "result:not-truncated"),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].truncated, false);
+  assert.equal(messages[0].resultRef, "result:not-truncated");
+});
+
 test("tool preview cards preserve gate-declined error kind as declined status", () => {
   const card = toolCardFromPreview({
     invocation_id: "invocation-preview-declined",

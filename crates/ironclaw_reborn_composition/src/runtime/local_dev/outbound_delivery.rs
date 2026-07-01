@@ -17,8 +17,8 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopRunContext,
+        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        CapabilityResumeToken, ConcurrencyHint, LoopRunContext,
     },
 };
 
@@ -421,8 +421,8 @@ async fn write_completed_result(
         .result_writer
         .write_capability_result(CapabilityResultWrite {
             run_context: &invocation.run_context,
-            input_ref: invocation_effective_input_ref(&invocation),
-            invocation_id: InvocationId::new(),
+            input_ref: invocation.effective_input_ref(),
+            invocation_id: invocation.invocation_id(),
             capability_id: &invocation.request.capability_id,
             output,
             display_preview: None,
@@ -447,17 +447,6 @@ fn invocation_replay_input(
         .as_ref()
         .map(|resume| &resume.input)
         .unwrap_or(&invocation.input)
-}
-
-fn invocation_effective_input_ref(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
-) -> &CapabilityInputRef {
-    invocation
-        .request
-        .approval_resume
-        .as_ref()
-        .map(|resume| &resume.input_ref)
-        .unwrap_or(&invocation.request.input_ref)
 }
 
 fn caller_for_run(

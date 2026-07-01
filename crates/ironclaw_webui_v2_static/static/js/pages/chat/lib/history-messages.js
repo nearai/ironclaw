@@ -243,7 +243,7 @@ export function toolCardFromActivity(activity) {
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,
     resultRef: null,
-    truncated: false,
+    truncated: null,
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
     turnRunId: activity.turn_run_id || null,

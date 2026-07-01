@@ -121,12 +121,29 @@ function ToolActivityCard({ activity, nested = false }) {
     toolResultPreview,
   } = activity;
 
-  const [expanded, setExpanded] = React.useState(
-    toolStatus === "error" || toolStatus === "declined",
-  );
+  const shouldAutoExpand = shouldAutoExpandToolCard({
+    toolStatus,
+    toolDetail,
+    toolParameters,
+    toolResultPreview,
+  });
+  const hasTerminalNotice = isTerminalToolNotice(toolStatus);
+  const hasAutoExpandableContent = hasAutoExpandableToolContent({
+    toolStatus,
+    toolDetail,
+    toolParameters,
+    toolResultPreview,
+  });
+  const [expanded, setExpanded] = React.useState(shouldAutoExpand);
+  const previousAutoExpandRef = React.useRef({ toolStatus, hasAutoExpandableContent });
   React.useEffect(() => {
-    if (toolStatus === "error" || toolStatus === "declined") setExpanded(true);
-  }, [toolStatus]);
+    const previous = previousAutoExpandRef.current;
+    const becameTerminalNotice = hasTerminalNotice && previous.toolStatus !== toolStatus;
+    const gainedAutoExpandableContent =
+      hasAutoExpandableContent && !previous.hasAutoExpandableContent;
+    if (becameTerminalNotice || gainedAutoExpandableContent) setExpanded(true);
+    previousAutoExpandRef.current = { toolStatus, hasAutoExpandableContent };
+  }, [hasTerminalNotice, hasAutoExpandableContent, toolStatus]);
 
   const dotClass = DOT_STYLE[toolStatus] || DOT_STYLE.running;
   const hasDuration = toolDurationMs !== null && toolDurationMs !== undefined;
@@ -193,6 +210,29 @@ function ToolActivityCard({ activity, nested = false }) {
       </div>
     </div>
   `;
+}
+
+function shouldAutoExpandToolCard({ toolStatus, toolDetail, toolParameters, toolResultPreview }) {
+  return (
+    isTerminalToolNotice(toolStatus) ||
+    hasAutoExpandableToolContent({ toolStatus, toolDetail, toolParameters, toolResultPreview })
+  );
+}
+
+function isTerminalToolNotice(toolStatus) {
+  return toolStatus === "error" || toolStatus === "declined";
+}
+
+function hasAutoExpandableToolContent({
+  toolStatus,
+  toolDetail,
+  toolParameters,
+  toolResultPreview,
+}) {
+  return (
+    (toolStatus === "running" || toolStatus === "success") &&
+    Boolean(toolDetail || toolParameters || toolResultPreview)
+  );
 }
 
 /* Tabbed Panel — Details / Parameters / Result / Error. Only tabs that have

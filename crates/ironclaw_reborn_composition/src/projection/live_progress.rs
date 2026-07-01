@@ -18,8 +18,9 @@ use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillAc
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
+    CapabilityDisplayPreviewViewInput, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
+    PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{
     TurnRunId, TurnScope,
@@ -28,6 +29,8 @@ use ironclaw_turns::{
         LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
+
+use super::display_preview::CapabilityDisplayPreviewRecord;
 
 // Live progress uses a synthetic cursor because it is an ephemeral UI hint,
 // not a durable runtime event. This sink must remain the only producer on this
@@ -50,6 +53,14 @@ pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
     next_sequence: AtomicU64,
+}
+
+pub(crate) struct CompletedCapabilityPreviewLiveUpdate {
+    pub(crate) run_id: TurnRunId,
+    pub(crate) invocation_id: InvocationId,
+    pub(crate) capability_id: CapabilityId,
+    pub(crate) output_bytes: u64,
+    pub(crate) preview: CapabilityDisplayPreviewRecord,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -92,13 +103,16 @@ impl LiveProjectionPublisher {
         self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn publish_live_item(
+    fn publish_live_items(
         &self,
         owner: Option<&UserId>,
         scope: &TurnScope,
         sequence: u64,
-        item: ThreadLiveProjectionItem,
+        items: Vec<ThreadLiveProjectionItem>,
     ) {
+        if items.is_empty() {
+            return;
+        }
         let cursor = EventProjectionCursor::for_scope(
             self.projection_scope(owner, scope),
             EventCursor::new(LIVE_PROGRESS_CURSOR_BASE.saturating_add(sequence)),
@@ -106,7 +120,7 @@ impl LiveProjectionPublisher {
         let update = ThreadLiveProjectionUpdate {
             cursor,
             thread_id: scope.thread_id.clone(),
-            items: vec![item],
+            items,
         };
         if let Err(error) = self
             .update_source
@@ -117,6 +131,65 @@ impl LiveProjectionPublisher {
                 "failed to publish live progress projection"
             );
         }
+    }
+
+    fn publish_live_item(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        sequence: u64,
+        item: ThreadLiveProjectionItem,
+    ) {
+        self.publish_live_items(owner, scope, sequence, vec![item]);
+    }
+
+    pub(crate) fn publish_completed_capability_preview(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        update: CompletedCapabilityPreviewLiveUpdate,
+    ) {
+        let sequence = self.next_live_sequence();
+        let CompletedCapabilityPreviewLiveUpdate {
+            run_id,
+            invocation_id,
+            capability_id,
+            output_bytes,
+            preview,
+        } = update;
+        self.publish_live_items(
+            owner,
+            scope,
+            sequence,
+            vec![
+                ThreadLiveProjectionItem::CapabilityActivity {
+                    run_id,
+                    invocation_id,
+                    capability_id: capability_id.clone(),
+                    status: CapabilityActivityStatus::Completed,
+                    provider: None,
+                    runtime: None,
+                    output_bytes: Some(output_bytes),
+                    error_kind: None,
+                },
+                ThreadLiveProjectionItem::CapabilityDisplayPreview {
+                    run_id,
+                    invocation_id,
+                    capability_id,
+                    status: CapabilityActivityStatus::Completed,
+                    error_kind: None,
+                    title: preview.title,
+                    subtitle: preview.subtitle,
+                    input_summary: preview.input_summary,
+                    output_summary: preview.output_summary,
+                    output_preview: preview.output_preview,
+                    output_kind: preview.output_kind,
+                    output_bytes: preview.output_bytes.or(Some(output_bytes)),
+                    result_ref: preview.result_ref,
+                    truncated: preview.truncated,
+                },
+            ],
+        );
     }
 
     /// Publish a "learned a new skill" live item to the run's thread stream,
@@ -192,16 +265,15 @@ pub(super) fn product_items_for_live_update(
     display_previews: &dyn super::display_preview::CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
 ) -> Vec<ProductProjectionItem> {
-    update
-        .items
-        .iter()
-        .filter_map(|item| match item {
+    let mut items = Vec::new();
+    for item in &update.items {
+        match item {
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
-                Some(ProductProjectionItem::Thinking {
+                items.push(ProductProjectionItem::Thinking {
                     id: id.clone(),
                     run_id: Some(*run_id),
                     body: body.clone(),
-                })
+                });
             }
             ThreadLiveProjectionItem::CapabilityActivity {
                 run_id,
@@ -230,7 +302,37 @@ pub(super) fn product_items_for_live_update(
                     updated_at: Utc::now(),
                     activity_order: None,
                 }) {
-                    Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
+                    Ok(activity) => {
+                        let explicit_preview_in_update = update.items.iter().any(|item| {
+                            matches!(
+                                item,
+                                ThreadLiveProjectionItem::CapabilityDisplayPreview {
+                                    invocation_id: preview_invocation_id,
+                                    ..
+                                } if preview_invocation_id == invocation_id
+                            )
+                        });
+                        let preview = if explicit_preview_in_update {
+                            None
+                        } else {
+                            match display_previews.live_preview(&activity) {
+                                Ok(preview) => preview,
+                                Err(error) => {
+                                    tracing::debug!(
+                                        error = %error,
+                                        invocation_id = %invocation_id,
+                                        capability_id = %capability_id,
+                                        "live capability display preview rejected by product adapter boundary"
+                                    );
+                                    None
+                                }
+                            }
+                        };
+                        items.push(ProductProjectionItem::CapabilityActivity(activity));
+                        if let Some(preview) = preview {
+                            items.push(ProductProjectionItem::CapabilityDisplayPreview(preview));
+                        }
+                    }
                     Err(error) => {
                         tracing::debug!(
                             error = %error,
@@ -238,7 +340,57 @@ pub(super) fn product_items_for_live_update(
                             capability_id = %capability_id,
                             "live capability activity rejected by product adapter boundary"
                         );
-                        None
+                    }
+                }
+            }
+            ThreadLiveProjectionItem::CapabilityDisplayPreview {
+                run_id,
+                invocation_id,
+                capability_id,
+                status,
+                error_kind,
+                title,
+                subtitle,
+                input_summary,
+                output_summary,
+                output_preview,
+                output_kind,
+                output_bytes,
+                result_ref,
+                truncated,
+            } => {
+                match ironclaw_product_adapters::CapabilityDisplayPreviewView::new(
+                    CapabilityDisplayPreviewViewInput {
+                        timeline_message_id: None,
+                        invocation_id: *invocation_id,
+                        turn_run_id: Some(*run_id),
+                        thread_id: Some(update.thread_id.clone()),
+                        capability_id: capability_id.clone(),
+                        status: live_capability_activity_status(*status),
+                        error_kind: error_kind.clone(),
+                        title: title.clone(),
+                        subtitle: subtitle.clone(),
+                        input_summary: input_summary.clone(),
+                        output_summary: output_summary.clone(),
+                        output_preview: output_preview.clone(),
+                        output_kind: output_kind.clone(),
+                        output_bytes: *output_bytes,
+                        result_ref: result_ref.clone(),
+                        truncated: *truncated,
+                        updated_at: Utc::now(),
+                        activity_order: None,
+                    },
+                ) {
+                    Ok(preview) => {
+                        items.push(ProductProjectionItem::CapabilityDisplayPreview(preview));
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            "live capability display preview rejected by product adapter boundary"
+                        );
                     }
                 }
             }
@@ -247,7 +399,7 @@ pub(super) fn product_items_for_live_update(
                 run_id,
                 phase,
                 body,
-            } => Some(ProductProjectionItem::WorkSummary {
+            } => items.push(ProductProjectionItem::WorkSummary {
                 id: id.clone(),
                 run_id: *run_id,
                 phase: live_work_summary_phase_to_product_phase(*phase),
@@ -258,14 +410,15 @@ pub(super) fn product_items_for_live_update(
                 run_id,
                 skill_names,
                 feedback,
-            } => Some(ProductProjectionItem::SkillActivation {
+            } => items.push(ProductProjectionItem::SkillActivation {
                 id: id.clone(),
                 run_id: *run_id,
                 skill_names: skill_names.clone(),
                 feedback: feedback.clone(),
             }),
-        })
-        .collect()
+        }
+    }
+    items
 }
 
 fn live_work_summary_phase_to_product_phase(

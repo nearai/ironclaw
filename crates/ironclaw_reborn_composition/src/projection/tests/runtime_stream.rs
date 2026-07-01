@@ -439,6 +439,135 @@ async fn webui_event_stream_replays_capability_started_before_folded_completion(
 }
 
 #[tokio::test]
+async fn webui_event_stream_replays_fast_completed_activity_with_parameters() {
+    let tenant_id = TenantId::new("webui-fast-activity-params-tenant").unwrap();
+    let user_id = UserId::new("webui-fast-activity-params-user").unwrap();
+    let agent_id = AgentId::new("webui-fast-activity-params-agent").unwrap();
+    let thread_id = ThreadId::new("webui-fast-activity-params-thread").unwrap();
+    let turn_run_id = TurnRunId::new();
+    let run_invocation_id = InvocationId::from_uuid(turn_run_id.as_uuid());
+    let capability_invocation = InvocationId::new();
+    let capability = CapabilityId::new("builtin.extension_search").unwrap();
+    let input_ref = preview_input_ref("webui-fast-activity-params");
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                run_invocation_id,
+            ),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    let services = build_reborn_projection_services(
+        event_log.clone(),
+        ReplyTargetBindingRef::new("webui-fast-activity-params-reply").unwrap(),
+    )
+    .with_display_previews(Arc::clone(&display_previews));
+    let initial = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let turn_run_key = turn_run_id.to_string();
+    display_previews.record_input(
+        &turn_run_key,
+        &input_ref,
+        capability.as_str(),
+        &serde_json::json!({"query": "gmail"}),
+    );
+    display_previews.record_running_invocation(&turn_run_key, capability_invocation, &input_ref);
+    display_previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &turn_run_key,
+        input_ref: &input_ref,
+        invocation_id: capability_invocation,
+        capability_id: &capability,
+        result_ref: "result:webui-fast-activity-params",
+        output: &serde_json::json!({"extensions": ["gmail"]}),
+        output_bytes: 32,
+    });
+
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                capability_invocation,
+            ),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                capability_invocation,
+            ),
+            capability.clone(),
+            ExtensionId::new("builtin").unwrap(),
+            RuntimeKind::FirstParty,
+            32,
+        ))
+        .await
+        .unwrap();
+
+    let replayed = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(initial[0].projection_cursor().clone()),
+        })
+        .await
+        .unwrap();
+
+    let input_summaries = replayed
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == capability_invocation
+                    && activity.capability_id == capability =>
+            {
+                Some(activity.input_summary.as_deref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(input_summaries.len(), 2, "events: {replayed:#?}");
+    assert!(
+        input_summaries.iter().all(
+            |summary| matches!(summary, Some(summary) if summary.contains("\"query\": \"gmail\""))
+        ),
+        "fast completed activity should retain parameters from completed preview record: {replayed:#?}"
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind() {
     let tenant_id = TenantId::new("webui-activity-redacted-tenant").unwrap();
     let user_id = UserId::new("webui-activity-redacted-user").unwrap();

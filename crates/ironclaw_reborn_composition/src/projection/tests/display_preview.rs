@@ -484,7 +484,7 @@ async fn running_input_surfaces_staged_input_until_result_lands() {
         "nearai.web_search",
         &serde_json::json!({"query": "deploy status token: sk-secret", "limit": 5}),
     );
-    store.record_running_invocation(invocation_id, &input_ref);
+    store.record_running_invocation(&run_id.to_string(), invocation_id, &input_ref);
 
     // While running, the inline subtitle and parameters are surfaced — and they
     // carry the same projection-sanitized text the preview frame uses, so the
@@ -513,8 +513,8 @@ async fn running_input_surfaces_staged_input_until_result_lands() {
             .contains("sk-secret")
     );
 
-    // Once the result lands, the pending input is consumed and no longer
-    // surfaced as in-flight (the completed preview takes over).
+    // Once the result lands, the pending input is consumed, but activity rows
+    // replayed after fast/yolo completions still need their Parameters tab.
     store.record_result(CapabilityDisplayPreviewResult {
         run_id: &run_id.to_string(),
         input_ref: &input_ref,
@@ -524,7 +524,22 @@ async fn running_input_surfaces_staged_input_until_result_lands() {
         output: &serde_json::json!({"results": []}),
         output_bytes: 12,
     });
-    assert!(store.running_input(invocation_id).is_none());
+    let completed = store
+        .running_input(invocation_id)
+        .expect("completed activity input");
+    assert!(
+        completed
+            .input_summary
+            .as_deref()
+            .is_some_and(|s| s.contains("query: deploy status")),
+    );
+    assert!(
+        !completed
+            .input_summary
+            .as_deref()
+            .unwrap()
+            .contains("sk-secret")
+    );
 }
 
 #[tokio::test]
@@ -1196,4 +1211,101 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
     assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.truncated);
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_scopes_running_links_by_run() {
+    let first_run_id = TurnRunId::new();
+    let second_run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.extension_search").unwrap();
+    let shared_input_ref = preview_input_ref("shared-running-link-input");
+    let first_running_invocation_id = InvocationId::new();
+    let second_result_invocation_id = InvocationId::new();
+    let store = CapabilityDisplayPreviewStore::default();
+
+    store.record_input(
+        &first_run_id.to_string(),
+        &shared_input_ref,
+        "first.tool",
+        &serde_json::json!({"query": "first run"}),
+    );
+    store.record_running_invocation(
+        &first_run_id.to_string(),
+        first_running_invocation_id,
+        &shared_input_ref,
+    );
+    store.record_input(
+        &second_run_id.to_string(),
+        &shared_input_ref,
+        "second.tool",
+        &serde_json::json!({"query": "second run"}),
+    );
+
+    let resolved_invocation_id = store.record_result_with_preview(
+        CapabilityDisplayPreviewResult {
+            run_id: &second_run_id.to_string(),
+            input_ref: &shared_input_ref,
+            invocation_id: second_result_invocation_id,
+            capability_id: &capability,
+            result_ref: "result:second-run",
+            output: &serde_json::json!({"installed": ["gmail"]}),
+            output_bytes: 24,
+        },
+        None,
+    );
+
+    assert_eq!(resolved_invocation_id, second_result_invocation_id);
+    let second_record = store
+        .record_for_invocation(second_result_invocation_id)
+        .expect("second run result should be recorded under its own invocation");
+    assert_eq!(second_record.title, "second.tool");
+    let first_running = store
+        .running_input(first_running_invocation_id)
+        .expect("first run running input should remain linked");
+    assert!(
+        first_running
+            .input_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("first run")),
+        "first run input summary should remain linked, got {:?}",
+        first_running.input_summary,
+    );
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_returns_running_invocation_for_completed_result() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.extension_search").unwrap();
+    let input_ref = preview_input_ref("linked-result-preview-input");
+    let running_invocation_id = InvocationId::new();
+    let stale_result_invocation_id = InvocationId::new();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        capability.as_str(),
+        &serde_json::json!({"query": "gmail"}),
+    );
+    store.record_running_invocation(&run_id.to_string(), running_invocation_id, &input_ref);
+
+    let resolved_invocation_id = store.record_result_with_preview(
+        CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id: stale_result_invocation_id,
+            capability_id: &capability,
+            result_ref: "result:linked-result-preview",
+            output: &serde_json::json!({"installed": ["gmail"]}),
+            output_bytes: 24,
+        },
+        None,
+    );
+
+    assert_eq!(resolved_invocation_id, running_invocation_id);
+    assert!(store.record_for_invocation(running_invocation_id).is_some());
+    assert!(
+        store
+            .record_for_invocation(stale_result_invocation_id)
+            .is_none()
+    );
 }

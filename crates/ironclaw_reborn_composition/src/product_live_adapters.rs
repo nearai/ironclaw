@@ -309,12 +309,15 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
 
     fn record_running_invocation(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
-        self.display_previews
-            .record_running_invocation(invocation_id, input_ref);
+        self.display_previews.record_running_invocation(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            input_ref,
+        );
     }
 
     async fn update_capability_result(

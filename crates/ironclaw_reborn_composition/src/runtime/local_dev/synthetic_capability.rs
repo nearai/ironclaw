@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
 use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 use ironclaw_turns::{
     CapabilityActivityId,
@@ -118,6 +118,20 @@ pub(super) struct LocalDevSyntheticCapabilityInvocation {
     pub(super) request: CapabilityInvocation,
     pub(super) input: serde_json::Value,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
+}
+
+impl LocalDevSyntheticCapabilityInvocation {
+    pub(super) fn invocation_id(&self) -> InvocationId {
+        InvocationId::from_uuid(self.request.activity_id.as_uuid())
+    }
+
+    pub(super) fn effective_input_ref(&self) -> &CapabilityInputRef {
+        self.request
+            .approval_resume
+            .as_ref()
+            .map(|resume| &resume.input_ref)
+            .unwrap_or(&self.request.input_ref)
+    }
 }
 
 #[async_trait]
@@ -250,6 +264,12 @@ impl LocalDevSyntheticCapabilityPort {
             .await?;
         let activity_id =
             self.record_provider_tool_call_registration(&input_ref, &capability_id, activity_id)?;
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &capability_id,
+            &tool_call,
+        );
         Ok(CapabilityCallCandidate {
             activity_id,
             surface_version: self.current_surface_version()?,
@@ -470,6 +490,11 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
             effective_input_ref,
             request.activity_id,
         )?;
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            InvocationId::from_uuid(request.activity_id.as_uuid()),
+            effective_input_ref,
+        );
         let input = match request.approval_resume.as_ref() {
             Some(resume) => resume.input.clone(),
             None => {
@@ -486,7 +511,7 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
         if let Some(observer) = &self.trajectory_observer {
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 observer.on_capability_input(
-                    request.input_ref.as_str(),
+                    effective_input_ref.as_str(),
                     request.capability_id.as_str(),
                     &input,
                 );
@@ -534,16 +559,25 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, InvocationId, ProjectId,
+        ResourceEstimate, TenantId, ThreadId,
+    };
     use ironclaw_loop_support::{
         CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
     };
     use ironclaw_turns::{
         LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
         TurnScope,
-        run_profile::{InMemoryRunProfileResolver, VisibleCapabilityRequest},
+        run_profile::{
+            CapabilityApprovalResume, CapabilityResumeToken, InMemoryRunProfileResolver,
+            VisibleCapabilityRequest,
+        },
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     const TEST_CAPABILITY_ID: &str = "test.synthetic";
     const TEST_PROVIDER_TOOL_NAME: &str = "test__synthetic";
@@ -551,6 +585,56 @@ mod tests {
     struct FixedInputResolver {
         input_ref: CapabilityInputRef,
         input: serde_json::Value,
+    }
+
+    struct RecordedDisplayInput {
+        input_ref: CapabilityInputRef,
+        capability_id: CapabilityId,
+        arguments: serde_json::Value,
+    }
+
+    #[derive(Debug)]
+    struct RecordedTrajectoryInput {
+        call_id: String,
+        capability_id: String,
+        arguments: serde_json::Value,
+    }
+
+    #[derive(Debug)]
+    struct RecordingTrajectoryObserver {
+        inputs: Arc<StdMutex<Vec<RecordedTrajectoryInput>>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs
+                .lock()
+                .expect("trajectory input lock")
+                .push(RecordedTrajectoryInput {
+                    call_id: call_id.to_string(),
+                    capability_id: capability_id.to_string(),
+                    arguments: arguments.clone(),
+                });
+        }
+
+        fn on_capability_result(
+            &self,
+            _call_id: &str,
+            _capability_id: &str,
+            _output: &serde_json::Value,
+        ) {
+        }
+    }
+
+    struct RecordingInputResolver {
+        input_ref: CapabilityInputRef,
+        input: serde_json::Value,
+        display_inputs: Arc<StdMutex<Vec<RecordedDisplayInput>>>,
     }
 
     #[async_trait]
@@ -569,6 +653,42 @@ mod tests {
             _tool_call: &ProviderToolCall,
         ) -> Result<CapabilityInputRef, AgentLoopHostError> {
             Ok(self.input_ref.clone())
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for RecordingInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(self.input.clone())
+        }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            Ok(self.input_ref.clone())
+        }
+
+        fn record_provider_tool_call_display_input(
+            &self,
+            _run_context: &LoopRunContext,
+            input_ref: &CapabilityInputRef,
+            capability_id: &CapabilityId,
+            tool_call: &ProviderToolCall,
+        ) {
+            self.display_inputs
+                .lock()
+                .expect("display inputs lock")
+                .push(RecordedDisplayInput {
+                    input_ref: input_ref.clone(),
+                    capability_id: capability_id.clone(),
+                    arguments: tool_call.arguments.clone(),
+                });
         }
     }
 
@@ -591,6 +711,10 @@ mod tests {
         writes: Arc<AtomicUsize>,
     }
 
+    struct RecordingResultWriter {
+        running_invocations: Arc<StdMutex<Vec<(InvocationId, CapabilityInputRef)>>>,
+    }
+
     #[async_trait]
     impl LoopCapabilityResultWriter for CountingResultWriter {
         async fn write_capability_result(
@@ -602,6 +726,31 @@ mod tests {
                 LoopResultRef::new("result:synthetic-counting").expect("valid result ref"),
                 0,
             ))
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:synthetic-recording").expect("valid result ref"),
+                0,
+            ))
+        }
+
+        fn record_running_invocation(
+            &self,
+            _run_context: &LoopRunContext,
+            invocation_id: InvocationId,
+            input_ref: &CapabilityInputRef,
+        ) {
+            self.running_invocations
+                .lock()
+                .expect("running invocations lock")
+                .push((invocation_id, input_ref.clone()));
         }
     }
 
@@ -685,6 +834,33 @@ mod tests {
         handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
     ) -> LocalDevSyntheticCapabilityPort {
+        synthetic_port_with_resolver(
+            handler,
+            result_writer,
+            Arc::new(FixedInputResolver {
+                input_ref: CapabilityInputRef::new("input:synthetic-provider-call")
+                    .expect("input ref"),
+                input: serde_json::json!({"message": "hello"}),
+            }),
+        )
+        .await
+    }
+
+    async fn synthetic_port_with_resolver(
+        handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    ) -> LocalDevSyntheticCapabilityPort {
+        synthetic_port_with_resolver_and_observer(handler, result_writer, input_resolver, None)
+            .await
+    }
+
+    async fn synthetic_port_with_resolver_and_observer(
+        handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+        trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    ) -> LocalDevSyntheticCapabilityPort {
         let capability = LocalDevSyntheticCapability::new(
             LocalDevSyntheticCapabilityDescriptor::new(
                 TEST_CAPABILITY_ID,
@@ -700,13 +876,9 @@ mod tests {
             Arc::new(EmptyLoopCapabilityPort),
             vec![capability],
             run_context().await,
-            Arc::new(FixedInputResolver {
-                input_ref: CapabilityInputRef::new("input:synthetic-provider-call")
-                    .expect("input ref"),
-                input: serde_json::json!({"message": "hello"}),
-            }),
+            input_resolver,
             result_writer,
-            None,
+            trajectory_observer,
         )
         .expect("synthetic port");
         port.visible_capabilities(VisibleCapabilityRequest {})
@@ -739,6 +911,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synthetic_provider_call_records_display_input_under_registered_ref() {
+        let display_inputs = Arc::new(StdMutex::new(Vec::new()));
+        let input_ref =
+            CapabilityInputRef::new("input:synthetic-provider-call").expect("input ref");
+        let port = synthetic_port_with_resolver(
+            Arc::new(TestSyntheticHandler),
+            Arc::new(NoopResultWriter),
+            Arc::new(RecordingInputResolver {
+                input_ref: input_ref.clone(),
+                input: serde_json::json!({"message": "hello"}),
+                display_inputs: Arc::clone(&display_inputs),
+            }),
+        )
+        .await;
+
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("provider call registers");
+
+        let records = display_inputs.lock().expect("display inputs lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].input_ref, candidate.input_ref);
+        assert_eq!(records[0].input_ref, input_ref);
+        assert_eq!(records[0].capability_id.as_str(), TEST_CAPABILITY_ID);
+        assert_eq!(
+            records[0].arguments,
+            serde_json::json!({"message": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_invocation_records_running_input_link() {
+        let running_invocations = Arc::new(StdMutex::new(Vec::new()));
+        let handler_invocations = Arc::new(AtomicUsize::new(0));
+        let port = synthetic_port_with_io(
+            Arc::new(CountingSyntheticHandler {
+                invocations: Arc::clone(&handler_invocations),
+            }),
+            Arc::new(RecordingResultWriter {
+                running_invocations: Arc::clone(&running_invocations),
+            }),
+        )
+        .await;
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("provider call registers");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("synthetic invocation completes");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(handler_invocations.load(Ordering::SeqCst), 1);
+        let records = running_invocations
+            .lock()
+            .expect("running invocations lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].0,
+            InvocationId::from_uuid(candidate.activity_id.as_uuid())
+        );
+        assert_eq!(records[0].1, candidate.input_ref);
+    }
+
+    #[tokio::test]
+    async fn synthetic_approval_resume_records_trajectory_input_under_effective_ref() {
+        let running_invocations = Arc::new(StdMutex::new(Vec::new()));
+        let trajectory_inputs = Arc::new(StdMutex::new(Vec::new()));
+        let handler_invocations = Arc::new(AtomicUsize::new(0));
+        let port = synthetic_port_with_resolver_and_observer(
+            Arc::new(CountingSyntheticHandler {
+                invocations: Arc::clone(&handler_invocations),
+            }),
+            Arc::new(RecordingResultWriter {
+                running_invocations: Arc::clone(&running_invocations),
+            }),
+            Arc::new(FixedInputResolver {
+                input_ref: CapabilityInputRef::new("input:synthetic-original").expect("input ref"),
+                input: serde_json::json!({"message": "original"}),
+            }),
+            Some(Arc::new(RecordingTrajectoryObserver {
+                inputs: Arc::clone(&trajectory_inputs),
+            })),
+        )
+        .await;
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("provider call registers");
+        let resumed_input_ref =
+            CapabilityInputRef::new("input:synthetic-resumed").expect("input ref");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id: ApprovalRequestId::new(),
+                    resume_token: CapabilityResumeToken::new(candidate.activity_id.to_string())
+                        .expect("resume token"),
+                    correlation_id: CorrelationId::new(),
+                    input_ref: resumed_input_ref.clone(),
+                    input: serde_json::json!({"message": "approved"}),
+                    estimate: ResourceEstimate::default(),
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect("synthetic approval resume completes");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(handler_invocations.load(Ordering::SeqCst), 1);
+        let running_records = running_invocations
+            .lock()
+            .expect("running invocations lock");
+        assert_eq!(running_records.len(), 1);
+        assert_eq!(running_records[0].1, resumed_input_ref);
+        let trajectory_records = trajectory_inputs.lock().expect("trajectory input lock");
+        assert_eq!(trajectory_records.len(), 1);
+        assert_eq!(trajectory_records[0].call_id, resumed_input_ref.as_str());
+        assert_eq!(trajectory_records[0].capability_id, TEST_CAPABILITY_ID);
+        assert_eq!(
+            trajectory_records[0].arguments,
+            serde_json::json!({"message": "approved"})
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_synthetic_provider_call_reuses_activity_id_for_same_input_ref() {
         let port = synthetic_port().await;
         let first = port
@@ -756,7 +1068,19 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_provider_call_rejects_explicit_activity_id_change_for_same_input_ref() {
-        let port = synthetic_port().await;
+        let display_inputs = Arc::new(StdMutex::new(Vec::new()));
+        let input_ref =
+            CapabilityInputRef::new("input:synthetic-activity-change").expect("input ref");
+        let port = synthetic_port_with_resolver(
+            Arc::new(TestSyntheticHandler),
+            Arc::new(NoopResultWriter),
+            Arc::new(RecordingInputResolver {
+                input_ref,
+                input: serde_json::json!({"message": "hello"}),
+                display_inputs: Arc::clone(&display_inputs),
+            }),
+        )
+        .await;
         let activity_id = CapabilityActivityId::new();
         let first = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
@@ -774,6 +1098,7 @@ mod tests {
             .expect_err("activity id changes must be rejected");
 
         assert_eq!(first.activity_id, activity_id);
+        assert_eq!(display_inputs.lock().expect("display inputs lock").len(), 1);
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(
             error.safe_summary.contains("activity identity"),

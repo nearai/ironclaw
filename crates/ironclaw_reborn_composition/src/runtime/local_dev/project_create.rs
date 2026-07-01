@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, UserId};
+use ironclaw_host_api::UserId;
 use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_product_workflow::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
@@ -101,8 +101,8 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &invocation.run_context,
-                input_ref: &invocation.request.input_ref,
-                invocation_id: InvocationId::new(),
+                input_ref: invocation.effective_input_ref(),
+                invocation_id: invocation.invocation_id(),
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
@@ -250,6 +250,294 @@ fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use chrono::Utc;
+    use ironclaw_host_api::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, ProjectId, ResourceEstimate,
+        TenantId, ThreadId,
+    };
+    use ironclaw_loop_support::{
+        CapabilityWriteResult, EmptyLoopCapabilityPort, LoopCapabilityInputResolver,
+        LoopCapabilityResultWriter,
+    };
+    use ironclaw_product_workflow::{
+        RebornAddMemberRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
+        RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+        RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
+        RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
+        RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    };
+    use ironclaw_turns::{
+        CapabilityActivityId, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
+        TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            CapabilityApprovalResume, CapabilityInputRef, CapabilityInvocation,
+            CapabilityResumeToken, InMemoryRunProfileResolver, ProviderToolCall,
+            RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        },
+    };
+
+    use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
+
+    struct FixedProjectInputResolver {
+        input_ref: CapabilityInputRef,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for FixedProjectInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(serde_json::json!({
+                "name": "Original Project",
+                "description": "from original input"
+            }))
+        }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            Ok(self.input_ref.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordedProjectResultWrite {
+        input_ref: CapabilityInputRef,
+        invocation_id: ironclaw_host_api::InvocationId,
+        capability_id: CapabilityId,
+        output: serde_json::Value,
+    }
+
+    struct RecordingProjectResultWriter {
+        writes: Arc<std::sync::Mutex<Vec<RecordedProjectResultWrite>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingProjectResultWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.writes
+                .lock()
+                .expect("project result writes lock")
+                .push(RecordedProjectResultWrite {
+                    input_ref: write.input_ref.clone(),
+                    invocation_id: write.invocation_id,
+                    capability_id: write.capability_id.clone(),
+                    output: write.output.clone(),
+                });
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:project-create").expect("valid result ref"),
+                0,
+            ))
+        }
+    }
+
+    struct FakeProjectService;
+
+    #[async_trait]
+    impl ProjectService for FakeProjectService {
+        async fn list_projects(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornListProjectsRequest,
+        ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+            Ok(RebornListProjectsResponse { projects: vec![] })
+        }
+
+        async fn create_project(
+            &self,
+            _caller: ProjectCaller,
+            request: RebornCreateProjectRequest,
+        ) -> Result<RebornProjectResponse, ProjectServiceError> {
+            let now = Utc::now();
+            Ok(RebornProjectResponse {
+                project: RebornProjectInfo {
+                    project_id: "project-created".to_string(),
+                    name: request.name,
+                    description: request.description,
+                    icon: None,
+                    color: None,
+                    metadata: serde_json::json!({}),
+                    state: RebornProjectState::Active,
+                    role: RebornProjectRole::Owner,
+                    created_at: now,
+                    updated_at: now,
+                },
+            })
+        }
+
+        async fn get_project(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornGetProjectRequest,
+        ) -> Result<RebornProjectResponse, ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn update_project(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornUpdateProjectRequest,
+        ) -> Result<RebornProjectResponse, ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn delete_project(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornDeleteProjectRequest,
+        ) -> Result<(), ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn list_members(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornListMembersRequest,
+        ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn add_member(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornAddMemberRequest,
+        ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn update_member_role(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornUpdateMemberRoleRequest,
+        ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+
+        async fn remove_member(
+            &self,
+            _caller: ProjectCaller,
+            _request: RebornRemoveMemberRequest,
+        ) -> Result<(), ProjectServiceError> {
+            Err(ProjectServiceError::Unavailable)
+        }
+    }
+
+    async fn project_run_context() -> LoopRunContext {
+        let profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile resolves");
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("tenant-project-create").expect("tenant id"),
+                Some(AgentId::new("agent-project-create").expect("agent id")),
+                Some(ProjectId::new("project-existing").expect("project id")),
+                ThreadId::new("thread-project-create").expect("thread id"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            profile,
+        )
+    }
+
+    fn project_provider_tool_call() -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            turn_id: Some("turn-project-create".to_string()),
+            id: "call-project-create".to_string(),
+            name: ironclaw_host_api::ProviderToolName::new(PROJECT_CREATE_PROVIDER_TOOL_NAME)
+                .expect("provider tool name"),
+            arguments: serde_json::json!({
+                "name": "Original Project",
+                "description": "from original input"
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn project_create_resume_writes_result_under_effective_input_ref() {
+        let run_context = project_run_context().await;
+        let original_input_ref =
+            CapabilityInputRef::new("input:project-create-original").expect("input ref");
+        let resumed_input_ref =
+            CapabilityInputRef::new("input:project-create-resumed").expect("input ref");
+        let result_writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capability = project_create_capability(
+            Arc::new(FakeProjectService),
+            UserId::new("user-project-create").expect("user id"),
+        )
+        .expect("project create capability");
+        let port = wrap_local_dev_synthetic_capabilities(
+            Arc::new(EmptyLoopCapabilityPort),
+            vec![capability],
+            run_context.clone(),
+            Arc::new(FixedProjectInputResolver {
+                input_ref: original_input_ref,
+            }),
+            Arc::new(RecordingProjectResultWriter {
+                writes: Arc::clone(&result_writes),
+            }),
+            None,
+        )
+        .expect("synthetic port");
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let activity_id = CapabilityActivityId::new();
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                project_provider_tool_call(),
+                activity_id,
+            ))
+            .await
+            .expect("provider call registers");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id.clone(),
+                input_ref: candidate.input_ref.clone(),
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id: ApprovalRequestId::new(),
+                    resume_token: CapabilityResumeToken::new(activity_id.to_string())
+                        .expect("resume token"),
+                    correlation_id: CorrelationId::new(),
+                    input_ref: resumed_input_ref.clone(),
+                    input: serde_json::json!({
+                        "name": "Resumed Project",
+                        "description": "from resumed input"
+                    }),
+                    estimate: ResourceEstimate::default(),
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect("project create invocation completes");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        let writes = result_writes.lock().expect("project result writes lock");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].input_ref, resumed_input_ref);
+        assert_eq!(
+            writes[0].invocation_id,
+            ironclaw_host_api::InvocationId::from_uuid(activity_id.as_uuid())
+        );
+        assert_eq!(writes[0].capability_id, candidate.capability_id);
+        assert_eq!(writes[0].output["name"], "Resumed Project");
+    }
 
     #[test]
     fn parse_project_create_input_rejects_missing_name() {
