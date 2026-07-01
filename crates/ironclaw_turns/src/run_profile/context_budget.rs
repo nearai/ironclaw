@@ -16,6 +16,15 @@ impl PromptContextTokenBudget {
     pub const DEFAULT_RESERVE_TOKENS: u64 = 20_000;
     pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
 
+    /// Env overrides for the compaction context budget. Lets an operator (or the
+    /// nearai-bench harness) tighten the visible-transcript ceiling so long,
+    /// tool-heavy runs compact sooner and stop re-sending a near-full context
+    /// window every turn — the dominant token cost on multi-turn tasks (on top of
+    /// progressive tool disclosure). Unset ⇒ the compiled defaults, so this is a
+    /// pure no-op for existing deployments.
+    pub const CONTEXT_LIMIT_TOKENS_ENV: &'static str = "IRONCLAW_PROMPT_CONTEXT_LIMIT_TOKENS";
+    pub const RESERVE_TOKENS_ENV: &'static str = "IRONCLAW_PROMPT_CONTEXT_RESERVE_TOKENS";
+
     pub const fn new(
         context_limit_tokens: u64,
         reserve_tokens: u64,
@@ -37,11 +46,28 @@ impl PromptContextTokenBudget {
 impl Default for PromptContextTokenBudget {
     fn default() -> Self {
         Self {
-            context_limit_tokens: Self::DEFAULT_CONTEXT_LIMIT_TOKENS,
-            reserve_tokens: Self::DEFAULT_RESERVE_TOKENS,
+            context_limit_tokens: env_u64_positive(
+                Self::CONTEXT_LIMIT_TOKENS_ENV,
+                Self::DEFAULT_CONTEXT_LIMIT_TOKENS,
+            ),
+            reserve_tokens: env_u64_positive(
+                Self::RESERVE_TOKENS_ENV,
+                Self::DEFAULT_RESERVE_TOKENS,
+            ),
             main_loop_max_output_tokens: Self::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS,
         }
     }
+}
+
+/// Parse a positive `u64` from `key`, falling back to `default` when unset,
+/// unparseable, or non-positive. A zero/garbage override never silently
+/// disables the budget.
+fn env_u64_positive(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
