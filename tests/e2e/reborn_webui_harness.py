@@ -467,8 +467,15 @@ async def send_and_settle(
 ) -> None:
     """Send a text turn and wait until ``expected`` assistant replies finalize."""
     submit_body: dict = {}
+    last_submit_error = None
     for _ in range(12):
-        submit_body = await _submit_message(client, base_url, thread_id, content)
+        try:
+            submit_body = await _submit_message(client, base_url, thread_id, content)
+            last_submit_error = None
+        except httpx.HTTPError as error:
+            last_submit_error = error
+            await asyncio.sleep(0.5)
+            continue
         outcome = submit_body.get("outcome")
         if outcome in ACCEPTED_SEND_OUTCOMES:
             break
@@ -481,7 +488,7 @@ async def send_and_settle(
     else:
         raise AssertionError(
             f"Thread {thread_id} remained busy before accepting a new turn; "
-            f"last submit response: {submit_body}"
+            f"last submit response: {submit_body}; last submit error: {last_submit_error!r}"
         )
 
     for _ in range(90):
