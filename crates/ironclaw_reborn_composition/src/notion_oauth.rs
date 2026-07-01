@@ -1,4 +1,4 @@
-use crate::oauth_provider_client::{ExchangeScopePolicy, HostOAuthProviderSpec};
+use crate::oauth_provider_client::{ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape};
 
 pub(crate) const NOTION_PROVIDER_ID: &str = "notion";
 const NOTION_OAUTH_CAPABILITY: &str = "ironclaw_auth.notion_oauth";
@@ -13,5 +13,6 @@ pub(crate) fn notion_provider_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some(NOTION_RESOURCE),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
