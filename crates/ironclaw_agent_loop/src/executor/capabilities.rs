@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
@@ -38,7 +39,6 @@ use super::{
 pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
-const TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "the tool input could not be encoded";
 const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
 
 pub(super) struct CapabilityInput {
@@ -546,7 +546,7 @@ fn prefixed_capability_summary(
 }
 
 fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
-    if safe_summary == TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY {
+    if safe_summary == INPUT_ENCODE_HUMAN_SUMMARY {
         STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string()
     } else {
         safe_summary
@@ -1474,7 +1474,7 @@ mod tests {
     fn prefixed_capability_summary_rephrases_fixed_input_encode_summary() {
         let summary = prefixed_capability_summary(
             "capability failed with invalid_input: ".to_string(),
-            TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string(),
+            INPUT_ENCODE_HUMAN_SUMMARY.to_string(),
         )
         .expect("fixed input encode summary should be strategy-safe");
 

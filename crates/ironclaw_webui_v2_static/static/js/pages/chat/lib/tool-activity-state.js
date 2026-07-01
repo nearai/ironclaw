@@ -87,6 +87,7 @@ function toolCardFromGate(gate, overrides = {}) {
     toolResultPreview: null,
     toolError: overrides.toolError || null,
     toolErrorKind: overrides.toolErrorKind || null,
+    toolErrorIsBareKind: !!overrides.toolErrorKind && !overrides.toolError,
     toolDurationMs: null,
     updatedAt: overrides.updatedAt || new Date().toISOString(),
     resultRef: null,
@@ -149,6 +150,7 @@ function mergeToolActivity(current, incoming) {
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
     toolError: mergedToolError(current, incoming),
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
+    toolErrorIsBareKind: mergedToolErrorIsBareKind(current, incoming),
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
       : incoming.updatedAt || current.updatedAt,
@@ -180,12 +182,20 @@ function mergedToolError(current, incoming) {
   const incomingError = incoming.toolError || null;
   const currentError = current.toolError || null;
   if (!incomingError) return currentError;
-  const incomingIsBareKind =
-    !!incoming.toolErrorKind && incomingError === incoming.toolErrorKind;
-  if (incomingIsBareKind && currentError && currentError !== incomingError) {
+  if (incoming.toolErrorIsBareKind && currentError && currentError !== incomingError) {
     return currentError;
   }
   return incomingError;
+}
+
+function mergedToolErrorIsBareKind(current, incoming) {
+  const incomingError = incoming.toolError || null;
+  const currentError = current.toolError || null;
+  if (incoming.toolErrorIsBareKind && currentError && currentError !== incomingError) {
+    return !!current.toolErrorIsBareKind;
+  }
+  if (incomingError) return !!incoming.toolErrorIsBareKind;
+  return !!current.toolErrorIsBareKind;
 }
 
 function mergedActivityOrder(current, incoming) {
@@ -220,5 +230,6 @@ function normalizeToolCard(card) {
   return {
     ...card,
     toolName: normalizedName || card.toolName || "tool",
+    toolErrorIsBareKind: Boolean(card.toolErrorIsBareKind),
   };
 }

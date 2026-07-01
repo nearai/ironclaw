@@ -6,8 +6,9 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
-    ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, ResourceEstimate,
+    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -143,11 +144,9 @@ fn validate_loop_safe_identifier(
     Ok(value)
 }
 
-const TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "the tool input could not be encoded";
-
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
-    if value == TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY {
+    if value == INPUT_ENCODE_HUMAN_SUMMARY {
         return Ok(value);
     }
     if value.chars().any(|character| {
@@ -413,16 +412,22 @@ impl LoopSafeSummary {
         validate_loop_safe_summary(value.into()).map(Self)
     }
 
+    /// Build a display-safe capability failure summary, replacing unsafe input
+    /// with a fixed redaction marker.
     pub fn capability_failure_summary(value: impl Into<String>) -> Self {
         Self::new(value).unwrap_or_else(|_| Self::tool_failure_details_redacted())
     }
 
+    /// Fixed summary used when a capability failure detail was intentionally
+    /// redacted before reaching a user-visible or model-visible boundary.
     pub fn tool_failure_details_redacted() -> Self {
         Self("the tool failure details were redacted".to_string())
     }
 
+    /// Fixed fallback for input-encoding failures when no narrower safe detail
+    /// is available.
     pub fn tool_input_could_not_be_encoded() -> Self {
-        Self(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string())
+        Self(INPUT_ENCODE_HUMAN_SUMMARY.to_string())
     }
 
     pub fn model_gateway_failed() -> Self {
@@ -2533,9 +2538,9 @@ mod tests {
 
     #[test]
     fn loop_safe_summary_accepts_fixed_input_encode_summary() {
-        let summary = LoopSafeSummary::new(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY)
+        let summary = LoopSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
-        assert_eq!(summary.as_str(), TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY);
+        assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
 
         let raw_input_summary = LoopSafeSummary::new("tool input contained raw payload");
         assert!(

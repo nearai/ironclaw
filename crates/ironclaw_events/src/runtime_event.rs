@@ -1041,7 +1041,7 @@ fn truncate_error_summary(value: &str) -> String {
         return value.to_string();
     }
     let mut end = MAX_ERROR_SUMMARY_BYTES - ELLIPSIS.len();
-    while !value.is_char_boundary(end) {
+    while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     format!("{}{}", &value[..end], ELLIPSIS)
@@ -1138,7 +1138,9 @@ fn is_safe_hook_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProjectId, TenantId, UserId,
+    };
 
     fn scope() -> ResourceScope {
         ResourceScope {
@@ -1188,12 +1190,12 @@ mod tests {
             None,
             "invalid_input",
         )
-        .with_error_summary("the tool input could not be encoded");
+        .with_error_summary(INPUT_ENCODE_HUMAN_SUMMARY);
         let wire = serde_json::to_string(&tool_input_event).expect("serialize runtime event");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
         assert_eq!(
             decoded.error_summary.as_deref(),
-            Some("the tool input could not be encoded")
+            Some(INPUT_ENCODE_HUMAN_SUMMARY)
         );
 
         let non_filesystem_identifier_event = RuntimeEvent::capability_activity_failed(
@@ -1300,6 +1302,16 @@ mod tests {
                 "summary must be redacted: {secret_like_summary}"
             );
         }
+    }
+
+    #[test]
+    fn truncate_error_summary_preserves_utf8_boundaries() {
+        let summary = "a".repeat(MAX_ERROR_SUMMARY_BYTES - 4) + "ééé";
+        let truncated = truncate_error_summary(&summary);
+
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.len() <= MAX_ERROR_SUMMARY_BYTES);
     }
 
     #[test]

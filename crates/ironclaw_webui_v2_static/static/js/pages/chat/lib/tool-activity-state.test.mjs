@@ -419,6 +419,45 @@ test("tool activity state keeps preview failure detail when a bare-kind activity
   assert.equal(messages[0].toolErrorKind, "invalid_input");
 });
 
+test("tool activity state uses bare-kind flag instead of string equality", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-json",
+      capabilityId: "builtin.json",
+      toolName: "json",
+      toolStatus: "error",
+      toolError: "the tool input could not be encoded",
+      toolErrorKind: "invalid_input",
+      toolErrorIsBareKind: false,
+    },
+    stateRef,
+  );
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-json",
+      capabilityId: "builtin.json",
+      toolName: "json",
+      toolStatus: "error",
+      toolError: "invalid_input",
+      toolErrorKind: "invalidInput",
+      toolErrorIsBareKind: true,
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolError, "the tool input could not be encoded");
+});
+
 test("tool activity state applies durable projection order to live activity", () => {
   const runId = "run-projection-order";
   const stateRef = { current: createToolActivityState() };

@@ -315,21 +315,23 @@ fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<Str
         let rendered = issues
             .iter()
             .take(CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES)
-            .map(render_capability_input_issue)
+            .filter_map(render_capability_input_issue)
             .collect::<Vec<_>>()
             .join("; ");
-        let mut summary = format!("Invalid input: {rendered}");
-        if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
-            let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
-            summary.push_str(&format!(" (+{extra} more)"));
+        if !rendered.is_empty() {
+            let mut summary = format!("Invalid input: {rendered}");
+            if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
+                let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
+                summary.push_str(&format!(" (+{extra} more)"));
+            }
+            return Some(
+                ironclaw_host_api::truncate_capability_display_text(
+                    &summary,
+                    CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+                )
+                .text,
+            );
         }
-        return Some(
-            ironclaw_host_api::truncate_capability_display_text(
-                &summary,
-                CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
-            )
-            .text,
-        );
     }
 
     let summary = failure.safe_summary.trim();
@@ -345,19 +347,50 @@ fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<Str
     )
 }
 
-fn render_capability_input_issue(issue: &CapabilityInputIssue) -> String {
+const CAPABILITY_INPUT_ISSUE_FIELD_MAX_BYTES: usize = 160;
+
+fn render_capability_input_issue(issue: &CapabilityInputIssue) -> Option<String> {
     let code = match issue.code {
         CapabilityInputIssueCode::MissingRequired => "missing required field",
         CapabilityInputIssueCode::UnexpectedField => "unexpected field",
         CapabilityInputIssueCode::TypeMismatch => "type mismatch",
         CapabilityInputIssueCode::InvalidValue => "invalid value",
     };
-    match issue.expected.as_deref() {
+    let path = capability_input_issue_display_text(&issue.path)?;
+    match issue
+        .expected
+        .as_deref()
+        .and_then(capability_input_issue_display_text)
+    {
         Some(expected) if !expected.is_empty() => {
-            format!("{} — {code} (expected {expected})", issue.path)
+            Some(format!("{path} — {code} (expected {expected})"))
         }
-        _ => format!("{} — {code}", issue.path),
+        _ => Some(format!("{path} — {code}")),
     }
+}
+
+fn capability_input_issue_display_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(|character| {
+            character == '\0'
+                || character.is_control()
+                || !character.is_ascii()
+                || matches!(
+                    character,
+                    '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+                )
+        })
+    {
+        return None;
+    }
+    Some(
+        ironclaw_host_api::truncate_capability_display_text(
+            trimmed,
+            CAPABILITY_INPUT_ISSUE_FIELD_MAX_BYTES,
+        )
+        .text,
+    )
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -3361,6 +3394,28 @@ mod tests {
         assert_eq!(
             capability_failure_display_summary(&failure).as_deref(),
             Some("invalid JSON: expected value at line 1 column 1")
+        );
+    }
+
+    #[test]
+    fn capability_failure_display_summary_skips_unsafe_input_issue_fields() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "input schema validation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "payload</script>".to_string(),
+                    code: CapabilityInputIssueCode::InvalidValue,
+                    expected: Some("safe".to_string()),
+                    received: None,
+                    schema_path: None,
+                }],
+            }),
+        };
+
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("input schema validation failed")
         );
     }
 

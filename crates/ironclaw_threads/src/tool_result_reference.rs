@@ -1,4 +1,4 @@
-use ironclaw_host_api::{CapabilityId, ProviderToolName};
+use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
 use ironclaw_safety::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
     validate_provider_identity, validate_provider_token, validate_provider_tool_name,
@@ -18,7 +18,6 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
-const TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "the tool input could not be encoded";
 const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
     "access token",
     "api key",
@@ -351,7 +350,7 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
             "tool result summary must not contain raw payload or path delimiters".to_string(),
         );
     }
-    if value == TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY {
+    if value == INPUT_ENCODE_HUMAN_SUMMARY {
         return Ok(value);
     }
 
@@ -832,8 +831,8 @@ mod tests {
     use ironclaw_host_api::{CapabilityId, ProviderToolName};
 
     use super::{
-        ProviderToolCallReferenceEnvelope, TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY,
-        ToolResultReferenceEnvelope, ToolResultSafeSummary,
+        INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
+        ToolResultSafeSummary,
     };
 
     #[test]
@@ -857,9 +856,9 @@ mod tests {
 
     #[test]
     fn safe_summary_accepts_fixed_input_encode_summary() {
-        let summary = ToolResultSafeSummary::new(TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY)
+        let summary = ToolResultSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
-        assert_eq!(summary.as_str(), TOOL_INPUT_COULD_NOT_BE_ENCODED_SUMMARY);
+        assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
 
         assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
     }

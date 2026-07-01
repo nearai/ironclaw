@@ -2,6 +2,7 @@ use super::*;
 use ironclaw_first_party_extension_ports::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
 };
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_product_adapters::{
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
@@ -88,7 +89,7 @@ async fn runtime_capability_activity_failure_carries_error_detail() {
         &invocation_id.to_string(),
         invocation_id,
         &capability_id,
-        "the tool input could not be encoded",
+        INPUT_ENCODE_HUMAN_SUMMARY,
     );
 
     let payload = runtime_payload_from_candidate(
@@ -126,7 +127,7 @@ async fn runtime_capability_activity_failure_carries_error_detail() {
     assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
     assert_eq!(
         activity.error_detail.as_deref(),
-        Some("the tool input could not be encoded")
+        Some(INPUT_ENCODE_HUMAN_SUMMARY)
     );
 }
 

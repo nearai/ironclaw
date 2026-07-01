@@ -158,6 +158,12 @@ pub enum RuntimeDispatchErrorKind {
     Unknown,
 }
 
+/// Fixed user-facing fallback for [`RuntimeDispatchErrorKind::InputEncode`].
+///
+/// This exact sentence is whitelisted by downstream safety validators after
+/// they reject arbitrary summaries mentioning raw tool input.
+pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encoded";
+
 impl RuntimeDispatchErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -200,7 +206,7 @@ impl RuntimeDispatchErrorKind {
             Self::ExtensionRuntimeMismatch => "the tool runtime did not match its extension",
             Self::FilesystemDenied => "the tool was denied filesystem access",
             Self::Guest => "the tool reported an internal error",
-            Self::InputEncode => "the tool input could not be encoded",
+            Self::InputEncode => INPUT_ENCODE_HUMAN_SUMMARY,
             Self::InvalidResult => "the tool returned an invalid result",
             Self::Manifest => "the tool manifest is invalid",
             Self::Memory => "the tool exceeded its memory limit",
@@ -487,10 +493,7 @@ mod tests {
         // The user-facing summary must read as a sentence, never the stable
         // category token (which is for routing/metrics/audit only).
         let runtime = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode);
-        assert_eq!(
-            runtime.human_summary(),
-            "the tool input could not be encoded"
-        );
+        assert_eq!(runtime.human_summary(), INPUT_ENCODE_HUMAN_SUMMARY);
         assert_ne!(runtime.human_summary(), runtime.as_str());
         assert_eq!(
             DispatchFailureKind::UnknownCapability.human_summary(),
