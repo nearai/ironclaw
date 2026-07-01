@@ -19,7 +19,7 @@ on:
       cargo_features:
         description: Comma-separated Cargo features to enable
         required: false
-        default: postgres,html-to-markdown,matrix-e2ee
+        default: postgres,html-to-markdown
         type: string
       target:
         description: Rust target triple
@@ -31,7 +31,7 @@ permissions:
   contents: write
 
 env:
-  DEFAULT_CARGO_FEATURES: postgres,html-to-markdown,matrix-e2ee
+  DEFAULT_CARGO_FEATURES: postgres,html-to-markdown
   DEFAULT_RELEASE_TAG: pilot-native-matrix-channel-pilot
   DEFAULT_TARGET: x86_64-unknown-linux-gnu
   DEPLOYMENT_BRANCH: deployment-target
