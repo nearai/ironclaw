@@ -157,6 +157,24 @@ pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<Hos
     HostedMcpEndpoint::parse(url)
 }
 
+/// The network target a hosted-HTTP MCP package is allowed to reach: its
+/// manifest endpoint (always HTTPS, since [`HostedMcpEndpoint::parse`] rejects
+/// other schemes). Returns `None` for non-MCP / non-host-bundled packages.
+///
+/// The capability dispatch network policy uses this so a credential-free hosted
+/// MCP provider gets an allow-list entry from its manifest, rather than an empty
+/// one derived only from credentials.
+pub(crate) fn hosted_mcp_endpoint_target(
+    package: &ExtensionPackage,
+) -> Option<NetworkTargetPattern> {
+    let endpoint = hosted_http_mcp_endpoint(package)?;
+    Some(NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: endpoint.host_pattern,
+        port: endpoint.port,
+    })
+}
+
 /// Returns `true` only when `url` has scheme `https`, a host that
 /// case-insensitively matches `endpoint.host_pattern`, and a path that
 /// (ignoring trailing slashes) matches `endpoint.path`.
@@ -275,6 +293,72 @@ mod tests {
             plan.network_policy.allowed_targets[0].host_pattern,
             "fixture.example.com"
         );
+    }
+
+    #[test]
+    fn hosted_mcp_endpoint_target_uses_manifest_url() {
+        let registry = SharedExtensionRegistry::new(registry_with_provider(
+            "example-mcp",
+            "https://mcp.example.com:8443/mcp",
+            "example-mcp.ping",
+            "example_token",
+        ));
+        let snapshot = registry.snapshot();
+        let package = snapshot
+            .get_extension(&ExtensionId::new("example-mcp").unwrap())
+            .expect("package present");
+
+        let target = hosted_mcp_endpoint_target(package).expect("hosted MCP endpoint target");
+
+        assert_eq!(
+            target,
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.example.com".to_string(),
+                port: Some(8443),
+            }
+        );
+    }
+
+    #[test]
+    fn hosted_mcp_endpoint_target_rejects_non_hosted_mcp_packages() {
+        // 1. Manifest is not host-bundled. A hosted MCP endpoint is only
+        //    honored for `ManifestSource::HostBundled`, so an installed-local
+        //    manifest with an otherwise-valid hosted MCP runtime yields no
+        //    target.
+        let non_host_bundled = package_with_runtime(
+            ManifestSource::InstalledLocal,
+            ExtensionRuntime::Mcp {
+                transport: "http".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("https://mcp.example.com/mcp".to_string()),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_host_bundled).is_none());
+
+        // 2. Runtime is not a hosted-HTTP MCP server (here a WASM runtime), so
+        //    `hosted_http_mcp_endpoint` returns `None` regardless of source.
+        let non_mcp_runtime = package_with_runtime(
+            ManifestSource::HostBundled,
+            ExtensionRuntime::Wasm {
+                module: ironclaw_extensions::ExtensionAssetPath::new("wasm/example.wasm").unwrap(),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_mcp_runtime).is_none());
+
+        // 3. MCP runtime whose URL is not HTTPS. `HostedMcpEndpoint::parse`
+        //    rejects non-https schemes, so the endpoint target is `None`.
+        let non_https_url = package_with_runtime(
+            ManifestSource::HostBundled,
+            ExtensionRuntime::Mcp {
+                transport: "http".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("http://mcp.example.com/mcp".to_string()),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_https_url).is_none());
     }
 
     #[test]
@@ -456,6 +540,30 @@ mod tests {
             headers: &[],
             body: &[],
         }
+    }
+
+    /// Build a minimal package with the given manifest source and runtime. Only
+    /// `manifest.source` and `manifest.runtime` matter to
+    /// `hosted_mcp_endpoint_target`, so capabilities are left empty.
+    fn package_with_runtime(source: ManifestSource, runtime: ExtensionRuntime) -> ExtensionPackage {
+        ExtensionPackage::from_manifest(
+            ExtensionManifest {
+                schema_version: ironclaw_extensions::MANIFEST_SCHEMA_VERSION.to_string(),
+                id: ExtensionId::new("example-mcp").unwrap(),
+                name: "example-mcp".to_string(),
+                version: "0.1.0".to_string(),
+                description: "Hosted MCP".to_string(),
+                source,
+                requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
+                descriptor_trust_default: TrustClass::Sandbox,
+                runtime,
+                host_apis: Vec::new(),
+                hooks: Vec::new(),
+                capabilities: Vec::new(),
+            },
+            VirtualPath::new("/system/extensions/example-mcp").unwrap(),
+        )
+        .unwrap()
     }
 
     fn registry_with_notion() -> ironclaw_extensions::ExtensionRegistry {
