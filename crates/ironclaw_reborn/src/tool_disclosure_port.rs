@@ -43,6 +43,13 @@ const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 /// model's retry can carry the required fields. See `register_describe_first`.
 const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 
+/// Provider tool name of the loop's `capability_info` inspector (mirrors
+/// `ironclaw_loop_support::capability_info::TOOL_NAME`). Inspecting a deferred
+/// tool via `capability_info` is treated as intent to use it: the target is
+/// disclosed + promoted so it becomes directly callable — the `tool_search` →
+/// `capability_info` → direct-call discovery path.
+const CAPABILITY_INFO_NAME: &str = "capability_info";
+
 pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
@@ -320,6 +327,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             tool_call,
             activity_id,
         } = request;
+        // Inspecting a deferred tool via `capability_info` promotes it for direct
+        // use next turn (search → capability_info → direct call). Runs before
+        // dispatch so the promotion lands even though the call itself delegates
+        // to the inner port below.
+        self.note_capability_info_target(&tool_call)?;
         if !is_bridge_name(tool_call.name.as_str()) {
             if let Some(target) = self.direct_deferred_target(&tool_call)? {
                 // Preserve the model's emitted wire name in the replay when it is
@@ -625,6 +637,68 @@ impl ToolDisclosureCapabilityPort {
         })?;
         guard.entry(key).or_default().push(name);
         Ok(())
+    }
+
+    /// When the model inspects a deferred tool via `capability_info`, treat it as
+    /// intent to use that tool: disclose it this turn and promote it for the scope
+    /// so it becomes advertised with its full schema and directly callable next
+    /// turn — the `tool_search` → `capability_info` → direct-call flow. This is the
+    /// same disclose+promote a `tool_describe` / successful `tool_call` already
+    /// does, wired onto the `capability_info` path so that path can stand alone.
+    /// No-op for a non-`capability_info` call or a target not in the catalog.
+    fn note_capability_info_target(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        if tool_call.name.as_str() != CAPABILITY_INFO_NAME {
+            return Ok(());
+        }
+        let Some(target_name) = tool_call
+            .arguments
+            .get("name")
+            .or_else(|| tool_call.arguments.get("capability_id"))
+            .and_then(Value::as_str)
+        else {
+            return Ok(());
+        };
+        let capability_id = {
+            let mut guard = self.turn_state()?;
+            let Some(state) = guard.as_mut() else {
+                return Ok(());
+            };
+            // `capability_info`'s `name` may be the provider tool name (dotted or
+            // encoded) or the canonical capability id — resolve either.
+            let resolved = state
+                .catalog
+                .search_result(target_name)
+                .map(|result| (result.name, result.capability_id))
+                .or_else(|| {
+                    CapabilityId::new(target_name)
+                        .ok()
+                        .and_then(|capability_id| {
+                            state
+                                .catalog
+                                .definition_by_capability_id(&capability_id)
+                                .map(|definition| {
+                                    (
+                                        definition.name.to_string(),
+                                        definition.capability_id.clone(),
+                                    )
+                                })
+                        })
+                });
+            let Some((name, capability_id)) = resolved else {
+                return Ok(());
+            };
+            state.disclosed_names.insert(name);
+            capability_id
+        };
+        debug!(
+            target = target_name,
+            capability_id = capability_id.as_str(),
+            "capability_info inspected a deferred tool; disclosing + promoting it for direct use"
+        );
+        self.promote_target(&capability_id)
     }
 
     fn record_promotable_input(
@@ -1721,6 +1795,85 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name.as_str() == "hidden_tool"),
             "successful direct deferred call should promote the target on the next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_on_deferred_tool_promotes_it_for_direct_use_next_turn() {
+        // Firat's discovery flow: tool_search (names) -> capability_info (loads +
+        // promotes) -> direct call. Inspecting a deferred tool via capability_info
+        // must disclose it this turn and promote it for the next, so it becomes
+        // directly callable — without this the model inspects a tool it can never
+        // reach and loops.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::clone(&promoted_by_scope),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        assert!(
+            !port
+                .tool_definitions()
+                .expect("tool definitions")
+                .iter()
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
+            "hidden_tool starts deferred"
+        );
+
+        // The model inspects the deferred tool by its canonical capability id.
+        let inspect = provider_call("capability_info", json!({"name": "fixture.hidden"}));
+        port.note_capability_info_target(&inspect)
+            .expect("capability_info promotes the inspected target");
+
+        // This turn the inspected tool is disclosed onto the callable surface
+        // (visible_capabilities descriptors), so a call to it is authorized.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface after inspect");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str() == "fixture.hidden"),
+            "capability_info discloses the inspected tool onto the surface this turn"
+        );
+
+        let next_turn = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            promoted_by_scope,
+        );
+        next_turn
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("next visible surface");
+        assert!(
+            next_turn
+                .tool_definitions()
+                .expect("next tool definitions")
+                .iter()
+                .any(|definition| definition.name.as_str() == "hidden_tool"),
+            "capability_info promotes the inspected tool for the next turn"
         );
     }
 
