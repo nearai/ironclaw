@@ -39,6 +39,7 @@ use crate::latency::{
 };
 
 mod calendar_list_events;
+mod context_tools;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -49,6 +50,9 @@ pub const CALENDAR_UPDATE_EVENT_CAPABILITY_ID: &str = "google-calendar.update_ev
 pub const CALENDAR_DELETE_EVENT_CAPABILITY_ID: &str = "google-calendar.delete_event";
 pub const CALENDAR_ADD_ATTENDEES_CAPABILITY_ID: &str = "google-calendar.add_attendees";
 pub const CALENDAR_SET_REMINDER_CAPABILITY_ID: &str = "google-calendar.set_reminder";
+pub const CALENDAR_AGENDA_CAPABILITY_ID: &str = "google-calendar.agenda";
+pub const CALENDAR_DAILY_BRIEF_CAPABILITY_ID: &str = "google-calendar.daily_brief";
+pub const CALENDAR_MEETING_PREP_CAPABILITY_ID: &str = "google-calendar.meeting_prep";
 
 pub const GMAIL_LIST_MESSAGES_CAPABILITY_ID: &str = "gmail.list_messages";
 pub const GMAIL_GET_MESSAGE_CAPABILITY_ID: &str = "gmail.get_message";
@@ -56,6 +60,7 @@ pub const GMAIL_SEND_MESSAGE_CAPABILITY_ID: &str = "gmail.send_message";
 pub const GMAIL_CREATE_DRAFT_CAPABILITY_ID: &str = "gmail.create_draft";
 pub const GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID: &str = "gmail.reply_to_message";
 pub const GMAIL_TRASH_MESSAGE_CAPABILITY_ID: &str = "gmail.trash_message";
+pub const GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID: &str = "gmail.fetch_message_summaries";
 
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
@@ -666,6 +671,10 @@ enum CapabilityExecution {
         body: Vec<u8>,
     },
     CalendarListEvents(calendar_list_events::CalendarEventsQuery),
+    CalendarAgenda(context_tools::CalendarAgendaInput),
+    CalendarDailyBrief(context_tools::CalendarDailyBriefInput),
+    CalendarMeetingPrep(context_tools::CalendarMeetingPrepInput),
+    GmailFetchMessageSummaries(context_tools::GmailFetchMessageSummariesInput),
     AddAttendees(CalendarAddAttendeesInput),
 }
 
@@ -698,6 +707,23 @@ impl CapabilityExecution {
             }
             Self::CalendarListEvents(input) => {
                 calendar_list_events::execute(request, credential, stager, input).await
+            }
+            Self::CalendarAgenda(input) => {
+                context_tools::execute_calendar_agenda(request, credential, stager, input).await
+            }
+            Self::CalendarDailyBrief(input) => {
+                context_tools::execute_calendar_daily_brief(request, credential, stager, input)
+                    .await
+            }
+            Self::CalendarMeetingPrep(input) => {
+                context_tools::execute_calendar_meeting_prep(request, credential, stager, input)
+                    .await
+            }
+            Self::GmailFetchMessageSummaries(input) => {
+                context_tools::execute_gmail_fetch_message_summaries(
+                    request, credential, stager, input,
+                )
+                .await
             }
             Self::AddAttendees(input) => {
                 execute_add_attendees(request, credential, stager, input).await
@@ -867,12 +893,24 @@ fn capability_execution(
             CapabilityExecution::AddAttendees(CalendarAddAttendeesInput::parse(input)?)
         }
         Operation::CalendarSetReminder => single(calendar_set_reminder_request(input)?),
+        Operation::CalendarAgenda => {
+            CapabilityExecution::CalendarAgenda(context_tools::CalendarAgendaInput::parse(input)?)
+        }
+        Operation::CalendarDailyBrief => CapabilityExecution::CalendarDailyBrief(
+            context_tools::CalendarDailyBriefInput::parse(input)?,
+        ),
+        Operation::CalendarMeetingPrep => CapabilityExecution::CalendarMeetingPrep(
+            context_tools::CalendarMeetingPrepInput::parse(input)?,
+        ),
         Operation::GmailListMessages => single(gmail_list_messages_request(input)?),
         Operation::GmailGetMessage => single(gmail_get_message_request(input)?),
         Operation::GmailSendMessage => single(gmail_send_message_request(input)?),
         Operation::GmailCreateDraft => single(gmail_create_draft_request(input)?),
         Operation::GmailReplyToMessage => single(gmail_reply_to_message_request(input)?),
         Operation::GmailTrashMessage => single(gmail_trash_message_request(input)?),
+        Operation::GmailFetchMessageSummaries => CapabilityExecution::GmailFetchMessageSummaries(
+            context_tools::GmailFetchMessageSummariesInput::parse(input)?,
+        ),
     })
 }
 

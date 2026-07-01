@@ -39,6 +39,24 @@ pub enum GoogleSheetsAction {
         range: String,
     },
 
+    /// Preview a bounded range with headers and sample rows.
+    Preview {
+        /// The spreadsheet ID.
+        spreadsheet_id: String,
+        /// Optional sheet tab name. Defaults to the first sheet.
+        #[serde(default)]
+        sheet_name: Option<String>,
+        /// Optional A1 notation range. When omitted, reads from A1 using max rows/columns.
+        #[serde(default)]
+        range: Option<String>,
+        /// Maximum rows to preview (default: 20, max: 100).
+        #[serde(default = "default_preview_rows")]
+        max_rows: usize,
+        /// Maximum columns to preview (default: 10, max: 30).
+        #[serde(default = "default_preview_columns")]
+        max_columns: usize,
+    },
+
     /// Read values from multiple ranges at once.
     BatchReadValues {
         /// The spreadsheet ID.
@@ -152,8 +170,16 @@ fn default_value_input_option() -> String {
     "USER_ENTERED".to_string()
 }
 
+fn default_preview_rows() -> usize {
+    20
+}
+
+fn default_preview_columns() -> usize {
+    10
+}
+
 /// Sheet (tab) info within a spreadsheet.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SheetInfo {
     pub sheet_id: i64,
     pub title: String,
@@ -195,6 +221,22 @@ pub struct SpreadsheetMetadata {
 pub struct ValuesResult {
     pub range: String,
     pub values: Vec<Vec<serde_json::Value>>,
+}
+
+/// Result from preview.
+#[derive(Debug, Serialize)]
+pub struct SheetPreviewResult {
+    pub spreadsheet_id: String,
+    pub title: String,
+    pub url: String,
+    pub sheet_name: String,
+    pub range: String,
+    pub row_count_estimate: i64,
+    pub column_count_estimate: i64,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub sampled_row_count: usize,
+    pub sampled_column_count: usize,
 }
 
 /// Result from batch_read_values.

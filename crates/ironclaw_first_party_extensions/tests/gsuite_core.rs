@@ -15,11 +15,13 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_first_party_extensions::{
-    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_AGENDA_CAPABILITY_ID,
+    CALENDAR_CREATE_EVENT_CAPABILITY_ID, CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
     CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
     CALENDAR_GET_EVENT_CAPABILITY_ID, CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
-    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_SET_REMINDER_CAPABILITY_ID,
-    CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
+    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_MEETING_PREP_CAPABILITY_ID,
+    CALENDAR_SET_REMINDER_CAPABILITY_ID, CALENDAR_UPDATE_EVENT_CAPABILITY_ID,
+    GMAIL_CREATE_DRAFT_CAPABILITY_ID, GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_PROVIDER_SCOPES,
@@ -48,7 +50,16 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
         .iter()
         .map(|package| package.capabilities.len())
         .sum::<usize>();
-    assert_eq!(capability_count, 15);
+    assert_eq!(capability_count, 19);
+
+    let capability_ids = packages
+        .iter()
+        .flat_map(|package| package.capabilities.iter().map(|capability| capability.id))
+        .collect::<Vec<_>>();
+    assert!(capability_ids.contains(&CALENDAR_AGENDA_CAPABILITY_ID));
+    assert!(capability_ids.contains(&CALENDAR_DAILY_BRIEF_CAPABILITY_ID));
+    assert!(capability_ids.contains(&CALENDAR_MEETING_PREP_CAPABILITY_ID));
+    assert!(capability_ids.contains(&GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID));
 }
 
 #[test]
@@ -213,6 +224,88 @@ async fn calendar_list_events_defaults_to_upcoming_ordered_request() {
     assert!(url.contains("timeMin="));
     assert!(url.contains("maxResults=25"));
     assert!(!url.contains("timeMax="));
+}
+
+#[tokio::test]
+async fn calendar_daily_brief_combines_agenda_and_gmail_attention() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
+        ],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "standup",
+                "summary": "Daily standup",
+                "description": "Review launch blockers",
+                "start": { "dateTime": "2026-05-21T09:00:00Z" },
+                "end": { "dateTime": "2026-05-21T09:30:00Z" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "resultSizeEstimate": 12,
+            "messages": [{ "id": "msg-1", "threadId": "thread-1" }]
+        })),
+        RecordingEgress::json(json!({
+            "id": "msg-1",
+            "threadId": "thread-1",
+            "labelIds": ["INBOX", "UNREAD"],
+            "snippet": "Please review the launch blocker before standup.",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "Boss <boss@example.com>" },
+                    { "name": "To", "value": "Alice <alice@example.com>" },
+                    { "name": "Subject", "value": "Launch blocker" },
+                    { "name": "Date", "value": "Thu, 21 May 2026 08:00:00 +0000" }
+                ]
+            }
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_events": 2,
+            "email_query": "is:unread from:boss@example.com",
+            "email_max_results": 1
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].url.contains("/calendars/primary/events"));
+    assert!(requests[0].url.contains("maxResults=2"));
+    assert!(requests[1].url.contains("/users/me/messages"));
+    assert!(requests[1].url.contains("q=is%3Aunread"));
+    assert!(requests[1].url.contains("maxResults=1"));
+    assert!(
+        requests[2]
+            .url
+            .ends_with("/users/me/messages/msg-1?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date")
+    );
+
+    let body = &output["body"];
+    assert_eq!(body["kind"], "ironclaw#googleCalendarDailyBrief");
+    assert_eq!(body["agenda"]["eventCount"], 1);
+    assert_eq!(body["agenda"]["events"][0]["summary"], "Daily standup");
+    assert_eq!(body["emailAttention"]["messageCount"], 1);
+    assert_eq!(body["emailAttention"]["unreadCount"], 1);
+    assert_eq!(
+        body["emailAttention"]["messages"][0]["subject"],
+        "Launch blocker"
+    );
 }
 
 #[tokio::test]

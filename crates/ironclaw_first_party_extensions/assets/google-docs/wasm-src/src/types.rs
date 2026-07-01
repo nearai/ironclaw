@@ -34,6 +34,24 @@ pub enum GoogleDocsAction {
         document_id: String,
     },
 
+    /// Read a bounded excerpt from the document body as plain text.
+    ReadExcerpt {
+        /// The document ID.
+        document_id: String,
+        /// Optional text to search for. When present, the excerpt starts near the first match.
+        #[serde(default)]
+        query: Option<String>,
+        /// Character offset to start at when query is omitted or not found.
+        #[serde(default)]
+        start_char: usize,
+        /// Maximum excerpt characters (default: 4000, max: 20000).
+        #[serde(default = "default_excerpt_chars")]
+        max_chars: usize,
+        /// Include compact heading outline.
+        #[serde(default = "default_true")]
+        include_outline: bool,
+    },
+
     /// Insert text at a position.
     InsertText {
         /// The document ID.
@@ -173,6 +191,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_excerpt_chars() -> usize {
+    4_000
+}
+
 fn default_bullet_preset() -> String {
     "BULLET_DISC_CIRCLE_SQUARE".to_string()
 }
@@ -210,6 +232,29 @@ pub struct ReadContentResult {
     pub document_id: String,
     pub title: String,
     pub content: String,
+}
+
+/// Result from read_excerpt.
+#[derive(Debug, Serialize)]
+pub struct ReadExcerptResult {
+    pub document_id: String,
+    pub title: String,
+    pub excerpt: String,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub total_chars: usize,
+    pub truncated_before: bool,
+    pub truncated_after: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outline: Vec<DocumentOutlineItem>,
+}
+
+/// Compact heading outline entry.
+#[derive(Debug, Serialize)]
+pub struct DocumentOutlineItem {
+    pub title: String,
+    pub style: String,
+    pub char_offset: usize,
 }
 
 /// Result from insert_text, delete_content, replace_text.

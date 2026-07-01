@@ -2,6 +2,10 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+#[cfg(test)]
+use ironclaw_auth::{
+    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
@@ -1589,8 +1593,9 @@ credential_handle = "channel_ext_token"
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([
-                "https://www.googleapis.com/auth/calendar.events".to_string(),
-                "https://www.googleapis.com/auth/calendar.readonly".to_string(),
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
             ])
         );
 

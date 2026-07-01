@@ -14,6 +14,7 @@
 //! - `create_document`: Create a new blank document
 //! - `get_document`: Get document metadata (title, length, named ranges)
 //! - `read_content`: Read entire document body as plain text
+//! - `read_excerpt`: Read a bounded document excerpt as plain text
 //! - `insert_text`: Insert text at a position (or append at end)
 //! - `delete_content`: Delete text in a range
 //! - `replace_text`: Find and replace all occurrences
@@ -115,6 +116,23 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
 
         GoogleDocsAction::ReadContent { document_id } => {
             let result = api::read_content(&document_id)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleDocsAction::ReadExcerpt {
+            document_id,
+            query,
+            start_char,
+            max_chars,
+            include_outline,
+        } => {
+            let result = api::read_excerpt(
+                &document_id,
+                query.as_deref(),
+                start_char,
+                max_chars,
+                include_outline,
+            )?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -236,6 +254,7 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-docs.create_document" => Ok("create_document"),
         "google-docs.get_document" => Ok("get_document"),
         "google-docs.read_content" => Ok("read_content"),
+        "google-docs.read_excerpt" => Ok("read_excerpt"),
         "google-docs.insert_text" => Ok("insert_text"),
         "google-docs.delete_content" => Ok("delete_content"),
         "google-docs.replace_text" => Ok("replace_text"),
@@ -273,8 +292,10 @@ mod tests {
 
     #[test]
     fn params_with_action_rejects_caller_supplied_action() {
-        let result =
-            params_with_action(r#"{"action":"delete_all","document_id":"doc-1"}"#, "get_document");
+        let result = params_with_action(
+            r#"{"action":"delete_all","document_id":"doc-1"}"#,
+            "get_document",
+        );
 
         assert_eq!(result, Err("invalid_parameters".to_string()));
     }

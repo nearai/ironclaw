@@ -13,6 +13,8 @@
 //! # Supported Actions
 //!
 //! - `list_files`: Search/list files with Drive query syntax and corpora selection
+//! - `find_files_compact`: Search/list files with compact metadata output
+//! - `recent_files`: List recently modified files with compact metadata output
 //! - `get_file`: Get file metadata
 //! - `download_file`: Download file content as text (exports Google Docs/Sheets)
 //! - `upload_file`: Upload a text file (multipart)
@@ -107,6 +109,40 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 query.as_deref(),
                 page_size,
                 order_by.as_deref(),
+                &corpora,
+                drive_id.as_deref(),
+                page_token.as_deref(),
+            )?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleDriveAction::FindFilesCompact {
+            query,
+            page_size,
+            order_by,
+            corpora,
+            drive_id,
+            page_token,
+        } => {
+            let result = api::find_files_compact(
+                query.as_deref(),
+                page_size,
+                order_by.as_deref(),
+                &corpora,
+                drive_id.as_deref(),
+                page_token.as_deref(),
+            )?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleDriveAction::RecentFiles {
+            page_size,
+            corpora,
+            drive_id,
+            page_token,
+        } => {
+            let result = api::recent_files(
+                page_size,
                 &corpora,
                 drive_id.as_deref(),
                 page_token.as_deref(),
@@ -218,6 +254,8 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
     match context.capability_id.as_str() {
         "google-drive.list_files" => Ok("list_files"),
+        "google-drive.find_files_compact" => Ok("find_files_compact"),
+        "google-drive.recent_files" => Ok("recent_files"),
         "google-drive.get_file" => Ok("get_file"),
         "google-drive.download_file" => Ok("download_file"),
         "google-drive.upload_file" => Ok("upload_file"),

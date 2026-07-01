@@ -3,8 +3,9 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, GOOGLE_CALENDAR_EVENTS_SCOPE,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+    GOOGLE_GMAIL_SEND_SCOPE, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -4464,16 +4465,17 @@ output_schema_ref = "schemas/run.output.json"
             (
                 "google-calendar",
                 vec![
-                    "https://www.googleapis.com/auth/calendar.events",
-                    "https://www.googleapis.com/auth/calendar.readonly",
+                    GOOGLE_CALENDAR_EVENTS_SCOPE,
+                    GOOGLE_CALENDAR_READONLY_SCOPE,
+                    GOOGLE_GMAIL_READONLY_SCOPE,
                 ],
             ),
             (
                 "gmail",
                 vec![
-                    "https://www.googleapis.com/auth/gmail.modify",
-                    "https://www.googleapis.com/auth/gmail.readonly",
-                    "https://www.googleapis.com/auth/gmail.send",
+                    GOOGLE_GMAIL_MODIFY_SCOPE,
+                    GOOGLE_GMAIL_READONLY_SCOPE,
+                    GOOGLE_GMAIL_SEND_SCOPE,
                 ],
             ),
         ] {
@@ -5961,6 +5963,9 @@ output_schema_ref = "schemas/run.output.json"
                 "google-calendar.delete_event",
                 "google-calendar.add_attendees",
                 "google-calendar.set_reminder",
+                "google-calendar.agenda",
+                "google-calendar.daily_brief",
+                "google-calendar.meeting_prep",
             ]
         );
         assert_eq!(
@@ -5970,6 +5975,9 @@ output_schema_ref = "schemas/run.output.json"
                 "google-calendar.list_events",
                 "google-calendar.get_event",
                 "google-calendar.find_free_slots",
+                "google-calendar.agenda",
+                "google-calendar.daily_brief",
+                "google-calendar.meeting_prep",
             ]
         );
         let search = facade
@@ -5998,11 +6006,16 @@ output_schema_ref = "schemas/run.output.json"
                 "gmail.create_draft",
                 "gmail.reply_to_message",
                 "gmail.trash_message",
+                "gmail.fetch_message_summaries",
             ]
         );
         assert_eq!(
             extensions[0].summary.visible_read_only_capability_ids,
-            vec!["gmail.list_messages", "gmail.get_message"]
+            vec![
+                "gmail.list_messages",
+                "gmail.get_message",
+                "gmail.fetch_message_summaries",
+            ]
         );
 
         let calendar_ref =

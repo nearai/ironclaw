@@ -9,6 +9,8 @@ use crate::types::*;
 
 const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
+const MAX_PREVIEW_ROWS: usize = 100;
+const MAX_PREVIEW_COLUMNS: usize = 30;
 
 /// Make a Google Sheets API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -34,7 +36,11 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(api_status_error("Google Sheets", response.status, &response.body));
+        return Err(api_status_error(
+            "Google Sheets",
+            response.status,
+            &response.body,
+        ));
     }
 
     if response.body.is_empty() {
@@ -183,6 +189,105 @@ pub fn read_values(spreadsheet_id: &str, range: &str) -> Result<ValuesResult, St
             })
             .unwrap_or_default(),
     })
+}
+
+/// Preview a bounded sheet range with headers and sample rows.
+pub fn preview(
+    spreadsheet_id: &str,
+    sheet_name: Option<&str>,
+    range: Option<&str>,
+    max_rows: usize,
+    max_columns: usize,
+) -> Result<SheetPreviewResult, String> {
+    let metadata = get_spreadsheet(spreadsheet_id)?;
+    let selected_sheet = select_sheet(&metadata, sheet_name)?;
+    let max_rows = max_rows.clamp(1, MAX_PREVIEW_ROWS);
+    let max_columns = max_columns.clamp(1, MAX_PREVIEW_COLUMNS);
+    let range = range
+        .map(ToString::to_string)
+        .unwrap_or_else(|| preview_range(&selected_sheet.title, max_rows, max_columns));
+    let values = read_values(spreadsheet_id, &range)?;
+    let mut rows = values.values;
+    let headers: Vec<String> = rows
+        .first()
+        .map(|row| row.iter().map(cell_to_string).collect())
+        .unwrap_or_default();
+    if !rows.is_empty() {
+        rows.remove(0);
+    }
+    let sampled_column_count = rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(headers.len()))
+        .max()
+        .unwrap_or(0);
+    let sampled_row_count = rows.len();
+
+    Ok(SheetPreviewResult {
+        spreadsheet_id: metadata.spreadsheet_id,
+        title: metadata.title,
+        url: metadata.url,
+        sheet_name: selected_sheet.title,
+        range,
+        row_count_estimate: selected_sheet.row_count,
+        column_count_estimate: selected_sheet.column_count,
+        headers,
+        rows,
+        sampled_row_count,
+        sampled_column_count,
+    })
+}
+
+fn select_sheet(
+    metadata: &SpreadsheetMetadata,
+    sheet_name: Option<&str>,
+) -> Result<SheetInfo, String> {
+    if let Some(name) = sheet_name {
+        return metadata
+            .sheets
+            .iter()
+            .find(|sheet| sheet.title == name)
+            .cloned()
+            .ok_or_else(|| format!("sheet_not_found: {name}"));
+    }
+    metadata
+        .sheets
+        .first()
+        .cloned()
+        .ok_or_else(|| "spreadsheet_has_no_sheets".to_string())
+}
+
+fn preview_range(sheet_name: &str, max_rows: usize, max_columns: usize) -> String {
+    format!(
+        "{}!A1:{}{}",
+        quote_sheet_name(sheet_name),
+        column_name(max_columns),
+        max_rows
+    )
+}
+
+fn quote_sheet_name(sheet_name: &str) -> String {
+    format!("'{}'", sheet_name.replace('\'', "''"))
+}
+
+fn column_name(mut one_based_column: usize) -> String {
+    let mut name = String::new();
+    while one_based_column > 0 {
+        let rem = (one_based_column - 1) % 26;
+        name.insert(0, (b'A' + rem as u8) as char);
+        one_based_column = (one_based_column - 1) / 26;
+    }
+    name
+}
+
+fn cell_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => String::new(),
+        value => value.to_string(),
+    }
 }
 
 /// Read values from multiple ranges at once.

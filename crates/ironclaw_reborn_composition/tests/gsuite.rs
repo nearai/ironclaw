@@ -23,6 +23,8 @@ use ironclaw_reborn_composition::{
 };
 use serde_json::json;
 
+const EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES: usize = 19;
+
 #[derive(Default)]
 struct RecordingEgress {
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
@@ -296,7 +298,7 @@ async fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default(
         .iter()
         .map(|package| package.capabilities.len())
         .sum::<usize>();
-    assert_eq!(capability_count, 15);
+    assert_eq!(capability_count, EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES);
 }
 
 #[tokio::test]
@@ -582,7 +584,10 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(expected_capability_ids.len(), 15);
+    assert_eq!(
+        expected_capability_ids.len(),
+        EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES
+    );
     for capability_id in expected_capability_ids {
         assert!(
             registry.contains_handler(&cap_id(&capability_id)),

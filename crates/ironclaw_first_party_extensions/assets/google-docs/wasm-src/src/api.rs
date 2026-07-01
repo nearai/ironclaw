@@ -9,6 +9,7 @@ use crate::types::*;
 
 const DOCS_API_BASE: &str = "https://docs.googleapis.com/v1/documents";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
+const MAX_EXCERPT_CHARS: usize = 20_000;
 
 /// Make a Google Docs API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -34,7 +35,11 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(api_status_error("Google Docs", response.status, &response.body));
+        return Err(api_status_error(
+            "Google Docs",
+            response.status,
+            &response.body,
+        ));
     }
 
     if response.body.is_empty() {
@@ -160,6 +165,52 @@ pub fn read_content(document_id: &str) -> Result<ReadContentResult, String> {
     })
 }
 
+/// Read a bounded document excerpt, optionally centered on a query.
+pub fn read_excerpt(
+    document_id: &str,
+    query: Option<&str>,
+    start_char: usize,
+    max_chars: usize,
+    include_outline: bool,
+) -> Result<ReadExcerptResult, String> {
+    let path = url_encode(document_id);
+
+    let response = api_call("GET", &path, None)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    let mut text = String::new();
+    let mut outline = Vec::new();
+    if let Some(content) = parsed["body"]["content"].as_array() {
+        extract_text_from_elements(content, &mut text);
+        if include_outline {
+            let mut offset = 0;
+            extract_outline_from_elements(content, &mut offset, &mut outline);
+        }
+    }
+
+    let total_chars = text.chars().count();
+    let max_chars = max_chars.clamp(1, MAX_EXCERPT_CHARS);
+    let start_char = query
+        .and_then(|needle| query_char_offset(&text, needle))
+        .unwrap_or(start_char)
+        .min(total_chars);
+    let end_char = start_char.saturating_add(max_chars).min(total_chars);
+    let excerpt = slice_chars(&text, start_char, end_char);
+
+    Ok(ReadExcerptResult {
+        document_id: parsed["documentId"].as_str().unwrap_or("").to_string(),
+        title: parsed["title"].as_str().unwrap_or("").to_string(),
+        excerpt,
+        start_char,
+        end_char,
+        total_chars,
+        truncated_before: start_char > 0,
+        truncated_after: end_char < total_chars,
+        outline,
+    })
+}
+
 /// Recursively extract plain text from structural elements.
 fn extract_text_from_elements(elements: &[serde_json::Value], out: &mut String) {
     for el in elements {
@@ -195,6 +246,92 @@ fn extract_text_from_elements(elements: &[serde_json::Value], out: &mut String) 
             }
         }
     }
+}
+
+fn extract_outline_from_elements(
+    elements: &[serde_json::Value],
+    offset: &mut usize,
+    out: &mut Vec<DocumentOutlineItem>,
+) {
+    for el in elements {
+        if let Some(para) = el.get("paragraph") {
+            let before = *offset;
+            let text = paragraph_text(para);
+            let style = para["paragraphStyle"]["namedStyleType"]
+                .as_str()
+                .unwrap_or("");
+            if is_outline_style(style) {
+                let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !title.is_empty() {
+                    out.push(DocumentOutlineItem {
+                        title,
+                        style: style.to_string(),
+                        char_offset: before,
+                    });
+                }
+            }
+            *offset = offset.saturating_add(text.chars().count());
+        }
+        if let Some(table) = el.get("table") {
+            if let Some(rows) = table["tableRows"].as_array() {
+                for row in rows {
+                    if let Some(cells) = row["tableCells"].as_array() {
+                        for cell in cells {
+                            if let Some(cell_content) = cell["content"].as_array() {
+                                extract_outline_from_elements(cell_content, offset, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(table_of_contents) = el.get("tableOfContents") {
+            if let Some(content) = table_of_contents["content"].as_array() {
+                extract_outline_from_elements(content, offset, out);
+            }
+        }
+    }
+}
+
+fn paragraph_text(paragraph: &serde_json::Value) -> String {
+    paragraph["elements"]
+        .as_array()
+        .map(|elements| {
+            elements
+                .iter()
+                .filter_map(|element| element["textRun"]["content"].as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
+fn is_outline_style(style: &str) -> bool {
+    matches!(style, "TITLE" | "SUBTITLE") || style.starts_with("HEADING_")
+}
+
+fn query_char_offset(text: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return None;
+    }
+    let query_lower = query.to_lowercase();
+    let folded_chars: Vec<(usize, char)> = text
+        .chars()
+        .enumerate()
+        .flat_map(|(char_offset, ch)| ch.to_lowercase().map(move |folded| (char_offset, folded)))
+        .collect();
+    let folded_text = folded_chars.iter().map(|(_, ch)| *ch).collect::<String>();
+    let byte_offset = folded_text.find(&query_lower)?;
+    let folded_char_offset = folded_text[..byte_offset].chars().count();
+    folded_chars
+        .get(folded_char_offset)
+        .map(|(char_offset, _)| *char_offset)
+}
+
+fn slice_chars(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 /// Insert text at a position.
@@ -575,5 +712,10 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "invalid foreground_color hex: #GG0000");
+    }
+
+    #[test]
+    fn query_char_offset_handles_non_ascii_case_folding() {
+        assert_eq!(query_char_offset("Intro CAFÉ notes", "café"), Some(6));
     }
 }

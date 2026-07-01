@@ -163,6 +163,71 @@ pub fn list_files(
     })
 }
 
+/// Search/list files with compact fields intended for model context.
+pub fn find_files_compact(
+    query: Option<&str>,
+    page_size: u32,
+    order_by: Option<&str>,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    let result = list_files(
+        query,
+        page_size.clamp(1, 100),
+        order_by.or(Some("modifiedTime desc")),
+        corpora,
+        drive_id,
+        page_token,
+    )?;
+    Ok(compact_files_result(result))
+}
+
+/// Return recently modified files with compact fields intended for model context.
+pub fn recent_files(
+    page_size: u32,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    find_files_compact(
+        Some("trashed = false"),
+        page_size,
+        Some("modifiedTime desc"),
+        corpora,
+        drive_id,
+        page_token,
+    )
+}
+
+fn compact_files_result(result: ListFilesResult) -> CompactFilesResult {
+    CompactFilesResult {
+        files: result.files.into_iter().map(compact_file).collect(),
+        next_page_token: result.next_page_token,
+    }
+}
+
+fn compact_file(file: DriveFile) -> CompactDriveFile {
+    let owner = file.owners.first().map(|owner| {
+        owner
+            .display_name
+            .as_deref()
+            .unwrap_or(&owner.email)
+            .to_string()
+    });
+    CompactDriveFile {
+        id: file.id,
+        name: file.name,
+        mime_type: file.mime_type,
+        modified_time: file.modified_time,
+        web_view_link: file.web_view_link,
+        is_folder: file.is_folder,
+        shared: file.shared,
+        owned_by_me: file.owned_by_me,
+        owner,
+    }
+}
+
 /// Get file metadata.
 pub fn get_file(file_id: &str) -> Result<FileResult, String> {
     let path = format!(
