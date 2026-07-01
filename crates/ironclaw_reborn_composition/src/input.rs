@@ -32,6 +32,7 @@ use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
 use crate::oauth_dcr::OAuthDcrProviderConfig;
 use crate::oauth_provider_client::HostOAuthProviderSpec;
+use crate::slack_personal_oauth::slack_personal_provider_spec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
@@ -649,6 +650,14 @@ impl RebornBuildInput {
     /// registered for this host callback URL.
     pub fn with_notion_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
         self.push_oauth_provider_config(notion_provider_spec(), config);
+        self
+    }
+
+    /// Record product/bootstrap-provided Slack personal (user-token) OAuth
+    /// metadata on the build input. Uses the same shared Slack app as the bot
+    /// token; issues a `slack_personal` user-token credential.
+    pub fn with_slack_personal_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
+        self.push_oauth_provider_config(slack_personal_provider_spec(), config);
         self
     }
 

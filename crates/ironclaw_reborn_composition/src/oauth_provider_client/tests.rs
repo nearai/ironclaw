@@ -330,6 +330,30 @@ fn fake_digest(value: &str) -> String {
     )
 }
 
+#[test]
+fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
+    use secrecy::ExposeSecret;
+    let body = br#"{"ok":true,"access_token":"xoxb-bot-token","authed_user":{"id":"U1","access_token":"xoxp-user-token","scope":"search:read,users:read","token_type":"user"}}"#;
+    let parsed = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
+        .expect("slack user token parses");
+    assert_eq!(parsed.access_token.expose_secret(), "xoxp-user-token");
+    let scopes: Vec<&str> = parsed.scopes.iter().map(|scope| scope.as_str()).collect();
+    assert_eq!(scopes, vec!["search:read", "users:read"]);
+    assert!(parsed.refresh_token.is_none());
+}
+
+#[test]
+fn slack_token_response_rejects_ok_false() {
+    let body = br#"{"ok":false,"error":"invalid_code"}"#;
+    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+}
+
+#[test]
+fn slack_token_response_rejects_missing_authed_user() {
+    let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
+    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+}
+
 fn google_spec() -> HostOAuthProviderSpec {
     HostOAuthProviderSpec {
         provider_id: "google",
@@ -338,6 +362,7 @@ fn google_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::RequireProviderScope,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 
@@ -349,6 +374,7 @@ fn notion_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some("https://mcp.notion.com/mcp"),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 

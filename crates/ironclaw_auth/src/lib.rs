@@ -61,10 +61,13 @@ pub use oauth::{
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, GoogleOAuthCallbackState, GoogleOAuthRouteConfig,
     OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam,
-    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
-    build_authorization_url, build_google_authorization_url, is_allowed_google_scope,
-    opaque_state_hash, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge,
+    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
+    SLACK_PERSONAL_TOKEN_ENDPOINT, SlackPersonalOAuthCallbackState, authorization_code_hash,
+    build_authorization_url, build_google_authorization_url,
+    build_slack_personal_authorization_url, is_allowed_google_scope, opaque_state_hash,
+    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
+    pkce_verifier_hash, scope_text,
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,

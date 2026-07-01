@@ -1169,6 +1169,8 @@ mod tests {
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
                         crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                    token_response_shape:
+                        crate::oauth_provider_client::TokenResponseShape::Standard,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1614,6 +1616,8 @@ mod tests {
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
                         crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                    token_response_shape:
+                        crate::oauth_provider_client::TokenResponseShape::Standard,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1676,6 +1680,7 @@ mod tests {
                 resource: Some("https://mcp.notion.com/mcp"),
                 exchange_scope_policy:
                     crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                token_response_shape: crate::oauth_provider_client::TokenResponseShape::Standard,
             },
             callback_origin: "http://127.0.0.1:3000".to_string(),
             client_name: "Ironclaw".to_string(),

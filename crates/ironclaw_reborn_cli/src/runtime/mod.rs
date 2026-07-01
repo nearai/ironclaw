@@ -636,6 +636,9 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    if let Some(client) = resolve_slack_personal_oauth_config_from_env()? {
+        services_input = services_input.with_slack_personal_oauth_backend(client);
+    }
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -745,6 +748,50 @@ fn build_production_services_input(
 pub(crate) fn resolve_google_oauth_config_from_env()
 -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
     resolve_google_oauth_config(optional_nonempty_env)
+}
+
+/// Resolve the Slack personal (user-token) OAuth client config from env.
+///
+/// Single shared Slack app: point these at the same app that issues the
+/// workspace bot token. Returns `None` when no Slack-personal OAuth vars are
+/// set (the provider is simply not registered). Slack requires a client
+/// secret for token exchange, so a missing secret is warned about loudly.
+pub(crate) fn resolve_slack_personal_oauth_config_from_env()
+-> anyhow::Result<Option<OAuthClientConfig>> {
+    resolve_slack_personal_oauth_config(optional_nonempty_env)
+}
+
+fn resolve_slack_personal_oauth_config(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<OAuthClientConfig>> {
+    let client_id = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID");
+    let redirect_uri = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI");
+    let client_secret = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET");
+
+    if client_id.is_none() && redirect_uri.is_none() && client_secret.is_none() {
+        return Ok(None);
+    }
+
+    let client_id = client_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID is required for Slack personal OAuth setup"
+        )
+    })?;
+    let redirect_uri = redirect_uri.ok_or_else(|| {
+        anyhow::anyhow!(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI is required for Slack personal OAuth setup"
+        )
+    })?;
+    let client_secret = client_secret.map(SecretString::from);
+    if client_secret.is_none() {
+        tracing::warn!(
+            target = "ironclaw::reborn::cli::slack_personal_oauth",
+            "Slack personal OAuth config has no client secret; Slack requires one for token exchange",
+        );
+    }
+    let client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
+        .context("invalid Slack personal OAuth client configuration")?;
+    Ok(Some(client))
 }
 
 fn resolve_google_oauth_config(
@@ -1191,7 +1238,8 @@ mod tests {
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
+        protect_reborn_log_filter, resolve_google_oauth_config,
+        resolve_slack_personal_oauth_config, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -3072,6 +3120,49 @@ poll_interval_secs = 15
             resolve_google_oauth_config(|_| None).expect("empty env should not fail setup");
 
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_returns_none_when_unset() {
+        let config =
+            resolve_slack_personal_oauth_config(|_| None).expect("empty env should not fail setup");
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_errors_when_client_id_missing() {
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+        )]);
+        let error = resolve_slack_personal_oauth_config(|name| {
+            vars.get(name).map(|value| value.to_string())
+        })
+        .expect_err("redirect-only Slack personal OAuth config must fail closed");
+        assert!(error.to_string().contains("SLACK_PERSONAL_CLIENT_ID"));
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_builds_client_when_all_vars_set() {
+        let vars = HashMap::from([
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID",
+                "slack-client-id",
+            ),
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET",
+                "slack-client-secret",
+            ),
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            ),
+        ]);
+        let config = resolve_slack_personal_oauth_config(|name| {
+            vars.get(name).map(|value| value.to_string())
+        })
+        .expect("valid Slack personal OAuth config resolves");
+        assert!(config.is_some());
     }
 
     #[test]

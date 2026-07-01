@@ -14,7 +14,7 @@ id = "slack_user.search_messages"
 description = "Search across all messages you can see (your DMs, group DMs, and channels you belong to). Requires the search:read user scope."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal" }, audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -28,7 +28,7 @@ id = "slack_user.list_conversations"
 description = "List channels, private channels, DMs (im), and group DMs (mpim) you belong to. Use this to discover DM conversation IDs."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal" }, audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -42,7 +42,7 @@ id = "slack_user.get_conversation_history"
 description = "Read message history from any channel or DM you can see, identified by its conversation ID."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal" }, audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -56,7 +56,7 @@ id = "slack_user.get_user_info"
 description = "Get information about a Slack user (name, real name, email)."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal" }, audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -70,7 +70,7 @@ id = "slack_user.send_message"
 description = "Send a message as you to a channel or DM. Requires the chat:write user scope; the message appears to come from your account."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal" }, audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 default_permission = "ask"
 visibility = "model"

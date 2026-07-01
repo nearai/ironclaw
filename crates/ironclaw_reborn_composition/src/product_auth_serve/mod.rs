@@ -37,10 +37,11 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
     GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
-    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge,
+    PkceVerifierSecret, ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SlackPersonalOAuthCallbackState, Timestamp,
+    TurnRunRef, binding_scope_owns_account, build_google_authorization_url,
+    build_slack_personal_authorization_url, parse_google_callback_scopes,
+    parse_google_requested_scopes, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -71,6 +72,8 @@ pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/cal
 pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
 pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
+pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/slack_personal/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -142,6 +145,7 @@ pub(crate) struct ProductAuthRouteState {
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
     google_oauth: Option<GoogleOAuthRouteConfig>,
+    slack_personal_oauth: Option<crate::input::OAuthClientConfig>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -162,6 +166,7 @@ impl ProductAuthRouteState {
             default_agent_id,
             default_project_id,
             google_oauth: None,
+            slack_personal_oauth: None,
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -176,6 +181,22 @@ impl ProductAuthRouteState {
 
     fn google_oauth_config(&self) -> Result<&GoogleOAuthRouteConfig, ProductAuthRouteFailure> {
         self.google_oauth
+            .as_ref()
+            .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
+    }
+
+    pub(crate) fn with_slack_personal_oauth(
+        mut self,
+        config: crate::input::OAuthClientConfig,
+    ) -> Self {
+        self.slack_personal_oauth = Some(config);
+        self
+    }
+
+    fn slack_personal_oauth_config(
+        &self,
+    ) -> Result<&crate::input::OAuthClientConfig, ProductAuthRouteFailure> {
+        self.slack_personal_oauth
             .as_ref()
             .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
     }
@@ -352,6 +373,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
             .route(
                 GOOGLE_OAUTH_CALLBACK_PATH,
                 get(oauth::google_oauth_callback_handler),
+            )
+            .route(
+                SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
+                get(oauth::slack_personal_oauth_callback_handler),
             )
             .with_state(state),
         descriptors: product_auth_route_descriptors(),
