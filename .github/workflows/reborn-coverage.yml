@@ -78,6 +78,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-coverage
+          # Instrumented target dirs are multi-GB. Only save on main so the ~10 GB
+          # repo cache LRU holds ONE shared, main-seeded instrumented cache that
+          # every PR restores — instead of each PR writing a branch-scoped copy
+          # (invisible to other PRs) that evicts the useful seed.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
