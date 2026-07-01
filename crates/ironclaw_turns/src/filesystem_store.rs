@@ -45,6 +45,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{ResourceScope, UserId};
 use tokio::sync::RwLock;
+use tracing::{Instrument, field};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
@@ -78,6 +79,36 @@ use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, Run
 mod tests;
 
 const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
+
+fn turn_state_write_span(
+    operation: &'static str,
+    scope: Option<&TurnScope>,
+    run_id: Option<&TurnRunId>,
+) -> tracing::Span {
+    let span = tracing::trace_span!(
+        target: "ironclaw_latency",
+        "turn_state_write",
+        turn_state_op = operation,
+        tenant_id = field::Empty,
+        thread_id = field::Empty,
+        owner_user_id = field::Empty,
+        run_id = field::Empty,
+    );
+
+    if let Some(scope) = scope {
+        span.record("tenant_id", field::display(&scope.tenant_id));
+        span.record("thread_id", field::display(&scope.thread_id));
+        if let Some(owner_user_id) = scope.explicit_owner_user_id() {
+            span.record("owner_user_id", field::display(owner_user_id));
+        }
+    }
+
+    if let Some(run_id) = run_id {
+        span.record("run_id", field::display(run_id));
+    }
+
+    span
+}
 
 #[derive(Clone)]
 struct CachedSnapshot {
@@ -533,6 +564,7 @@ where
 
     async fn apply_run_state_transition<A, Fut>(
         &self,
+        operation: &'static str,
         run_id: TurnRunId,
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
@@ -544,16 +576,21 @@ where
         Fut: std::future::Future<Output = (Result<TurnRunState, TurnError>, InMemoryTurnStateStore)>
             + Send,
     {
-        let previous = self
-            .prepare_runner_lease_retirement(run_id, runner_id, lease_token, retired_status)
-            .await?;
-        let result = self.apply(RunnerLeaseOverlay::Run(run_id), apply).await;
-        if result.is_err() {
-            self.restore_runner_lease_after_failed_transition(previous, retired_status)
-                .await;
+        let span = turn_state_write_span(operation, None, Some(&run_id));
+        async move {
+            let previous = self
+                .prepare_runner_lease_retirement(run_id, runner_id, lease_token, retired_status)
+                .await?;
+            let result = self.apply(RunnerLeaseOverlay::Run(run_id), apply).await;
+            if result.is_err() {
+                self.restore_runner_lease_after_failed_transition(previous, retired_status)
+                    .await;
+            }
+            self.cleanup_runner_lease_after_state(&result).await;
+            result
         }
-        self.cleanup_runner_lease_after_state(&result).await;
-        result
+        .instrument(span)
+        .await
     }
 
     async fn compensate_failed_claim(&self, claimed: &ClaimedTurnRun) {
@@ -569,6 +606,11 @@ where
                     .await;
                 (outcome.map(|_| ()), store)
             })
+            .instrument(turn_state_write_span(
+                "compensate_failed_claim",
+                Some(&claimed.state.scope),
+                Some(&run_id),
+            ))
             .await;
         if let Err(error) = result {
             tracing::debug!(
@@ -629,6 +671,11 @@ where
                 (outcome, store)
             }
         })
+        .instrument(turn_state_write_span(
+            "submit_turn",
+            Some(&request.scope),
+            request.requested_run_id.as_ref(),
+        ))
         .await
     }
 
@@ -643,6 +690,11 @@ where
                 (outcome, store)
             }
         })
+        .instrument(turn_state_write_span(
+            "resume_turn",
+            Some(&request.scope),
+            Some(&request.run_id),
+        ))
         .await
     }
 
@@ -650,33 +702,42 @@ where
         &self,
         request: CancelRunRequest,
     ) -> Result<CancelRunResponse, TurnError> {
-        let previous = self.prepare_cancel_requested_runner_lease(&request).await?;
-        let result = self
-            .apply(RunnerLeaseOverlay::Run(request.run_id), |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.request_cancel(request).await;
-                    (outcome, store)
-                }
-            })
-            .await;
-        if result.is_err() {
-            self.restore_runner_lease_after_failed_transition(
-                previous,
-                TurnStatus::CancelRequested,
-            )
-            .await;
-        }
-        let response = result?;
-        match response.status {
-            status if status.is_terminal() => {
-                self.runner_lease_store()
-                    .delete_best_effort(response.run_id)
-                    .await;
+        let span = turn_state_write_span(
+            "request_cancel",
+            Some(&request.scope),
+            Some(&request.run_id),
+        );
+        async move {
+            let previous = self.prepare_cancel_requested_runner_lease(&request).await?;
+            let result = self
+                .apply(RunnerLeaseOverlay::Run(request.run_id), |store| {
+                    let request = request.clone();
+                    async move {
+                        let outcome = store.request_cancel(request).await;
+                        (outcome, store)
+                    }
+                })
+                .await;
+            if result.is_err() {
+                self.restore_runner_lease_after_failed_transition(
+                    previous,
+                    TurnStatus::CancelRequested,
+                )
+                .await;
             }
-            _ => {}
+            let response = result?;
+            match response.status {
+                status if status.is_terminal() => {
+                    self.runner_lease_store()
+                        .delete_best_effort(response.run_id)
+                        .await;
+                }
+                _ => {}
+            }
+            Ok(response)
         }
-        Ok(response)
+        .instrument(span)
+        .await
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
@@ -717,6 +778,11 @@ where
                 (outcome, store)
             }
         })
+        .instrument(turn_state_write_span(
+            "submit_child_turn",
+            Some(&request.child_scope),
+            request.requested_run_id.as_ref(),
+        ))
         .await
     }
 
@@ -756,6 +822,11 @@ where
                 .await;
             (outcome, store)
         })
+        .instrument(turn_state_write_span(
+            "reserve_tree_descendants",
+            Some(scope),
+            Some(&root_run_id),
+        ))
         .await
     }
 
@@ -771,6 +842,11 @@ where
                 .await;
             (outcome, store)
         })
+        .instrument(turn_state_write_span(
+            "release_tree_descendants",
+            Some(scope),
+            Some(&root_run_id),
+        ))
         .await
     }
 }
@@ -815,6 +891,11 @@ where
                 (outcome, store)
             }
         })
+        .instrument(turn_state_write_span(
+            "put_loop_checkpoint",
+            Some(&request.scope),
+            Some(&request.run_id),
+        ))
         .await
     }
 
@@ -838,24 +919,29 @@ where
         &self,
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        let claimed = self
-            .apply(RunnerLeaseOverlay::None, |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.claim_next_run(request).await;
-                    (outcome, store)
-                }
-            })
-            .await?;
-        if let Some(claimed) = &claimed
-            && let Err(error) = self
-                .seed_runner_lease_from_snapshot_inner(claimed.state.run_id)
-                .await
-        {
-            self.compensate_failed_claim(claimed).await;
-            return Err(error);
+        let span = turn_state_write_span("claim_next_run", request.scope_filter.as_ref(), None);
+        async move {
+            let claimed = self
+                .apply(RunnerLeaseOverlay::None, |store| {
+                    let request = request.clone();
+                    async move {
+                        let outcome = store.claim_next_run(request).await;
+                        (outcome, store)
+                    }
+                })
+                .await?;
+            if let Some(claimed) = &claimed
+                && let Err(error) = self
+                    .seed_runner_lease_from_snapshot_inner(claimed.state.run_id)
+                    .await
+            {
+                self.compensate_failed_claim(claimed).await;
+                return Err(error);
+            }
+            Ok(claimed)
         }
-        Ok(claimed)
+        .instrument(span)
+        .await
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
@@ -874,6 +960,11 @@ where
                     (outcome, store)
                 }
             })
+            .instrument(turn_state_write_span(
+                "recover_expired_leases",
+                request.scope_filter.as_ref(),
+                None,
+            ))
             .await;
         if let Ok(response) = &result {
             for state in &response.recovered {
@@ -897,11 +988,17 @@ where
                 (outcome, store)
             }
         })
+        .instrument(turn_state_write_span(
+            "record_model_route_snapshot",
+            None,
+            Some(&request.run_id),
+        ))
         .await
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "block_run",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -919,6 +1016,7 @@ where
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "complete_run",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -939,6 +1037,7 @@ where
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "cancel_run",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -956,6 +1055,7 @@ where
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "fail_run",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -976,6 +1076,7 @@ where
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "record_runner_failure",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -996,6 +1097,7 @@ where
         request: RelinquishRunRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "relinquish_run",
             request.run_id,
             request.runner_id,
             request.lease_token,
@@ -1016,6 +1118,7 @@ where
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply_run_state_transition(
+            "apply_validated_loop_exit",
             request.run_id,
             request.runner_id,
             request.lease_token,
