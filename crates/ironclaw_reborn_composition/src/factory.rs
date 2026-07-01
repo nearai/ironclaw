@@ -143,6 +143,8 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::slack_manifest_digest;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::slack_user_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -3312,6 +3314,17 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
         Vec::new(),
+        None,
+    ));
+    #[cfg(feature = "slack-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("slack_user").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack personal first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/slack_user/manifest.toml".to_string(),
+        Some(slack_user_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        gsuite_allowed_effects(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
