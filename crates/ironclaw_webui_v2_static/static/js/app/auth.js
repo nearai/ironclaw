@@ -28,12 +28,13 @@ import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 //              `/auth/session/exchange` for the real bearer so the
 //              bearer never appears in a redirect `Location` header.
 //
-// Either form is honored ONLY when sessionStorage has no token yet.
-// Without this guard a crafted `/v2/#token=INVALID` link could
-// replace a user's working bearer with garbage and lock them out
-// until they re-auth. The token is always stripped from the URL
-// (query AND fragment) so a copy-paste of the address bar does not
-// leak it onward.
+// Raw bearer URL tokens are honored ONLY when sessionStorage has no
+// token yet. Without this guard a crafted `/v2/#token=INVALID` link
+// could replace a user's working bearer with garbage and lock them
+// out until they re-auth. OAuth `login_ticket` redirects are different:
+// they come from an intentional provider callback and must replace a
+// stale stored bearer. Consumed credentials are always stripped from
+// the URL so a copy-paste of the address bar does not leak them onward.
 function readFragmentParam(hash, name) {
   if (!hash) return "";
   // location.hash starts with "#". Treat the rest as a urlencoded
@@ -131,14 +132,14 @@ export function useAuthSession() {
   const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
   const [session, setSession] = React.useState(null);
   const [isExchanging, setIsExchanging] = React.useState(
-    () => Boolean(loginTicket && !readStoredToken()),
+    () => Boolean(loginTicket),
   );
   const [isSessionChecking, setIsSessionChecking] = React.useState(
     () => Boolean(readStoredToken()),
   );
 
   React.useEffect(() => {
-    if (!loginTicket || readStoredToken()) {
+    if (!loginTicket) {
       setIsExchanging(false);
       return undefined;
     }

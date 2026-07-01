@@ -758,8 +758,8 @@ mod tests {
             "auth.js must call history.replaceState to clean the URL",
         );
 
-        // 3. Refuses to overwrite an existing stored token —
-        //    `consumeTokenFromUrl` must early-return when
+        // 3. Refuses to overwrite an existing stored token for raw
+        //    bearer URLs — `consumeTokenFromUrl` must early-return when
         //    `readStoredToken()` is truthy. This guards against the
         //    `/v2#token=BAD` lock-out scenario the doc-comment
         //    calls out.
@@ -768,7 +768,21 @@ mod tests {
             "auth.js must consult sessionStorage before storing a new token",
         );
 
-        // 4. Logout calls the server-side revoke endpoint —
+        // 4. OAuth callback tickets are trusted, single-use login
+        //    continuations. They must still be exchanged when a stale
+        //    sessionStorage token exists, so an intentional relogin can
+        //    replace the previous bearer.
+        assert!(
+            source.contains("Boolean(loginTicket)"),
+            "login tickets must trigger exchange even when sessionStorage already has a token",
+        );
+        assert!(
+            !source.contains("loginTicket && !readStoredToken()")
+                && !source.contains("!loginTicket || readStoredToken()"),
+            "login-ticket exchange must not be skipped because sessionStorage already has a token",
+        );
+
+        // 5. Logout calls the server-side revoke endpoint —
         //    locks the regression where `signOut` drops the local
         //    token without telling the server (which would let the
         //    bearer roam in other tabs until natural expiry).
@@ -777,7 +791,7 @@ mod tests {
             "signOut must fire-and-forget the server-side revoke",
         );
 
-        // 5. Surfaces the OAuth callback's `?login_error=<code>`
+        // 6. Surfaces the OAuth callback's `?login_error=<code>`
         //    so users who deny consent or trip a hd / state guard
         //    see an explanation instead of a blank login page.
         assert!(
