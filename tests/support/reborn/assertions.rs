@@ -112,6 +112,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert some model-visible `System`-role prompt captured across the turn's
+    /// requests contains `text`. Reads the scripted `TraceLlm` retained before
+    /// the `dyn LlmProvider` upcast — proves prompt-injected content (safety
+    /// banners, skill instructions, profile lines) actually reached the model.
+    pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.iter().any(|prompt| prompt.contains(text)) {
+            return Ok(());
+        }
+        Err(format!(
+            "no captured system prompt containing {text:?}; saw {} system message(s)",
+            prompts.len()
+        )
+        .into())
+    }
+
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed
     /// scripted body actually surfaced back to the model as a tool result.

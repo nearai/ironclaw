@@ -126,6 +126,7 @@ use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use crate::support::trace_llm::TraceLlm;
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -685,7 +686,11 @@ impl<'g> RebornThreadBuilder<'g> {
         // --- per-thread scripted gateway, registered before any submit ---------
         // Session path is per-conversation so group threads do not clobber each
         // other's LLM session cache under the same `turn_root`.
-        let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(self.replies));
+        // Retain the concrete `TraceLlm` before the `dyn LlmProvider` upcast so
+        // the harness can inspect the model-visible system prompt via
+        // `captured_requests()` (T0-SYSPROMPT — unblocks prompt-injection asserts).
+        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
+        let raw: Arc<dyn LlmProvider> = scripted_llm.clone();
         let session = create_session_manager(SessionConfig {
             session_path: shared
                 .turn_root
@@ -757,6 +762,7 @@ impl<'g> RebornThreadBuilder<'g> {
             coordinator: Arc::clone(&shared.coordinator),
             event_seq: AtomicU64::new(1),
             capability_recorder,
+            scripted_llm,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,
