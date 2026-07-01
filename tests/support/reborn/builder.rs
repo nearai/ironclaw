@@ -36,6 +36,7 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
+use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
@@ -363,6 +364,8 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
+    /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
+    pub(crate) baseline_network_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -591,6 +594,16 @@ impl RebornIntegrationHarness {
             .filter(|message| matches!(message.role, Role::System))
             .map(|message| message.content)
             .collect()
+    }
+
+    /// Snapshot of the captured **network** egress requests for this thread only
+    /// (`[baseline_network_count..]` delta), in call order. Read by
+    /// `assert_network_egress_header_contains` (assertions.rs) — the T0-SECRET-INJECT
+    /// credential-injection assertion, which observes a different recorder lane
+    /// than `captured_egress_requests` (see that assertion's docs for why).
+    pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
+        let all = self.capability_recorder.network_http_requests();
+        all[self.baseline_network_count..].to_vec()
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process

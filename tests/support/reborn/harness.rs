@@ -2322,6 +2322,25 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
+    /// Wires the GitHub first-party WASM capabilities behind `GithubHarnessAuthorizer`.
+    ///
+    /// **Credential injection is coupled through two mechanisms, not one.** The
+    /// authorizer's `InjectCredentialAccountOnce` obligation is necessary for the
+    /// capability to dispatch at all — removing it (verified empirically) does not
+    /// make the call fall back to an unauthenticated request; the run hangs and
+    /// never reaches `Completed`, because `try_with_wasm_runtime` (below) also
+    /// auto-wires `SharedHostWasmRuntimeCredentials` with product-auth restaging
+    /// (since both `.with_secret_store` and `.with_runtime_credential_account_resolver`
+    /// are set), which independently resolves the GitHub manifest's declared
+    /// `runtime_credentials` and stages the same secret. That staging path runs
+    /// unconditionally on every WASM HTTP call (`WasmRuntimeHttpAdapter::request`),
+    /// not gated on the authorizer's `Decision`. Both mechanisms exist because they
+    /// serve different layers (authorization vs. staged material for the guest), but
+    /// it means a test asserting on the injected header proves the *end-to-end*
+    /// wire outcome, not that the authorizer's obligation specifically is the sole
+    /// producer of the header — the obligation being present is what keeps dispatch
+    /// from hanging, which the mutation-verify in `reborn_integration_secret_injection.rs`
+    /// exercises via the secret *value*, not by removing the obligation.
     pub(crate) async fn github_issue_tools() -> HarnessResult<Self> {
         // Credential account resolves to a real handle → capability dispatches.
         Self::github_issue_tools_with_credential_result(Ok(SecretHandle::new(

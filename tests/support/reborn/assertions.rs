@@ -231,7 +231,7 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// Assert that the (first) captured **network** egress request whose URL
+    /// Assert that any captured **network** egress request whose URL
     /// contains `url_substr` carried a header named `header_name`
     /// (case-insensitive) whose value contains `value_substr`. This is the
     /// credential-injection-on-the-wire proof for T0-SECRET-INJECT: a
@@ -247,37 +247,49 @@ impl RebornIntegrationHarness {
     /// `assert_egress_*` family (which reads `runtime_http_requests()`) is inert
     /// for this wiring. Assert here instead.
     ///
-    /// Reads the FULL network-egress log (no `[baseline..]` slice — there is no
-    /// `baseline_network_count`). Correct for a single-shot flat harness (the only
-    /// caller today); a future group backend sharing this recorder across threads
-    /// would need baseline slicing here to avoid matching a prior thread's request.
+    /// Checks only the `[baseline_network_count..]` delta so a group thread never
+    /// spuriously matches a prior thread's request (R2), mirroring the runtime-lane
+    /// `assert_egress_*` family's baseline discipline even though no group
+    /// constructor wires `GithubIssueTools` today.
     pub async fn assert_network_egress_header_contains(
         &self,
         url_substr: &str,
         header_name: &str,
         value_substr: &str,
     ) -> HarnessResult<()> {
-        let requests = self.capability_recorder.network_http_requests();
-        let Some(request) = requests.iter().find(|r| r.url.contains(url_substr)) else {
+        let requests = self.captured_network_requests();
+        let mut matching = requests
+            .iter()
+            .filter(|r| r.url.contains(url_substr))
+            .peekable();
+        if matching.peek().is_none() {
             let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
             return Err(format!(
                 "no captured network egress request matching url {url_substr:?}; saw {seen:?}"
             )
             .into());
-        };
-        if request.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case(header_name) && value.contains(value_substr)
-        }) {
-            return Ok(());
         }
-        let seen: Vec<&str> = request
-            .headers
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
+        let mut first_seen: Option<Vec<&str>> = None;
+        for request in matching {
+            if request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case(header_name) && value.contains(value_substr)
+            }) {
+                return Ok(());
+            }
+            if first_seen.is_none() {
+                first_seen = Some(
+                    request
+                        .headers
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect(),
+                );
+            }
+        }
+        let seen = first_seen.unwrap_or_default();
         Err(format!(
-            "network egress request to {url_substr:?} has no header {header_name:?} \
-             containing {value_substr:?}; header names present: {seen:?}"
+            "no network egress request matching url {url_substr:?} has header {header_name:?} \
+             containing {value_substr:?}; header names present (first matching request): {seen:?}"
         )
         .into())
     }
