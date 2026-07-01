@@ -1513,6 +1513,33 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+/// Env flag gating [`collapse_repeated_failure_observations`].
+///
+/// Defaults **off**: unset / empty / unrecognized leaves the replayed context
+/// byte-identical to the pre-feature path. An operator opts in with `on`, `1`,
+/// or `true`. Kept as a separate knob from `REBORN_TOOL_DISCLOSURE` because this
+/// context-dedup pass runs in the shared `convert_messages` path independently of
+/// tool disclosure.
+pub const REBORN_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
+
+fn collapse_repeated_failures_enabled() -> bool {
+    collapse_repeated_failures_from_raw(std::env::var(REBORN_COLLAPSE_REPEATED_FAILURES_ENV).ok())
+}
+
+/// Pure resolution of the collapse flag from a raw env value, so the default-off
+/// contract is testable without mutating process env.
+fn collapse_repeated_failures_from_raw(raw: Option<impl AsRef<str>>) -> bool {
+    match raw {
+        Some(value) => {
+            let value = value.as_ref().trim();
+            value.eq_ignore_ascii_case("on")
+                || value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
+
 /// Collapse runs of identical *error* tool observations in the replayed context.
 ///
 /// A model that repeats the same failing call accumulates byte-for-byte identical
@@ -1554,7 +1581,12 @@ fn convert_messages(
     mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
-    collapse_repeated_failure_observations(&mut messages);
+    // Off by default (see REBORN_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
+    // interior duplicate error observations when an operator opts in, so the
+    // replayed context is otherwise byte-identical to the pre-feature path.
+    if collapse_repeated_failures_enabled() {
+        collapse_repeated_failure_observations(&mut messages);
+    }
     let mut converted = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
@@ -2006,6 +2038,20 @@ mod tests {
             "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
             "trust": "untrusted_tool_output",
         })
+    }
+
+    #[test]
+    fn collapse_repeated_failures_flag_defaults_off_and_opts_in_explicitly() {
+        // Unset / empty / unrecognized => off (byte-identical replayed context).
+        assert!(!collapse_repeated_failures_from_raw(None::<&str>));
+        assert!(!collapse_repeated_failures_from_raw(Some("")));
+        assert!(!collapse_repeated_failures_from_raw(Some("off")));
+        assert!(!collapse_repeated_failures_from_raw(Some("garbage")));
+        // Explicit truthy values opt in.
+        assert!(collapse_repeated_failures_from_raw(Some("on")));
+        assert!(collapse_repeated_failures_from_raw(Some("1")));
+        assert!(collapse_repeated_failures_from_raw(Some("true")));
+        assert!(collapse_repeated_failures_from_raw(Some(" TRUE ")));
     }
 
     #[test]
