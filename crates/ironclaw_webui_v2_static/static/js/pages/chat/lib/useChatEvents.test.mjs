@@ -173,6 +173,29 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
 });
 
+test("useChatEvents: skill activation projection stays out of chat transcript", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            skill_activation: {
+              id: "activation-1",
+              skill_names: ["github"],
+              feedback: ["github: activated after model selection"],
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.messages, []);
+});
+
 test("useChatEvents: auth gate stays visible through progress events", () => {
   const runId = "run-auth-1";
   const authGate = {
