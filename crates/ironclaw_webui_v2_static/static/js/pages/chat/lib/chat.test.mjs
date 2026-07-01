@@ -380,16 +380,10 @@ test("Chat does not render a scoped logs link for the active thread run", () => 
     },
   });
 
-  const messageList = findComponent(tree, components.MessageList);
   assert.equal(
     findComponent(tree, components.Link),
     null,
     "active chat should not render an extra scoped logs link outside the global header",
-  );
-  assert.equal(
-    findComponent(messageList, components.Link),
-    null,
-    "active run logs link should not render with the run-status content",
   );
   assert.equal(
     findNode(tree, (node) =>
