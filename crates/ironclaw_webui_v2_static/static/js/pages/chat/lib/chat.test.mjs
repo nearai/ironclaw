@@ -400,10 +400,18 @@ test("Chat links to scoped logs for the active thread run", () => {
   assert.ok(logsLink.values.includes("nav.logs"));
 
   const messageList = findComponent(tree, components.MessageList);
-  assert.equal(
+  assert.ok(
     findComponent(messageList, components.Link),
+    "active run logs link should render with the run-status content",
+  );
+  assert.equal(
+    findNode(tree, (node) =>
+      node.strings.some((part) =>
+        part.includes("justify-end border-b border-[var(--v2-panel-border)]")
+      )
+    ),
     null,
-    "active run logs link should not render in the message list footer near the composer",
+    "active run logs link should not render as a duplicate top header bar",
   );
 });
 
