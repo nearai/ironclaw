@@ -289,11 +289,11 @@ impl RebornIntegrationHarness {
         let seen = first_seen.unwrap_or_default();
         Err(format!(
             "no network egress request matching url {url_substr:?} has header {header_name:?} \
-             containing {value_substr:?}; header names present (first matching request): {seen:?}"
+             with the expected value (redacted, not logged); header names present (first \
+             matching request): {seen:?}"
         )
         .into())
     }
-
 
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed

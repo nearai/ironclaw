@@ -602,8 +602,8 @@ impl RebornIntegrationHarness {
     /// credential-injection assertion, which observes a different recorder lane
     /// than `captured_egress_requests` (see that assertion's docs for why).
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
-        let all = self.capability_recorder.network_http_requests();
-        all[self.baseline_network_count..].to_vec()
+        let mut all = self.capability_recorder.network_http_requests();
+        all.split_off(self.baseline_network_count)
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process
