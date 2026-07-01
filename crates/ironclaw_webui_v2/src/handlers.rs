@@ -65,7 +65,8 @@ use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
-// initial approval UI state, while the settings route remains authoritative.
+// initial approval UI state. It is mutable through `/settings/tools`, so do
+// not cache it across requests; the settings route remains authoritative.
 const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(100);
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
@@ -113,7 +114,7 @@ pub async fn get_session(
 ) -> Json<WebUiV2SessionResponse> {
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
-    let global_auto_approve = cached_global_auto_approve_enabled(&state, caller.clone()).await;
+    let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
@@ -149,18 +150,6 @@ async fn global_auto_approve_enabled(
             false
         }
     }
-}
-
-async fn cached_global_auto_approve_enabled(
-    state: &WebUiV2State,
-    caller: WebUiAuthenticatedCaller,
-) -> bool {
-    if let Some(enabled) = state.cached_global_auto_approve_feature(&caller) {
-        return enabled;
-    }
-    let enabled = global_auto_approve_enabled(state, caller.clone()).await;
-    state.cache_global_auto_approve_feature(&caller, enabled);
-    enabled
 }
 
 /// `POST /api/webchat/v2/threads`

@@ -2844,18 +2844,15 @@ async fn get_session_reports_global_auto_approve_feature_from_facade() {
 }
 
 #[tokio::test]
-async fn get_session_caches_global_auto_approve_feature_per_user() {
+async fn get_session_refreshes_global_auto_approve_feature_between_requests() {
     let services = Arc::new(StubServices::default());
     let state = WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
-    let alpha_router = webui_v2_router(state.clone())
+    let router = webui_v2_router(state)
         .layer(axum::Extension(caller_for_user("user-alpha")))
-        .layer(axum::Extension(WebUiV2Capabilities::default()));
-    let beta_router = webui_v2_router(state)
-        .layer(axum::Extension(caller_for_user("user-beta")))
         .layer(axum::Extension(WebUiV2Capabilities::default()));
 
     *services.global_auto_approve_enabled.lock().expect("lock") = false;
-    let alpha_initial = alpha_router
+    let initial = router
         .clone()
         .oneshot(
             Request::builder()
@@ -2867,12 +2864,12 @@ async fn get_session_caches_global_auto_approve_feature_per_user() {
         .await
         .expect("oneshot");
     assert_eq!(
-        read_json(alpha_initial).await["features"]["global_auto_approve"],
+        read_json(initial).await["features"]["global_auto_approve"],
         false
     );
 
     *services.global_auto_approve_enabled.lock().expect("lock") = true;
-    let alpha_cached = alpha_router
+    let refreshed = router
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -2883,30 +2880,14 @@ async fn get_session_caches_global_auto_approve_feature_per_user() {
         .await
         .expect("oneshot");
     assert_eq!(
-        read_json(alpha_cached).await["features"]["global_auto_approve"],
-        false,
-        "same caller must keep the session-bootstrap flag stable"
-    );
-
-    let beta_initial = beta_router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/session")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(
-        read_json(beta_initial).await["features"]["global_auto_approve"],
+        read_json(refreshed).await["features"]["global_auto_approve"],
         true,
-        "cache entries must not leak across authenticated users"
+        "session bootstrap must reflect the mutable tenant/user settings flag"
     );
     assert_eq!(
         *services.global_auto_approve_calls.lock().expect("lock"),
         2,
-        "facade should be read once per authenticated user"
+        "session handler should re-read the mutable flag on each bootstrap request"
     );
 }
 

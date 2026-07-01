@@ -1632,7 +1632,8 @@ pub trait RebornServicesApi: Send + Sync {
     /// Return the effective global auto-approve toggle for the authenticated
     /// caller. This is a narrow session-bootstrap read, not the operator
     /// config key/value surface; implementations must derive scope from the
-    /// trusted caller.
+    /// trusted caller. The default returns `Ok(false)` for compositions that
+    /// have not wired the approval settings surface.
     async fn global_auto_approve_enabled(
         &self,
         _caller: WebUiAuthenticatedCaller,
