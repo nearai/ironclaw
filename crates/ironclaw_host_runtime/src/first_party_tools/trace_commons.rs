@@ -420,8 +420,13 @@ impl ContributionHttpSink for HostEgressContributionSink {
                     "trace bearer staging is unavailable",
                 ));
             };
-            let handle = SecretHandle::new(TRACE_COMMONS_BEARER_HANDLE)
-                .map_err(|_| ContributionHttpError::new("invalid trace bearer handle"))?;
+            let handle = SecretHandle::new(TRACE_COMMONS_BEARER_HANDLE).map_err(|error| {
+                // Safe to log the cause: the handle name is a compile-time
+                // constant, so this validation error carries no secret/path —
+                // it only fires if the constant itself is malformed.
+                tracing::debug!(%error, "invalid trace bearer handle constant");
+                ContributionHttpError::new("invalid trace bearer handle")
+            })?;
             secret_stager
                 .stage_secret_material_once(
                     &self.scope,
@@ -1147,13 +1152,18 @@ pub(super) async fn dispatch_account_login_link(
             match persisted {
                 Ok(Ok(_)) => Ok(format_account_login_link(&link)),
                 Ok(Err(error)) => {
-                    tracing::debug!(%error, "failed to persist Trace Commons account login link");
+                    // Filesystem errors can carry raw host paths (mkdir/write/
+                    // fsync/rename); the host_runtime guideline forbids that in
+                    // logs. Log only the safe fact; message stays sanitized.
+                    let _ = error;
+                    tracing::debug!("failed to persist Trace Commons account login link");
                     Ok(account_login_link_error_value(
                         "could not write the account login link to local state".to_string(),
                     ))
                 }
                 Err(join_error) => {
-                    tracing::debug!(%join_error, "account login link persist task failed");
+                    let _ = join_error;
+                    tracing::debug!("account login link persist task failed");
                     Ok(account_login_link_error_value(
                         "could not write the account login link to local state".to_string(),
                     ))
