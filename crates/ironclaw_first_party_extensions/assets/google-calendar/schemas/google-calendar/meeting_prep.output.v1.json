@@ -1,1 +1,90 @@
-{"type":"object","additionalProperties":true}
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Calendar meeting_prep output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "timeMin", "timeMax", "meeting", "linkedResources", "partialFailures"],
+  "properties": {
+    "kind": { "const": "ironclaw#calendarMeetingPrep" },
+    "timeMin": { "type": ["string", "null"] },
+    "timeMax": { "type": ["string", "null"] },
+    "meeting": {
+      "oneOf": [{ "$ref": "#/definitions/event" }, { "type": "null" }]
+    },
+    "linkedResources": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/linkedResource" }
+    },
+    "partialFailures": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/partialFailure" }
+    }
+  },
+  "definitions": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "calendarId",
+        "summary",
+        "start",
+        "end",
+        "location",
+        "htmlLink",
+        "hangoutLink",
+        "descriptionPreview",
+        "attendeeCount",
+        "attendees"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "calendarId": { "type": "string" },
+        "summary": { "type": "string" },
+        "start": { "type": ["string", "null"] },
+        "end": { "type": ["string", "null"] },
+        "location": { "type": "string" },
+        "htmlLink": { "type": "string" },
+        "hangoutLink": { "type": "string" },
+        "descriptionPreview": { "type": "string" },
+        "attendeeCount": { "type": "integer", "minimum": 0 },
+        "attendees": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/attendee" }
+        }
+      }
+    },
+    "attendee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["email", "displayName", "responseStatus", "organizer"],
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "responseStatus": { "type": "string" },
+        "organizer": { "type": "boolean" }
+      }
+    },
+    "linkedResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "kind", "id"],
+      "properties": {
+        "url": { "type": "string" },
+        "kind": { "enum": ["google_doc", "google_sheet", "google_slide", "google_drive", "url"] },
+        "id": { "type": ["string", "null"] }
+      }
+    },
+    "partialFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "reason"],
+      "properties": {
+        "scope": { "type": "string" },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "reason": { "type": ["string", "null"] },
+        "source": { "type": "string" }
+      }
+    }
+  }
+}

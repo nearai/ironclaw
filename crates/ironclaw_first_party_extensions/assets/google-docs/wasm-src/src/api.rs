@@ -165,7 +165,7 @@ pub fn read_content(document_id: &str) -> Result<ReadContentResult, String> {
     })
 }
 
-/// Read a bounded document excerpt, optionally centered on a query.
+/// Read a bounded document excerpt, starting near the first query match when provided.
 pub fn read_excerpt(
     document_id: &str,
     query: Option<&str>,
@@ -198,9 +198,18 @@ pub fn read_excerpt(
     let end_char = start_char.saturating_add(max_chars).min(total_chars);
     let excerpt = slice_chars(&text, start_char, end_char);
 
+    let document_id = parsed["documentId"]
+        .as_str()
+        .ok_or_else(|| "Google Docs response missing documentId".to_string())?
+        .to_string();
+    let title = parsed["title"]
+        .as_str()
+        .ok_or_else(|| "Google Docs response missing title".to_string())?
+        .to_string();
+
     Ok(ReadExcerptResult {
-        document_id: parsed["documentId"].as_str().unwrap_or("").to_string(),
-        title: parsed["title"].as_str().unwrap_or("").to_string(),
+        document_id,
+        title,
         excerpt,
         start_char,
         end_char,
@@ -260,12 +269,12 @@ fn extract_outline_from_elements(
             let style = para["paragraphStyle"]["namedStyleType"]
                 .as_str()
                 .unwrap_or("");
-            if is_outline_style(style) {
+            if let Some(style) = DocumentOutlineStyle::from_named_style(style) {
                 let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !title.is_empty() {
                     out.push(DocumentOutlineItem {
                         title,
-                        style: style.to_string(),
+                        style,
                         char_offset: before,
                     });
                 }
@@ -303,10 +312,6 @@ fn paragraph_text(paragraph: &serde_json::Value) -> String {
                 .collect::<String>()
         })
         .unwrap_or_default()
-}
-
-fn is_outline_style(style: &str) -> bool {
-    matches!(style, "TITLE" | "SUBTITLE") || style.starts_with("HEADING_")
 }
 
 fn query_char_offset(text: &str, query: &str) -> Option<usize> {

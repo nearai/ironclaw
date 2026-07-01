@@ -224,6 +224,7 @@ fn compact_file(file: DriveFile) -> CompactDriveFile {
         is_folder: file.is_folder,
         shared: file.shared,
         owned_by_me: file.owned_by_me,
+        trashed: file.trashed,
         owner,
     }
 }

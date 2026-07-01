@@ -1,7 +1,11 @@
 use std::{cmp::Ordering, sync::Arc};
 
 use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
-use ironclaw_host_api::{NetworkMethod, RuntimeDispatchErrorKind, RuntimeHttpEgressResponse};
+use futures_util::{StreamExt as _, stream};
+use ironclaw_host_api::{
+    NetworkMethod, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse,
+};
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -25,6 +29,7 @@ const MAX_DAILY_BRIEF_EMAIL_LIMIT: u32 = 20;
 const DEFAULT_PREVIEW_CHARS: usize = 500;
 const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_CALENDARS: usize = 50;
+const MAX_CONTEXT_TOOL_FANOUT_CONCURRENCY: usize = 8;
 const DEFAULT_DAILY_BRIEF_EMAIL_QUERY: &str = "is:unread newer_than:7d";
 
 pub(super) struct GmailFetchMessageSummariesInput {
@@ -78,14 +83,25 @@ impl CalendarAgendaInput {
         if selector_count > 1 {
             return Err(input_error());
         }
+        let time_min = optional_query_value(input, "time_min")?;
+        let time_max = optional_query_value(input, "time_max")?;
+        if time_min.is_some() != time_max.is_some() {
+            return Err(input_error());
+        }
+        if let Some(time_min) = &time_min {
+            parse_rfc3339_bound(time_min)?;
+        }
+        if let Some(time_max) = &time_max {
+            parse_rfc3339_bound(time_max)?;
+        }
         Ok(Self {
             calendar_id,
             calendar_ids,
             include_all_calendars,
             window: AgendaWindow::parse(optional_str(input, "window")?)?,
             time_zone: parse_fixed_offset(optional_str(input, "time_zone")?)?,
-            time_min: optional_query_value(input, "time_min")?,
-            time_max: optional_query_value(input, "time_max")?,
+            time_min,
+            time_max,
             max_results: optional_u32(input, "max_results")?
                 .unwrap_or(DEFAULT_AGENDA_LIMIT)
                 .clamp(1, MAX_AGENDA_LIMIT),
@@ -135,6 +151,9 @@ impl CalendarDailyBriefInput {
         let mut agenda = CalendarAgendaInput::parse(input)?;
         let max_events = optional_u32(input, "max_events")?;
         let max_results = optional_u32(input, "max_results")?;
+        if max_events.is_some() && max_results.is_some() {
+            return Err(input_error());
+        }
         agenda.max_results = max_events
             .or(max_results)
             .unwrap_or(agenda.max_results)
@@ -174,7 +193,10 @@ pub(super) async fn execute_calendar_agenda(
     input: CalendarAgendaInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let mut run = GoogleApiRun::new(request, credential, stager);
-    let agenda = fetch_agenda(&mut run, &input).await?;
+    let agenda = fetch_agenda(&mut run, &input, false).await?;
+    if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
+        return Ok(auth_expired);
+    }
     synthesized_outcome(agenda, &run)
 }
 
@@ -185,7 +207,7 @@ pub(super) async fn execute_calendar_meeting_prep(
     input: CalendarMeetingPrepInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let mut run = GoogleApiRun::new(request, credential, stager);
-    let agenda = fetch_agenda(&mut run, &input.agenda).await?;
+    let agenda = fetch_agenda(&mut run, &input.agenda, true).await?;
     if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
         return Ok(auth_expired);
     }
@@ -194,11 +216,14 @@ pub(super) async fn execute_calendar_meeting_prep(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let meeting = events.first().cloned();
+    let mut meeting = events.first().cloned();
     let linked_resources = meeting
         .as_ref()
         .map(|event| linked_resources(event, input.linked_resource_limit))
         .unwrap_or_default();
+    if let Some(fields) = meeting.as_mut().and_then(Value::as_object_mut) {
+        fields.remove("_linkedResourceText");
+    }
     let body = json!({
         "kind": "ironclaw#calendarMeetingPrep",
         "timeMin": agenda.get("timeMin").cloned().unwrap_or(Value::Null),
@@ -217,7 +242,7 @@ pub(super) async fn execute_calendar_daily_brief(
     input: CalendarDailyBriefInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let mut run = GoogleApiRun::new(request, credential, stager);
-    let agenda = fetch_agenda(&mut run, &input.agenda).await?;
+    let agenda = fetch_agenda(&mut run, &input.agenda, false).await?;
     if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
         return Ok(auth_expired);
     }
@@ -280,6 +305,24 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
         }
     }
 
+    async fn prepare_get(
+        &mut self,
+        url: String,
+    ) -> Result<GoogleApiPreparedGet, GsuiteDispatchError> {
+        self.stage_credential_if_needed().await?;
+        self.credential_staged = false;
+        Ok(GoogleApiPreparedGet {
+            request: runtime_request(
+                self.request,
+                self.credential.access_secret.clone(),
+                NetworkMethod::Get,
+                url,
+                Vec::new(),
+            ),
+            runtime_http_egress: Arc::clone(&self.request.runtime_http_egress),
+        })
+    }
+
     async fn get(&mut self, url: String) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
         self.request(NetworkMethod::Get, url, Vec::new()).await
     }
@@ -315,6 +358,13 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
         self.network_egress_bytes
     }
 
+    fn record_response_usage(&mut self, response: &RuntimeHttpEgressResponse) {
+        self.network_egress_bytes = self
+            .network_egress_bytes
+            .saturating_add(response.request_bytes);
+        self.redaction_applied |= response.redaction_applied;
+    }
+
     async fn stage_credential_if_needed(&mut self) -> Result<(), GsuiteDispatchError> {
         if self.credential_staged {
             return Ok(());
@@ -335,6 +385,17 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
             })?;
         self.credential_staged = true;
         Ok(())
+    }
+}
+
+struct GoogleApiPreparedGet {
+    request: RuntimeHttpEgressRequest,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+}
+
+impl GoogleApiPreparedGet {
+    async fn execute(self) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
+        execute_runtime_http(self.request, self.runtime_http_egress).await
     }
 }
 
@@ -364,8 +425,30 @@ async fn fetch_gmail_summaries(
     let ids = message_ids(&list_body);
     let mut messages = Vec::new();
     let mut partial_failures = Vec::new();
-    for id in ids.iter().take(input.max_results as usize) {
-        let response = run.get(gmail_metadata_url(id)).await?;
+    let mut requests = Vec::new();
+    for (index, id) in ids.iter().take(input.max_results as usize).enumerate() {
+        requests.push((
+            index,
+            id.clone(),
+            run.prepare_get(gmail_metadata_url(id)).await?,
+        ));
+    }
+    let mut responses = stream::iter(requests)
+        .map(|(index, id, request)| async move { (index, id, request.execute().await) })
+        .buffer_unordered(MAX_CONTEXT_TOOL_FANOUT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    responses.sort_by_key(|(index, _, _)| *index);
+    let mut first_error = None;
+    for (_, id, response) in responses {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
+        run.record_response_usage(&response);
         if is_google_auth_expired_response(&response) {
             return Ok(auth_expired_marker());
         }
@@ -380,6 +463,9 @@ async fn fetch_gmail_summaries(
             continue;
         }
         messages.push(compact_gmail_message(&body, input.body_preview_chars));
+    }
+    if let Some(error) = first_error {
+        return Err(add_network_usage(error, run.network_egress_bytes()));
     }
     let unread_count = messages
         .iter()
@@ -408,6 +494,7 @@ async fn fetch_gmail_summaries(
 async fn fetch_agenda(
     run: &mut GoogleApiRun<'_, '_>,
     input: &CalendarAgendaInput,
+    include_link_source: bool,
 ) -> Result<Value, GsuiteDispatchError> {
     let (time_min, time_max, date_label) = agenda_bounds(input)?;
     let (calendar_ids, calendars, calendar_failure) = resolve_calendar_ids(run, input).await?;
@@ -419,6 +506,13 @@ async fn fetch_agenda(
             .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
         return Ok(json!({
             "kind": "ironclaw#calendarAgenda",
+            "date": date_label,
+            "window": input.window.as_str(),
+            "timeZone": format_fixed_offset(input.time_zone),
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "calendarIds": [],
+            "calendars": [],
             "events": [],
             "eventCount": 0,
             "partialFailures": [partial_failure("calendar_discovery", response.status, &body)],
@@ -427,28 +521,58 @@ async fn fetch_agenda(
 
     let mut events = Vec::new();
     let mut partial_failures = Vec::new();
-    for calendar_id in calendar_ids.iter().take(MAX_CALENDARS) {
-        let response = run
-            .get(agenda_events_url(input, calendar_id, &time_min, &time_max)?)
-            .await?;
+    let mut urls = Vec::new();
+    for (index, calendar_id) in calendar_ids.iter().take(MAX_CALENDARS).enumerate() {
+        urls.push((
+            index,
+            calendar_id.clone(),
+            agenda_events_url(input, calendar_id, &time_min, &time_max)?,
+        ));
+    }
+    let mut requests = Vec::new();
+    for (index, calendar_id, url) in urls {
+        requests.push((index, calendar_id, run.prepare_get(url).await?));
+    }
+    let mut responses = stream::iter(requests)
+        .map(|(index, calendar_id, request)| async move {
+            (index, calendar_id, request.execute().await)
+        })
+        .buffer_unordered(MAX_CONTEXT_TOOL_FANOUT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    responses.sort_by_key(|(index, _, _)| *index);
+    let mut first_error = None;
+    for (_, calendar_id, response) in responses {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
+        run.record_response_usage(&response);
         if is_google_auth_expired_response(&response) {
             return Ok(auth_expired_marker());
         }
         let body = response_body_json(&response)
             .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
         if response.status != 200 {
-            partial_failures.push(partial_failure(calendar_id, response.status, &body));
+            partial_failures.push(partial_failure(&calendar_id, response.status, &body));
             continue;
         }
         if let Some(items) = body.get("items").and_then(Value::as_array) {
             for event in items {
                 events.push(compact_calendar_event(
                     event,
-                    calendar_id,
+                    &calendar_id,
                     input.description_chars,
+                    include_link_source,
                 ));
             }
         }
+    }
+    if let Some(error) = first_error {
+        return Err(add_network_usage(error, run.network_egress_bytes()));
     }
     events.sort_by(compare_event_start);
     events.truncate(input.max_results as usize);
@@ -603,7 +727,12 @@ fn gmail_header(message: &Value, name: &str) -> String {
         .to_string()
 }
 
-fn compact_calendar_event(event: &Value, calendar_id: &str, description_chars: usize) -> Value {
+fn compact_calendar_event(
+    event: &Value,
+    calendar_id: &str,
+    description_chars: usize,
+    include_link_source: bool,
+) -> Value {
     let description = event
         .get("description")
         .and_then(Value::as_str)
@@ -619,7 +748,7 @@ fn compact_calendar_event(event: &Value, calendar_id: &str, description_chars: u
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({
+    let mut compact = json!({
         "id": event.get("id").and_then(Value::as_str).unwrap_or(""),
         "calendarId": calendar_id,
         "summary": event.get("summary").and_then(Value::as_str).unwrap_or("(No title)"),
@@ -631,7 +760,14 @@ fn compact_calendar_event(event: &Value, calendar_id: &str, description_chars: u
         "descriptionPreview": truncate_chars(description, description_chars),
         "attendeeCount": event.get("attendees").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
         "attendees": attendees,
-    })
+    });
+    if include_link_source && let Some(fields) = compact.as_object_mut() {
+        fields.insert(
+            "_linkedResourceText".to_string(),
+            Value::String(linked_resource_text(event, description)),
+        );
+    }
+    compact
 }
 
 fn compact_attendee(attendee: &Value) -> Value {
@@ -652,7 +788,10 @@ fn event_time(event: &Value, key: &str) -> Value {
 }
 
 fn compare_event_start(left: &Value, right: &Value) -> Ordering {
-    sortable_time(left).cmp(&sortable_time(right))
+    match (event_start_instant(left), event_start_instant(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        _ => sortable_time(left).cmp(&sortable_time(right)),
+    }
 }
 
 fn sortable_time(event: &Value) -> String {
@@ -663,20 +802,39 @@ fn sortable_time(event: &Value) -> String {
         .to_string()
 }
 
+fn event_start_instant(event: &Value) -> Option<DateTime<Utc>> {
+    let value = sortable_time(event);
+    DateTime::parse_from_rfc3339(&value)
+        .map(|time| time.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|time| Utc.from_utc_datetime(&time))
+        })
+}
+
 fn linked_resources(event: &Value, limit: usize) -> Vec<Value> {
-    let text = [
-        event
-            .get("descriptionPreview")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        event.get("location").and_then(Value::as_str).unwrap_or(""),
-        event.get("htmlLink").and_then(Value::as_str).unwrap_or(""),
-        event
-            .get("hangoutLink")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    ]
-    .join("\n");
+    let text = event
+        .get("_linkedResourceText")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            [
+                event
+                    .get("descriptionPreview")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                event.get("location").and_then(Value::as_str).unwrap_or(""),
+                event.get("htmlLink").and_then(Value::as_str).unwrap_or(""),
+                event
+                    .get("hangoutLink")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ]
+            .join("\n")
+        });
     let Ok(re) = Regex::new(r#"https://[^\s<>"']+"#) else {
         return Vec::new();
     };
@@ -691,6 +849,19 @@ fn linked_resources(event: &Value, limit: usize) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn linked_resource_text(event: &Value, description: &str) -> String {
+    [
+        description,
+        event.get("location").and_then(Value::as_str).unwrap_or(""),
+        event.get("htmlLink").and_then(Value::as_str).unwrap_or(""),
+        event
+            .get("hangoutLink")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ]
+    .join("\n")
 }
 
 fn linked_resource_kind(url: &str) -> &'static str {
@@ -708,11 +879,31 @@ fn linked_resource_kind(url: &str) -> &'static str {
 }
 
 fn google_resource_id(url: &str) -> Option<String> {
-    let marker = "/d/";
+    resource_id_after_marker(url, "/d/")
+        .or_else(|| resource_id_after_marker(url, "/drive/folders/"))
+        .or_else(|| query_param(url, "id"))
+}
+
+fn resource_id_after_marker(url: &str, marker: &str) -> Option<String> {
     let start = url.find(marker)? + marker.len();
     let tail = &url[start..];
-    let end = tail.find(['/', '?', '&', '#']).unwrap_or(tail.len());
-    Some(tail[..end].to_string())
+    let id = tail.split(['/', '?', '&', '#']).next().unwrap_or("");
+    non_empty_id(id)
+}
+
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (candidate, value) = pair.split_once('=')?;
+        if candidate == key {
+            return non_empty_id(value);
+        }
+    }
+    None
+}
+
+fn non_empty_id(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn agenda_bounds(
@@ -801,12 +992,27 @@ fn parse_fixed_offset(value: Option<&str>) -> Result<FixedOffset, GsuiteDispatch
     let Some((hours, minutes)) = value[1..].split_once(':') else {
         return Err(input_error());
     };
-    let hours: i32 = hours.parse().map_err(|_| input_error())?;
-    let minutes: i32 = minutes.parse().map_err(|_| input_error())?;
+    let hours: i32 = hours.parse().map_err(|error| {
+        tracing::debug!(?error, time_zone = value, "invalid time zone hour");
+        input_error()
+    })?;
+    let minutes: i32 = minutes.parse().map_err(|error| {
+        tracing::debug!(?error, time_zone = value, "invalid time zone minute");
+        input_error()
+    })?;
     if hours > 23 || minutes > 59 {
         return Err(input_error());
     }
     FixedOffset::east_opt(sign * ((hours * 60 + minutes) * 60)).ok_or_else(input_error)
+}
+
+fn parse_rfc3339_bound(value: &str) -> Result<(), GsuiteDispatchError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|error| {
+            tracing::debug!(?error, value, "invalid RFC3339 calendar bound");
+            input_error()
+        })
 }
 
 fn format_fixed_offset(offset: FixedOffset) -> String {
@@ -821,10 +1027,16 @@ fn optional_u32(input: &Value, key: &str) -> Result<Option<u32>, GsuiteDispatchE
         return Ok(None);
     };
     if let Some(number) = value.as_u64() {
-        return u32::try_from(number).map(Some).map_err(|_| input_error());
+        return u32::try_from(number).map(Some).map_err(|error| {
+            tracing::debug!(?error, key, number, "numeric input is outside u32 range");
+            input_error()
+        });
     }
     if let Some(text) = value.as_str() {
-        return text.parse::<u32>().map(Some).map_err(|_| input_error());
+        return text.parse::<u32>().map(Some).map_err(|error| {
+            tracing::debug!(?error, key, text, "invalid numeric string input");
+            input_error()
+        });
     }
     Err(input_error())
 }
@@ -947,5 +1159,77 @@ mod tests {
             google_resource_id("https://docs.google.com/document/d/doc-123/edit?tab=t.0"),
             Some("doc-123".to_string())
         );
+    }
+
+    #[test]
+    fn google_resource_id_extracts_drive_folder_and_query_id() {
+        assert_eq!(
+            google_resource_id("https://drive.google.com/drive/folders/folder-123?usp=sharing"),
+            Some("folder-123".to_string())
+        );
+        assert_eq!(
+            google_resource_id("https://drive.google.com/open?id=file-456&usp=drive_link"),
+            Some("file-456".to_string())
+        );
+    }
+
+    #[test]
+    fn event_start_sort_uses_rfc3339_instants_before_string_fallback() {
+        let earlier = json!({"start": "2026-01-01T00:30:00+02:00"});
+        let later = json!({"start": "2025-12-31T23:00:00+00:00"});
+
+        assert_eq!(compare_event_start(&earlier, &later), Ordering::Less);
+    }
+
+    #[test]
+    fn calendar_agenda_input_rejects_one_sided_time_bounds() {
+        let input = json!({"time_min": "2026-01-01T00:00:00Z"});
+
+        assert!(CalendarAgendaInput::parse(&input).is_err());
+    }
+
+    #[test]
+    fn calendar_agenda_input_rejects_invalid_time_bound_format() {
+        let input = json!({
+            "time_min": "2026-01-01",
+            "time_max": "2026-01-02T00:00:00Z",
+        });
+
+        assert!(CalendarAgendaInput::parse(&input).is_err());
+    }
+
+    #[test]
+    fn calendar_daily_brief_input_rejects_ambiguous_event_limits() {
+        let input = json!({
+            "max_events": 5,
+            "max_results": 6,
+        });
+
+        assert!(CalendarDailyBriefInput::parse(&input).is_err());
+    }
+
+    #[test]
+    fn parse_fixed_offset_accepts_utc_and_fixed_offsets() {
+        assert_eq!(
+            format_fixed_offset(parse_fixed_offset(Some("UTC")).unwrap()),
+            "+00:00"
+        );
+        assert_eq!(
+            format_fixed_offset(parse_fixed_offset(Some("+03:30")).unwrap()),
+            "+03:30"
+        );
+        assert_eq!(
+            format_fixed_offset(parse_fixed_offset(Some("-04:00")).unwrap()),
+            "-04:00"
+        );
+    }
+
+    #[test]
+    fn agenda_window_accepts_supported_aliases() {
+        assert_eq!(
+            AgendaWindow::parse(Some("this_week")).unwrap().as_str(),
+            "week"
+        );
+        assert!(AgendaWindow::parse(Some("month")).is_err());
     }
 }
