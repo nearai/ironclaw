@@ -4,9 +4,15 @@
 //! (`wrap_local_dev_synthetic_capabilities` + `project_create_capability`) and
 //! persists a project via the real `ProjectService`.
 //!
-//! The result-contains assertion is the mutation-catching one: if
-//! `apply_synthetic_capability_wrappers` is made a no-op, the capability is not
-//! provided by the port and no success result with the project name is recorded.
+//! The result-contains assertion proves dispatch + a recorded output payload,
+//! but not actual persistence: a regression that made `create_project` a
+//! silent no-op while still fabricating a `{project_id, name}` success payload
+//! would pass it. The read-back below closes that gap by re-querying the REAL
+//! `ProjectService` (through `RebornIntegrationGroup::capability_harness` ->
+//! `project_service_for_test`, the SAME instance
+//! `apply_synthetic_capability_wrappers` dispatched the write through) and
+//! asserting the created project is actually present — mirrors the E-PROFILE
+//! `reborn_integration_profile` write -> read-back pattern.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -14,6 +20,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 
@@ -50,4 +57,35 @@ async fn project_create_capability_dispatches_and_persists_project() {
         .assert_tool_result_contains("My Project")
         .await
         .expect("project_create returned the created project");
+
+    // Persistence read-back (E-PROJ): re-fetch through the SAME `ProjectService`
+    // instance the capability wrote through, scoped to the same `(tenant, user)`
+    // `project_create_capability::effective_user_id` derived the caller from.
+    // `effective_user_id` prefers the run scope's explicit thread owner, then
+    // the run actor, and only falls back to the capability harness's fixed
+    // constructor user when neither is set — this thread's binding has neither
+    // an explicit owner nor an override (`project_tools()` never calls
+    // `with_user_id`), so the actual dispatch caller is the thread's binding
+    // actor, not `capability_harness.user_id()`.
+    let capability_harness = group
+        .capability_harness()
+        .expect("project_lifecycle always uses HostRuntime");
+    let project_service = capability_harness
+        .project_service_for_test()
+        .expect("project_tools() always wires a ProjectService");
+    let caller = ProjectCaller {
+        tenant_id: harness.binding.tenant_id.clone(),
+        user_id: harness.binding.actor_user_id.clone(),
+    };
+    let projects = project_service
+        .list_projects(caller, RebornListProjectsRequest::default())
+        .await
+        .expect("list_projects succeeds")
+        .projects;
+    assert!(
+        projects.iter().any(|project| project.name == "My Project"),
+        "project_create's write must be readable back through the real \
+         ProjectService — a no-op create_project that still fabricates a \
+         success payload must fail this assertion; got projects: {projects:?}"
+    );
 }

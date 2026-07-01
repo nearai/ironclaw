@@ -2636,6 +2636,17 @@ impl HostRuntimeCapabilityHarness {
         self.profile_filesystem.clone()
     }
 
+    /// E-PROJ: the project service backing the synthetic `project_create`
+    /// capability, for write→read-back assertions — mirrors
+    /// `profile_filesystem_for_test`'s role for E-PROFILE. `Some` only for
+    /// `project_tools()`-built harnesses. Lets a test read a created project
+    /// back through the SAME `Arc<dyn ProjectService>` instance
+    /// `apply_synthetic_capability_wrappers` dispatches writes through, rather
+    /// than reconstructing an equivalent (and possibly unwritten) one.
+    pub(crate) fn project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
+        self.project_service.clone()
+    }
+
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness
     /// surfaces, in one linear step (keeps the capability-specific knowledge out
     /// of `create_capability_port`'s main assembly chain).
