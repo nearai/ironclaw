@@ -1933,7 +1933,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
-    async fn trigger_management_tools() -> HarnessResult<Self> {
+    pub(crate) async fn trigger_management_tools() -> HarnessResult<Self> {
         let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![

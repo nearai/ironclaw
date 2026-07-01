@@ -259,8 +259,9 @@ impl GroupCapability {
 /// runtime so state written by thread A is visible to thread B.
 ///
 /// Construct with [`live_approvals`](Self::live_approvals),
-/// [`builtin_tools`](Self::builtin_tools), or
-/// [`extension_lifecycle`](Self::extension_lifecycle), or via
+/// [`builtin_tools`](Self::builtin_tools),
+/// [`extension_lifecycle`](Self::extension_lifecycle), or
+/// [`triggers`](Self::triggers), or via
 /// [`builder`](Self::builder) for custom storage mode.
 pub struct RebornIntegrationGroup {
     pub(crate) shared: Arc<GroupSharedStorage>,
@@ -309,6 +310,14 @@ impl RebornIntegrationGroup {
     /// runtime resolves user profiles from.
     pub async fn profile_tools() -> HarnessResult<Self> {
         Self::builder().profile_tools().await
+    }
+
+    /// Group with trigger-management tools
+    /// (trigger_create/list/pause/resume/remove). Auto-approve is enabled for
+    /// all capability ids in the group scope so the `Ask`-mode verbs dispatch
+    /// through the real capability path instead of raising approval gates.
+    pub async fn triggers() -> HarnessResult<Self> {
+        Self::builder().triggers().await
     }
 
     /// Builder for advanced configuration (e.g. `StorageMode::LibSql`).
@@ -689,6 +698,13 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime = HostRuntimeCapabilityHarness::profile_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
+    }
+
+    /// Build a trigger-management group. See [`RebornIntegrationGroup::triggers`].
+    pub async fn triggers(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = HostRuntimeCapabilityHarness::trigger_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
     }
 }
 

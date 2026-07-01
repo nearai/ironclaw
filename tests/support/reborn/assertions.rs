@@ -315,4 +315,34 @@ impl RebornIntegrationHarness {
         )
         .into())
     }
+
+    /// Return the parsed JSON `output` of the MOST RECENT recorded capability
+    /// result for `capability_id` (baseline-sliced to this thread's turns).
+    ///
+    /// Unlike `assert_tool_result_contains`, this returns the value so a test can
+    /// read a server-minted field — e.g. the `trigger_id` a `builtin.trigger_create`
+    /// dispatch mints, which a static script cannot know ahead of time and which
+    /// later `trigger_pause`/`resume`/`remove` turns must reference. Errors (never
+    /// silently returns `Null`) when no result for `capability_id` was recorded.
+    pub async fn tool_result_output(
+        &self,
+        capability_id: &str,
+    ) -> HarnessResult<serde_json::Value> {
+        let results = self.captured_capability_results();
+        if let Some(result) = results
+            .iter()
+            .rev()
+            .find(|result| result.capability_id.as_str() == capability_id)
+        {
+            return Ok(result.output.clone());
+        }
+        let seen: Vec<String> = results
+            .iter()
+            .map(|result| result.capability_id.as_str().to_string())
+            .collect();
+        Err(format!(
+            "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
+        )
+        .into())
+    }
 }

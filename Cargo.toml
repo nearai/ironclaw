@@ -356,6 +356,10 @@ name = "reborn_group_extensions"
 path = "tests/reborn_group_extensions/main.rs"
 
 [[test]]
+name = "reborn_group_triggers"
+path = "tests/reborn_group_triggers/main.rs"
+
+[[test]]
 name = "reborn_integration_oauth_refresh"
 required-features = ["libsql"]
 
