@@ -975,6 +975,27 @@ impl AdminScope {
     pub async fn deactivate_user(&self, id: &str) -> Result<(), crate::error::DatabaseError> {
         self.inner.update_user_status(id, "deactivated").await
     }
+
+    // === Trace Commons instance enrollment ===
+
+    /// Enroll this IronClaw instance with Trace Commons using an operator invite
+    /// link. Writes the instance-level enrollment policy that non-personally-
+    /// enrolled users inherit via `resolve_trace_credentials`. Admin-only by
+    /// construction: `AdminScope` is unconstructable for non-admin identities.
+    /// The `sink` is supplied by the host so the POST routes through the
+    /// deployment's network-egress policy.
+    pub async fn enroll_instance_trace_commons(
+        &self,
+        invite_url: &str,
+        consents: ironclaw_reborn_traces::onboarding::OnboardConsents,
+        sink: &dyn ironclaw_reborn_traces::onboarding::OnboardingHttpSink,
+    ) -> Result<
+        ironclaw_reborn_traces::onboarding::OnboardOutcome,
+        ironclaw_reborn_traces::onboarding::OnboardError,
+    > {
+        ironclaw_reborn_traces::onboarding::onboard_instance_with_sink(invite_url, consents, sink)
+            .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,6 +1239,30 @@ mod tests {
             scope.is_none(),
             "Regular identity should NOT construct AdminScope"
         );
+    }
+
+    #[tokio::test]
+    async fn test_admin_scope_enroll_instance_trace_commons_gate() {
+        // Gate boundary: a Regular identity cannot construct AdminScope, so
+        // enroll_instance_trace_commons is unreachable for non-admins.
+        let regular_scope = AdminScope::new(alice_identity(), test_db().await);
+        assert!(
+            regular_scope.is_none(),
+            "Regular identity must not obtain AdminScope (gate denies enrollment method)"
+        );
+
+        // Admin identity can construct AdminScope and therefore reach the method.
+        let admin_scope = AdminScope::new(admin_identity(), test_db().await);
+        assert!(
+            admin_scope.is_some(),
+            "Admin identity must obtain AdminScope (gate permits enrollment method)"
+        );
+
+        // Confirm the method is addressable on the admin-constructed scope.
+        // We do not perform a real network call; the gate boundary is the
+        // load-bearing assertion above.
+        let _f = AdminScope::enroll_instance_trace_commons;
+        let _ = admin_scope;
     }
 
     #[tokio::test]
