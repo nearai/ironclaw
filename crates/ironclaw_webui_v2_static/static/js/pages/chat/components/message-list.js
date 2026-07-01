@@ -221,7 +221,7 @@ export function MessageList({
       onPointerDown=${markScrollbarDragIntent}
       onCopy=${onCopy}
       data-testid="message-list-scroll"
-      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-20 sm:px-5 lg:px-8"
+      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
       <div
         ref=${contentRef}
@@ -254,6 +254,7 @@ export function MessageList({
               />`
         )}
         ${children}
+        ${logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" />`}
       </div>
     </div>
     ${logsPath &&

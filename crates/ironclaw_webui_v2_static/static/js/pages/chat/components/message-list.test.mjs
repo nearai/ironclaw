@@ -181,8 +181,13 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-20 sm:px-5 lg:px-8"/,
-    "scroll area should keep bottom padding for floating controls",
+    /className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"/,
+    "scroll area should keep its normal bottom padding",
+  );
+  assert.match(
+    messageListSource,
+    /\$\{logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" \/>`\}/,
+    "floating logs control should reserve space with an end-of-content spacer",
   );
   assert.match(
     messageListSource,
