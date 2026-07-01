@@ -3782,6 +3782,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             descriptors,
+            callable_capability_ids: None,
         })
     }
 
