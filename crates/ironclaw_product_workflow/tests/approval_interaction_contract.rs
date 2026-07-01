@@ -1974,6 +1974,106 @@ async fn already_denied_replay_returns_stale_when_run_is_other_terminal_state() 
 }
 
 #[tokio::test]
+async fn discarded_gate_returns_stale_without_resolution() {
+    // A Discarded gate (e.g. discard_pending CAS tombstone) must behave like
+    // a stale gate for every resolution decision: approve_gate's status
+    // guard and match arm, and deny_gate's status match, all fold Discarded
+    // into the StaleGate rejection before any resolver/turn side effect
+    // runs. Regression coverage for PR #5234 review (Medium) — Discarded
+    // had no approval_interaction_contract fixture.
+    for (decision, key) in [
+        (
+            ApprovalInteractionDecision::ApproveOnce,
+            "discarded-approve-once",
+        ),
+        (
+            ApprovalInteractionDecision::AlwaysAllow,
+            "discarded-always-allow",
+        ),
+        (ApprovalInteractionDecision::Deny, "discarded-deny"),
+    ] {
+        let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+            approval_request("delete a file"),
+            ApprovalStatus::Discarded,
+        );
+
+        let error = service
+            .resolve(ResolveApprovalInteractionRequest {
+                scope: scope(),
+                actor: actor("user-alpha"),
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: IdempotencyKey::new(key).expect("idempotency"),
+            })
+            .await
+            .expect_err("discarded gate must return StaleGate");
+
+        assert!(
+            matches!(
+                error,
+                ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::StaleGate
+                }
+            ),
+            "decision {decision:?} did not return StaleGate: {error:?}"
+        );
+        assert_eq!(resolver.approval_count(), 0, "decision {decision:?}");
+        assert_eq!(resolver.denial_count(), 0, "decision {decision:?}");
+        assert_eq!(coordinator.resumption_count(), 0, "decision {decision:?}");
+    }
+}
+
+#[tokio::test]
+async fn expired_gate_returns_stale_without_resolution() {
+    // Same shape as discarded_gate_returns_stale_without_resolution: an
+    // Expired gate must also short-circuit to StaleGate for every decision
+    // without issuing a resolver side effect or a turn resume. Expired also
+    // had no approval_interaction_contract fixture.
+    for (decision, key) in [
+        (
+            ApprovalInteractionDecision::ApproveOnce,
+            "expired-approve-once",
+        ),
+        (
+            ApprovalInteractionDecision::AlwaysAllow,
+            "expired-always-allow",
+        ),
+        (ApprovalInteractionDecision::Deny, "expired-deny"),
+    ] {
+        let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+            approval_request("delete a file"),
+            ApprovalStatus::Expired,
+        );
+
+        let error = service
+            .resolve(ResolveApprovalInteractionRequest {
+                scope: scope(),
+                actor: actor("user-alpha"),
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: IdempotencyKey::new(key).expect("idempotency"),
+            })
+            .await
+            .expect_err("expired gate must return StaleGate");
+
+        assert!(
+            matches!(
+                error,
+                ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::StaleGate
+                }
+            ),
+            "decision {decision:?} did not return StaleGate: {error:?}"
+        );
+        assert_eq!(resolver.approval_count(), 0, "decision {decision:?}");
+        assert_eq!(resolver.denial_count(), 0, "decision {decision:?}");
+        assert_eq!(coordinator.resumption_count(), 0, "decision {decision:?}");
+    }
+}
+
+#[tokio::test]
 async fn deny_marks_pending_gate_denied_then_resumes_run_with_disposition() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
     let response = service
