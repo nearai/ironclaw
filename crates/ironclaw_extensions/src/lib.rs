@@ -755,6 +755,7 @@ fn capability_descriptors_from_manifest(
                 effects: capability.effects.clone(),
                 default_permission: capability.default_permission,
                 runtime_credentials: capability.runtime_credentials.clone(),
+                network_targets: capability.network_targets.clone(),
                 resource_profile: capability.resource_profile.clone(),
             })
         })

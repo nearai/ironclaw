@@ -9,7 +9,9 @@ use clap::Args;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 #[cfg(not(feature = "slack-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services;
-use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
@@ -389,6 +391,49 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
+
+            // Tenant-shared tool credentials from the environment (#5459). Any
+            // `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` env var is written
+            // into the tenant-shared admin-managed scope so a keyed tool
+            // (network + `use_secret`) resolves its `InjectSecretOnce` obligation
+            // for EVERY user of the tenant — including SSO users who never
+            // provisioned it — from one operator-set key. Inert unless the
+            // operator sets one. Ops/dev provisioning path; not per-user setup.
+            const DEV_SECRET_PREFIX: &str = "IRONCLAW_REBORN_DEV_SECRET__";
+            for (name, value) in std::env::vars() {
+                let Some(handle_raw) = name.strip_prefix(DEV_SECRET_PREFIX) else {
+                    continue;
+                };
+                if value.is_empty() {
+                    continue;
+                }
+                let handle = SecretHandle::new(handle_raw).map_err(|err| {
+                    anyhow!("{name}: invalid secret handle `{handle_raw}`: {err}")
+                })?;
+                // The caller invocation owner alias (tenant/user/agent/project),
+                // mapped to the tenant-shared scope the runtime's InjectSecretOnce
+                // resolution falls back to (caller-first, then tenant-shared).
+                let owner = ResourceScope {
+                    tenant_id: tenant_id.clone(),
+                    user_id: user_id.clone(),
+                    agent_id: Some(default_agent_id.clone()),
+                    project_id: default_project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                let shared_scope = owner.tenant_shared_managed_scope();
+                runtime
+                    .seed_local_dev_secret(shared_scope, handle, value)
+                    .await
+                    .map_err(|err| anyhow!("failed to seed dev secret `{handle_raw}`: {err}"))?;
+                tracing::warn!(
+                    target: "ironclaw::reborn::cli",
+                    secret_handle = handle_raw,
+                    "seeded IRONCLAW_REBORN_DEV_SECRET__ tool credential at the tenant-shared scope"
+                );
+            }
+
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 match build_slack_host_beta_runtime_mounts(&runtime, slack_config)

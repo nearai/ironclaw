@@ -8,9 +8,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
-    sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
+    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -19,15 +19,15 @@ use ironclaw_product_workflow::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
     ProductWorkflowError, RebornChannelConnectStrategy,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 mod active_publication;
 #[cfg(test)]
 mod hosted_mcp_test_support;
 
 use crate::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
-    visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
+    materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -52,7 +52,7 @@ use active_publication::extension_trust_policy_input;
 // and registry ownership first; tracked in #4091.
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
-    catalog: AvailableExtensionCatalog,
+    catalog: Arc<RwLock<AvailableExtensionCatalog>>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
@@ -66,6 +66,8 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) default_permission: PermissionMode,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Manifest-declared network egress allowlist, independent of credentials.
+    pub(crate) network_targets: Vec<NetworkTargetPattern>,
 }
 
 #[derive(Clone)]
@@ -85,6 +87,7 @@ impl ActiveExtensionCapability {
             effects: descriptor.effects.clone(),
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
+            network_targets: descriptor.network_targets.clone(),
         }
     }
 }
@@ -102,6 +105,75 @@ impl ExtensionActivationMode {
             None => Self::Static,
         }
     }
+}
+
+/// Zip-bomb guards for [`unzip_extension_bundle`]: the HTTP route caps only the
+/// COMPRESSED body (8 MiB), so these bound what an uploaded bundle may expand
+/// to in memory. Generous for real tool bundles (wasm + schemas + prompts),
+/// tight enough that a hostile upload cannot OOM the host.
+const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
+const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Extract an uploaded tool bundle (a zip) into `(path, bytes)` pairs, guarding
+/// against zip-slip: absolute paths, `..` traversal, and backslash separators
+/// are rejected rather than trusted.
+fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, ProductWorkflowError> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bundle)).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("uploaded tool bundle is not a valid zip: {error}"),
+        }
+    })?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle has a corrupt entry: {error}"),
+            }
+        })?;
+        if !entry.is_file() {
+            continue;
+        }
+        if files.len() >= MAX_EXTENSION_BUNDLE_FILES {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle contains too many files (limit {MAX_EXTENSION_BUNDLE_FILES})"
+                ),
+            });
+        }
+        let name = entry.name().to_string();
+        if name.is_empty()
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.split('/').any(|component| component == "..")
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
+            });
+        }
+        // `take(allowance + 1)` bounds what a hostile entry can buffer: the
+        // declared zip sizes are attacker-controlled lies, so the guard must sit
+        // on the actual decompressed stream, never on entry metadata.
+        let allowance = MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES - total_bytes;
+        let mut bytes = Vec::new();
+        entry
+            .take(allowance as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("failed to read `{name}` from the uploaded bundle: {error}"),
+            })?;
+        if bytes.len() > allowance {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle expands past the {MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES}-byte decompressed limit"
+                ),
+            });
+        }
+        total_bytes += bytes.len();
+        files.push((name, bytes));
+    }
+    Ok(files)
 }
 
 pub(crate) async fn restore_extension_lifecycle_state(
@@ -169,7 +241,7 @@ impl RebornLocalExtensionManagementPort {
     ) -> Self {
         Self {
             filesystem,
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             installation_store,
             lifecycle_service,
             active_extensions,
@@ -206,11 +278,13 @@ impl RebornLocalExtensionManagementPort {
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let extensions = self.catalog.search(query);
+        let catalog = self.catalog.read().await;
+        let extensions = catalog.search(query);
         let mut summaries = Vec::new();
         for extension in extensions {
             summaries.push(self.search_summary(extension, credential_gate).await?);
         }
+        drop(catalog);
         let count = summaries.len();
         let mut response = response_with_payload(
             None,
@@ -261,7 +335,7 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?
             .map(|installation| phase_for_activation_state(installation.activation_state()))
             .unwrap_or(LifecyclePhase::Discovered);
-        let summary = self.catalog.resolve(&package_ref)?.summary();
+        let summary = self.catalog.read().await.resolve(&package_ref)?.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -325,7 +399,8 @@ impl RebornLocalExtensionManagementPort {
             ) else {
                 continue;
             };
-            let Ok(available) = self.catalog.resolve(&package_ref) else {
+            let catalog = self.catalog.read().await;
+            let Ok(available) = catalog.resolve(&package_ref) else {
                 continue;
             };
             summaries.push(LifecycleInstalledExtensionSummary {
@@ -382,11 +457,53 @@ impl RebornLocalExtensionManagementPort {
         Ok(installation)
     }
 
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Unzips (zip-slip guarded), validates the
+    /// `manifest.toml`, writes the assets under `/system/extensions/<id>/` so it
+    /// survives a restart, and extends the in-memory catalog so it shows in the
+    /// Registry immediately. The existing install/activate flow then operates on
+    /// it like any other available extension.
+    ///
+    /// Takes the catalog WRITE lock and NO `operation_lock`; `install` takes a
+    /// catalog READ lock before `operation_lock`, so the lock order is
+    /// consistent and the two cannot deadlock.
+    pub(crate) async fn import_bundle(
+        &self,
+        bundle: &[u8],
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let files = unzip_extension_bundle(bundle)?;
+        let package = imported_extension_package(files)?;
+        let package_ref = package.package_ref.clone();
+        let summary = package.summary();
+        materialize_available_extension(self.filesystem.as_ref(), &package).await?;
+        {
+            let mut catalog = self.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        }
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Discovered,
+            LifecycleProductPayload::ExtensionSearch {
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary,
+                    installation_phase: None,
+                }],
+                count: 1,
+            },
+        ))
+    }
+
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let available = self.catalog.resolve(&package_ref)?;
+        // Read guard is held for the whole method because `available` borrows
+        // from the catalog (used by prepare_install/materialize/visible_caps
+        // below). Acquired BEFORE `operation_lock`; `import_bundle` takes the
+        // write guard before `operation_lock` too, so the lock order is
+        // consistent and the two cannot deadlock.
+        let catalog = self.catalog.read().await;
+        let available = catalog.resolve(&package_ref)?;
         let plan = prepare_install(available)?;
         let _operation_guard = self.operation_lock.lock().await;
         self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
@@ -1529,6 +1646,70 @@ mod tests {
         assert!(
             !message.contains("callable by exact name"),
             "no tools published ⇒ no direct-invocation guidance, got: {message}"
+        );
+    }
+
+    /// Build an in-memory zip from `(entry_name, bytes)` pairs for
+    /// [`unzip_extension_bundle`] boundary tests.
+    fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    /// The doc contract promises backslash separators are REJECTED; normalizing
+    /// them instead silently accepts a path shape the guard claims to refuse.
+    #[test]
+    fn unzip_extension_bundle_rejects_backslash_entry_names() {
+        let bundle = zip_bundle(&[("wasm\\module.wasm", b"x".as_slice())]);
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("backslash separators must be rejected, not normalized");
+        assert!(
+            format!("{error}").contains("unsafe path"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A small compressed upload must not be allowed to expand past the
+    /// decompressed-bytes cap (zip bomb): the route body limit bounds only the
+    /// COMPRESSED size, so the cap here is the actual memory guard.
+    #[test]
+    fn unzip_extension_bundle_caps_total_decompressed_bytes() {
+        let oversized = vec![0u8; MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES + 1];
+        let bundle = zip_bundle(&[("payload.bin", oversized.as_slice())]);
+        assert!(
+            bundle.len() < MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
+            "test premise: the bomb must be small compressed"
+        );
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("expansion past the decompressed cap must be rejected");
+        assert!(
+            format!("{error}").contains("expands past"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Entry-count flooding is the other zip-bomb axis: many tiny entries.
+    #[test]
+    fn unzip_extension_bundle_caps_entry_count() {
+        let names: Vec<String> = (0..=MAX_EXTENSION_BUNDLE_FILES)
+            .map(|index| format!("assets/file-{index}.txt"))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), b"x".as_slice()))
+            .collect();
+        let bundle = zip_bundle(&entries);
+        let error =
+            unzip_extension_bundle(&bundle).expect_err("entry-count flooding must be rejected");
+        assert!(
+            format!("{error}").contains("too many files"),
+            "unexpected error: {error}"
         );
     }
 

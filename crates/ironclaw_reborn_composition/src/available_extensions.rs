@@ -1565,6 +1565,82 @@ where
     Ok(packages)
 }
 
+/// Build an [`AvailableExtensionPackage`] from the files of an uploaded tool
+/// bundle (the WebUI "Install Tool" import path). The files are `(path, bytes)`
+/// pairs already extracted (and path-sanitized) from the zip; the bundle root
+/// must contain `manifest.toml`. Mirrors [`load_filesystem_packages`]'s
+/// construction so an imported tool is validated and shaped exactly like a
+/// filesystem-discovered one, except its assets travel as inline bytes (the
+/// caller materializes them under `/system/extensions/<id>/`).
+pub(crate) fn imported_extension_package(
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest_toml = files
+        .iter()
+        .find(|(path, _)| path == "manifest.toml")
+        .ok_or_else(|| map_binding_error("imported bundle is missing manifest.toml at its root"))
+        .and_then(|(_, bytes)| {
+            String::from_utf8(bytes.clone()).map_err(|error| {
+                map_binding_error(format!("imported manifest.toml is not UTF-8: {error}"))
+            })
+        })?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host port catalog rejected imported extension: {error}"),
+        }
+    })?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host API contract registry rejected imported extension: {error}"),
+            }
+        })?;
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &host_ports,
+        None,
+        &contracts,
+    )
+    .map_err(map_binding_error)?;
+    // The manifest is projected exactly once; the typed id comes from the
+    // validated record. First-party ids are the SYSTEM tier of the extension-id
+    // namespace: an import claiming one would replace the first-party package in
+    // the catalog (`extend` upserts by package_ref) and overwrite its assets, so
+    // enforce the same boundary filesystem discovery applies.
+    let extension_id = record.manifest().id.clone();
+    if reserved_host_bundled_extension_id(&extension_id) {
+        return Err(map_binding_error(format!(
+            "extension id `{}` is reserved for host-bundled extensions and cannot be imported",
+            extension_id.as_str()
+        )));
+    }
+    let id = extension_id.as_str();
+    let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
+    let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
+    let manifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(map_binding_error)?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())
+        .map_err(map_binding_error)?;
+    let assets = files
+        .into_iter()
+        .map(|(path, bytes)| bytes_asset(&path, &bytes))
+        .collect();
+    Ok(AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            package.id.as_str(),
+        )?,
+        manifest_toml: record.raw_toml().to_string(),
+        package,
+        surface_kinds,
+        assets,
+    })
+}
+
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
@@ -2457,6 +2533,25 @@ handle = "web_token"
 
         assert_eq!(catalog.search("").count(), 0);
         assert_eq!(catalog.search("slack").count(), 0);
+    }
+
+    /// The import (upload) path must enforce the same reserved-id boundary as
+    /// filesystem discovery: an uploaded bundle claiming a first-party id would
+    /// otherwise REPLACE that package in the catalog (`extend` upserts by
+    /// package_ref) and overwrite its assets under `/system/extensions/<id>/`.
+    /// The real github manifest is used so the rejection provably fires on a
+    /// bundle that passes full manifest validation.
+    #[test]
+    fn imported_extension_package_rejects_reserved_host_bundled_extension_ids() {
+        let error = imported_extension_package(vec![(
+            "manifest.toml".to_string(),
+            GITHUB_MANIFEST.as_bytes().to_vec(),
+        )])
+        .expect_err("uploading a bundle that claims a first-party id must be rejected");
+        assert!(
+            format!("{error}").contains("reserved"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

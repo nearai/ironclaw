@@ -160,6 +160,16 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
     }
 
     let mut targets = Vec::new();
+    // Manifest-declared egress allowlist — the keyless-but-networked path. A
+    // capability declares its egress hosts directly, without a credential
+    // (and therefore without forcing a secret injection).
+    for target in &capability.network_targets {
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    // Credential audiences are folded in on top: a credentialed egress host is
+    // reachable whether or not it was also listed in `network_targets`.
     for credential in &capability.runtime_credentials {
         if !targets.contains(&credential.audience) {
             targets.push(credential.audience.clone());
@@ -181,9 +191,20 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
             port: None,
         });
     }
+    // Only mark the policy "constrained" (via `deny_private_ip_ranges`) when the
+    // capability actually declares egress targets. `network_policy_is_constrained`
+    // treats `deny_private_ip_ranges` as a constraint, so an unconditional `true`
+    // would give even a no-network tool (no `network` effect, no `network_targets`,
+    // no credential) a non-empty-looking policy → a spurious `ApplyNetworkPolicy`
+    // obligation with an empty allowlist that fails `validate_network_policy_metadata`.
+    // A tool with no egress targets gets an unconstrained empty policy → no network
+    // obligation at all. Networked tools keep the private-IP SSRF guard on their
+    // declared targets. (A tool that declares the `network` effect but no targets is
+    // still caught by the effect-based obligation gate and fails as misconfigured.)
+    let has_egress_targets = !targets.is_empty();
     NetworkPolicy {
         allowed_targets: targets,
-        deny_private_ip_ranges: true,
+        deny_private_ip_ranges: has_egress_targets,
         max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
     }
 }
@@ -202,6 +223,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -226,6 +248,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -240,6 +263,67 @@ mod tests {
         );
         assert!(policy.deny_private_ip_ranges);
         assert_eq!(policy.max_egress_bytes, Some(NETWORK_EGRESS_LIMIT));
+    }
+
+    #[test]
+    fn keyless_no_network_capability_yields_unconstrained_empty_policy() {
+        // #5459: a pure-compute tool (no `network` effect, no `network_targets`,
+        // no credential) must NOT be "constrained". `network_policy_is_constrained`
+        // treats `deny_private_ip_ranges` as a constraint, so leaving it `true` here
+        // would emit a spurious empty `ApplyNetworkPolicy` obligation that fails
+        // `validate_network_policy_metadata`. It must resolve to an empty,
+        // unconstrained policy so no network obligation is emitted at all.
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("ascii-renderer.draw").unwrap(),
+            provider: ExtensionId::new("ascii-renderer").unwrap(),
+            effects: vec![EffectKind::DispatchCapability],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert!(policy.allowed_targets.is_empty());
+        assert!(
+            !policy.deny_private_ip_ranges,
+            "a no-egress policy must be unconstrained so no ApplyNetworkPolicy is emitted"
+        );
+        assert_eq!(policy.max_egress_bytes, None);
+    }
+
+    #[test]
+    fn manifest_network_targets_populate_allowlist_without_credential() {
+        // #5459 "network + no key": a tool declares its egress host via
+        // `network_targets` (no credential) and gets a constrained allowlist —
+        // an `ApplyNetworkPolicy` scoped to that host, no secret injection.
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("hacker-news.top_stories").unwrap(),
+            provider: ExtensionId::new("hacker-news").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "news.ycombinator.com".to_string(),
+                port: None,
+            }],
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(
+            policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "news.ycombinator.com".to_string(),
+                port: None,
+            }]
+        );
+        assert!(
+            policy.deny_private_ip_ranges,
+            "a tool with declared egress keeps the private-IP SSRF guard"
+        );
     }
 
     #[test]
@@ -264,6 +348,7 @@ mod tests {
                 },
                 required: true,
             }],
+            network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -285,6 +370,7 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -305,6 +391,7 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
