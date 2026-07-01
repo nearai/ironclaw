@@ -170,6 +170,7 @@ async fn seed_accepted_run(
 
 struct ActorFallbackApprovalInteractionService {
     pending_thread_id: ThreadId,
+    tenant_id: TenantId,
     owner_user_id: UserId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -182,6 +183,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
         request: ListPendingApprovalsRequest,
     ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
         let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.tenant_id == self.tenant_id
             && request.scope.agent_id.as_ref() == Some(&self.agent_id)
             && request.scope.project_id == self.project_id
             && !request.scope.has_explicit_thread_owner()
@@ -665,6 +667,7 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
     .with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(repo)))
     .with_approval_interactions(Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: thread_id.clone(),
+        tenant_id: c.tenant_id.clone(),
         owner_user_id: c.user_id.clone(),
         agent_id: c.agent_id.clone(),
         project_id: c.project_id.clone(),

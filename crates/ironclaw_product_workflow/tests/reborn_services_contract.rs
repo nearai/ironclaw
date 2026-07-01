@@ -680,6 +680,7 @@ impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
 
 struct ActorFallbackApprovalInteractionService {
     pending_thread_id: ThreadId,
+    tenant_id: TenantId,
     owner_user_id: UserId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -692,6 +693,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
         request: ListPendingApprovalsRequest,
     ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
         let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.tenant_id == self.tenant_id
             && request.scope.agent_id.as_ref() == Some(&self.agent_id)
             && request.scope.project_id == self.project_id
             && !request.scope.has_explicit_thread_owner()
@@ -10087,6 +10089,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     let trigger_scope = trigger_run_thread_scope_for(&caller);
     let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
         owner_user_id: trigger_scope.creator_user_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
@@ -10133,6 +10136,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     let trigger_scope = trigger_run_thread_scope_for(&caller);
     let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
         owner_user_id: trigger_scope.creator_user_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
@@ -10180,6 +10184,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     let trigger_scope = trigger_run_thread_scope_for(&caller);
     let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
         owner_user_id: trigger_scope.creator_user_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
@@ -10238,6 +10243,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     let trigger_scope = trigger_run_thread_scope_for(&caller);
     let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
         owner_user_id: trigger_scope.creator_user_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),

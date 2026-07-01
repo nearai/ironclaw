@@ -145,7 +145,10 @@ function instantiate(queryState, options = {}) {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       react.beginRender();
       hook = context.globalThis.__testExports.useNotifications({
-        profile: { tenant_id: "tenant", user_id: "user" },
+        profile:
+          options.profile === undefined
+            ? { tenant_id: "tenant", user_id: "user" }
+            : options.profile,
         activeThreadId: options.activeThreadId || null,
         threads: options.threads || [],
       });
@@ -176,6 +179,7 @@ function plainThreadRequests(calls) {
   return calls.map((call) => ({
     limit: call.limit,
     needsApproval: call.needsApproval,
+    candidateThreadId: call.candidateThreadId,
   }));
 }
 
@@ -204,7 +208,7 @@ test("queries only threads that need approval", async () => {
 
   await harness.queryOptions.queryFn();
   assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true },
+    { limit: 20, needsApproval: true, candidateThreadId: undefined },
   ]);
 });
 
@@ -222,8 +226,26 @@ test("does not use active thread as an approval query candidate", async () => {
 
   await harness.queryOptions.queryFn();
   assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true },
+    { limit: 20, needsApproval: true, candidateThreadId: undefined },
   ]);
+});
+
+test("does not poll or persist notification state before profile scope hydrates", () => {
+  const harness = instantiate(
+    {
+      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
+      isLoading: false,
+      isSuccess: true,
+      error: null,
+      refetch: () => {},
+    },
+    { activeThreadId: "thread-1", profile: null },
+  );
+
+  assert.equal(harness.queryOptions.enabled, false);
+  assert.deepEqual(harness.getStateScopes, []);
+  assert.deepEqual(harness.markSeenCalls, []);
+  assert.equal(harness.hook.unreadCount, 0);
 });
 
 test("does not include locally known non-automation approval threads", () => {

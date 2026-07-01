@@ -126,7 +126,18 @@ export function isApprovalThread(thread, state) {
 export function approvalThreadNotificationId(thread) {
   const threadId = thread?.id || thread?.thread_id;
   if (!threadId) return null;
-  return `approval:${threadId}`;
+  const freshness =
+    thread?.approval_request_id ||
+    thread?.approval_id ||
+    thread?.gate_ref ||
+    thread?.run_id ||
+    thread?.turn_run_id ||
+    thread?.updated_at ||
+    thread?.created_at ||
+    thread?.last_activity ||
+    thread?.last_activity_at ||
+    "pending";
+  return `approval:${threadId}:${encodeURIComponent(String(freshness))}`;
 }
 
 function threadTimestamp(thread) {

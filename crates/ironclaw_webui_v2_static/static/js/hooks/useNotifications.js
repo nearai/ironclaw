@@ -13,10 +13,14 @@ import {
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;
 
+function emptyNotificationState() {
+  return { initialized: false, seenIds: new Set() };
+}
+
 function profileScope(profile) {
   return profile?.tenant_id && profile?.user_id
     ? `${profile.tenant_id}:${profile.user_id}`
-    : "anon";
+    : null;
 }
 
 function normalizeThread(record) {
@@ -37,10 +41,14 @@ export function useNotifications({
   const { t } = useI18n();
   const scope = profileScope(profile);
   const [notificationState, setNotificationState] = React.useState(() =>
-    getNotificationState(scope),
+    scope ? getNotificationState(scope) : emptyNotificationState(),
   );
 
   React.useEffect(() => {
+    if (!scope) {
+      setNotificationState(emptyNotificationState());
+      return undefined;
+    }
     setNotificationState(getNotificationState(scope));
     return subscribeNotifications((nextState, changedScope) => {
       if (changedScope === scope) setNotificationState(nextState);
@@ -48,25 +56,26 @@ export function useNotifications({
   }, [scope]);
 
   const query = useQuery({
-    queryKey: ["notifications", "approval-threads", scope],
+    queryKey: ["notifications", "approval-threads", scope || "pending-profile"],
     queryFn: () =>
       listThreads({
         limit: NOTIFICATION_THREAD_LIMIT,
         needsApproval: true,
       }),
-    enabled,
+    enabled: enabled && Boolean(scope),
     refetchInterval: NOTIFICATION_REFETCH_MS,
     refetchIntervalInBackground: false,
   });
 
   const approvalMessages = React.useMemo(() => {
+    if (!scope) return [];
     const records = Array.isArray(query.data?.threads) ? query.data.threads : [];
     const approvalThreads = records.map((record) => ({
       ...normalizeThread(record),
       state: record?.state || THREAD_STATE.NEEDS_ATTENTION,
     }));
     return approvalThreadNotifications(approvalThreads, new Map(), t);
-  }, [query.data, t]);
+  }, [query.data, scope, t]);
 
   const messages = React.useMemo(
     () =>
@@ -77,7 +86,7 @@ export function useNotifications({
   );
 
   React.useEffect(() => {
-    if (!activeThreadId) return;
+    if (!activeThreadId || !scope) return;
     const activeMessageIds = approvalMessages
       .filter(
         (message) =>
@@ -96,6 +105,7 @@ export function useNotifications({
   );
 
   const dismissMessage = React.useCallback((messageId) => {
+    if (!scope) return;
     const next = markNotificationIdsSeen([messageId], scope);
     setNotificationState(next);
   }, [scope]);

@@ -60,15 +60,22 @@ test("approvalThreadNotifications returns generic clickable approval messages", 
   assert.equal(messages[0].href, "/chat/thread-1");
 });
 
-test("approvalThreadNotificationId is stable per thread", () => {
+test("approvalThreadNotificationId includes approval freshness", () => {
   const id = approvalThreadNotificationId({
     thread_id: "thread-1",
     updated_at: "2026-06-30T00:00:00Z",
   });
-  assert.equal(id, "approval:thread-1");
+  assert.equal(id, "approval:thread-1:2026-06-30T00%3A00%3A00Z");
+
+  const runScoped = approvalThreadNotificationId({
+    thread_id: "thread-1",
+    run_id: "run-123",
+    updated_at: "2026-06-30T00:00:00Z",
+  });
+  assert.equal(runScoped, "approval:thread-1:run-123");
 
   const fallback = approvalThreadNotificationId({ id: "thread-1" });
-  assert.equal(fallback, "approval:thread-1");
+  assert.equal(fallback, "approval:thread-1:pending");
 });
 
 test("approvalThreadNotifications can use local thread state", () => {

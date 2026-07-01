@@ -2,6 +2,7 @@
 
 import json
 import re
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import expect
 
@@ -15,45 +16,35 @@ from reborn_webui_harness import (
 THREAD_ID = "thread-e2e-notification"
 
 
-def _automation_payload():
+def _notification_threads_payload():
     return {
-        "scheduler_enabled": True,
-        "automations": [
+        "threads": [
             {
-                "automation_id": "automation-e2e-notification",
-                "name": "E2E scheduled report",
-                "state": "active",
-                "source": {
-                    "type": "schedule",
-                    "cron": "*/5 * * * *",
-                    "timezone": "UTC",
-                },
-                "created_at": "2026-06-30T08:00:00Z",
-                "next_run_at": "2026-06-30T08:15:00Z",
-                "last_status": "running",
-                "recent_runs": [
-                    {
-                        "run_id": "run-e2e-notification",
-                        "thread_id": THREAD_ID,
-                        "status": "running",
-                        "fired_at": "2026-06-30T08:10:00Z",
-                        "submitted_at": "2026-06-30T08:10:01Z",
-                    }
-                ],
+                "id": THREAD_ID,
+                "thread_id": THREAD_ID,
+                "title": "E2E scheduled report",
+                "state": "needs_attention",
+                "updated_at": "2026-06-30T08:10:01Z",
             }
         ],
+        "next_cursor": None,
     }
 
 
-async def _route_automations(page):
+async def _route_notification_threads(page):
     async def handler(route):
+        parsed = urlparse(route.request.url)
+        query = parse_qs(parsed.query)
+        if query.get("needs_approval") != ["true"]:
+            await route.continue_()
+            return
         await route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps(_automation_payload()),
+            body=json.dumps(_notification_threads_payload()),
         )
 
-    await page.route("**/api/webchat/v2/automations**", handler)
+    await page.route("**/api/webchat/v2/threads?**", handler)
 
 
 async def _open_v2(page, base_url, path="/v2/"):
@@ -69,7 +60,7 @@ async def test_reborn_v2_notification_popover_opens_automation_thread(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
-        await _route_automations(page)
+        await _route_notification_threads(page)
         await _open_v2(page, reborn_v2_server)
 
         await page.locator(SEL_V2["notification_bell"]).click()
@@ -95,7 +86,7 @@ async def test_reborn_v2_notification_drawer_and_header_actions_fit_mobile(
     context = await reborn_v2_browser.new_context(viewport=viewport)
     page = await context.new_page()
     try:
-        await _route_automations(page)
+        await _route_notification_threads(page)
         await _open_v2(page, reborn_v2_server, "/v2/settings/language")
 
         for selector in (SEL_V2["header_logs_link"], SEL_V2["header_docs_link"]):
