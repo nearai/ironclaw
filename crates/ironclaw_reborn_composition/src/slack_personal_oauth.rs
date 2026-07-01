@@ -31,7 +31,9 @@ use crate::oauth_gate::{
     OAuthGateChallengeRequest, auth_scope_for_blocked_turn, challenge_view_from_flow,
     provider_scopes, turn_gate_query,
 };
-use crate::oauth_provider_client::{ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape};
+use crate::oauth_provider_client::{
+    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
+};
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
@@ -146,8 +148,12 @@ impl SlackPersonalOAuthGateProvider {
         let scopes = provider_scopes(&requirement.provider_scopes)?;
         let prepared = self.prepare_flow(&auth_scope, flow_id, scopes).await?;
         let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
-        self.store_pkce_verifier(&auth_scope.resource, flow_id, prepared.pkce_verifier.clone())
-            .await?;
+        self.store_pkce_verifier(
+            &auth_scope.resource,
+            flow_id,
+            prepared.pkce_verifier.clone(),
+        )
+        .await?;
         let flow = match request
             .flow_manager
             .create_flow(NewAuthFlow {
@@ -213,9 +219,13 @@ impl SlackPersonalOAuthGateProvider {
         scopes: Vec<ProviderScope>,
     ) -> Result<PreparedSlackOAuthGateFlow, AuthProductError> {
         let account_label = CredentialAccountLabel::new("slack_personal")?;
-        let state =
-            SlackPersonalOAuthCallbackState::new(flow_id, scope.clone(), account_label, scopes.clone())?
-                .encode()?;
+        let state = SlackPersonalOAuthCallbackState::new(
+            flow_id,
+            scope.clone(),
+            account_label,
+            scopes.clone(),
+        )?
+        .encode()?;
         let opaque_state_hash = opaque_state_hash(state.as_str())?;
         let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
         let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;

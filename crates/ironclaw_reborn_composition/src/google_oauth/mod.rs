@@ -1,4 +1,6 @@
-use crate::oauth_provider_client::{ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape};
+use crate::oauth_provider_client::{
+    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
+};
 
 pub(crate) fn google_provider_spec() -> HostOAuthProviderSpec {
     HostOAuthProviderSpec {

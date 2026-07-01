@@ -325,7 +325,9 @@ pub(crate) fn turn_gate_query(
     }
 }
 
-pub(crate) fn provider_scopes(raw_scopes: &[String]) -> Result<Vec<ProviderScope>, AuthProductError> {
+pub(crate) fn provider_scopes(
+    raw_scopes: &[String],
+) -> Result<Vec<ProviderScope>, AuthProductError> {
     raw_scopes
         .iter()
         .map(|scope| ProviderScope::new(scope.clone()))
