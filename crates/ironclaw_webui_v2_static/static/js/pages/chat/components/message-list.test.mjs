@@ -174,15 +174,15 @@ test("MessageList renders a floating thread logs shortcut", () => {
     /import \{ Link \} from "react-router";/,
     "thread logs shortcut should use React Router navigation",
   );
-  assert.match(
+  assert.doesNotMatch(
     messageListSource,
-    /import \{ buildScopedLogsPath \} from "\.\.\/\.\.\/logs\/lib\/logs-data\.js";/,
-    "thread logs shortcut should reuse the shared scoped logs path builder",
+    /buildScopedLogsPath/,
+    "message-list should receive a logsPath prop instead of building routes",
   );
   assert.match(
     messageListSource,
-    /const logsPath = threadId \? buildScopedLogsPath\(\{ threadId \}\) : null;/,
-    "thread logs shortcut should build a thread-scoped route through the shared helper",
+    /logsPath,/,
+    "message-list should accept a prebuilt thread logs route",
   );
   assert.match(
     messageListSource,
@@ -196,7 +196,12 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*group absolute bottom-5 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\][\s\S]*<\$\{Icon\} name="logs"/,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-5 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
+    "floating logs button classes should live in a module-level constant",
+  );
+  assert.match(
+    messageListSource,
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*<\$\{Icon\} name="logs"/,
     "thread logs shortcut should render as a visible bottom-right icon button",
   );
 });

@@ -20,6 +20,7 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -100,6 +101,7 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  const logsPath = activeThreadId ? buildScopedLogsPath({ threadId: activeThreadId }) : null;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -254,6 +256,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
+            logsPath=${logsPath}
             pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&

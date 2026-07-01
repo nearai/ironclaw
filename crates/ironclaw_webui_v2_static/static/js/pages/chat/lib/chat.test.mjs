@@ -84,6 +84,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
     buildRuntimeContext: () => ({}),
+    buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: () => {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -384,6 +385,12 @@ test("Chat does not render a top-level logs header for the active thread run", (
     findComponent(tree, components.Link),
     null,
     "active chat should not render an extra run logs router link outside message actions",
+  );
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).logsPath,
+    "/logs?thread_id=thread-1",
+    "chat should pass a prebuilt thread-scoped logs path down to MessageList",
   );
   assert.equal(
     findNode(tree, (node) =>
