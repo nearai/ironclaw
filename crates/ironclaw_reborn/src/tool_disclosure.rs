@@ -45,6 +45,12 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "extension_install",
     "extension_activate",
     "extension_remove",
+    // routine / scheduled-trigger lifecycle — core so the model can list and
+    // create routines directly with the full schema in context. trigger_create's
+    // `schedule` is a `oneOf` (cron/once objects) a weak model can't format from
+    // a deferred/describe-first schema, so keep both always advertised.
+    "trigger_list",
+    "trigger_create",
     // skills + time
     "skill_list",
     "time",
@@ -920,6 +926,8 @@ mod tests {
             ("extension_install", "builtin.extension_install"),
             ("extension_activate", "builtin.extension_activate"),
             ("extension_remove", "builtin.extension_remove"),
+            ("trigger_list", "builtin.trigger_list"),
+            ("trigger_create", "builtin.trigger_create"),
             ("time", ironclaw_host_runtime::TIME_CAPABILITY_ID),
         ];
         let synthetic_or_extension_core_names = [
