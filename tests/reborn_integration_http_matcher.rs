@@ -168,15 +168,10 @@ async fn http_5xx_status_surfaces_as_completed_result_with_status() {
 /// Asserts the `denied` category surfaced (not merely that the run completed).
 #[tokio::test]
 async fn http_network_policy_denied_surfaces_recoverable_denied() {
-    use ironclaw_host_api::RuntimeHttpEgressError;
     let h = RebornIntegrationHarness::test_default()
-        .with_keyed_http_responses([ScriptedHttpResponse::egress_error(
+        .with_keyed_http_responses([ScriptedHttpResponse::network_error(
             ERR_URL,
-            RuntimeHttpEgressError::Network {
-                reason: "policy_denied".to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            },
+            "policy_denied",
         )])
         .script([
             RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
@@ -199,17 +194,11 @@ async fn http_network_policy_denied_surfaces_recoverable_denied() {
 /// `Failed{OutputTooLarge}` capability outcome; the run recovers to completion.
 #[tokio::test]
 async fn http_oversize_response_surfaces_recoverable_failed() {
-    use ironclaw_host_api::{
-        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressError,
-    };
+    use ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
     let h = RebornIntegrationHarness::test_default()
-        .with_keyed_http_responses([ScriptedHttpResponse::egress_error(
+        .with_keyed_http_responses([ScriptedHttpResponse::response_error(
             ERR_URL,
-            RuntimeHttpEgressError::Response {
-                reason: RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED.to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            },
+            RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
         )])
         .script([
             RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
@@ -225,4 +214,52 @@ async fn http_oversize_response_surfaces_recoverable_failed() {
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
+/// Guards `assert_tool_error_summary_contains` against a vacuous pass, mirroring
+/// the sibling negative guards (`shell_assertions_fail_when_no_shell_call_ran`,
+/// `assert_mcp_tool_called_fails_when_no_mcp_call_ran`). Two ways it must return
+/// `Err`: (a) a completed turn that persisted NO tool-error reference at all, and
+/// (b) a real `Denied` turn probed with a needle that isn't in the summary.
+#[tokio::test]
+async fn tool_error_summary_assertion_fails_without_matching_tool_error() {
+    // (a) Plain text turn — no tool call, so no `ToolResultReference` is persisted.
+    let clean = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("no tool")])
+        .build()
+        .await
+        .expect("harness builds");
+    clean
+        .submit_turn("just talk")
+        .await
+        .expect("turn completes");
+    assert!(
+        clean
+            .assert_tool_error_summary_contains("capability denied with policy_denied")
+            .await
+            .is_err(),
+        "assertion must reject a turn that persisted no tool-error reference"
+    );
+
+    // (b) Real `Denied` turn, but probed with a needle that isn't in the summary.
+    let denied = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::network_error(
+            ERR_URL,
+            "policy_denied",
+        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    denied.submit_turn("fetch").await.expect("turn completes");
+    assert!(
+        denied
+            .assert_tool_error_summary_contains("capability failed with backend")
+            .await
+            .is_err(),
+        "assertion must reject a needle that is absent from the persisted summary"
+    );
 }

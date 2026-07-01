@@ -164,7 +164,9 @@ needs a different scripted body, install keyed responses via
 - `.with_method(method)` — narrow to a specific HTTP method (lowercase, e.g. `"post"`).
 - `.with_capability(capability_id)` — narrow to a specific capability id (e.g. `"builtin.http"`).
 - `.with_status(status)` — override the status of a `for_url` body response (e.g. `404`, `500`). Still a successful egress call — `builtin.http` surfaces it as a Completed tool result carrying that status. Panics if called on an `egress_error` response (mutually exclusive outcomes).
-- `ScriptedHttpResponse::egress_error(url_substr, error)` — scripts a runtime egress failure (`Err(RuntimeHttpEgressError)` from `execute`) instead of a body, driving `builtin.http`'s error-mapping paths (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`).
+- `ScriptedHttpResponse::egress_error(url_substr, error)` — scripts a runtime egress failure (`Err(RuntimeHttpEgressError)` from `execute`) instead of a body, driving `builtin.http`'s error-mapping paths (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`). Prefer the two named wrappers below so test bodies select the scenario by name instead of hand-building the nested error struct:
+  - `ScriptedHttpResponse::network_error(url_substr, reason)` — a `RuntimeHttpEgressError::Network` with `reason` (e.g. `"policy_denied"` → `Denied`).
+  - `ScriptedHttpResponse::response_error(url_substr, reason)` — a `RuntimeHttpEgressError::Response` with `reason` (e.g. `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED` → `Failed{OutputTooLarge}`).
 
 Requests that match no scripted response fall back to the recording egress default body. The keyed matcher is the canonical HTTP-scripting API; new per-URL response needs fold into `ScriptedHttpResponse` rather than adding a parallel matcher.
 

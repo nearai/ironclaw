@@ -96,6 +96,38 @@ impl ScriptedHttpResponse {
         }
     }
 
+    /// Script a network-layer egress failure (`RuntimeHttpEgressError::Network`)
+    /// with the given `reason` — e.g. `"policy_denied"`, which the tool's error
+    /// mapping surfaces as a `Denied` capability outcome. Thin named wrapper over
+    /// [`egress_error`](Self::egress_error) so test bodies select the scenario by
+    /// name instead of hand-building the nested error struct.
+    pub fn network_error(url_substr: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::egress_error(
+            url_substr,
+            RuntimeHttpEgressError::Network {
+                reason: reason.into(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        )
+    }
+
+    /// Script a response-layer egress failure (`RuntimeHttpEgressError::Response`)
+    /// with the given `reason` — e.g. `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED`,
+    /// which the tool's error mapping surfaces as `Failed{OutputTooLarge}`. Thin
+    /// named wrapper over [`egress_error`](Self::egress_error) so test bodies
+    /// select the scenario by name instead of hand-building the nested error struct.
+    pub fn response_error(url_substr: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::egress_error(
+            url_substr,
+            RuntimeHttpEgressError::Response {
+                reason: reason.into(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        )
+    }
+
     /// Override the HTTP status of a body response (default `200`). Panics on
     /// an [`egress_error`](ScriptedHttpResponse::egress_error) response — the
     /// two are mutually exclusive scripted outcomes, and silently no-op'ing

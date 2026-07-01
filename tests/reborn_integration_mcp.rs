@@ -79,47 +79,11 @@ async fn mcp_tool_call_reaches_mock_server() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked");
-    // Confirm the mock server actually received an HTTP request — this proves
-    // the MCP runtime made a real HTTP call to the loopback server, not just
-    // that the capability recorder fired before the egress (the M4 gap).
-    let recorded = server.recorded_requests();
-    assert!(
-        !recorded.is_empty(),
-        "mock MCP server received no HTTP request; MCP egress did not reach the server"
-    );
-    let tools_call = recorded
-        .iter()
-        .find(|r| r.method == "tools/call")
-        .unwrap_or_else(|| {
-            panic!(
-                "mock MCP server received requests but none was tools/call; saw: {:?}",
-                recorded
-                    .iter()
-                    .map(|r| r.method.as_str())
-                    .collect::<Vec<_>>()
-            )
-        });
-    assert_eq!(
-        tools_call
-            .params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str()),
-        Some("search"),
-        "tools/call params did not name the expected tool 'search'; params: {:?}",
-        tools_call.params
-    );
-    assert_eq!(
-        tools_call
-            .params
-            .as_ref()
-            .and_then(|p| p.get("arguments"))
-            .and_then(|a| a.get("query"))
-            .and_then(|q| q.as_str()),
-        Some("needle-xyz-42"),
-        "tools/call did not carry the scripted arguments intact; params: {:?}",
-        tools_call.params
-    );
+    // Confirm the mock server actually received the `tools/call` over HTTP with
+    // the scripted arguments intact — proves the MCP runtime made a real HTTP
+    // call to the loopback server, not just that the capability recorder fired
+    // before the egress (the M4 gap).
+    assert_recorded_tools_call(&server, "search", "needle-xyz-42");
 }
 
 /// Guards `assert_mcp_tool_called` against vacuous pass: when no MCP tool ran

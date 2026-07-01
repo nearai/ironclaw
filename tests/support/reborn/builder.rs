@@ -115,12 +115,26 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     storage: StorageMode,
-    /// Slice 5: when `true`, the `BuiltinHttpTools` backend uses the real
-    /// `LocalHostProcessPort` instead of the inert `RecordingProcessPort`.
-    live_shell: bool,
-    /// Sticky scripted result for the inert recording process port (error-path
-    /// coverage): a non-zero exit code or a `run_command` error.
-    scripted_process: Option<ScriptedProcessResult>,
+    /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
+    /// of a `bool` + `Option` so the modes are mutually exclusive by
+    /// construction — the last shell-selecting builder method wins, and a live
+    /// runtime can never carry a stale scripted result.
+    shell_mode: ShellMode,
+}
+
+/// Which process port the built `BuiltinHttpTools` runtime installs for
+/// `builtin.shell`. These are mutually exclusive; the builder holds exactly one.
+#[derive(Debug, Clone, Default)]
+enum ShellMode {
+    /// Slice 5 default: the inert `RecordingProcessPort` records the command and
+    /// spawns no OS process.
+    #[default]
+    Inert,
+    /// The real `LocalHostProcessPort` runs a (hermetic) command for real.
+    Live,
+    /// The inert recording port returns a scripted result (error-path coverage):
+    /// a non-zero exit code or a `run_command` error.
+    Scripted(ScriptedProcessResult),
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -158,7 +172,7 @@ impl RebornIntegrationHarnessBuilder {
     /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_live_shell(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
-        self.live_shell = true;
+        self.shell_mode = ShellMode::Live;
         self
     }
 
@@ -168,8 +182,7 @@ impl RebornIntegrationHarnessBuilder {
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
-        self.scripted_process = Some(ScriptedProcessResult::ExitCode(exit_code));
-        self.live_shell = false;
+        self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::ExitCode(exit_code));
         self
     }
 
@@ -179,8 +192,7 @@ impl RebornIntegrationHarnessBuilder {
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_timeout(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
-        self.scripted_process = Some(ScriptedProcessResult::Timeout);
-        self.live_shell = false;
+        self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::Timeout);
         self
     }
 
@@ -220,7 +232,7 @@ impl RebornIntegrationHarnessBuilder {
     /// the scripted provider, and start the planned runtime.
     ///
     /// Routes through an internal, degenerate one-thread `RebornIntegrationGroup`
-    /// (matching this builder's capability/storage/live_shell/keyed_http_responses
+    /// (matching this builder's capability/storage/shell_mode/keyed_http_responses
     /// selections) so there is exactly ONE assembly path for both groups and
     /// single-shot harnesses (design §3: no de-facto fork). Behavior is
     /// byte-identical to the old inline build — existing tests are unaffected
@@ -236,14 +248,18 @@ impl RebornIntegrationHarnessBuilder {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
                 // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
-                // the default recording path uses the inert RecordingProcessPort.
-                let host_runtime = if self.live_shell {
-                    HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
-                } else {
-                    HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                // `Inert`/`Scripted` both use the inert RecordingProcessPort (the
+                // latter with a canned result installed below).
+                let host_runtime = match self.shell_mode {
+                    ShellMode::Live => {
+                        HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
+                    }
+                    ShellMode::Inert | ShellMode::Scripted(_) => {
+                        HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                    }
                 };
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
-                if let Some(scripted_process) = self.scripted_process {
+                if let ShellMode::Scripted(scripted_process) = self.shell_mode {
                     host_runtime.install_process_script(scripted_process)?;
                 }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
@@ -320,8 +336,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
-            live_shell: false,
-            scripted_process: None,
+            shell_mode: ShellMode::default(),
         }
     }
 
