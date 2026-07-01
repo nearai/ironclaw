@@ -527,7 +527,11 @@ impl InMemoryTurnStateStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         let seq = self.persist_seq.fetch_add(1, Ordering::SeqCst);
-        (seq, inner.persistence_snapshot())
+        // Durable writes persist the *compact recovery* snapshot (non-terminal
+        // runs + their referenced records, no audit events) — O(active runs), not
+        // O(total state). The full `persistence_snapshot()` stays the runtime
+        // read-model/projection surface.
+        (seq, inner.recovery_snapshot())
     }
 
     /// Persist the snapshot through the durable block sink, if one is attached.
@@ -2158,6 +2162,126 @@ impl Inner {
             loop_checkpoints,
             idempotency_records,
             events: self.events.clone(),
+            event_retention_floor: self.event_retention_floor,
+            admission_reservations,
+            spawn_tree_reservations,
+        }
+    }
+
+    /// A compact snapshot for durable recovery: only the runs a restart must
+    /// coordinate — the **non-terminal** ones (blocked + queued + running) — plus
+    /// exactly the records they reference. Terminal runs need no coordination
+    /// recovery (a completed/failed run must not rehydrate as live) and lifecycle
+    /// `events` exist only for audit/projection, so both are omitted. This makes
+    /// the durable write O(active runs) instead of O(total accumulated state),
+    /// and structurally prevents a finished run from being resurrected.
+    ///
+    /// The filter is closed under references: `from_persistence_snapshot` rejects
+    /// a run whose turn is absent, and blocked runs must keep their thread lock,
+    /// checkpoints, and admission/spawn reservations — so every kept run keeps its
+    /// turn, active lock, checkpoints, and reservations. Idempotency records are
+    /// kept whole (bounded by the store cap, no run-ref requirement) so recent
+    /// submit/resume/cancel dedup survives a restart. Concurrency counters and any
+    /// missing admission reservations are re-derived from the kept runs on load.
+    fn recovery_snapshot(&self) -> TurnPersistenceSnapshot {
+        let kept: Vec<&RunRecord> = self
+            .records
+            .values()
+            .filter(|record| !record.status.get().is_terminal())
+            .collect();
+        let kept_run_ids: HashSet<TurnRunId> = kept.iter().map(|record| record.run_id).collect();
+        let kept_turn_ids: HashSet<crate::TurnId> =
+            kept.iter().map(|record| record.turn_id).collect();
+        let kept_checkpoint_ids: HashSet<TurnCheckpointId> = kept
+            .iter()
+            .filter_map(|record| record.checkpoint_id)
+            .collect();
+        // Tree roots that still have a non-terminal run (root kept, or a kept
+        // descendant points at it) — keep those spawn-tree reservations so
+        // subagent capacity stays accurate across restart.
+        let live_tree_roots: HashSet<TurnRunId> = kept
+            .iter()
+            .map(|record| record.spawn_tree_root_run_id.unwrap_or(record.run_id))
+            .collect();
+
+        let mut runs = kept
+            .iter()
+            .map(|record| record.persistence_record())
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|record| record.event_cursor);
+        let mut turns = self
+            .turns
+            .values()
+            .filter(|turn| kept_turn_ids.contains(&turn.turn_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        turns.sort_by_key(|record| record.created_at);
+        let mut active_locks = self
+            .active_locks
+            .values()
+            .filter(|lock| kept_run_ids.contains(&lock.run_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        active_locks.sort_by_key(|record| record.acquired_at);
+        let mut checkpoints = self
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| kept_checkpoint_ids.contains(&checkpoint.checkpoint_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        checkpoints.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.sequence.cmp(&b.sequence))
+        });
+        let mut loop_checkpoints = self
+            .loop_checkpoints
+            .values()
+            .filter(|checkpoint| kept_checkpoint_ids.contains(&checkpoint.checkpoint_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        loop_checkpoints.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.checkpoint_id.as_uuid().cmp(&b.checkpoint_id.as_uuid()))
+        });
+        let mut idempotency_records = self
+            .idempotency_records
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        idempotency_records.sort_by_key(|record| record.created_at);
+        let mut admission_reservations = self
+            .admission_reservations
+            .values()
+            .filter(|reservation| kept_run_ids.contains(&reservation.run_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        admission_reservations.sort_by_key(|reservation| reservation.run_id.to_string());
+        let mut spawn_tree_reservations = self
+            .tree_reservations
+            .iter()
+            .filter(|(key, _)| live_tree_roots.contains(&key.root_run_id))
+            .filter_map(|(key, descendant_count)| {
+                let root = self.records.get(&key.root_run_id)?;
+                Some(SpawnTreeReservation {
+                    scope: root.scope.clone(),
+                    root_run_id: key.root_run_id,
+                    descendant_count: *descendant_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        spawn_tree_reservations.sort_by_key(|reservation| reservation.root_run_id.to_string());
+        TurnPersistenceSnapshot {
+            turns,
+            runs,
+            active_locks,
+            checkpoints,
+            loop_checkpoints,
+            idempotency_records,
+            // Dropped: audit-only lifecycle events are the unbounded bloat, and
+            // recovery reconstructs the cursor from the kept runs' event cursors.
+            events: Vec::new(),
             event_retention_floor: self.event_retention_floor,
             admission_reservations,
             spawn_tree_reservations,

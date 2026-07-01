@@ -1048,10 +1048,10 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     );
 
     // A resumed run completes from `Running`, not from a blocked state. The
-    // durable snapshot must still converge to the terminal state so a restart
-    // does not rehydrate an already-finished run as a live `Queued`/`Running`
-    // run — persist-on-block tracks the gate-touched run through its terminal
-    // transition to guarantee this.
+    // compact recovery snapshot must converge by *dropping* the now-terminal run
+    // so a restart does not rehydrate an already-finished run as a live
+    // `Queued`/`Running` run — persist-on-block tracks the gate-touched run
+    // through its terminal transition to trigger that write.
     let resumed_runner_id = TurnRunnerId::new();
     let resumed_lease_token = TurnLeaseToken::new();
     store
@@ -1075,30 +1075,32 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     assert_eq!(
         after_complete.len(),
         4,
-        "completing a gate-resumed run must persist its terminal state"
+        "completing a gate-resumed run must persist the recovery-set change"
     );
     let terminal_snapshot = after_complete.last().unwrap().clone();
-    let terminal_run = terminal_snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .expect("resumed run present in terminal snapshot");
-    assert_eq!(terminal_run.status, TurnStatus::Completed);
+    assert!(
+        terminal_snapshot
+            .runs
+            .iter()
+            .all(|record| record.run_id != run_id),
+        "a completed run must be absent from the compact recovery snapshot"
+    );
 
-    // Rehydrate from the terminal snapshot — the run must come back Completed,
-    // not Queued/Running, so recovery does not re-run a finished turn.
+    // Rehydrate from that snapshot — the finished run must not come back at all,
+    // so recovery cannot re-run it.
     let restored_terminal = InMemoryTurnStateStore::from_persistence_snapshot(
         terminal_snapshot,
         InMemoryTurnStateStoreLimits::default(),
     )
     .unwrap();
-    let restored_terminal_run = restored_terminal
-        .persistence_snapshot()
-        .runs
-        .into_iter()
-        .find(|record| record.run_id == run_id)
-        .expect("completed run survives rehydration");
-    assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
+    assert!(
+        restored_terminal
+            .persistence_snapshot()
+            .runs
+            .iter()
+            .all(|record| record.run_id != run_id),
+        "a completed run must not be resurrected on rehydration"
+    );
 }
 
 /// A run recovered *from a restart snapshot* while blocked must still receive a
@@ -1196,21 +1198,18 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
         .await
         .unwrap();
 
-    // Completing the recovered run must have persisted its terminal state, so a
-    // subsequent restart rehydrates it as Completed, not live.
+    // Completing the recovered run must persist the recovery-set change, dropping
+    // the now-terminal run so a subsequent restart cannot rehydrate it as live.
     let terminal_snapshot = restored_sink
         .snapshots()
         .pop()
         .expect("terminal persist after recovery resume/complete");
-    let terminal_run = terminal_snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .expect("recovered run present in terminal snapshot");
-    assert_eq!(
-        terminal_run.status,
-        TurnStatus::Completed,
-        "recovered gate-blocked run must persist its terminal state, not stay Queued/Running"
+    assert!(
+        terminal_snapshot
+            .runs
+            .iter()
+            .all(|record| record.run_id != run_id),
+        "a recovered gate-blocked run that completes must be dropped from the recovery snapshot, not left as live"
     );
 }
 
@@ -1322,15 +1321,12 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         .snapshots()
         .pop()
         .expect("terminal persist after recovered resumed run completes");
-    assert_eq!(
+    assert!(
         terminal_snapshot
             .runs
             .iter()
-            .find(|record| record.run_id == run_id)
-            .expect("recovered resumed run present in terminal snapshot")
-            .status,
-        TurnStatus::Completed,
-        "a resumed gate-touched run recovered from a restart must still persist its terminal state"
+            .all(|record| record.run_id != run_id),
+        "a resumed gate-touched run recovered from a restart must be dropped from the recovery snapshot once it completes"
     );
 }
 
@@ -1397,6 +1393,143 @@ async fn flush_persists_in_flight_non_blocked_run() {
             .iter()
             .any(|record| record.run_id == run_id),
         "in-flight run survives flush + rehydration"
+    );
+}
+
+/// The durable snapshot written on flush/persist is the **compact recovery
+/// snapshot**, not the full runtime read-model: it keeps only non-terminal runs
+/// (and their referential closure) and drops the replayable event log, which the
+/// runtime rebuilds from its own source-of-truth on restart. This is the core of
+/// the blocked-subset/delta recovery design — a completed run carries no
+/// in-flight coordination state worth recovering, so persisting it only bloats
+/// every write and risks resurrecting a finished turn. Referential integrity
+/// must still hold: every kept run's turn survives so rehydration succeeds.
+#[tokio::test]
+async fn flush_recovery_snapshot_keeps_active_runs_drops_terminal_and_events() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    // Run A: completed → terminal, must be dropped from the recovery snapshot.
+    let done_run = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-done", "idem-done"))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(&store, done_run, "thread-done").await;
+
+    // Run B: claimed and left Running (in-flight, never blocked) → kept.
+    let running_run = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-running", "idem-running"))
+            .await
+            .unwrap(),
+    );
+    let running_runner = TurnRunnerId::new();
+    let running_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: running_runner,
+            lease_token: running_lease,
+            scope_filter: Some(scope("thread-running")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Run C: claimed then gate-blocked (Approval) → kept.
+    let blocked_run = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-blocked", "idem-blocked"))
+            .await
+            .unwrap(),
+    );
+    let blocked_runner = TurnRunnerId::new();
+    let blocked_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: blocked_runner,
+            lease_token: blocked_lease,
+            scope_filter: Some(scope("thread-blocked")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id: blocked_run,
+            runner_id: blocked_runner,
+            lease_token: blocked_lease,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: GateRef::new("recovery-gate").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+
+    store.flush().await;
+    let snapshot = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+
+    // Terminal run dropped; active runs kept with their live status.
+    assert!(
+        snapshot.runs.iter().all(|record| record.run_id != done_run),
+        "a completed run carries no in-flight state and must be dropped from the recovery snapshot"
+    );
+    assert_eq!(
+        snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == running_run)
+            .expect("in-flight running run kept")
+            .status,
+        TurnStatus::Running,
+    );
+    assert_eq!(
+        snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == blocked_run)
+            .expect("gate-blocked run kept")
+            .status,
+        TurnStatus::BlockedApproval,
+    );
+
+    // The replayable event log is not part of the recovery snapshot.
+    assert!(
+        snapshot.events.is_empty(),
+        "recovery snapshot must drop the replayable event log, got {} events",
+        snapshot.events.len()
+    );
+
+    // Referential integrity: kept runs' turns survive, so rehydration succeeds
+    // and recovers exactly the two active runs (never the terminal one).
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .expect("compact recovery snapshot must rehydrate (referential closure intact)");
+    let restored_runs = restored.persistence_snapshot().runs;
+    assert!(
+        restored_runs
+            .iter()
+            .any(|record| record.run_id == running_run),
+        "in-flight running run survives rehydration"
+    );
+    assert!(
+        restored_runs
+            .iter()
+            .any(|record| record.run_id == blocked_run),
+        "gate-blocked run survives rehydration"
+    );
+    assert!(
+        restored_runs.iter().all(|record| record.run_id != done_run),
+        "terminal run is never resurrected on rehydration"
     );
 }
 
