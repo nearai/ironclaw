@@ -677,15 +677,32 @@ where
     // This is a deny list — it takes effect regardless of the resolved profile
     // allow-set (which is `All` for top-level runs, making a profile allow-set
     // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
-    let disabled = DISABLED_CAPABILITY_IDS
+    let global_denied = DISABLED_CAPABILITY_IDS
         .iter()
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
-    if !disabled.is_empty() {
-        capability_factory_builder = capability_factory_builder
-            .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(disabled)));
-    }
+    // Issue #5505: a scheduled-trigger fire must not be able to create,
+    // remove, pause, or resume triggers (read-only trigger_list stays
+    // available). Kept as a *second* named set — not folded into
+    // `global_denied` — so it only applies on the `scheduled_trigger`
+    // capability-surface profile.
+    let scheduled_trigger_denied = SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    // Construction-guard fix: always add this decorator, even when both deny
+    // sets happen to be empty. A prior version only added it `if
+    // !disabled.is_empty()`, which meant emptying `DISABLED_CAPABILITY_IDS`
+    // (the documented spawn_subagent re-enable toggle) would silently also
+    // drop the scheduled-trigger deny — an unrelated toggle must never
+    // re-enable `trigger_create` for scheduled fires. Kept as the OUTERMOST
+    // decorator (added last, after the tool-disclosure decorator above) so
+    // it strips capabilities regardless of what surfaced them.
+    capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
+        DisabledCapabilitiesDecorator::new(global_denied, scheduled_trigger_denied),
+    ));
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(capability_factory_builder);
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
@@ -781,14 +798,39 @@ where
 const DISABLED_CAPABILITY_IDS: &[&str] =
     &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
 
+/// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
+/// an interactive turn, but must not be able to create/remove/pause/resume
+/// triggers (a fire mutating the trigger fleet is exactly the reported "a
+/// routine that creates routines" bug). Read-only
+/// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
+/// excluded from this list. Applied only when the resolved profile's
+/// `capability_surface_profile_id` is
+/// [`crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`].
+const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
+    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+];
+
+/// Global deny list (applies to every resolved profile) plus a per-profile
+/// deny list keyed on `capability_surface_profile_id`. Both `CapabilityId`
+/// vecs are constructed once here — `CapabilityId::new` is fallible, so
+/// validation happens at composition time, never inside `decorate()`.
+///
+/// A `match` (rather than a `HashMap`) is deliberate: exactly one
+/// per-profile entry exists today. Promote to a table only when a second
+/// profile-scoped deny set actually lands.
 struct DisabledCapabilitiesDecorator {
-    denied_capability_ids: Vec<CapabilityId>,
+    global_denied: Vec<CapabilityId>,
+    scheduled_trigger_denied: Vec<CapabilityId>,
 }
 
 impl DisabledCapabilitiesDecorator {
-    fn new(denied_capability_ids: Vec<CapabilityId>) -> Self {
+    fn new(global_denied: Vec<CapabilityId>, scheduled_trigger_denied: Vec<CapabilityId>) -> Self {
         Self {
-            denied_capability_ids,
+            global_denied,
+            scheduled_trigger_denied,
         }
     }
 }
@@ -796,13 +838,19 @@ impl DisabledCapabilitiesDecorator {
 impl LoopCapabilityPortDecorator for DisabledCapabilitiesDecorator {
     fn decorate(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        Arc::new(CapabilitySurfaceDenyFilter::new(
-            inner,
-            self.denied_capability_ids.iter().cloned(),
-        ))
+        let mut denied = self.global_denied.clone();
+        if run_context
+            .resolved_run_profile
+            .capability_surface_profile_id
+            .as_str()
+            == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+        {
+            denied.extend(self.scheduled_trigger_denied.iter().cloned());
+        }
+        Arc::new(CapabilitySurfaceDenyFilter::new(inner, denied))
     }
 }
 
@@ -864,14 +912,19 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::scheduler_permit_count;
+    use super::{DisabledCapabilitiesDecorator, scheduler_permit_count};
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId};
+    use ironclaw_host_runtime::{
+        TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    };
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+            CapabilityBatchOutcome, CapabilityDescriptorView, CapabilityInvocation,
+            CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
             LoopRunContext, RunProfileResolutionRequest, VisibleCapabilityRequest,
             VisibleCapabilitySurface,
         },
@@ -938,16 +991,43 @@ mod tests {
     }
 
     async fn test_run_context() -> LoopRunContext {
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .unwrap();
+        test_run_context_with_resolved_profile(resolved)
+    }
+
+    fn test_run_context_with_resolved_profile(
+        resolved: ironclaw_turns::run_profile::ResolvedRunProfile,
+    ) -> LoopRunContext {
         let tenant_id = TenantId::new("tenant-runtime-test").unwrap();
         let agent_id = AgentId::new("agent-runtime-test").unwrap();
         let project_id = ProjectId::new("project-runtime-test").unwrap();
         let thread_id = ThreadId::new("thread-runtime-test").unwrap();
         let turn_scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
-        let resolved = InMemoryRunProfileResolver::default()
-            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-            .await
-            .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    /// Run context whose resolved profile carries the `scheduled_trigger`
+    /// capability-surface-profile id — built through the real production
+    /// resolver (`default_planned_run_profile_resolver`), not a hand-rolled
+    /// `ResolvedRunProfile`, so the test tracks the actual registration.
+    async fn scheduled_trigger_run_context() -> LoopRunContext {
+        use crate::planned_driver_factory::default_planned_run_profile_resolver;
+        use ironclaw_turns::{RunProfileId, RunProfileRequest};
+
+        let resolver =
+            default_planned_run_profile_resolver().expect("planned resolver should build");
+        let resolved = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(RunProfileId::scheduled_trigger().as_str()).unwrap(),
+                ),
+            )
+            .await
+            .expect("scheduled_trigger profile should resolve");
+        test_run_context_with_resolved_profile(resolved)
     }
 
     struct FailingFactory {
@@ -1140,6 +1220,189 @@ mod tests {
             self.decorate_calls.fetch_add(1, Ordering::SeqCst);
             inner
         }
+    }
+
+    // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────
+
+    /// Fixed-surface inner port standing in for the host capability port —
+    /// exercised through `DecoratingLoopCapabilityPortFactory` +
+    /// `DisabledCapabilitiesDecorator`, the same composition pipeline used in
+    /// `build_default_planned_runtime` (runtime.rs `~610-621`), not
+    /// `decorate()` called in isolation.
+    struct FixedSurfacePort {
+        surface: VisibleCapabilitySurface,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for FixedSurfacePort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            Ok(self.surface.clone())
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "unused in this test",
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "unused in this test",
+            ))
+        }
+    }
+
+    fn descriptor(capability_id: &str) -> CapabilityDescriptorView {
+        CapabilityDescriptorView {
+            capability_id: CapabilityId::new(capability_id).expect("test capability id is valid"),
+            provider: None,
+            runtime: RuntimeKind::Wasm,
+            safe_name: capability_id.to_string(),
+            safe_description: format!("{capability_id} description"),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
+            parameters_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn full_trigger_and_spawn_surface() -> VisibleCapabilitySurface {
+        VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-v1").expect("test version is valid"),
+            descriptors: vec![
+                descriptor(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                descriptor(TRIGGER_CREATE_CAPABILITY_ID),
+                descriptor(TRIGGER_LIST_CAPABILITY_ID),
+                descriptor(TRIGGER_REMOVE_CAPABILITY_ID),
+                descriptor(TRIGGER_PAUSE_CAPABILITY_ID),
+                descriptor(TRIGGER_RESUME_CAPABILITY_ID),
+                descriptor("builtin.echo"),
+            ],
+        }
+    }
+
+    fn scheduled_trigger_mutator_ids() -> Vec<CapabilityId> {
+        [
+            TRIGGER_CREATE_CAPABILITY_ID,
+            TRIGGER_REMOVE_CAPABILITY_ID,
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            TRIGGER_RESUME_CAPABILITY_ID,
+        ]
+        .into_iter()
+        .map(|id| CapabilityId::new(id).expect("trigger mutator capability id is valid"))
+        .collect()
+    }
+
+    async fn visible_capability_ids(
+        factory: &DecoratingLoopCapabilityPortFactory,
+        run_context: &LoopRunContext,
+    ) -> Vec<String> {
+        let port = factory
+            .create_capability_port(run_context)
+            .await
+            .expect("composed capability port");
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities")
+            .descriptors
+            .into_iter()
+            .map(|descriptor| descriptor.capability_id.as_str().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn scheduled_trigger_surface_excludes_mutators_interactive_includes_them() {
+        // Test through the caller: drive the composed
+        // DecoratingLoopCapabilityPortFactory + DisabledCapabilitiesDecorator
+        // pipeline's `visible_capabilities()`, not `decorate()` in isolation.
+        let global_denied = vec![
+            CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        ];
+        let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
+            surface: full_trigger_and_spawn_surface(),
+        });
+        let factory =
+            DecoratingLoopCapabilityPortFactory::new(Arc::new(StaticFactory { port: inner }))
+                .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(
+                    global_denied,
+                    scheduled_trigger_mutator_ids(),
+                )));
+
+        let scheduled_ids =
+            visible_capability_ids(&factory, &scheduled_trigger_run_context().await).await;
+        assert!(
+            !scheduled_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()),
+            "scheduled_trigger surface must exclude trigger_create: {scheduled_ids:?}"
+        );
+        assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(
+            scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()),
+            "read-only trigger_list must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
+        );
+        assert!(
+            !scheduled_ids
+                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
+            "global deny list must still apply on scheduled_trigger surface"
+        );
+
+        let interactive_ids = visible_capability_ids(&factory, &test_run_context().await).await;
+        assert!(
+            interactive_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()),
+            "interactive_tools surface must include trigger_create: {interactive_ids:?}"
+        );
+        assert!(interactive_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
+        assert!(interactive_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
+        assert!(interactive_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(interactive_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
+        assert!(
+            !interactive_ids
+                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
+            "global deny list must still apply on the interactive surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_trigger_mutators_stay_denied_when_global_deny_list_is_emptied() {
+        // Regression for the footgun described in the plan: emptying
+        // DISABLED_CAPABILITY_IDS (the documented spawn_subagent re-enable
+        // toggle) must never silently re-enable the trigger mutators for a
+        // scheduled fire.
+        let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
+            surface: full_trigger_and_spawn_surface(),
+        });
+        let factory =
+            DecoratingLoopCapabilityPortFactory::new(Arc::new(StaticFactory { port: inner }))
+                .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(
+                    Vec::new(),
+                    scheduled_trigger_mutator_ids(),
+                )));
+
+        let scheduled_ids =
+            visible_capability_ids(&factory, &scheduled_trigger_run_context().await).await;
+
+        assert!(!scheduled_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
+        // Global list was empty, so the previously-denied spawn_subagent
+        // capability is now visible again (expected — this is what "emptying
+        // the toggle" means); only the scheduled-trigger set stays denied.
+        assert!(
+            scheduled_ids
+                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string())
+        );
     }
 
     // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
