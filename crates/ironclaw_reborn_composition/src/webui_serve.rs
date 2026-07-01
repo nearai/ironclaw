@@ -258,6 +258,7 @@ pub struct WebuiServeConfig {
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
+    pub(crate) slack_personal_oauth: Option<crate::input::OAuthClientConfig>,
     /// Optional Slack personal-binding WebUI OAuth route config.
     /// Host binaries must opt in explicitly after wiring a host-owned
     /// Slack OAuth client plus identity binding store.
@@ -375,6 +376,7 @@ impl WebuiServeConfig {
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
             google_oauth: None,
+            slack_personal_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_binding: None,
             #[cfg(feature = "slack-v2-host-beta")]
@@ -386,6 +388,12 @@ impl WebuiServeConfig {
 
     pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
         self.google_oauth = Some(config);
+        self
+    }
+
+    /// Slack personal (user-token) OAuth client config for the WebUI setup flow.
+    pub fn with_slack_personal_oauth(mut self, config: crate::input::OAuthClientConfig) -> Self {
+        self.slack_personal_oauth = Some(config);
         self
     }
 
@@ -604,6 +612,9 @@ pub fn webui_v2_app_with_lifecycle(
         );
         if let Some(google_oauth) = config.google_oauth.clone() {
             state = state.with_google_oauth(google_oauth);
+        }
+        if let Some(slack_personal_oauth) = config.slack_personal_oauth.clone() {
+            state = state.with_slack_personal_oauth(slack_personal_oauth);
         }
         product_auth_route_mount(state)
     });
