@@ -556,6 +556,23 @@ impl InMemoryTurnStateStore {
         sink.persist(&snapshot).await;
     }
 
+    /// Durably flush the full current turn-state snapshot through the block sink.
+    ///
+    /// Persist-on-block only writes when the gate-blocked set changes, so between
+    /// gate events the durable snapshot lags the live in-memory state. On a
+    /// *graceful* shutdown (a planned deploy's SIGTERM) the runtime calls this so
+    /// the restart recovers **in-flight** turns too, not just gate-blocked ones —
+    /// closing the "deploy silently drops in-progress turns" gap. It writes the
+    /// same full snapshot `persist_blocked_state` does (going through the same
+    /// sequence/stale-skip guard, so a racing gate persist cannot clobber it), and
+    /// is a no-op when no durable sink is attached (the default in-memory store
+    /// used by tests, no-DB builds, and the stress tool). A hard crash (SIGKILL /
+    /// OOM) still loses in-flight state — bounding that needs a periodic flush,
+    /// which is a separate follow-up.
+    pub async fn flush(&self) {
+        self.persist_blocked_state().await;
+    }
+
     /// After a terminal transition, if `run_id` still had an outstanding
     /// gate-persisted snapshot, write once more so the durable snapshot converges
     /// to the terminal state — otherwise a run that blocked, resumed, and then

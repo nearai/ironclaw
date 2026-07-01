@@ -481,6 +481,13 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
+    /// flush the full snapshot durably (recovering in-flight turns on the next
+    /// restart, not just gate-blocked ones). `None` when no local runtime is
+    /// wired (e.g. production-parts launches); the durable filesystem store
+    /// already persists every transition, so it needs no shutdown flush.
+    #[cfg(feature = "inmemory-turn-state")]
+    turn_state_flush: Option<Arc<LocalDevTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -2130,6 +2137,16 @@ impl RebornRuntime {
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
+        // Everything that mutates turn state (trigger poller, credential-refresh
+        // worker, scheduler/runner) is now stopped, so the in-memory authority is
+        // quiescent. Flush its full snapshot durably so a planned restart recovers
+        // in-flight turns, not just gate-blocked ones. No-op unless a durable sink
+        // is attached; the durable filesystem store persists every transition and
+        // needs no shutdown flush (hence this is only wired under the feature).
+        #[cfg(feature = "inmemory-turn-state")]
+        if let Some(turn_state) = &self.turn_state_flush {
+            turn_state.flush().await;
+        }
         Ok(())
     }
 
@@ -3601,9 +3618,16 @@ pub async fn build_reborn_runtime(
         )
     });
 
+    // Concrete in-memory store handle for the graceful-shutdown flush (see the
+    // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
+    // doesn't disturb its later use.
+    #[cfg(feature = "inmemory-turn-state")]
+    let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        #[cfg(feature = "inmemory-turn-state")]
+        turn_state_flush,
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,

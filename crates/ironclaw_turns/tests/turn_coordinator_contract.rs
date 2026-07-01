@@ -1334,6 +1334,72 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
     );
 }
 
+/// Graceful-shutdown flush must durably capture **in-flight, non-blocked** runs,
+/// not just gate-blocked ones — that is what makes a planned deploy (SIGTERM)
+/// recover in-progress turns instead of dropping them. Persist-on-block never
+/// fires for a plain running turn, so only `flush()` covers it.
+#[tokio::test]
+async fn flush_persists_in_flight_non_blocked_run() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-flush", "idem-flush"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-flush")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // The run is now Running (in-flight) and never blocked, so persist-on-block
+    // has not fired — the hot path stays off the sink.
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/run must not persist on the hot path"
+    );
+
+    // Graceful shutdown flush captures the in-flight run.
+    store.flush().await;
+    let flushed = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    let record = flushed
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("in-flight run present in flushed snapshot");
+    assert!(
+        matches!(record.status, TurnStatus::Running | TurnStatus::Queued),
+        "flush must capture the in-flight non-blocked run, got {:?}",
+        record.status
+    );
+
+    // And it rehydrates, so a restart recovers the in-flight run.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        flushed,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        restored
+            .persistence_snapshot()
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id),
+        "in-flight run survives flush + rehydration"
+    );
+}
+
 #[tokio::test]
 async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
     let store = Arc::new(InMemoryTurnStateStore::default());
