@@ -29,9 +29,9 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
         LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        ModelVisibleToolObservation, ParentLoopOutput, ProviderToolCallReference,
+        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
         StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -465,6 +465,8 @@ pub enum ScriptedCapabilityOutcome {
         terminate_hint: bool,
         /// Optional digest over completed output.
         output_digest: Option<ContentDigest>,
+        /// Optional model-visible observation for completed output.
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     /// Approval gate.
     ApprovalRequired {
@@ -514,6 +516,7 @@ impl ScriptedCapabilityOutcome {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -527,6 +530,7 @@ impl ScriptedCapabilityOutcome {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             output_digest: Some(output_digest),
+            model_observation: None,
         }
     }
 
@@ -537,6 +541,7 @@ impl ScriptedCapabilityOutcome {
             progress: CapabilityProgress::NoChange,
             terminate_hint: false,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -547,6 +552,7 @@ impl ScriptedCapabilityOutcome {
             progress: CapabilityProgress::Blocked,
             terminate_hint: false,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -557,6 +563,7 @@ impl ScriptedCapabilityOutcome {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: true,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -1077,6 +1084,7 @@ fn scripted_capability_outcome(
             progress,
             terminate_hint,
             output_digest,
+            model_observation,
         } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
@@ -1085,6 +1093,7 @@ fn scripted_capability_outcome(
             terminate_hint,
             byte_len: 0,
             output_digest,
+            model_observation,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // ASCII letters, digits, `_`, `-`, or `.`.
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
-const MAX_MODEL_OBSERVATION_BYTES: usize = 4096;
+const MAX_MODEL_OBSERVATION_BYTES: usize = 16 * 1024;
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -505,6 +505,14 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 128,
             )
         }
+        "output" => {
+            validate_object_keys(object, &["kind", "content"], "model observation detail")?;
+            validate_model_observation_value(required_field(
+                object,
+                "content",
+                "model observation detail",
+            )?)
+        }
         other => Err(format!(
             "model observation detail kind `{other}` is unsupported"
         )),
@@ -939,6 +947,34 @@ mod tests {
         .expect("nested formatting whitespace is valid");
 
         assert!(envelope.model_observation.is_some());
+    }
+
+    #[test]
+    fn model_observation_accepts_success_output_detail() {
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed.",
+            "detail": {
+                "kind": "output",
+                "content": {
+                    "path": "MEMORY.md",
+                    "content": "remembered"
+                }
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:memory-read",
+            ToolResultSafeSummary::new("capability completed").expect("summary"),
+            observation.clone(),
+        )
+        .expect("output observation is valid");
+
+        assert_eq!(
+            envelope.model_visible_content_or_safe_summary(),
+            serde_json::to_string(&observation).expect("serialize")
+        );
     }
 
     #[test]

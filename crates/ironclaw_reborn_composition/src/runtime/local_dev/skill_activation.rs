@@ -5,7 +5,7 @@ use ironclaw_host_api::InvocationId;
 use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+    CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint, ModelVisibleToolObservation,
 };
 
 use crate::runtime::{
@@ -95,6 +95,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             "activated": activated,
             "count": activated.len(),
         });
+        let model_observation = ModelVisibleToolObservation::success_output(output.clone()).ok();
         let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -113,6 +114,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation,
         }))
     }
 }

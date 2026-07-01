@@ -248,6 +248,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -370,6 +371,7 @@ impl LoopCapabilityPort for AuthPassPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -1223,6 +1225,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         terminate_hint: false,
         byte_len: 0,
         output_digest: None,
+        model_observation: None,
     })
 }
 
