@@ -948,6 +948,8 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
     ))
 }
 
+// `internal_from` logs the backend cause while keeping the facade payload
+// sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
     RebornServicesError::internal_from(error)
 }

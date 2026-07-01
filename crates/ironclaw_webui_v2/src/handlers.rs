@@ -67,7 +67,7 @@ use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
 // initial approval UI state. It is mutable through `/settings/tools`, so do
 // not cache it across requests; the settings route remains authoritative.
-const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(100);
+const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(250);
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
@@ -102,7 +102,8 @@ pub struct WebUiV2Features {
     pub reborn_projects: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
-    /// operator settings payload shape.
+    /// operator settings payload shape. Settings mutations should update local
+    /// UI state directly or re-fetch `/session`; this field is only a snapshot.
     pub global_auto_approve: bool,
 }
 
