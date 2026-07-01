@@ -308,6 +308,61 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     .await
     .expect("local-dev services build");
     assert!(services.product_auth.is_some());
+    assert!(
+        services.local_dev_wasm_runtime_credential_provider_captured,
+        "local-dev WASM runtime must capture the product-auth credential provider"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_google_oauth_backend_captures_wasm_credential_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "production-google-oauth-owner",
+            db,
+            dir.path().join("events.db").display().to_string(),
+            None,
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_google_oauth_backend(OAuthClientConfig {
+            client_id: OAuthClientId::new("google-client-123").expect("client id"),
+            client_secret: None,
+            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+                .expect("redirect uri"),
+            hosted_domain_hint: None,
+        })
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("production services build");
+
+    assert!(services.product_auth.is_some());
+    assert!(
+        services.local_dev_wasm_runtime_credential_provider_captured,
+        "production WASM runtime must capture the product-auth credential provider"
+    );
 }
 
 #[tokio::test]

@@ -3,12 +3,50 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use ironclaw_product_workflow::ResolvedBinding;
+
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
     IndexSpec, LocalFilesystem, Page, RecordVersion, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
+
+/// Build the turn-state scope path for `binding`, with `root_prefix`
+/// prepended before `/tenants/...`.
+///
+/// The 4-arm match selects a path that isolates turn state by the combination
+/// of tenant, optional agent, optional project, and owner user:
+/// - Binary-E2E tier: `root_prefix = "/engine"` → `/engine/tenants/{t}/.../{u}/turns`
+/// - Integration tier: `root_prefix = ""` → `/tenants/{t}/.../{u}/turns`
+///
+/// Extracted here so `scoped_turns_fs` (harness.rs) and `scoped_turns_fs_composite`
+/// (builder.rs) share one source of turn-path truth; adding a new dimension
+/// (e.g. `mission_id`) only requires updating this function.
+pub fn turns_scope_path(root_prefix: &str, binding: &ResolvedBinding) -> String {
+    let owner_user_id = binding
+        .subject_user_id
+        .as_ref()
+        .unwrap_or(&binding.actor_user_id);
+    match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
+        (Some(agent_id), Some(project_id)) => format!(
+            "{root_prefix}/tenants/{}/agents/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, agent_id, project_id, owner_user_id
+        ),
+        (Some(agent_id), None) => format!(
+            "{root_prefix}/tenants/{}/agents/{}/users/{}/turns",
+            binding.tenant_id, agent_id, owner_user_id
+        ),
+        (None, Some(project_id)) => format!(
+            "{root_prefix}/tenants/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, project_id, owner_user_id
+        ),
+        (None, None) => format!(
+            "{root_prefix}/tenants/{}/users/{}/turns",
+            binding.tenant_id, owner_user_id
+        ),
+    }
+}
 
 pub fn local_filesystem(root: &Path) -> Result<LocalFilesystem, FilesystemError> {
     let mut fs = LocalFilesystem::new();

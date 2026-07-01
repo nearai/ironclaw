@@ -219,6 +219,7 @@ export function useChat(threadId) {
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
   const submitBusyRef = React.useRef(false);
+  const localRunAdmissionRef = React.useRef(null);
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -259,6 +260,14 @@ export function useChat(threadId) {
   React.useEffect(() => {
     threadIdRef.current = threadId;
   }, [threadId]);
+  React.useEffect(
+    () => () => {
+      if (localRunAdmissionRef.current?.threadId === threadId) {
+        localRunAdmissionRef.current = null;
+      }
+    },
+    [threadId],
+  );
 
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
@@ -322,6 +331,17 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      const localRunAdmission = localRunAdmissionRef.current;
+      if (localRunAdmission?.runId === _runId) {
+        localRunAdmissionRef.current = null;
+      } else if (_runId && localRunAdmission && !localRunAdmission.runId) {
+        // The terminal SSE can arrive before the POST response exposes run_id.
+        localRunAdmissionRef.current = {
+          ...localRunAdmission,
+          runId: _runId,
+          settledBeforeResponse: true,
+        };
+      }
       // submitBusyRef is released by send()'s `finally` when the POST settles —
       // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
       // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
@@ -363,6 +383,14 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
+      // The only local admission guard is the in-flight-POST re-entrancy lock:
+      // it blocks a duplicate submit while the previous send request has not
+      // settled. Run/processing state must NOT block a send — a follow-up into
+      // a still-running thread (same or parallel) must reach the backend so
+      // Reborn can queue it (deferred_busy), and sends to other threads / new
+      // chats must never be dropped just because the viewed thread is running.
+      // Per-destination busy state is the backend queue's responsibility, not
+      // this guard's.
       if (submitBusyRef.current) {
         return null;
       }
@@ -409,7 +437,16 @@ export function useChat(threadId) {
       const updateCurrentRunState = (updater) => {
         if (shouldRenderInCurrentThread) updater();
       };
-
+      // Only the rendered thread has an SSE settle path in this hook. Background
+      // target sends are left to the server's rejected_busy response instead.
+      const shouldTrackLocalRun = shouldRenderInCurrentThread;
+      if (shouldTrackLocalRun) {
+        localRunAdmissionRef.current = {
+          threadId: sendThreadId,
+          runId: null,
+          settledBeforeResponse: false,
+        };
+      }
       submitBusyRef.current = true;
       updateCurrentThread((prev) => [...prev, optimisticMessage]);
       updateSeededTarget((prev) => [...prev, optimisticMessage]);
@@ -433,7 +470,32 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id && shouldRenderInCurrentThread) {
+        let runSettledBeforeResponse = false;
+        if (response?.run_id && shouldTrackLocalRun) {
+          const localRunAdmission = localRunAdmissionRef.current;
+          runSettledBeforeResponse = Boolean(
+            localRunAdmission &&
+              localRunAdmission.threadId === sendThreadId &&
+              localRunAdmission.runId === response.run_id &&
+              localRunAdmission.settledBeforeResponse,
+          );
+          if (runSettledBeforeResponse) {
+            localRunAdmissionRef.current = null;
+          } else {
+            localRunAdmissionRef.current = {
+              threadId: sendThreadId,
+              runId: response.run_id,
+              settledBeforeResponse: false,
+            };
+          }
+        } else if (shouldTrackLocalRun) {
+          localRunAdmissionRef.current = null;
+        }
+        if (
+          response?.run_id &&
+          shouldRenderInCurrentThread &&
+          !runSettledBeforeResponse
+        ) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -458,6 +520,11 @@ export function useChat(threadId) {
         }
         const busyOutcome = BUSY_OUTCOME[response?.outcome];
         if (busyOutcome) {
+          // A busy outcome (deferred or rejected) started no new local run, so
+          // drop any local-run admission this send optimistically recorded.
+          if (shouldTrackLocalRun) {
+            localRunAdmissionRef.current = null;
+          }
           // One mapper drives the UI status for both busy outcomes so the
           // optimistic bubble matches what `messagesFromTimeline` renders
           // after a reload (deferred -> queued, rejected -> error).
@@ -510,10 +577,19 @@ export function useChat(threadId) {
           if (busyOutcome.stopProcessing) {
             updateCurrentRunState(() => setIsProcessing(false));
           }
+        } else if (!response?.run_id) {
+          // No run started and not a busy outcome: drop the optimistic local
+          // admission so a later send is not blocked by stale state.
+          if (shouldTrackLocalRun) {
+            localRunAdmissionRef.current = null;
+          }
         }
         // submitBusyRef is released in `finally` (single source) — see below.
         return response;
       } catch (err) {
+        if (shouldTrackLocalRun) {
+          localRunAdmissionRef.current = null;
+        }
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
@@ -541,7 +617,8 @@ export function useChat(threadId) {
         // flight — that thread's SSE is torn down, its settle event never
         // arrives, the guard stays `true`, and every later send is silently
         // dropped. Follow-up sends into a still-running thread must be allowed
-        // to reach the backend queue after this POST completes.
+        // to reach the backend queue after this POST completes — blocking a
+        // resubmit into a busy thread is the backend queue's job, not this.
         submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
@@ -617,6 +694,13 @@ export function useChat(threadId) {
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
+      const localRunAdmission = localRunAdmissionRef.current;
+      if (
+        localRunAdmission?.runId === runId ||
+        localRunAdmission?.threadId === threadId
+      ) {
+        localRunAdmissionRef.current = null;
+      }
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
