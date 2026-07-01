@@ -35,9 +35,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
-use ironclaw_product_adapters::{
-    DeliveryStatus, ProductInboundAck, ProductTriggerReason, ProductWorkflow,
-};
+use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
@@ -48,7 +46,6 @@ use ironclaw_turns::{
     TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::delivery::RecordingOutboundDeliverySink;
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{
     HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
@@ -288,11 +285,6 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
-    /// Per-thread outbound-delivery sink (E-OUTBOUND seam). The in-process
-    /// `submit_turn` path does not drive outbound delivery itself; this sink is
-    /// the shared handle a delivery-driver test (C-OUTBOUND) feeds to
-    /// `prepare_and_render_product_outbound`. Unused in PR-E1.
-    pub(crate) delivery_sink: RecordingOutboundDeliverySink,
 }
 
 impl RebornIntegrationHarness {
@@ -384,21 +376,6 @@ impl RebornIntegrationHarness {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
         Ok((run_id, gate_ref))
-    }
-
-    /// Snapshot of outbound delivery statuses recorded for this thread
-    /// (E-OUTBOUND seam). Unused in PR-E1; consumed by C-OUTBOUND's
-    /// delivery-driver tests once a turn drives `prepare_and_render_product_outbound`
-    /// through `delivery_sink()`.
-    pub fn delivery_statuses(&self) -> Vec<DeliveryStatus> {
-        self.delivery_sink.statuses()
-    }
-
-    /// The per-thread outbound-delivery sink (E-OUTBOUND seam). C-OUTBOUND passes
-    /// this into a delivery driver so a full turn's reply payload + reply target
-    /// are recorded for `delivery_statuses()` assertions.
-    pub(crate) fn delivery_sink(&self) -> &RecordingOutboundDeliverySink {
-        &self.delivery_sink
     }
 
     /// Assert the finalized assistant reply in thread history contains `text`.

@@ -1867,6 +1867,39 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
+    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Uses `new_with_options` (not `core_builtin_tools_from_runtime`), so
+    /// `profile_filesystem` is populated from `services.local_dev_profile_filesystem_for_test()`
+    /// — the read-back half of the round trip a `RebornIntegrationGroup::profile_tools()`
+    /// scenario needs. Base mounts are `/memory` directly (this harness's only
+    /// capability needs it; no per-capability mount override required, unlike
+    /// `core_builtin_tools_from_runtime`'s multi-capability surface).
+    pub(crate) async fn profile_tools() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
+            "reborn-e2e-profile-tools",
+            vec![CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-profile-tools-user")?,
+            HostRuntimeHarnessOptions::new(
+                memory_mounts(MountPermissions::read_write_list_delete())?,
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
     async fn skill_management_tools() -> HarnessResult<Self> {
         let mut harness = Self::new_with_options(
             "reborn-e2e-skill-management-tools",

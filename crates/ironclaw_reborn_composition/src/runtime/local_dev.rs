@@ -81,7 +81,6 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 /// `project_create_capability` + `wrap_local_dev_synthetic_capabilities`, so the
 /// test path never hand-mirrors the production wrap.
 #[cfg(feature = "test-support")]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn wrap_project_create_capability_for_test(
     inner: Arc<dyn LoopCapabilityPort>,
     project_service: Arc<dyn ProjectService>,

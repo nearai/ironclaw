@@ -83,7 +83,8 @@ use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
-    HostManagedModelGateway, JsonSpawnSubagentInputCodec, SubagentSpawnLimits,
+    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    SubagentSpawnLimits,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
@@ -114,7 +115,6 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
-use super::delivery::RecordingOutboundDeliverySink;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -182,6 +182,14 @@ pub(crate) struct GroupSharedStorage {
     /// `Arc`-wrapped inner state) and slices `[baseline_*..]` so assertions
     /// only see that thread's own deltas (R2).
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
+    /// The exact `HostUserProfileSource` wired into the group's ONE planned
+    /// runtime (E-PROFILE seam; built once in `into_group` from
+    /// `capability_recorder.profile_filesystem()`). Kept so a profile-round-trip
+    /// test can call `resolve_user_profile` on the SAME instance the running
+    /// loop reads from, rather than re-deriving an equivalent one — a mutation
+    /// that breaks the `into_group` wiring (not just `build_user_profile_source_for_test`
+    /// itself) is caught.
+    pub(crate) user_profile_source: Arc<dyn HostUserProfileSource>,
 }
 
 impl GroupSharedStorage {
@@ -294,6 +302,14 @@ impl RebornIntegrationGroup {
         Self::builder().project_lifecycle().await
     }
 
+    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Auto-approve is enabled. Use `user_profile_source_for_test()` to read
+    /// a written profile back through the same adapter the group's planned
+    /// runtime resolves user profiles from.
+    pub async fn profile_tools() -> HarnessResult<Self> {
+        Self::builder().profile_tools().await
+    }
+
     /// Builder for advanced configuration (e.g. `StorageMode::LibSql`).
     /// Defaults to `StorageMode::InMemory`.
     pub fn builder() -> RebornIntegrationGroupBuilder {
@@ -339,6 +355,15 @@ impl RebornIntegrationGroup {
             GroupCapability::HostRuntime(arc) => Some(arc),
             GroupCapability::Recording => None,
         }
+    }
+
+    /// The exact `HostUserProfileSource` wired into this group's ONE planned
+    /// runtime (E-PROFILE seam). Lets a test read back a `profile_set` write
+    /// through the SAME production adapter the running loop resolves user
+    /// profiles from, rather than reconstructing an equivalent one — see the
+    /// field docs on `GroupSharedStorage::user_profile_source`.
+    pub(crate) fn user_profile_source_for_test(&self) -> &Arc<dyn HostUserProfileSource> {
+        &self.shared.user_profile_source
     }
 }
 
@@ -500,6 +525,10 @@ impl RebornIntegrationGroupBuilder {
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let model_gateway: Arc<dyn HostManagedModelGateway> =
             Arc::clone(&scope_gateway) as Arc<dyn HostManagedModelGateway>;
+        let user_profile_source: Arc<dyn HostUserProfileSource> =
+            ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
+                capability_recorder.profile_filesystem(),
+            );
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -535,10 +564,10 @@ impl RebornIntegrationGroupBuilder {
             // returns `None` when no `context/profile.json` exists, so existing
             // HostRuntime group tests are behavior-identical. Built once here (not
             // per-thread) because the group's ONE planned runtime is assembled once.
-            user_profile_source:
-                ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
-                    capability_recorder.profile_filesystem(),
-                ),
+            // Kept in a local (rather than built inline) so the SAME `Arc` can
+            // also be stashed on `GroupSharedStorage` for a profile-round-trip
+            // test to read from directly (see `user_profile_source` field docs).
+            user_profile_source: Arc::clone(&user_profile_source),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
@@ -562,6 +591,7 @@ impl RebornIntegrationGroupBuilder {
                 scope_gateway,
                 turn_store,
                 capability_recorder,
+                user_profile_source,
             }),
         })
     }
@@ -649,6 +679,14 @@ impl RebornIntegrationGroupBuilder {
     pub async fn project_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::project_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
+    pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = HostRuntimeCapabilityHarness::profile_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
@@ -826,7 +864,6 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_egress_count,
             baseline_result_count,
             baseline_process_count,
-            delivery_sink: RecordingOutboundDeliverySink::new(),
         })
     }
 }

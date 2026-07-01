@@ -830,9 +830,11 @@ where
 /// (the `gate:approval-` prefix parse + `ApprovalStatus::Pending` check)
 /// never drifts from production. Tests only.
 ///
-/// Wired by the Reborn integration-test framework's `assemble_thread_runtime`
-/// so a `BlockedApproval` run is verified against the persisted `Pending`
-/// approval request at loop exit and genuinely pauses — mirrors the production
+/// Wired by the Reborn integration-test harness's one-runtime group assembly
+/// (`tests/support/reborn/group.rs`'s `into_group`, which builds the group's
+/// single planned runtime via `build_default_planned_runtime`) so a
+/// `BlockedApproval` run is verified against the persisted `Pending` approval
+/// request at loop exit and genuinely pauses — mirrors the production
 /// `runtime.rs` path with the real type, never a hand-mirrored copy.
 #[cfg(feature = "test-support")]
 pub fn build_local_dev_approval_gate_evidence_for_test(
@@ -855,7 +857,6 @@ pub const PROJECT_CREATE_CAPABILITY_ID: &str = crate::runtime::PROJECT_CREATE_CA
 /// `project_create_capability`), so the dispatch path never drifts from
 /// production.
 #[cfg(feature = "test-support")]
-#[allow(clippy::too_many_arguments)]
 pub fn wrap_project_create_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
@@ -878,7 +879,8 @@ pub fn wrap_project_create_capability_for_test(
 }
 
 /// Build the `HostUserProfileSource` the Reborn integration harness wires into
-/// `assemble_thread_runtime` (E-PROFILE seam).
+/// the group's single planned runtime in `into_group`
+/// (`tests/support/reborn/group.rs`, E-PROFILE seam).
 ///
 /// Reuses the production `MemoryBackedUserProfileSourceAdapter` (the single
 /// orphan-rule wrapper around `MemoryBackedUserProfileSource`) so the test path

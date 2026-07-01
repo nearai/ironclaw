@@ -811,7 +811,6 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
 /// without widening any production type's visibility; mirrors the
 /// approval-gate-evidence forwarder above.
 #[cfg(feature = "test-support")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn wrap_project_create_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
