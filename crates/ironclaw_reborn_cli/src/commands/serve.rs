@@ -32,7 +32,7 @@ use secrecy::SecretString;
 use crate::context::RebornCliContext;
 use crate::runtime::{
     RuntimeInputOptions, open_trigger_access_store_for_profile,
-    resolve_google_oauth_config_from_env,
+    resolve_google_oauth_config_from_env, resolve_slack_personal_oauth_config_from_env,
 };
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
@@ -506,6 +506,11 @@ impl ServeCommand {
                         .context("invalid Google OAuth hosted-domain hint for WebUI")?;
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
+            }
+            if let Some(slack_personal_oauth) = resolve_slack_personal_oauth_config_from_env()
+                .context("failed to resolve Slack personal OAuth setup config for WebUI")?
+            {
+                serve_config = serve_config.with_slack_personal_oauth(slack_personal_oauth);
             }
             if let Some(value) = csp_override {
                 serve_config = serve_config

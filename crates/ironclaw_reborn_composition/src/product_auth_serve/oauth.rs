@@ -78,6 +78,9 @@ pub(super) async fn extension_oauth_start_handler(
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    if request.provider == SLACK_PERSONAL_PROVIDER_ID {
+        return start_slack_personal_oauth_flow(state, caller, request, requester_extension).await;
+    }
     if request.provider != GOOGLE_PROVIDER_ID {
         return start_dcr_extension_oauth_flow(state, caller, request, requester_extension).await;
     }
@@ -158,6 +161,100 @@ async fn start_dcr_extension_oauth_flow(
         status: flow.status,
         provider,
         authorization_url: authorization_url.clone(),
+        expires_at: flow.expires_at,
+        continuation: flow.continuation,
+        callback_scope: scope_hint(&scope),
+    }))
+}
+
+/// Non-DCR extension OAuth start for the Slack personal (user-token) provider.
+///
+/// Mirrors [`start_google_oauth_flow`] but uses the Slack authorize URL
+/// (`user_scope`) + [`SlackPersonalOAuthCallbackState`] and the Slack client
+/// config. Needed because `extension_oauth_start_handler` otherwise routes
+/// every non-Google provider to the DCR path, which `slack_personal` is not.
+async fn start_slack_personal_oauth_flow(
+    state: ProductAuthRouteState,
+    caller: WebUiAuthenticatedCaller,
+    request: ExtensionOAuthStartRequest,
+    requester_extension: ExtensionId,
+) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
+    let now = Utc::now();
+    if request.expires_at <= now
+        || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
+    {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
+
+    let config = state.slack_personal_oauth_config()?;
+    let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let account_label = CredentialAccountLabel::new(request.account_label)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let requested_scopes = request
+        .scopes
+        .into_iter()
+        .map(ProviderScope::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let fields = ScopeFields {
+        session_id: None,
+        thread_id: None,
+        invocation_id: request.invocation_id,
+    };
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let flow_id = AuthFlowId::new();
+    let update_binding = scoped_update_binding_for_requester(
+        &state,
+        scope.clone(),
+        provider.clone(),
+        Some(&requester_extension),
+    )
+    .await?;
+    let opaque_state = SlackPersonalOAuthCallbackState::new(
+        flow_id,
+        scope.clone(),
+        account_label,
+        requested_scopes.clone(),
+    )
+    .map_err(ProductAuthRouteFailure::from)?
+    .encode()
+    .map_err(ProductAuthRouteFailure::from)?;
+    let opaque_state_hash = opaque_state_hash(opaque_state.as_str())?;
+    let pkce_verifier_secret = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
+    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier_secret.expose_secret())?;
+    let pkce_secret = PkceVerifierSecret::new(pkce_verifier_secret.clone())
+        .map_err(ProductAuthRouteFailure::from)?;
+    let pkce_challenge = pkce_s256_challenge(&pkce_secret);
+    let authorization_url = build_slack_personal_authorization_url(
+        config.client_id.as_str(),
+        config.redirect_uri.as_str(),
+        opaque_state.as_str(),
+        &pkce_challenge,
+        &requested_scopes,
+    )
+    .map_err(ProductAuthRouteFailure::from)?;
+
+    let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
+        RebornOAuthStartFlowRequest {
+            flow_id: Some(flow_id),
+            scope: scope.clone(),
+            provider: provider.clone(),
+            authorization_url: authorization_url.clone(),
+            opaque_state_hash: opaque_state_hash.clone(),
+            pkce_verifier_hash,
+            update_binding,
+            expires_at: request.expires_at,
+        },
+    ))
+    .await?;
+    state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
+
+    Ok(Json(ProductOAuthStartResponse {
+        flow_id: flow.id,
+        status: flow.status,
+        provider,
+        authorization_url,
         expires_at: flow.expires_at,
         continuation: flow.continuation,
         callback_scope: scope_hint(&scope),
