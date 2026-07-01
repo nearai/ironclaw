@@ -60,6 +60,7 @@ jobs:
           set -euo pipefail
 
           release_cache_root=""
+          min_cache_kb=$((20 * 1024 * 1024))
           cache_candidates=()
           if [[ -n "${STATIC_RUNNER_WORK_CACHE:-}" ]]; then
             cache_candidates+=("${STATIC_RUNNER_WORK_CACHE}/pilot-linux-artifact")
@@ -70,7 +71,12 @@ jobs:
           cache_candidates+=("${RUNNER_TEMP}/ironclaw-pilot-linux-artifact-cache")
 
           for candidate in "${cache_candidates[@]}"; do
-            if mkdir -p "${candidate}/cargo-home" "${candidate}/rustup-home" 2>/dev/null; then
+            if mkdir -p "${candidate}/cargo-home" "${candidate}/rustup-home" "${candidate}/tmp" 2>/dev/null; then
+              available_kb="$(df -Pk "${candidate}" | awk 'NR == 2 { print $4 }')"
+              if [[ "${candidate}" != "${RUNNER_TEMP}/"* && "${available_kb}" -lt "${min_cache_kb}" ]]; then
+                echo "::notice::skipping persistent cache ${candidate}; only ${available_kb} KiB available"
+                continue
+              fi
               release_cache_root="${candidate}"
               break
             fi
@@ -87,6 +93,7 @@ jobs:
           {
             echo "CARGO_HOME=${release_cache_root}/cargo-home"
             echo "RUSTUP_HOME=${release_cache_root}/rustup-home"
+            echo "TMPDIR=${release_cache_root}/tmp"
           } >> "$GITHUB_ENV"
 
       - name: Resolve source inputs
