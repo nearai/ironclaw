@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ascii-renderer.draw input",
+  "type": "object",
+  "properties": {
+    "subject": {
+      "type": "string",
+      "enum": ["cat", "dog", "robot"],
+      "description": "Which drawing to render. Defaults to robot."
+    }
+  },
+  "additionalProperties": false
+}

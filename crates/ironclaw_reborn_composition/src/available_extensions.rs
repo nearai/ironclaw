@@ -1557,6 +1557,75 @@ where
     Ok(packages)
 }
 
+/// Build an [`AvailableExtensionPackage`] from the files of an uploaded tool
+/// bundle (the WebUI "Install Tool" import path). The files are `(path, bytes)`
+/// pairs already extracted (and path-sanitized) from the zip; the bundle root
+/// must contain `manifest.toml`. Mirrors [`load_filesystem_packages`]'s
+/// construction so an imported tool is validated and shaped exactly like a
+/// filesystem-discovered one, except its assets travel as inline bytes (the
+/// caller materializes them under `/system/extensions/<id>/`).
+pub(crate) fn imported_extension_package(
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest_toml = files
+        .iter()
+        .find(|(path, _)| path == "manifest.toml")
+        .ok_or_else(|| map_binding_error("imported bundle is missing manifest.toml at its root"))
+        .and_then(|(_, bytes)| {
+            String::from_utf8(bytes.clone()).map_err(|error| {
+                map_binding_error(format!("imported manifest.toml is not UTF-8: {error}"))
+            })
+        })?;
+    let id = toml::from_str::<Value>(&manifest_toml)
+        .map_err(|error| map_binding_error(format!("imported manifest.toml parse error: {error}")))?
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| map_binding_error("imported manifest.toml is missing the `id` field"))?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host port catalog rejected imported extension: {error}"),
+        }
+    })?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host API contract registry rejected imported extension: {error}"),
+            }
+        })?;
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &host_ports,
+        None,
+        &contracts,
+    )
+    .map_err(map_binding_error)?;
+    let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
+    let surface_kinds = surface_kinds_from_manifest_record(&record, &id)?;
+    let manifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(map_binding_error)?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())
+        .map_err(map_binding_error)?;
+    let assets = files
+        .into_iter()
+        .map(|(path, bytes)| bytes_asset(&path, &bytes))
+        .collect();
+    Ok(AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            package.id.as_str(),
+        )?,
+        manifest_toml: record.raw_toml().to_string(),
+        package,
+        surface_kinds,
+        assets,
+    })
+}
+
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),

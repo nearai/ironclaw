@@ -2072,6 +2072,17 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
+    /// test stubs need no change.
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3873,6 +3884,14 @@ impl RebornServicesApi for RebornServices {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+    }
+
+    async fn import_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
     }
 
     async fn activate_extension(
