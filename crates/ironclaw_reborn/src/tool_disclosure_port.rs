@@ -92,10 +92,30 @@ struct ToolDisclosureCapabilityPort {
 #[derive(Debug, Clone)]
 struct ToolDisclosureTurnState {
     turn_id: TurnId,
+    /// Fingerprint of the inner tool surface the catalog was built from. The
+    /// catalog is rebuilt when this changes so tools that become available
+    /// mid-turn (an activated extension, a completed OAuth connect) enter the
+    /// disclosure catalog and become discoverable/describable/callable — without
+    /// it, `tool_describe`/`tool_call` report a just-activated tool as "unknown".
+    definitions_fingerprint: u64,
     surface_version: Option<CapabilitySurfaceVersion>,
     catalog: CapabilityCatalog,
     active: ActiveSet,
     disclosed_names: BTreeSet<String>,
+}
+
+/// Cheap order-independent-of-content fingerprint of the visible tool surface,
+/// used to detect mid-turn changes (extension activation / OAuth connect) so the
+/// disclosure catalog can refresh. `tool_definitions()` is already name-sorted,
+/// so hashing count + names in order is deterministic.
+fn definitions_fingerprint(definitions: &[ProviderToolDefinition]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    definitions.len().hash(&mut hasher);
+    for definition in definitions {
+        definition.name.as_str().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[derive(Debug, Clone)]
@@ -534,21 +554,38 @@ impl ToolDisclosureCapabilityPort {
                 format!("tool disclosure turn state lock is poisoned: {e}"),
             )
         })?;
+        let definitions = self.inner.tool_definitions()?;
+        let fingerprint = definitions_fingerprint(&definitions);
+        let same_turn = guard
+            .as_ref()
+            .map(|state| state.turn_id == self.run_context.turn_id)
+            .unwrap_or(false);
         let rebuild = guard
             .as_ref()
-            .map(|state| state.turn_id != self.run_context.turn_id)
+            .map(|state| {
+                state.turn_id != self.run_context.turn_id
+                    || state.definitions_fingerprint != fingerprint
+            })
             .unwrap_or(true);
         if rebuild {
-            let definitions = self.inner.tool_definitions()?;
             let catalog = CapabilityCatalog::new(&definitions, &[]);
             let promoted = self.promoted_for_scope()?;
             let active = select_active_set(&catalog, &promoted, self.caps);
+            // Preserve disclosure progress across a same-turn refresh (a tool the
+            // model already described stays disclosed); a genuine turn change
+            // starts fresh.
+            let (surface_version, disclosed_names) = guard
+                .take()
+                .filter(|_| same_turn)
+                .map(|state| (state.surface_version, state.disclosed_names))
+                .unwrap_or((None, BTreeSet::new()));
             *guard = Some(ToolDisclosureTurnState {
                 turn_id: self.run_context.turn_id,
-                surface_version: None,
+                definitions_fingerprint: fingerprint,
+                surface_version,
                 catalog,
                 active,
-                disclosed_names: BTreeSet::new(),
+                disclosed_names,
             });
         }
         Ok(guard)

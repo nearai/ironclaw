@@ -196,6 +196,19 @@ impl CapabilityCatalog {
 
     pub(crate) fn search_result(&self, name: &str) -> Option<CatalogSearchResult> {
         self.entry_by_name(name)
+            .or_else(|| {
+                // Forgiving lookup: the model often passes the dotted
+                // capability-id form (`google-calendar.list_calendars`) it saw
+                // from other surfaces, but the catalog is keyed by the encoded
+                // provider name (`google-calendar__list_calendars`). Fall back to
+                // the encoded form so `tool_describe` resolves either spelling.
+                let encoded = encode_provider_tool_name(name);
+                if encoded == name {
+                    None
+                } else {
+                    self.entry_by_name(&encoded)
+                }
+            })
             .map(CatalogSearchResult::from_entry)
     }
 
@@ -1010,6 +1023,42 @@ mod tests {
             &definition,
             "gmail__send_message"
         ));
+    }
+
+    #[test]
+    fn search_result_resolves_dotted_and_encoded_names() {
+        // tool_describe passes whatever name the model harvested; the catalog is
+        // keyed by the `__`-encoded wire name. Both the encoded form and the
+        // dotted capability-id form must resolve to the same entry, or a
+        // just-discovered tool reads as "unknown".
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("google-calendar.list_events")
+                .expect("valid capability id"),
+            name: ProviderToolName::new("google-calendar__list_events")
+                .expect("valid provider tool name"),
+            description: "List events on a Google Calendar.".to_string(),
+            parameters: medium_schema(0),
+        };
+        let catalog = CapabilityCatalog::new(&[definition], &[]);
+
+        assert!(
+            catalog
+                .search_result("google-calendar__list_events")
+                .is_some(),
+            "encoded name must resolve"
+        );
+        assert!(
+            catalog
+                .search_result("google-calendar.list_events")
+                .is_some(),
+            "dotted capability-id name must resolve via the forgiving fallback"
+        );
+        assert!(
+            catalog
+                .search_result("google-calendar.list_calendars")
+                .is_none(),
+            "an unrelated name must not resolve"
+        );
     }
 
     #[test]
