@@ -71,6 +71,8 @@ pub(crate) fn init_tracing() {
 }
 
 const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
+    ("cranelift_codegen", "warn"),
+    ("wasmtime_internal_cranelift", "warn"),
     ("tokio_postgres", "warn"),
     ("deadpool_postgres", "warn"),
     ("h2", "warn"),
@@ -1581,6 +1583,8 @@ mod tests {
         let filter = protect_reborn_log_filter("debug");
 
         assert!(filter.contains("debug"));
+        assert!(filter.contains("cranelift_codegen=warn"));
+        assert!(filter.contains("wasmtime_internal_cranelift=warn"));
         assert!(filter.contains("tokio_postgres=warn"));
         assert!(filter.contains("deadpool_postgres=warn"));
         assert!(filter.contains("h2=warn"));
