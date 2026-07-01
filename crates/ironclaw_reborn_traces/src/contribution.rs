@@ -4079,7 +4079,14 @@ fn read_trace_policy_for_scope_at(
     scope: Option<&str>,
 ) -> anyhow::Result<StandingTraceContributionPolicy> {
     let path = trace_policy_path_at(base, scope);
-    if !path.exists() {
+    // Fail loud on stat/permission errors: `Path::exists()` maps them to
+    // `false`, which would silently treat an unreadable policy as
+    // missing/default-disabled and flip enrollment/flush behavior. Only a
+    // confirmed non-existent path returns the not-enrolled default.
+    if !path
+        .try_exists()
+        .map_err(|e| anyhow::anyhow!("failed to stat trace policy {}: {}", path.display(), e))?
+    {
         return Ok(StandingTraceContributionPolicy::default());
     }
     let body = std::fs::read_to_string(&path)
