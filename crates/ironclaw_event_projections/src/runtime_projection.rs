@@ -272,7 +272,7 @@ fn apply_capability_activity_event(
         return;
     };
     let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
-    let sanitized_error_summary = event.error_summary.clone().and_then(sanitize_error_summary);
+    let sanitized_error_summary = projection_error_detail(event);
     let activity = activities
         .entry(event.scope.invocation_id)
         .or_insert_with(|| capability_activity_projection_for_entry(entry, status));
@@ -327,11 +327,26 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
-        error_detail: event.error_summary.clone().and_then(sanitize_error_summary),
+        error_detail: projection_error_detail(event),
         first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,
     }
+}
+
+fn projection_error_detail(event: &RuntimeEvent) -> Option<String> {
+    // Product-facing projections are a second channel boundary after the
+    // durable runtime log. Re-run the sanitizer here so direct in-memory
+    // construction, legacy replay payloads, or future event producers cannot
+    // surface backend-authored detail strings unless they satisfy the
+    // redacted display-summary contract. The projection field is named
+    // `error_detail` intentionally: product/WebUI consumers render it as
+    // optional per-tool failure detail, while the durable event keeps the
+    // source field name `error_summary`.
+    event
+        .error_summary
+        .as_deref()
+        .and_then(sanitize_error_summary)
 }
 
 fn capability_activity_status_for_event(

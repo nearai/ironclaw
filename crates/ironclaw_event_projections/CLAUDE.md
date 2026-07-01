@@ -10,6 +10,13 @@ This crate is above `ironclaw_events` and below product adapters. Keep it:
 - non-mutating: projection failures must not mutate durable logs or kernel state;
 - backend-independent: do not depend on JSONL/PostgreSQL/libSQL adapter crates directly.
 
+The one allowed product-display exception is `CapabilityActivityProjection.error_detail`:
+it may carry only the sanitized `RuntimeEvent.error_summary` value after replay
+re-runs `ironclaw_events::sanitize_error_summary`. This field is still not a
+general backend-detail channel; raw tool input/output, host paths, secrets, and
+provider messages that fail the runtime-event sanitizer must remain collapsed to
+the fixed safe summaries.
+
 Current slices:
 
 - replay-derived `ThreadTimeline` and `RunStatusProjection` over `DurableEventLog`;

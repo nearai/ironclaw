@@ -1412,6 +1412,42 @@ async fn replay_projection_capability_activity_stays_metadata_only() {
 }
 
 #[tokio::test]
+async fn replay_projection_preserves_safe_capability_error_detail() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity-detail").unwrap());
+    let detail = "json parsing failed: unexpected comma at line 4";
+
+    log.append(
+        RuntimeEvent::capability_activity_failed(
+            scope.clone(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary(detail),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    let activity = &snapshot.capability_activities[0];
+    assert_eq!(activity.status, CapabilityActivityStatus::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(activity.error_detail.as_deref(), Some(detail));
+}
+
+#[tokio::test]
 async fn replay_projection_keeps_model_completed_running_until_reply_finalized() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

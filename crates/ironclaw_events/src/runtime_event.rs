@@ -1,6 +1,7 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    CapabilityId, ExtensionId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProcessId, ResourceScope,
+    RuntimeKind, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -832,6 +833,9 @@ fn sanitize_error_summary_str(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if trimmed == INPUT_ENCODE_HUMAN_SUMMARY {
+        return Some(INPUT_ENCODE_HUMAN_SUMMARY.to_string());
     }
     let lower = trimmed.to_ascii_lowercase();
     if is_workspace_file_error_summary(trimmed, &lower) {
