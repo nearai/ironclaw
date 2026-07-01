@@ -6449,13 +6449,17 @@ async fn mint_account_login_link_inner(
         trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
     };
 
-    // Local precondition: a missing issuer URL is EnrollmentIncomplete; the
-    // claim mint's transport/status/device-key failures below are Backend.
+    // Local preconditions FIRST, before any secret/egress work, so incomplete
+    // enrollment fails closed with no side effects: a missing issuer URL and a
+    // malformed login-links URL are both EnrollmentIncomplete; the claim mint's
+    // transport/status/device-key failures below are Backend.
     if upload_claim_issuer_missing(&resolution.policy) {
         return Err(AccountLoginLinkError::EnrollmentIncomplete(
             anyhow::anyhow!("Trace Commons upload-claim issuer URL is not configured"),
         ));
     }
+    let url = account_login_links_url(&resolution.policy)
+        .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
@@ -6463,8 +6467,6 @@ async fn mint_account_login_link_inner(
         .bearer_token(&resolution.policy, &context, false)
         .await
         .map_err(AccountLoginLinkError::Backend)?;
-    let url = account_login_links_url(&resolution.policy)
-        .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
     let body = match &resolution.subject {
         Some(s) => serde_json::json!({ "subject": s }),
         None => serde_json::json!({}),
