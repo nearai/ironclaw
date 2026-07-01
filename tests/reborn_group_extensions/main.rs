@@ -19,9 +19,9 @@ mod support;
 
 // Declared in execution order (install → remove → activate) to match the run
 // sequence in `extensions_group_e2e` below.
+mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_remove_then_absent_cross_thread;
-mod scenario_activate_then_active_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 

@@ -105,7 +105,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
-    viewer.submit_turn("search web-access after activation").await?;
+    viewer
+        .submit_turn("search web-access after activation")
+        .await?;
     viewer
         .assert_tool_invoked("builtin.extension_search")
         .await?;
