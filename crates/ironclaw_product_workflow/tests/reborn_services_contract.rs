@@ -12,8 +12,10 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
+    AutoApproveSettingStore, CapabilityPermissionStoreError, PersistentApprovalAction,
+    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
@@ -7997,6 +7999,43 @@ impl PersistentApprovalPolicyStore for FailingAllowPersistentApprovalPolicyStore
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingAutoApproveSettingStore {
+    get_keys: Mutex<Vec<AutoApproveSettingKey>>,
+}
+
+impl RecordingAutoApproveSettingStore {
+    fn get_keys(&self) -> Vec<AutoApproveSettingKey> {
+        self.get_keys.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutoApproveSettingStore for RecordingAutoApproveSettingStore {
+    async fn set(
+        &self,
+        input: AutoApproveSettingInput,
+    ) -> Result<AutoApproveSettingRecord, CapabilityPermissionStoreError> {
+        let key = AutoApproveSettingKey::from_resource_scope(&input.scope);
+        let now = Utc::now();
+        Ok(AutoApproveSettingRecord {
+            key,
+            enabled: input.enabled,
+            updated_by: input.updated_by,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn get(
+        &self,
+        key: &AutoApproveSettingKey,
+    ) -> Result<Option<AutoApproveSettingRecord>, CapabilityPermissionStoreError> {
+        self.get_keys.lock().expect("lock").push(key.clone());
+        Ok(None)
+    }
+}
+
 fn services_with_operator_approval_config() -> RebornServices {
     services_with_operator_approval_config_parts().0
 }
@@ -8015,13 +8054,23 @@ fn services_with_operator_approval_config_parts() -> (
 fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> RebornServices {
+    services_with_operator_approval_config_stores(
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        persistent_policies,
+    )
+}
+
+fn services_with_operator_approval_config_stores(
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+) -> RebornServices {
     RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_operator_approval_config(
         Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        auto_approve,
         persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
             tools: vec![
@@ -8149,6 +8198,35 @@ async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
         assert_eq!(value["state"], "always_allow");
         assert_eq!(value["effective_source"], "override");
     }
+}
+
+#[tokio::test]
+async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
+    let auto_approve = Arc::new(RecordingAutoApproveSettingStore::default());
+    let services = services_with_operator_approval_config_stores(
+        auto_approve.clone(),
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+    );
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-scope").expect("tenant"),
+        UserId::new("user-scope").expect("user"),
+        Some(AgentId::new("agent-scope").expect("agent")),
+        Some(ProjectId::new("project-scope").expect("project")),
+    );
+
+    let enabled = services
+        .global_auto_approve_enabled(caller)
+        .await
+        .expect("global auto approve read");
+
+    assert!(
+        enabled,
+        "unset auto-approve should resolve through the default"
+    );
+    let keys = auto_approve.get_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].tenant_id.as_str(), "tenant-scope");
+    assert_eq!(keys[0].user_id.as_str(), "user-scope");
 }
 
 #[tokio::test]

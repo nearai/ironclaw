@@ -78,9 +78,13 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
+    caller_for_user("user-alpha")
+}
+
+fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
-        UserId::new("user-alpha").expect("user"),
+        UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     )
@@ -2837,6 +2841,73 @@ async fn get_session_reports_global_auto_approve_feature_from_facade() {
             "session handler must not read arbitrary operator config keys"
         );
     }
+}
+
+#[tokio::test]
+async fn get_session_caches_global_auto_approve_feature_per_user() {
+    let services = Arc::new(StubServices::default());
+    let state = WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
+    let alpha_router = webui_v2_router(state.clone())
+        .layer(axum::Extension(caller_for_user("user-alpha")))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+    let beta_router = webui_v2_router(state)
+        .layer(axum::Extension(caller_for_user("user-beta")))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = false;
+    let alpha_initial = alpha_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(alpha_initial).await["features"]["global_auto_approve"],
+        false
+    );
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = true;
+    let alpha_cached = alpha_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(alpha_cached).await["features"]["global_auto_approve"],
+        false,
+        "same caller must keep the session-bootstrap flag stable"
+    );
+
+    let beta_initial = beta_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(beta_initial).await["features"]["global_auto_approve"],
+        true,
+        "cache entries must not leak across authenticated users"
+    );
+    assert_eq!(
+        *services.global_auto_approve_calls.lock().expect("lock"),
+        2,
+        "facade should be read once per authenticated user"
+    );
 }
 
 #[tokio::test]

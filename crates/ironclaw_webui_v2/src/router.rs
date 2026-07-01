@@ -6,11 +6,13 @@
 //! the canonical contract. This module exists so handler-level tests can
 //! drive the full route table without re-stating the path/method table.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use axum::Router;
 use axum::routing::{delete, get, post};
-use ironclaw_product_workflow::RebornServicesApi;
+use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_product_workflow::{RebornServicesApi, WebUiAuthenticatedCaller};
 use serde::Serialize;
 
 use crate::descriptors::{
@@ -88,6 +90,7 @@ pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
+    session_features: Arc<RwLock<HashMap<SessionFeatureCacheKey, SessionFeatureCacheEntry>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -104,6 +107,7 @@ impl WebUiV2State {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
             reborn_projects_enabled: false,
+            session_features: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -125,9 +129,58 @@ impl WebUiV2State {
         &self.services
     }
 
+    pub(crate) fn cached_global_auto_approve_feature(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Option<bool> {
+        let key = SessionFeatureCacheKey::from(caller);
+        self.session_features
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .map(|entry| entry.global_auto_approve)
+    }
+
+    pub(crate) fn cache_global_auto_approve_feature(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) {
+        let key = SessionFeatureCacheKey::from(caller);
+        self.session_features
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key,
+                SessionFeatureCacheEntry {
+                    global_auto_approve: enabled,
+                },
+            );
+    }
+
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SessionFeatureCacheKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+}
+
+impl From<&WebUiAuthenticatedCaller> for SessionFeatureCacheKey {
+    fn from(caller: &WebUiAuthenticatedCaller) -> Self {
+        Self {
+            tenant_id: caller.tenant_id.clone(),
+            user_id: caller.user_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionFeatureCacheEntry {
+    global_auto_approve: bool,
 }
 
 /// Build a [`Router`] mounting the WebChat v2 routes against the supplied

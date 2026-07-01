@@ -2652,7 +2652,15 @@ impl RebornServicesApi for RebornServices {
             .auto_approve
             .is_enabled(&operator_scope)
             .await
-            .map_err(operator_config_store_error)
+            .map_err(|error| {
+                tracing::debug!(
+                    tenant_id = %caller.tenant_id,
+                    user_id = %caller.user_id,
+                    error = %error,
+                    "failed to read global auto-approve setting"
+                );
+                operator_config_store_error(error)
+            })
     }
 
     async fn get_operator_setup(
