@@ -505,7 +505,7 @@ export function useChat(threadId) {
         if (response?.outcome !== "rejected_busy") {
           touchThreadInCache({
             threadId: response?.thread_id || sendThreadId,
-            messageContent: content,
+            messageContent: renderContent,
             updatedAt: pendingRecord.timestamp,
           });
         }

@@ -370,10 +370,12 @@ test("useChat.send: touches sidebar cache without refetching thread list", async
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await chat.send("hello from the existing thread");
+  await chat.send("raw wire content", {
+    displayContent: "visible sidebar title",
+  });
 
   assert.equal(touched.threadId, threadId);
-  assert.equal(touched.messageContent, "hello from the existing thread");
+  assert.equal(touched.messageContent, "visible sidebar title");
   assert.match(touched.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
