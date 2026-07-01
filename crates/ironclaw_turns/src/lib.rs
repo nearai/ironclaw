@@ -26,13 +26,13 @@ pub mod scope;
 mod status;
 mod store;
 
-pub use block_persistence::TurnStateBlockPersistence;
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
     GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,

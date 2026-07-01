@@ -1621,36 +1621,36 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             let mut inner = self.lock_inner()?;
             let mut record = inner.take_record(request.run_id)?;
             let inner_result = (|| {
-            let now = Utc::now();
-            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
-            if !matches!(record.status.get(), TurnStatus::Running) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status.get(),
-                    to: request.reason.status(),
-                });
-            }
-            // Running → Blocked: decrement per-user running counter.
-            let transition = record.status.set(request.reason.status());
-            inner.apply_status_transition(transition, &record);
-            record.checkpoint_id = Some(request.checkpoint_id);
-            record.gate_ref = Some(request.reason.gate_ref().clone());
-            record.blocked_activity_id = None;
-            record.credential_requirements = request.reason.credential_requirements().to_vec();
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = inner.next_cursor();
-            inner.record_checkpoint(
-                &record,
-                request.checkpoint_id,
-                request.state_ref,
-                request.reason.gate_ref().clone(),
-                now,
-            );
-            inner.update_active_lock(&record, now);
-            let state = record.state();
-            inner.push_event(&record, TurnEventKind::Blocked, None);
-            Ok(state)
+                let now = Utc::now();
+                ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
+                if !matches!(record.status.get(), TurnStatus::Running) {
+                    return Err(TurnError::InvalidTransition {
+                        from: record.status.get(),
+                        to: request.reason.status(),
+                    });
+                }
+                // Running → Blocked: decrement per-user running counter.
+                let transition = record.status.set(request.reason.status());
+                inner.apply_status_transition(transition, &record);
+                record.checkpoint_id = Some(request.checkpoint_id);
+                record.gate_ref = Some(request.reason.gate_ref().clone());
+                record.blocked_activity_id = None;
+                record.credential_requirements = request.reason.credential_requirements().to_vec();
+                record.runner_id = None;
+                record.lease_token = None;
+                record.lease_expires_at = None;
+                record.event_cursor = inner.next_cursor();
+                inner.record_checkpoint(
+                    &record,
+                    request.checkpoint_id,
+                    request.state_ref,
+                    request.reason.gate_ref().clone(),
+                    now,
+                );
+                inner.update_active_lock(&record, now);
+                let state = record.state();
+                inner.push_event(&record, TurnEventKind::Blocked, None);
+                Ok(state)
             })();
             inner.records.insert(record.run_id, record);
             inner_result

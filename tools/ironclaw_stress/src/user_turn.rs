@@ -33,7 +33,9 @@ use ironclaw_turns::{
     LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
     TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
-    runner::{BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
+    runner::{
+        BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -1337,7 +1339,9 @@ where
         memory_turn_store: Arc::new({
             let store = InMemoryTurnStateStore::default();
             if turn_state_backend.persists_on_block() {
-                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(&scoped)));
+                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
+                    &scoped,
+                )));
                 store.with_block_persistence(sink)
             } else {
                 store
