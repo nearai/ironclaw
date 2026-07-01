@@ -65,7 +65,7 @@ fn parse_error_for_install(error_label: &str, error: SkillParseError) -> SkillRe
 /// Rewrite the `name` field in raw YAML frontmatter while preserving every
 /// other key and value in the original mapping.
 ///
-/// We deliberately operate on `serde_yml::Value` instead of the typed
+/// We deliberately operate on `serde_norway::Value` instead of the typed
 /// `SkillManifest`: re-serializing through the typed struct silently drops
 /// any unknown frontmatter fields published upstream (custom metadata, future
 /// fields, vendor extensions). The recovery path must be lossless except for
@@ -75,8 +75,8 @@ fn rewrite_frontmatter_name(
     new_name: &str,
     error_label: &str,
 ) -> Result<String, SkillRegistryError> {
-    let mut value: serde_yml::Value =
-        serde_yml::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
+    let mut value: serde_norway::Value =
+        serde_norway::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
             name: error_label.to_string(),
             reason: format!("Failed to parse SKILL.md frontmatter for rewrite: {}", e),
         })?;
@@ -89,11 +89,11 @@ fn rewrite_frontmatter_name(
         })?;
 
     mapping.insert(
-        serde_yml::Value::String("name".to_string()),
-        serde_yml::Value::String(new_name.to_string()),
+        serde_norway::Value::String("name".to_string()),
+        serde_norway::Value::String(new_name.to_string()),
     );
 
-    let yaml = serde_yml::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
+    let yaml = serde_norway::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
         name: error_label.to_string(),
         reason: format!("Failed to rewrite normalized SKILL.md: {}", e),
     })?;
