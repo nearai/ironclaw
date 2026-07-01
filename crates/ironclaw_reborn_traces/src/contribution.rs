@@ -5817,7 +5817,7 @@ pub async fn mint_profile_attribution_token_for_user_via_sink(
     tenant_id: &TenantId,
     user_id: &UserId,
     sink: &dyn ContributionHttpSink,
-) -> anyhow::Result<ProfileAttributionToken> {
+) -> Result<ProfileAttributionToken, ProfileAttributionError> {
     // Typed at the public boundary; stringify only for the dir-parameterised core.
     mint_profile_attribution_token_for_user_inner(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
@@ -5835,11 +5835,17 @@ async fn mint_profile_attribution_token_for_user_inner(
     tenant_id: &str,
     user_id: &str,
     sink: &dyn ContributionHttpSink,
-) -> anyhow::Result<ProfileAttributionToken> {
-    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
-        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
+) -> Result<ProfileAttributionToken, ProfileAttributionError> {
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)
+        .map_err(ProfileAttributionError::PolicyRead)?
+        .ok_or(ProfileAttributionError::NotEnrolled)?;
     let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
-    mint_profile_attribution_token_with_context(&resolution.policy, &context, Some(sink)).await
+    // Missing-issuer-URL and incomplete-device-key failures both surface from
+    // the token mint; classify as EnrollmentIncomplete so the host contract
+    // stays typed without inspecting error strings.
+    mint_profile_attribution_token_with_context(&resolution.policy, &context, Some(sink))
+        .await
+        .map_err(ProfileAttributionError::EnrollmentIncomplete)
 }
 
 async fn mint_profile_attribution_token_with_policy(
@@ -5912,7 +5918,7 @@ pub async fn set_community_profile_for_user_via_sink(
     display_handle: &str,
     bio: Option<&str>,
     sink: &dyn ContributionHttpSink,
-) -> anyhow::Result<()> {
+) -> Result<(), CommunityProfileError> {
     // Typed at the public boundary; stringify only for the dir-parameterised core.
     set_community_profile_for_user_inner(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
@@ -5934,17 +5940,22 @@ async fn set_community_profile_for_user_inner(
     display_handle: &str,
     bio: Option<&str>,
     sink: Option<&dyn ContributionHttpSink>,
-) -> anyhow::Result<()> {
-    let handle = validate_community_profile_handle(display_handle)?;
+) -> Result<(), CommunityProfileError> {
+    let handle = validate_community_profile_handle(display_handle)
+        .map_err(|e| CommunityProfileError::InvalidProfile(format!("{e:#}")))?;
     if let Some(bio) = bio {
-        validate_community_profile_bio(bio)?;
+        validate_community_profile_bio(bio)
+            .map_err(|e| CommunityProfileError::InvalidProfile(format!("{e:#}")))?;
     }
-    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
-        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
-    let url = community_profile_url_from_policy(&resolution.policy)?;
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)
+        .map_err(ProfileAttributionError::PolicyRead)?
+        .ok_or(ProfileAttributionError::NotEnrolled)?;
+    let url = community_profile_url_from_policy(&resolution.policy)
+        .map_err(ProfileAttributionError::EnrollmentIncomplete)?;
     let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
-    let token =
-        mint_profile_attribution_token_with_context(&resolution.policy, &context, sink).await?;
+    let token = mint_profile_attribution_token_with_context(&resolution.policy, &context, sink)
+        .await
+        .map_err(ProfileAttributionError::EnrollmentIncomplete)?;
     let body = serde_json::json!({
         "display_handle": handle,
         "bio": bio,
@@ -5958,6 +5969,8 @@ async fn set_community_profile_for_user_inner(
         sink,
     )
     .await
+    .map_err(ProfileAttributionError::Backend)?;
+    Ok(())
 }
 
 async fn set_community_profile_for_scope_inner(
@@ -6274,6 +6287,43 @@ pub enum AccountLoginLinkError {
     /// write failure; carried here so the host maps one typed contract).
     #[error("could not write the account login link to local state")]
     LocalStateWrite,
+}
+
+/// Typed classification of a profile-attribution token mint failure, shared by
+/// the `profile_token` and `profile_set` flows (both mint the same token). The
+/// host maps these variants to the user-facing `error_code` contract, so it no
+/// longer substring-matches upstream error wording.
+#[derive(Debug, thiserror::Error)]
+pub enum ProfileAttributionError {
+    /// No enrollment (personal invite or instance) resolved for the caller.
+    #[error("not enrolled in Trace Commons")]
+    NotEnrolled,
+    /// The local enrollment policy could not be read or parsed.
+    #[error("could not read Trace Commons enrollment policy")]
+    PolicyRead(#[source] anyhow::Error),
+    /// Enrollment is incomplete — the upload-claim issuer URL or the local
+    /// device-key state is missing/invalid (both surface from the token mint).
+    #[error("Trace Commons enrollment is incomplete (issuer URL or device-key state)")]
+    EnrollmentIncomplete(#[source] anyhow::Error),
+    /// Any other failure — transport, serialization, or a rejected request.
+    #[error("Trace Commons profile request failed")]
+    Backend(#[source] anyhow::Error),
+    /// The host could not persist minted state locally (host-side write).
+    #[error("could not write the profile token to local state")]
+    LocalStateWrite,
+}
+
+/// Typed classification of a community-profile publish failure: either the
+/// caller-supplied handle/bio is invalid, or the underlying attribution mint /
+/// request failed (see [`ProfileAttributionError`]).
+#[derive(Debug, thiserror::Error)]
+pub enum CommunityProfileError {
+    /// The display handle or bio failed validation.
+    #[error("invalid community profile: {0}")]
+    InvalidProfile(String),
+    /// The attribution token mint or the profile request failed.
+    #[error(transparent)]
+    Attribution(#[from] ProfileAttributionError),
 }
 
 /// Extract the API base URL (origin) from the configured upload-claim issuer

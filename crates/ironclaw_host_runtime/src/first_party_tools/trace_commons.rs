@@ -23,10 +23,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_reborn_traces::contribution::{
     AccountLoginLink, AccountLoginLinkError, COMMUNITY_PROFILE_BIO_MAX_BYTES,
-    COMMUNITY_PROFILE_HANDLE_MAX_CHARS, COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError,
-    ContributionHttpMethod, ContributionHttpRequest, ContributionHttpResponse,
-    ContributionHttpSink, ProfileAttributionToken, StandingTraceContributionPolicy,
-    TraceCreditReport, TraceUploadAuthMode, mint_account_login_link_via_sink,
+    COMMUNITY_PROFILE_HANDLE_MAX_CHARS, COMMUNITY_PROFILE_HANDLE_MIN_CHARS, CommunityProfileError,
+    ContributionHttpError, ContributionHttpMethod, ContributionHttpRequest,
+    ContributionHttpResponse, ContributionHttpSink, ProfileAttributionError,
+    ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
+    TraceUploadAuthMode, mint_account_login_link_via_sink,
     mint_profile_attribution_token_for_user_via_sink, resolve_trace_credentials,
     set_community_profile_for_user_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
@@ -792,10 +793,14 @@ pub(super) async fn dispatch_profile_token(
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(profile_token_error_value(
-                "not enrolled in Trace Commons".to_string(),
+                &ProfileAttributionError::NotEnrolled,
             ));
         }
-        Err(error) => return Ok(profile_token_error_value(error.to_string())),
+        Err(error) => {
+            return Ok(profile_token_error_value(
+                &ProfileAttributionError::PolicyRead(error),
+            ));
+        }
     }
 
     // The agent profile_token path MUST route through host network egress — it
@@ -824,13 +829,15 @@ pub(super) async fn dispatch_profile_token(
         Ok(token) => match persist_profile_token(&scope, &token) {
             Ok(_path) => Ok(format_profile_token(&token)),
             Err(error) => {
-                tracing::debug!(%error, "failed to persist Trace Commons profile token");
+                // Filesystem write error can carry host paths; log only the fact.
+                let _ = error;
+                tracing::debug!("failed to persist Trace Commons profile token");
                 Ok(profile_token_error_value(
-                    "could not write the profile token to local state".to_string(),
+                    &ProfileAttributionError::LocalStateWrite,
                 ))
             }
         },
-        Err(error) => Ok(profile_token_error_value(error.to_string())),
+        Err(error) => Ok(profile_token_error_value(&error)),
     }
 }
 
@@ -910,37 +917,29 @@ fn format_profile_token(token: &ProfileAttributionToken) -> Value {
     })
 }
 
-fn profile_token_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
-        (
+fn profile_token_error_value(error: &ProfileAttributionError) -> Value {
+    // Typed variants → public `error_code`; no substring matching on wording.
+    let (error_code, message) = match error {
+        ProfileAttributionError::NotEnrolled => (
             "NotEnrolled",
             "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
-        )
-    } else if error.contains("could not read policy") {
-        (
+        ),
+        ProfileAttributionError::PolicyRead(_) => (
             "PolicyReadFailed",
             "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
-        )
-    } else if error.contains("issuer URL is not configured") {
-        (
-            "IssuerNotConfigured",
-            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("device key") {
-        (
-            "DeviceKeyUnavailable",
-            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("refused") {
-        (
-            "IssuerRefused",
-            "The Trace Commons issuer refused to mint a profile token. Ask the operator to check invite/device-key status.",
-        )
-    } else {
-        (
+        ),
+        ProfileAttributionError::EnrollmentIncomplete(_) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        ProfileAttributionError::Backend(_) => (
             "ProfileTokenMintFailed",
             "Could not mint a Trace Commons profile token. Check enrollment status and retry.",
-        )
+        ),
+        ProfileAttributionError::LocalStateWrite => (
+            "LocalStateWriteFailed",
+            "Could not write the profile token to local state.",
+        ),
     };
     json!({
         "minted": false,
@@ -981,10 +980,14 @@ pub(super) async fn dispatch_profile_set(
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(profile_set_error_value(
-                "not enrolled in Trace Commons".to_string(),
+                &CommunityProfileError::Attribution(ProfileAttributionError::NotEnrolled),
             ));
         }
-        Err(error) => return Ok(profile_set_error_value(error.to_string())),
+        Err(error) => {
+            return Ok(profile_set_error_value(
+                &CommunityProfileError::Attribution(ProfileAttributionError::PolicyRead(error)),
+            ));
+        }
     }
 
     // The agent profile_set path MUST route through host network egress — it
@@ -1015,7 +1018,7 @@ pub(super) async fn dispatch_profile_set(
     .await
     {
         Ok(()) => Ok(profile_set_success_value(&input)),
-        Err(error) => Ok(profile_set_error_value(error.to_string())),
+        Err(error) => Ok(profile_set_error_value(&error)),
     }
 }
 
@@ -1031,43 +1034,33 @@ fn profile_set_success_value(input: &ProfileSetToolInput) -> Value {
     })
 }
 
-fn profile_set_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
-        (
-            "NotEnrolled",
-            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
-        )
-    } else if error.contains("could not read policy") {
-        (
-            "PolicyReadFailed",
-            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
-        )
-    } else if error.contains("community profile handle") || error.contains("community profile bio")
-    {
-        (
+fn profile_set_error_value(error: &CommunityProfileError) -> Value {
+    // Typed variants → public `error_code`; no substring matching on wording.
+    let (error_code, message) = match error {
+        CommunityProfileError::InvalidProfile(_) => (
             "InvalidProfile",
             "Choose a pseudonymous handle 3-32 characters long using ASCII letters, digits, '-' or '_'. Bio must be at most 280 bytes.",
-        )
-    } else if error.contains("issuer URL is not configured") {
-        (
-            "IssuerNotConfigured",
-            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("device key") {
-        (
-            "DeviceKeyUnavailable",
-            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("refused") || error.contains("rejected") {
-        (
-            "IssuerRefused",
-            "Trace Commons refused the public profile update. Ask the operator to check invite/device-key status.",
-        )
-    } else {
-        (
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::NotEnrolled) => (
+            "NotEnrolled",
+            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::PolicyRead(_)) => (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::EnrollmentIncomplete(_)) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        // profile_set does not persist local state; `LocalStateWrite` cannot
+        // occur here, but the match stays exhaustive over the shared enum.
+        CommunityProfileError::Attribution(
+            ProfileAttributionError::Backend(_) | ProfileAttributionError::LocalStateWrite,
+        ) => (
             "ProfileSetFailed",
             "Could not update the Trace Commons public profile. Check enrollment status and retry.",
-        )
+        ),
     };
     json!({
         "updated": false,
@@ -1674,14 +1667,20 @@ mod tests {
 
     #[test]
     fn profile_token_error_maps_missing_enrollment_without_raw_error() {
-        let v =
-            profile_token_error_value("not enrolled in Trace Commons - onboard first".to_string());
+        assert_eq!(
+            profile_token_error_value(&ProfileAttributionError::NotEnrolled)["error_code"],
+            json!("NotEnrolled")
+        );
+        // The source cause is carried in the variant but the mapper emits only a
+        // static message — the raw error text never reaches the model surface.
+        let v = profile_token_error_value(&ProfileAttributionError::PolicyRead(
+            std::io::Error::other("secret path /home/x - onboard first").into(),
+        ));
         assert_eq!(v["minted"], json!(false));
-        assert_eq!(v["error_code"], json!("NotEnrolled"));
-        let serialized = serde_json::to_string(&v).unwrap();
+        assert_eq!(v["error_code"], json!("PolicyReadFailed"));
         assert!(
-            !serialized.contains("onboard first"),
-            "raw anyhow text should not be copied into model-visible output"
+            !serde_json::to_string(&v).unwrap().contains("onboard first"),
+            "raw cause text must not be copied into model-visible output"
         );
     }
 
@@ -1765,9 +1764,9 @@ mod tests {
 
     #[test]
     fn profile_set_error_maps_validation_without_raw_error() {
-        let v = profile_set_error_value(
+        let v = profile_set_error_value(&CommunityProfileError::InvalidProfile(
             "community profile handle must be at least 3 characters".to_string(),
-        );
+        ));
         assert_eq!(v["updated"], json!(false));
         assert_eq!(v["error_code"], json!("InvalidProfile"));
         let serialized = serde_json::to_string(&v).unwrap();
