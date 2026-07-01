@@ -1104,15 +1104,32 @@ pub(super) async fn dispatch_account_login_link(
     )
     .await
     {
-        Ok(link) => match persist_account_login_link(scope.as_str(), &link) {
-            Ok(_) => Ok(format_account_login_link(&link)),
-            Err(error) => {
-                tracing::debug!(%error, "failed to persist Trace Commons account login link");
-                Ok(account_login_link_error_value(
-                    "could not write the account login link to local state".to_string(),
-                ))
+        Ok(link) => {
+            // The persist path is blocking fs (mkdir/write/fsync/rename); keep it
+            // off the async worker via spawn_blocking so we never stall a Tokio
+            // thread on disk I/O.
+            let scope_owned = scope.clone();
+            let link_for_persist = link.clone();
+            let persisted = tokio::task::spawn_blocking(move || {
+                persist_account_login_link(&scope_owned, &link_for_persist)
+            })
+            .await;
+            match persisted {
+                Ok(Ok(_)) => Ok(format_account_login_link(&link)),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "failed to persist Trace Commons account login link");
+                    Ok(account_login_link_error_value(
+                        "could not write the account login link to local state".to_string(),
+                    ))
+                }
+                Err(join_error) => {
+                    tracing::debug!(%join_error, "account login link persist task failed");
+                    Ok(account_login_link_error_value(
+                        "could not write the account login link to local state".to_string(),
+                    ))
+                }
             }
-        },
+        }
         Err(error) => Ok(account_login_link_error_value(error.to_string())),
     }
 }

@@ -8,6 +8,7 @@
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_traces::contribution::{
     authorize_manual_review_hold_for_scope, fetch_account_traces, read_trace_policy_for_scope,
     resolve_trace_credentials, scoped_credit_view,
@@ -122,10 +123,12 @@ pub(super) enum AccountTracesError {
 /// Transport failures surface as a typed `Err` (the operation is named and the
 /// cause chain preserved) so the caller can return a sanitized, diagnosable 500.
 pub(super) async fn account_traces_for_user(
-    tenant_id: &str,
-    user_id: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
 ) -> Result<RebornAccountTracesResponse, AccountTracesError> {
-    let enrolled = resolve_trace_credentials(tenant_id, user_id)
+    // Identity stays typed inside this crate; only cross to `&str` at the
+    // `ironclaw_reborn_traces` boundary, which is stringly-typed.
+    let enrolled = resolve_trace_credentials(tenant_id.as_str(), user_id.as_str())
         .map_err(|e| AccountTracesError::ResolveCredentials(format!("{e:#}")))?
         .is_some();
     if !enrolled {
@@ -138,7 +141,7 @@ pub(super) async fn account_traces_for_user(
     // ACCOUNT_TRACES_DEFAULT_LIMIT (200), clamps any explicit value to
     // [1, ACCOUNT_TRACES_MAX_LIMIT], and caps the buffered response bytes — so
     // the initial settings-page slice can never scale with total account age.
-    let items = fetch_account_traces(tenant_id, user_id, None)
+    let items = fetch_account_traces(tenant_id.as_str(), user_id.as_str(), None)
         .await
         .map_err(|e| AccountTracesError::Fetch(format!("{e:#}")))?;
     let traces = items

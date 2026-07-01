@@ -1940,7 +1940,7 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
         let actor = caller.actor();
-        trace_credits::account_traces_for_user(caller.tenant_id.as_str(), actor.user_id.as_str())
+        trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
             .await
             .map_err(RebornServicesError::internal_from)
     }
