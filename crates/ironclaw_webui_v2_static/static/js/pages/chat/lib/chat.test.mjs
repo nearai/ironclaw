@@ -356,7 +356,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
-test("Chat does not render a scoped logs link for the active thread run", () => {
+test("Chat does not render a top-level logs header for the active thread run", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -383,7 +383,7 @@ test("Chat does not render a scoped logs link for the active thread run", () => 
   assert.equal(
     findComponent(tree, components.Link),
     null,
-    "active chat should not render an extra scoped logs link outside the global header",
+    "active chat should not render an extra run logs router link outside message actions",
   );
   assert.equal(
     findNode(tree, (node) =>

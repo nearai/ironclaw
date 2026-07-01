@@ -114,11 +114,13 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = role === "user" || (role === "assistant" && !isOptimistic);
+  const logsHref = threadId ? `/v2/logs?thread_id=${encodeURIComponent(threadId)}` : null;
+  const showLogsAction = Boolean(logsHref && showActions);
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
-  const showMetaRow = showActions || showRetryAction || timeLabel;
+  const showMetaRow = showActions || showLogsAction || showRetryAction || timeLabel;
 
   return html`
     <div
@@ -180,7 +182,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
           ].join(" ")}
         >
           ${timeLabel && html`<time dateTime=${timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">${timeLabel}</time>`}
-          ${(showActions || showRetryAction) && html`
+          ${(showActions || showLogsAction || showRetryAction) && html`
             <div className="flex shrink-0 items-center gap-1">
             ${showActions && html`
               <button
@@ -192,6 +194,16 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
               >
                 <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />
               </button>
+            `}
+            ${showLogsAction && html`
+              <a
+                href=${logsHref}
+                title="View thread logs"
+                aria-label="View thread logs"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
+              >
+                <${Icon} name="list" className="h-3.5 w-3.5" />
+              </a>
             `}
             ${showRetryAction && html`
               <button
