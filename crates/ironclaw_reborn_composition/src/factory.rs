@@ -119,18 +119,26 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+use ironclaw_turns::FilesystemTurnStateBlockPersistence;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
+use ironclaw_turns::InMemoryTurnStateStore;
 use ironclaw_turns::{
     CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
     LoopCheckpointStore,
 };
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_turns::{
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
-};
+use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -230,9 +238,18 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// The in-memory turn-state authority wins whenever `inmemory-turn-state` is on
+// (the runtime-wedge fix), and is also the only option in pure-memory builds.
+// Otherwise the durable per-user filesystem CAS store is used.
+#[cfg(all(
+    not(feature = "inmemory-turn-state"),
+    any(feature = "libsql", feature = "postgres")
+))]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
 pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1109,7 +1126,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         turn_state_store_limits,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
-    })?;
+    })
+    .await?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
@@ -1807,7 +1825,7 @@ fn parse_bool_env_value(value: &str) -> Option<bool> {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn build_local_dev_store_graph(
+async fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let RebornLocalDevStoreGraphInput {
@@ -1827,6 +1845,10 @@ fn build_local_dev_store_graph(
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    // The turn-state filesystem is needed by both backends: the durable
+    // filesystem store persists every transition to it, and the in-memory
+    // authority persists only its gate-blocked snapshot to it (persist-on-block
+    // durability, so a restart can recover turns parked on a human gate).
     let turn_state_scope =
         local_dev_nearai_mcp_owner_scope(owner_user_id.clone(), local_runtime_identity.as_ref())?;
     let turn_state_filesystem =
@@ -1844,6 +1866,36 @@ fn build_local_dev_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
+    // Runtime-wedge fix: with `inmemory-turn-state`, the whole local-dev/hosted
+    // runtime family (incl. hosted-single-tenant-volume) coordinates turn state
+    // in one in-process authority — no per-user `state.json` CAS livelock.
+    // Otherwise the durable filesystem store is used. `LocalDevTurnStateStore`
+    // resolves to the matching concrete type via the same feature cfg, so both
+    // arms satisfy every downstream consumer (coordinator, `LoopCheckpointStore`,
+    // `RuntimeTurnStateStore`) with no trait-object plumbing.
+    #[cfg(feature = "inmemory-turn-state")]
+    let turn_state = {
+        // Persist-on-block: the in-memory authority owns turn state in-process
+        // (no per-user `state.json` CAS livelock) but is otherwise volatile.
+        // Attach a durable sink that snapshots only when the gate-blocked set
+        // changes, and rehydrate from the last such snapshot on startup so a
+        // deploy never silently drops a turn parked on approval/auth.
+        let block_persistence = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
+            &turn_state_filesystem,
+        )));
+        // Fail loud on a real recovery fault. `load()` returns an empty snapshot
+        // for the normal missing-snapshot case (fresh volume), so an `Err` here is
+        // a genuine read/deserialization/integrity failure — falling back to an
+        // empty store would silently drop persisted blocked approvals/auth and
+        // defeat the recovery guarantee. Surface it as a build error instead
+        // (`RebornBuildError: Turn`), so an operator sees the failure rather than
+        // losing gate-parked turns.
+        let restored = block_persistence.load().await?;
+        let store =
+            InMemoryTurnStateStore::from_persistence_snapshot(restored, turn_state_store_limits)?;
+        Arc::new(store.with_block_persistence(block_persistence))
+    };
+    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(
         FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
@@ -1983,7 +2035,7 @@ fn build_local_dev_store_graph(
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-fn build_local_dev_store_graph(
+async fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let RebornLocalDevStoreGraphInput {

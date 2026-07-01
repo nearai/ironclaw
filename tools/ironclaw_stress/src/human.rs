@@ -163,6 +163,10 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
         "Run summary",
         &[
             ("backend", args.backend.as_str().to_string()),
+            (
+                "turn_state_backend",
+                args.turn_state_backend.as_str().to_string(),
+            ),
             ("preset", format_preset(args.preset)),
             ("scenario", args.scenario.as_str().to_string()),
             ("run_id", run_id.to_string()),
