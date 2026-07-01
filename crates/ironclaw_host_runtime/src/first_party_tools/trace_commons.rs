@@ -27,8 +27,8 @@ use ironclaw_reborn_traces::contribution::{
     ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
     TraceUploadAuthMode, mint_account_login_link_via_sink,
-    mint_profile_attribution_token_for_scope_via_sink, read_trace_policy_for_scope,
-    set_community_profile_for_scope_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
+    mint_profile_attribution_token_for_user_via_sink, resolve_trace_credentials,
+    set_community_profile_for_user_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
@@ -430,7 +430,13 @@ impl ContributionHttpSink for HostEgressContributionSink {
                     SecretMaterial::from(token),
                 )
                 .await
-                .map_err(|_| ContributionHttpError::new("trace bearer could not be staged"))?;
+                .map_err(|error| {
+                    // Preserve the staging cause for diagnosis (logged, never
+                    // returned) instead of collapsing it to an opaque string;
+                    // the wire message stays sanitized on the credential path.
+                    tracing::debug!(?error, "trace bearer staging failed");
+                    ContributionHttpError::new("trace bearer could not be staged")
+                })?;
             credential_injections.push(RuntimeCredentialInjection {
                 handle,
                 source: RuntimeCredentialSource::StagedObligation {
@@ -629,17 +635,19 @@ may be missing or malformed. Re-run onboarding with a fresh invite.",
 pub(super) async fn dispatch_status(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let scope = trace_scope_key(
+    // Resolve the caller's effective enrollment — personal-invite OR the
+    // admin-provisioned instance enrollment — so an instance-only contributor is
+    // reported as enrolled (with the instance policy) rather than not-enrolled.
+    // A MISSING policy is already softened to the not-enrolled default inside the
+    // resolver's policy reads, so an `Err` here is a genuine read/parse failure
+    // (unreadable or corrupt policy file). Do NOT mask that as `enrolled: false`
+    // — a user who IS enrolled would be told they are not. Report the read
+    // failure honestly without asserting an enrollment state.
+    let resolution = match resolve_trace_credentials(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
-    );
-    // A MISSING policy is already softened to the not-enrolled default inside
-    // `read_trace_policy_for_scope`, so an `Err` here is a genuine read/parse
-    // failure (unreadable or corrupt policy file). Do NOT mask that as
-    // `enrolled: false` — a user who IS enrolled would be told they are not.
-    // Report the read failure honestly without asserting an enrollment state.
-    let policy = match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(p) => p,
+    ) {
+        Ok(resolution) => resolution,
         Err(error) => {
             tracing::debug!(%error, "trace commons status: local policy read failed");
             return Ok(json!({
@@ -648,7 +656,12 @@ pub(super) async fn dispatch_status(
             }));
         }
     };
-    Ok(format_status(&policy))
+    match resolution {
+        Some(resolution) => Ok(format_status(&resolution.policy)),
+        // Enrolled in neither personal nor instance: report the not-enrolled
+        // default (enrolled: false), matching the prior missing-policy behavior.
+        None => Ok(format_status(&StandingTraceContributionPolicy::default())),
+    }
 }
 
 fn format_status(policy: &StandingTraceContributionPolicy) -> Value {
@@ -757,10 +770,15 @@ pub(super) async fn dispatch_profile_token(
     // must get NotEnrolled guidance, not a NetworkDenied miswiring error. This
     // mirrors dispatch_profile_set's ordering (enrollment check precedes the
     // network call). Egress extraction below is the host-runtime miswiring
-    // guard for the confirmed+enrolled mint path.
-    match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) if policy.enabled => {}
-        Ok(_) => {
+    // guard for the confirmed+enrolled mint path. Route through the shared
+    // resolver so instance-only contributors (personal policy absent, instance
+    // policy enabled) pass the gate instead of being falsely rejected.
+    match resolve_trace_credentials(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(profile_token_error_value(
                 "not enrolled in Trace Commons".to_string(),
             ));
@@ -784,7 +802,13 @@ pub(super) async fn dispatch_profile_token(
         capability_id: request.capability_id.clone(),
         secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
-    match mint_profile_attribution_token_for_scope_via_sink(Some(scope.as_str()), &sink).await {
+    match mint_profile_attribution_token_for_user_via_sink(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+        &sink,
+    )
+    .await
+    {
         Ok(token) => match persist_profile_token(&scope, &token) {
             Ok(_path) => Ok(format_profile_token(&token)),
             Err(error) => {
@@ -935,13 +959,15 @@ pub(super) async fn dispatch_profile_set(
         }));
     }
 
-    let scope = trace_scope_key(
+    // Route the enrollment gate through the shared resolver so instance-only
+    // contributors (personal policy absent, instance policy enabled) pass
+    // instead of being falsely rejected as not enrolled.
+    match resolve_trace_credentials(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
-    );
-    match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) if policy.enabled => {}
-        Ok(_) => {
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(profile_set_error_value(
                 "not enrolled in Trace Commons".to_string(),
             ));
@@ -967,8 +993,9 @@ pub(super) async fn dispatch_profile_set(
         capability_id: request.capability_id.clone(),
         secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
-    match set_community_profile_for_scope_via_sink(
-        Some(scope.as_str()),
+    match set_community_profile_for_user_via_sink(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
         &input.display_handle,
         input.bio.as_deref(),
         &sink,
@@ -1069,10 +1096,16 @@ pub(super) async fn dispatch_account_login_link(
 
     // Enrollment pre-check BEFORE extracting host egress: a not-enrolled user
     // must get NotEnrolled guidance, not a NetworkDenied miswiring error.
-    // Mirrors dispatch_profile_token's ordering.
-    match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) if policy.enabled => {}
-        Ok(_) => {
+    // Mirrors dispatch_profile_token's ordering. Route through the shared
+    // resolver so instance-only contributors pass the gate — matching
+    // `mint_account_login_link_via_sink`, which already resolves instance
+    // enrollment via `resolve_trace_credentials`.
+    match resolve_trace_credentials(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(account_login_link_error_value(
                 "not enrolled in Trace Commons".to_string(),
             ));

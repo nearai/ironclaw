@@ -5763,6 +5763,30 @@ fn profile_attribution_claim_context(scope: Option<&str>) -> TraceUploadClaimCon
     }
 }
 
+/// Build a profile-attribution claim context from an instance-aware
+/// [`TraceCredentialResolution`]. The device key lives at the instance scope
+/// dir when a pseudonymous `subject` is present (instance enrollment) and at the
+/// user scope dir otherwise (personal-invite enrollment) — the same scope_dir /
+/// subject selection as `mint_account_login_link_inner`.
+fn profile_attribution_claim_context_from_resolution(
+    base_dir: &std::path::Path,
+    resolution: &TraceCredentialResolution,
+) -> TraceUploadClaimContext {
+    let scope_dir = if resolution.subject.is_some() {
+        trace_contribution_dir_for_scope_at(base_dir, None)
+    } else {
+        trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
+    };
+    TraceUploadClaimContext {
+        trace_id: None,
+        submission_id: None,
+        consent_scopes: vec![ConsentScope::PublicAttribution],
+        allowed_uses: Vec::new(),
+        scope_dir: Some(scope_dir),
+        subject: resolution.subject.clone(),
+    }
+}
+
 /// Mint a short-lived profile-attribution token from the configured Trace
 /// Commons upload-claim issuer. The token authorizes community-profile
 /// management only and cannot submit traces.
@@ -5783,9 +5807,55 @@ pub async fn mint_profile_attribution_token_for_scope_via_sink(
     mint_profile_attribution_token_with_policy(&policy, scope, Some(sink)).await
 }
 
+/// Instance-aware variant of [`mint_profile_attribution_token_for_scope_via_sink`]:
+/// resolves the caller's enrollment (personal invite OR admin-provisioned
+/// instance enrollment) via [`resolve_trace_credentials`], so an instance-only
+/// contributor mints under the shared instance device key with a per-user
+/// pseudonymous subject rather than being falsely rejected as not enrolled.
+pub async fn mint_profile_attribution_token_for_user_via_sink(
+    tenant_id: &str,
+    user_id: &str,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<ProfileAttributionToken> {
+    mint_profile_attribution_token_for_user_inner(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+        sink,
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`mint_profile_attribution_token_for_user_via_sink`].
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn mint_profile_attribution_token_for_user_inner(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<ProfileAttributionToken> {
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
+        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
+    let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
+    mint_profile_attribution_token_with_context(&resolution.policy, &context, Some(sink)).await
+}
+
 async fn mint_profile_attribution_token_with_policy(
     policy: &StandingTraceContributionPolicy,
     scope: Option<&str>,
+    sink: Option<&dyn ContributionHttpSink>,
+) -> anyhow::Result<ProfileAttributionToken> {
+    let context = profile_attribution_claim_context(scope);
+    mint_profile_attribution_token_with_context(policy, &context, sink).await
+}
+
+/// Mint a profile-attribution token using a prebuilt claim context. Shared by
+/// the scope-based (`*_for_scope_*`) and instance-aware (`*_for_user_*`) entry
+/// points so the enabled/issuer gates and the issuer round-trip stay in one
+/// place regardless of how the context (scope_dir + subject) was derived.
+async fn mint_profile_attribution_token_with_context(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
     sink: Option<&dyn ContributionHttpSink>,
 ) -> anyhow::Result<ProfileAttributionToken> {
     anyhow::ensure!(
@@ -5800,8 +5870,7 @@ async fn mint_profile_attribution_token_with_policy(
             .is_some_and(|url| !url.trim().is_empty()),
         "Trace Commons upload token issuer URL is not configured; re-run onboarding"
     );
-    let context = profile_attribution_claim_context(scope);
-    let claim = fetch_trace_upload_claim_from_issuer(policy, &context, sink).await?;
+    let claim = fetch_trace_upload_claim_from_issuer(policy, context, sink).await?;
     Ok(ProfileAttributionToken {
         access_token: claim.access_token,
         expires_at: claim.expires_at,
@@ -5829,6 +5898,63 @@ pub async fn set_community_profile_for_scope_via_sink(
     sink: &dyn ContributionHttpSink,
 ) -> anyhow::Result<()> {
     set_community_profile_for_scope_inner(scope, display_handle, bio, Some(sink)).await
+}
+
+/// Instance-aware variant of [`set_community_profile_for_scope_via_sink`]:
+/// resolves the caller's enrollment via [`resolve_trace_credentials`] so an
+/// instance-only contributor can publish a community profile under the shared
+/// instance device key with a per-user pseudonymous subject.
+pub async fn set_community_profile_for_user_via_sink(
+    tenant_id: &str,
+    user_id: &str,
+    display_handle: &str,
+    bio: Option<&str>,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<()> {
+    set_community_profile_for_user_inner(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+        display_handle,
+        bio,
+        Some(sink),
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`set_community_profile_for_user_via_sink`].
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn set_community_profile_for_user_inner(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    display_handle: &str,
+    bio: Option<&str>,
+    sink: Option<&dyn ContributionHttpSink>,
+) -> anyhow::Result<()> {
+    let handle = validate_community_profile_handle(display_handle)?;
+    if let Some(bio) = bio {
+        validate_community_profile_bio(bio)?;
+    }
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
+        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
+    let url = community_profile_url_from_policy(&resolution.policy)?;
+    let context = profile_attribution_claim_context_from_resolution(base_dir, &resolution);
+    let token =
+        mint_profile_attribution_token_with_context(&resolution.policy, &context, sink).await?;
+    let body = serde_json::json!({
+        "display_handle": handle,
+        "bio": bio,
+    });
+    execute_community_profile_request(
+        &resolution.policy,
+        ContributionHttpMethod::Put,
+        url,
+        &token.access_token,
+        Some(&body),
+        sink,
+    )
+    .await
 }
 
 async fn set_community_profile_for_scope_inner(
@@ -15481,6 +15607,170 @@ mod tests {
             bodies[0]["subject"],
             serde_json::Value::String(expected_subject),
             "posted subject must be per-user pseudonymous id for instance enrollment"
+        );
+    }
+
+    /// Write an instance policy (scope `None`) and promote a device key at the
+    /// instance scope dir, so `resolve_trace_credentials_at` returns a per-user
+    /// pseudonymous subject and DeviceKey auth can sign without a network call.
+    /// Returns nothing — the caller reads back via the resolver.
+    fn enroll_instance_with_device_key(base: &std::path::Path, addr: std::net::SocketAddr) {
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
+                "127.0.0.1".to_string()
+            ]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ingestion_endpoint: Some(format!("http://{addr}/v1/traces")),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope_at(base, None, &policy).expect("instance policy writes");
+        let instance_dir = trace_contribution_dir_for_scope_at(base, None);
+        let pending =
+            crate::onboarding::DeviceKeypair::load_or_generate_pending(&instance_dir, "testhash")
+                .unwrap();
+        pending.promote(&instance_dir, "tenant-dev").unwrap();
+    }
+
+    /// The instance-aware profile-token mint (`*_for_user_*`) must resolve the
+    /// shared instance enrollment for a user with no personal-invite policy, and
+    /// carry that user's pseudonymous subject to the upload-claim issuer — else
+    /// instance-only contributors are falsely rejected as not enrolled.
+    #[tokio::test]
+    async fn mint_profile_attribution_token_for_user_uses_instance_subject() {
+        use std::sync::{Arc, Mutex};
+
+        let claim_jwt =
+            test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let claim_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let claim_cap = claim_bodies.clone();
+
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(move |axum::Json(b): axum::Json<serde_json::Value>| {
+                let jwt = claim_jwt_for_mock.clone();
+                let claim_cap = claim_cap.clone();
+                async move {
+                    claim_cap.lock().unwrap().push(b);
+                    axum::Json(serde_json::json!({
+                        "access_token": jwt,
+                        "token_type": "Bearer",
+                        "expires_in": 300
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        enroll_instance_with_device_key(base.path(), addr);
+
+        let sink = ReqwestContributionSink;
+        let token = mint_profile_attribution_token_for_user_inner(
+            base.path(),
+            "tenant-dev",
+            "alice",
+            &sink,
+        )
+        .await
+        .expect("instance-enrolled user mints a profile-attribution token");
+        assert_eq!(token.access_token, claim_jwt);
+
+        let bodies = claim_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "exactly one claim request");
+        let expected_subject =
+            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        assert_eq!(
+            bodies[0]["subject"],
+            serde_json::Value::String(expected_subject),
+            "claim request must carry the per-user pseudonymous subject for instance enrollment"
+        );
+    }
+
+    /// The instance-aware community-profile publish (`*_for_user_*`) must resolve
+    /// the shared instance enrollment, mint under the per-user subject, and PUT
+    /// the profile — proving instance-only contributors can publish a profile.
+    #[tokio::test]
+    async fn set_community_profile_for_user_publishes_under_instance_subject() {
+        use std::sync::{Arc, Mutex};
+
+        let claim_jwt =
+            test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let claim_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let claim_cap = claim_bodies.clone();
+        let profile_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let profile_cap = profile_bodies.clone();
+
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move |axum::Json(b): axum::Json<serde_json::Value>| {
+                    let jwt = claim_jwt_for_mock.clone();
+                    let claim_cap = claim_cap.clone();
+                    async move {
+                        claim_cap.lock().unwrap().push(b);
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt,
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/community/profile",
+                axum::routing::put(move |axum::Json(b): axum::Json<serde_json::Value>| {
+                    let profile_cap = profile_cap.clone();
+                    async move {
+                        profile_cap.lock().unwrap().push(b);
+                        axum::Json(serde_json::json!({ "ok": true }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        enroll_instance_with_device_key(base.path(), addr);
+
+        let sink = ReqwestContributionSink;
+        set_community_profile_for_user_inner(
+            base.path(),
+            "tenant-dev",
+            "alice",
+            "pilot_alice",
+            Some("Trace Commons pilot"),
+            Some(&sink),
+        )
+        .await
+        .expect("instance-enrolled user publishes a community profile");
+
+        let expected_subject =
+            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        let claims = claim_bodies.lock().unwrap();
+        assert_eq!(claims.len(), 1, "exactly one claim request");
+        assert_eq!(
+            claims[0]["subject"],
+            serde_json::Value::String(expected_subject),
+            "claim request must carry the per-user pseudonymous subject for instance enrollment"
+        );
+        let profiles = profile_bodies.lock().unwrap();
+        assert_eq!(profiles.len(), 1, "exactly one community-profile PUT");
+        assert_eq!(
+            profiles[0]["display_handle"],
+            serde_json::json!("pilot_alice")
         );
     }
 
