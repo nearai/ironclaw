@@ -186,7 +186,7 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*absolute bottom-4 right-4[\s\S]*<\$\{Icon\} name="file"[\s\S]*\$\{t\("nav\.logs"\)\}/,
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*absolute bottom-4 right-4[\s\S]*<\$\{Icon\} name="logs"[\s\S]*\$\{t\("nav\.logs"\)\}/,
     "thread logs shortcut should render as a bottom-right floating pill button",
   );
 });

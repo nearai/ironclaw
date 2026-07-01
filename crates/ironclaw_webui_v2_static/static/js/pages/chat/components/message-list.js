@@ -264,7 +264,7 @@ export function MessageList({
         title=${t("nav.logs")}
         className="absolute bottom-4 right-4 inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 text-xs font-semibold text-[var(--v2-text-muted)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] transition hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)]"
       >
-        <${Icon} name="file" className="h-3.5 w-3.5" />
+        <${Icon} name="logs" className="h-3.5 w-3.5" />
         ${t("nav.logs")}
       <//>
     `}

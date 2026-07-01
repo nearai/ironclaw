@@ -51,6 +51,10 @@ const paths = {
       d="M4.5 6.5h.1M4.5 12h.1M4.5 17.5h.1"
     />`,
 
+  logs: html`<path d="M4.5 5.5h15v13h-15v-13Z" /><path
+      d="m7.5 10 2 2-2 2"
+    /><path d="M11.5 14h4.5" />`,
+
   lock: html`<path d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10" /><path
       d="M5.5 10h13v10.5h-13V10Z"
     /><path d="M12 14.4v2.3" />`,
