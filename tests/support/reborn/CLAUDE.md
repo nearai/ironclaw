@@ -69,6 +69,7 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 ## Files
 
+- `scope_gateway.rs` — `ScopeRegistryGateway`, a `HostManagedModelGateway` dispatcher that routes model calls to per-thread scripted gateways by `TurnScope` (looked up in a `Mutex<HashMap>`). Sits at the `HostManagedModelGateway` seam but routes to REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` chain — the single-fake-at-the-vendor-SDK-seam invariant (CLAUDE.md lines 5–8, 28) is preserved. Its own `stream_model` is a `ConfigurationError` sentinel (never reached when routing succeeds); `resolve_for_scope` does the actual lookup.
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
 - `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, core assertions
@@ -79,12 +80,16 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results`) the assertion file reads.
-- **`harness.rs` split follow-up** — the MCP/process-port wiring block
-  (`LoopbackMcpRuntimeHttpEgress`, `mock_mcp_extension_package`,
-  `local_dev_host_runtime_with_registry_egress_and_mcp`,
-  `HostRuntimeCapabilityHarness::mock_mcp_tools`, and the `LoopbackMcpRuntime`
-  type alias) is a tracked follow-up to extract into a `harness_mcp.rs` sub-module
-  (the file exceeds 4000 lines; see arch-exempt annotation near `LoopbackMcpRuntime`).
+- `harness_mcp.rs` — the mock-MCP scaffolding extracted from `harness.rs`:
+  `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
+  `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
+  `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`,
+  and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
+  stays in `harness.rs` (it is a full `Self {..}` constructor co-located with its
+  sibling constructors and would otherwise force every private field of the central
+  harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
+  in `harness_mcp.rs`. `harness.rs` remains large (further `harness_auth.rs` /
+  `harness_hooks.rs` splits are tracked in the coverage roadmap).
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
@@ -245,19 +250,27 @@ Both are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 
-`RebornIntegrationGroup` (in `group.rs`) owns shared storage and a shared
-capability backend once; each `.thread(conv_id)` builds a per-thread turn
-runtime over those shared pieces. Cross-thread persistence is real — thread A
+`RebornIntegrationGroup` (in `group.rs`) owns shared storage, a shared
+capability backend, and one shared turn runtime (coordinator + scheduler) once;
+each `.thread(conv_id)` builds a per-thread workflow over that one shared
+runtime. Cross-thread persistence is real — thread A
 writes, thread B sees it. Single-shot `test_default()` is a degenerate
 one-thread group (its own storage, baseline = 0); all existing tests are
 byte-identical after this refactor.
 
 ### When to use a group (vs a flat test)
 
-Use a group **only** when the scenario needs cross-thread persistence — e.g.,
-thread A submits a tool call that raises an approval gate; thread B resolves
-the gate; thread A resumes. A scenario that submits + asserts in one thread
-belongs in a flat `tests/reborn_integration_*.rs` test as always.
+Use a group when the scenario needs **multiple threads over shared state or
+the shared runtime** — either:
+- **cross-thread persistence** — thread A submits a tool call that raises an
+  approval gate; thread B resolves the gate; thread A resumes; or
+- **shared-coordinator/runtime behavior** — two threads parked on gates at the
+  same time, resolved independently by `run_id` (see
+  `scenario_concurrent_dual_gate_resume`), which only the one-shared-runtime
+  model can exercise.
+
+A scenario that submits + asserts in one thread belongs in a flat
+`tests/reborn_integration_*.rs` test as always.
 
 ### Group test binary layout
 

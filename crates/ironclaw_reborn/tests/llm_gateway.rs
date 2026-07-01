@@ -3357,7 +3357,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, ironclaw_turns::run_profile::AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             descriptors: Vec::new(),
         })

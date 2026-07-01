@@ -1,11 +1,12 @@
 //! Filesystem-backed [`TurnStateStore`] implementation.
 //!
 //! Persists the lower-churn [`TurnPersistenceSnapshot`] as a JSON blob under
-//! the `/turns` mount alias (alias-relative path: `/turns/state.json`) and
-//! high-churn runner lease heartbeats as per-run CAS records under
-//! `/turns/runner-leases`. Snapshot mutations read the snapshot, overlay
-//! current runner leases, delegate to an [`InMemoryTurnStateStore`] in a
-//! transient `apply` closure, and write the resulting snapshot back with
+//! the `/turns` mount alias (alias-relative path: `/turns/state.json`).
+//! High-churn runner lease heartbeats are memory-backed per
+//! [`FilesystemTurnStateStore`] instance and are overlaid onto the durable
+//! snapshot while the process is alive. Snapshot mutations read the snapshot,
+//! overlay current runner leases, delegate to an [`InMemoryTurnStateStore`] in
+//! a transient `apply` closure, and write the resulting snapshot back with
 //! optimistic CAS + bounded retry. Reads load the snapshot, overlay current
 //! runner leases, and project through the in-memory store without writing
 //! back.
@@ -22,7 +23,6 @@
 //!
 //! ```text
 //! /turns/state.json
-//! /turns/runner-leases/{run_id}.json
 //! ```
 //!
 //! Within-tenant scoping (agent/project/thread) is encoded inside the
@@ -33,13 +33,18 @@
 //! path itself.
 
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
+use ironclaw_filesystem::{
+    CasApply, CasUpdateError, FILESYSTEM_APPLY_TIMEOUT, RecordVersion, RootFilesystem,
+    ScopedFilesystem, cas_update,
+};
+use ironclaw_host_api::{ResourceScope, UserId};
+use tokio::sync::RwLock;
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
@@ -65,17 +70,13 @@ mod profile_resolver;
 mod projection;
 mod runner_lease;
 
-use io::{
-    FILESYSTEM_CAS_RETRIES, PutError, cas_retry_backoff, deserialize_snapshot, fs_error,
-    put_with_cas, snapshot_entry, snapshot_path,
-};
+use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
-use runner_lease::{RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar};
+use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
 
 #[cfg(test)]
 mod tests;
 
-const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
@@ -124,6 +125,7 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_cache: Mutex<Option<CachedSnapshot>>,
+    runner_leases: RunnerLeaseMemory,
     apply_timeout: Duration,
 }
 
@@ -137,6 +139,7 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_cache: Mutex::new(None),
+            runner_leases: Arc::new(RwLock::new(HashMap::new())),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -212,20 +215,12 @@ where
         self.overlay_runner_leases(snapshot, overlay).await
     }
 
-    async fn read_snapshot_from_filesystem_with_runner_lease_overlay(
-        &self,
-        overlay: RunnerLeaseOverlay,
-    ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        let snapshot = self.read_snapshot_from_filesystem().await?;
-        self.overlay_runner_leases(snapshot, overlay).await
-    }
-
     async fn overlay_runner_leases(
         &self,
         snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
         overlay: RunnerLeaseOverlay,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        self.runner_lease_sidecar().overlay(snapshot, overlay).await
+        self.runner_lease_store().overlay(snapshot, overlay).await
     }
 
     async fn seed_runner_lease_from_snapshot_inner(
@@ -233,7 +228,7 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .seed_from_snapshot(&snapshot, run_id)
             .await?;
         self.clear_snapshot_cache();
@@ -241,9 +236,7 @@ where
     }
 
     async fn cleanup_runner_lease_after_state(&self, result: &Result<TurnRunState, TurnError>) {
-        self.runner_lease_sidecar()
-            .cleanup_after_state(result)
-            .await;
+        self.runner_lease_store().cleanup_after_state(result).await;
         self.clear_snapshot_cache();
     }
 
@@ -251,12 +244,12 @@ where
         &self,
         request: HeartbeatRequest,
     ) -> Result<EventCursor, TurnError> {
-        let sidecar = self.runner_lease_sidecar();
-        let cursor = match sidecar.heartbeat(request.clone()).await {
+        let lease_store = self.runner_lease_store();
+        let cursor = match lease_store.heartbeat(request.clone()).await {
             Err(TurnError::ScopeNotFound) => {
                 self.seed_missing_runner_lease_from_snapshot(request.run_id)
                     .await?;
-                self.runner_lease_sidecar().heartbeat(request).await?
+                self.runner_lease_store().heartbeat(request).await?
             }
             result => result?,
         };
@@ -269,7 +262,7 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .seed_from_snapshot_if_missing(&snapshot, run_id)
             .await
     }
@@ -292,7 +285,7 @@ where
         ) {
             return Ok(None);
         }
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .mark_cancel_requested_from_snapshot(&snapshot, request.run_id)
             .await
     }
@@ -305,7 +298,7 @@ where
         retired_status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .retire_runner_lease_from_snapshot(
                 &snapshot,
                 run_id,
@@ -324,15 +317,15 @@ where
         let Some(previous) = previous else {
             return;
         };
-        self.runner_lease_sidecar()
+        self.runner_lease_store()
             .restore_if_current_status(previous, current_status)
             .await;
         self.clear_snapshot_cache();
     }
 
-    fn runner_lease_sidecar(&self) -> RunnerLeaseSidecar<F> {
-        RunnerLeaseSidecar::new(
-            Arc::clone(&self.filesystem),
+    fn runner_lease_store(&self) -> RunnerLeaseStore {
+        RunnerLeaseStore::new(
+            Arc::clone(&self.runner_leases),
             self.limits.runner_lease_ttl,
             self.apply_timeout,
         )
@@ -387,77 +380,155 @@ where
     /// guarded read/modify/write is deadline-bounded so one wedged filesystem
     /// operation only consumes this caller's apply attempt until the deadline
     /// returns `TurnError::Unavailable`.
-    async fn apply<T, A, Fut>(
-        &self,
-        overlay: RunnerLeaseOverlay,
-        mut apply: A,
-    ) -> Result<T, TurnError>
+    async fn apply<T, A, Fut>(&self, overlay: RunnerLeaseOverlay, apply: A) -> Result<T, TurnError>
     where
-        A: FnMut(InMemoryTurnStateStore) -> Fut,
-        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
+        A: FnMut(InMemoryTurnStateStore) -> Fut + Send,
+        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)> + Send,
+        T: Send,
     {
         let path = snapshot_path()?;
-        match tokio::time::timeout(
-            self.apply_timeout,
-            self.apply_with_retry(&path, overlay, &mut apply),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                self.clear_snapshot_cache();
-                Err(TurnError::Unavailable {
-                    reason: "turn state filesystem apply timed out".to_string(),
-                })
-            }
-        }
-    }
+        // Clear stale cache before entering the CAS loop so every retry reads
+        // through to the backend rather than a potentially stale in-process
+        // snapshot.
+        self.clear_snapshot_cache();
 
-    async fn apply_with_retry<T, A, Fut>(
-        &self,
-        path: &ScopedPath,
-        overlay: RunnerLeaseOverlay,
-        apply: &mut A,
-    ) -> Result<T, TurnError>
-    where
-        A: FnMut(InMemoryTurnStateStore) -> Fut,
-        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
-    {
-        for attempt in 0..FILESYSTEM_CAS_RETRIES {
-            let (snapshot, version) = self
-                .read_snapshot_from_filesystem_with_runner_lease_overlay(overlay)
-                .await?;
-            let old_snapshot = snapshot.clone();
-            let store = self.build_in_memory_store(snapshot)?;
-            let (outcome, store) = apply(store).await;
-            let new_snapshot = store.persistence_snapshot();
+        let scope = ResourceScope::system();
+        let limits = self.limits;
+        let admission_limit_provider = self.admission_limit_provider.clone();
+        let runner_leases_for_overlay = Arc::clone(&self.runner_leases);
+        let runner_lease_ttl = limits.runner_lease_ttl;
+        let overlay_timeout = self.apply_timeout;
 
-            if new_snapshot == old_snapshot {
-                // This apply path read the latest snapshot directly from the
-                // backend, so any previously cached snapshot may now be stale.
-                self.clear_snapshot_cache();
-                return outcome;
-            }
-            let entry = snapshot_entry(&new_snapshot)?;
-            let cas = match version {
-                Some(version) => CasExpectation::Version(version),
-                None => CasExpectation::Absent,
-            };
-            match put_with_cas(self.filesystem.as_ref(), path, entry, cas).await {
-                Ok(version) => {
-                    self.store_snapshot_cache((new_snapshot, Some(version)));
-                    return outcome;
+        // Wrap the caller's FnMut in Arc<Mutex> so the `cas_update` callback
+        // can call it without capturing a mutable reference into the async block.
+        // The lock is never held across an `.await` point: the FnMut is called
+        // synchronously (returning a Future), the guard is dropped, and only
+        // then the returned Future is awaited. CAS retries are sequential, so
+        // there is no lock contention in practice.
+        let apply = Arc::new(Mutex::new(apply));
+
+        let cas_future = cas_update(
+            self.filesystem.as_ref(),
+            &scope,
+            &path,
+            // decode: stored body → TurnPersistenceSnapshot.
+            |bytes: &[u8]| deserialize_snapshot(bytes),
+            // encode: next snapshot → versioned Entry.
+            |snapshot: &TurnPersistenceSnapshot| snapshot_entry(snapshot),
+            // apply: per CAS-retry callback.
+            //   1. Apply runner-lease overlay so the InMemoryTurnStateStore sees
+            //      up-to-date `last_heartbeat_at` / `lease_expires_at` from the
+            //      in-memory runner-lease map. The overlaid snapshot is both the
+            //      no-op baseline and (on a real transition) what cas_update
+            //      writes back — mirroring the pre-merge `apply_with_retry`,
+            //      which built and persisted from the overlaid `old_snapshot`.
+            //   2. Build the transient InMemoryTurnStateStore.
+            //   3. Call the caller's closure (FnMut) via the mutex, then await
+            //      the returned Future without holding the lock.
+            move |current: Option<TurnPersistenceSnapshot>| {
+                let apply = Arc::clone(&apply);
+                let runner_leases_for_overlay = Arc::clone(&runner_leases_for_overlay);
+                let admission_limit_provider = admission_limit_provider.clone();
+
+                async move {
+                    let raw_snapshot = current.unwrap_or_default();
+                    let (overlaid_snapshot, _) = RunnerLeaseStore::new(
+                        runner_leases_for_overlay,
+                        runner_lease_ttl,
+                        overlay_timeout,
+                    )
+                    .overlay((raw_snapshot, None), overlay)
+                    .await?;
+                    // No-op baseline is the OVERLAID snapshot, not the raw
+                    // backend body. `RunnerLeaseOverlay::Run` / `::All` patch
+                    // time-varying lease fields (last_heartbeat_at,
+                    // lease_expires_at) from the in-memory runner-lease map into
+                    // the snapshot the closure sees. Comparing the closure's result
+                    // against the raw body would classify an inert transition as
+                    // a real mutation and write on every call — version churn and
+                    // CAS retries under load. This mirrors the pre-merge
+                    // `apply_with_retry`, which diffed `new_snapshot` against the
+                    // overlaid `old_snapshot`, and subsumes the absent +
+                    // default-snapshot case (the overlay of an absent record is
+                    // the default snapshot, so an empty store stays inert here).
+                    let baseline = overlaid_snapshot.clone();
+
+                    let store =
+                        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+                            overlaid_snapshot,
+                            limits,
+                            admission_limit_provider,
+                        )?;
+
+                    // Call the FnMut via mutex without holding the lock across `.await`.
+                    let apply_fut = {
+                        let mut guard = apply.lock().map_err(|_| TurnError::Unavailable {
+                            reason: "turn state apply closure panicked".to_string(),
+                        })?;
+                        (*guard)(store)
+                    };
+                    let (outcome, store) = apply_fut.await;
+                    let new_snapshot = store.persistence_snapshot();
+
+                    match outcome {
+                        Err(e) => Err(e),
+                        Ok(value) => {
+                            // Inert transition: the closure left the overlaid
+                            // snapshot unchanged, so there is nothing to persist.
+                            // Signal no-op so `cas_update` skips the write
+                            // entirely (no version bump).
+                            if new_snapshot == baseline {
+                                return Ok(CasApply::no_op(
+                                    new_snapshot.clone(),
+                                    (value, new_snapshot),
+                                ));
+                            }
+                            // Thread the new snapshot back alongside the
+                            // caller's outcome so the outer scope can populate
+                            // the cache.
+                            Ok(CasApply::new(new_snapshot.clone(), (value, new_snapshot)))
+                        }
+                    }
                 }
-                Err(PutError::VersionMismatch) => {
+            },
+        );
+
+        // Run the CAS loop inside the apply timeout.
+        //
+        // Note: `cas_update` internally applies `FILESYSTEM_APPLY_TIMEOUT` (from
+        // `ironclaw_filesystem`) to the whole CAS loop.  `self.apply_timeout`
+        // defaults to the same shared constant but can be shortened in tests via
+        // `with_apply_timeout`.  The outer `tokio::time::timeout` here enforces
+        // the per-call deadline; `cas_update`'s inner timeout is an additional
+        // guard inside the helper itself.
+        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<TurnError>> =
+            match tokio::time::timeout(self.apply_timeout, cas_future).await {
+                Ok(result) => result,
+                Err(_) => {
                     self.clear_snapshot_cache();
-                    cas_retry_backoff(attempt).await;
+                    return Err(TurnError::Unavailable {
+                        reason: "turn state filesystem apply timed out".to_string(),
+                    });
                 }
-                Err(PutError::Other(error)) => return Err(error),
+            };
+
+        match result {
+            Ok((value, written_snapshot)) => {
+                // Successful write or explicit no-op (CasApply::no_op). Populate
+                // the snapshot cache with the resulting snapshot so the next read
+                // can skip a backend roundtrip. For a true write we cache the
+                // written snapshot; for a no-op (absent+default) we cache the
+                // default, which is observationally identical to re-reading an
+                // absent record. We store `None` for the version; reads don't use
+                // the version and writes always re-read fresh.
+                self.store_snapshot_cache((written_snapshot, None));
+                Ok(value)
+            }
+            Err(e) => {
+                self.clear_snapshot_cache();
+                Err(map_cas_error(e))
             }
         }
-        Err(TurnError::Unavailable {
-            reason: "turn state filesystem CAS retries exhausted".to_string(),
-        })
     }
 
     async fn apply_run_state_transition<A, Fut>(
@@ -469,9 +540,9 @@ where
         apply: A,
     ) -> Result<TurnRunState, TurnError>
     where
-        A: FnMut(InMemoryTurnStateStore) -> Fut,
-        Fut:
-            std::future::Future<Output = (Result<TurnRunState, TurnError>, InMemoryTurnStateStore)>,
+        A: FnMut(InMemoryTurnStateStore) -> Fut + Send,
+        Fut: std::future::Future<Output = (Result<TurnRunState, TurnError>, InMemoryTurnStateStore)>
+            + Send,
     {
         let previous = self
             .prepare_runner_lease_retirement(run_id, runner_id, lease_token, retired_status)
@@ -503,10 +574,27 @@ where
             tracing::debug!(
                 run_id = %run_id,
                 error = %error,
-                "failed to compensate turn claim after runner lease sidecar seed failed"
+                "failed to compensate turn claim after memory runner lease seed failed"
             );
         }
         self.clear_snapshot_cache();
+    }
+}
+
+/// Map a [`CasUpdateError`] into a [`TurnError`].
+fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
+    match error {
+        CasUpdateError::Apply(inner) => inner,
+        CasUpdateError::Timeout => TurnError::Unavailable {
+            reason: "turn state filesystem apply timed out".to_string(),
+        },
+        CasUpdateError::RetriesExhausted => TurnError::Unavailable {
+            reason: "turn state filesystem CAS retries exhausted".to_string(),
+        },
+        CasUpdateError::CasUnsupported => TurnError::Unavailable {
+            reason: "turn state filesystem backend must support versioned CAS".to_string(),
+        },
+        CasUpdateError::Backend(fs) => fs_error(fs),
     }
 }
 
@@ -582,7 +670,7 @@ where
         let response = result?;
         match response.status {
             status if status.is_terminal() => {
-                self.runner_lease_sidecar()
+                self.runner_lease_store()
                     .delete_best_effort(response.run_id)
                     .await;
             }
@@ -789,7 +877,7 @@ where
             .await;
         if let Ok(response) = &result {
             for state in &response.recovered {
-                self.runner_lease_sidecar()
+                self.runner_lease_store()
                     .delete_best_effort(state.run_id)
                     .await;
             }

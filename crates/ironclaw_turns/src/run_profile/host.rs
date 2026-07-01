@@ -1331,11 +1331,14 @@ pub struct VisibleCapabilitySurface {
     /// model-visible capability filter) must therefore validate against this
     /// wider "callable" set, while advertising and prompt rendering stay narrow.
     ///
-    /// Empty means "same as `descriptors`" — i.e. no disclosure narrowing is in
-    /// effect, so callable == advertised. Producers that don't narrow leave this
-    /// empty and consumers fall back to `descriptors`.
+    /// `None` means "same as `descriptors`" — no disclosure narrowing is in
+    /// effect, so callable == advertised. `Some(_)` is an explicit callable set
+    /// that may legitimately be empty (no callable capabilities this turn),
+    /// which the sentinel-free encoding keeps distinct from the un-narrowed case.
+    /// Producers that don't narrow leave this `None`; consumers fall back to
+    /// `descriptors`.
     #[serde(default)]
-    pub callable_capability_ids: Vec<CapabilityId>,
+    pub callable_capability_ids: Option<Vec<CapabilityId>>,
 }
 
 /// Concurrency hint for a capability surfaced to an agent loop driver.

@@ -305,6 +305,24 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .head_seq(path, from)
+            .await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .reserve_sequence(path)
+            .await
+    }
+
     // ── Legacy bytes plane ──
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {

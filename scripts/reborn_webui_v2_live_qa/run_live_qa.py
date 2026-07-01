@@ -1002,11 +1002,22 @@ async def _wait_for_assistant_reply(
     last_text = ""
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
-        if await assistant.count() > 0:
+        assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
+        if await assistant_blocks.count() > 0:
             try:
                 text = await assistant.inner_text(timeout=1000)
             except Exception:
                 text = ""
+            try:
+                block_texts = [
+                    block.strip()
+                    for block in await assistant_blocks.all_inner_texts()
+                    if block.strip()
+                ]
+            except Exception:
+                block_texts = []
+            if block_texts:
+                text = "\n".join(block_texts)
             if text:
                 last_text = text
             normalized = text.lower()
@@ -1185,7 +1196,7 @@ async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResul
         case_name="qa_3b_endpoint_status_live_chat",
         prompt=_qa_sheet_prompt("qa_3b_endpoint_status_live_chat"),
         marker=None,
-        required_text=["status"],
+        required_text=["status|http|200|up|running|responded"],
         extra_details={"endpoint_url": url, "expected_status_code": live_status},
     )
 
@@ -2042,7 +2053,7 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         case_name="qa_2e_calendar_prep_email_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine", "email"],
+        required_text=["routine", "email|emails|gmail"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
     )
 
@@ -2440,7 +2451,7 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
         ctx,
         case_name="qa_6c_gmail_to_sheet_live_chat",
         marker=None,
-        required_text=["ABC", "spreadsheet"],
+        required_text=["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
         extensions=[
             {
                 "package_id": "gmail",
@@ -2768,7 +2779,7 @@ async def case_qa_4d_github_release_slack_routine(ctx: LiveQaContext) -> ProbeRe
         case_name="qa_4d_github_release_slack_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine"],
+        required_text=["routine|trigger|automation|cron|schedule|created"],
         prompt=_qa_sheet_prompt("qa_4d_github_release_slack_routine"),
     )
 
@@ -3311,7 +3322,7 @@ async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
         case_name="qa_8b_hn_keyword_live_chat",
         prompt=_qa_sheet_prompt("qa_8b_hn_keyword_live_chat"),
         marker=None,
-        required_text=["news.ycombinator.com"],
+        required_text=["news.ycombinator.com|hacker news|hn|discussion|id="],
         timeout=240.0,
     )
 

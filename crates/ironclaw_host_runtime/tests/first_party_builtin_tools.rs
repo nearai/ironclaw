@@ -3034,6 +3034,43 @@ async fn builtin_time_tolerates_null_string_sentinels_in_optional_fields() {
 }
 
 #[tokio::test]
+async fn builtin_time_now_accepts_utc_offset_compatibility_input() {
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "utc_offset": "+03:00"
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["utc_offset"], json!("+03:00"));
+    assert!(
+        output
+            .get("local_iso")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.ends_with("+03:00")),
+        "time `now` should return local_iso with requested offset, got {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn builtin_time_now_rejects_invalid_utc_offset() {
+    let failure = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "utc_offset": "not-an-offset"
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
 async fn builtin_echo_preserves_null_string_in_required_field() {
     // The optional-sentinel normalization must never touch required fields, so a
     // deliberate "null" payload still round-trips unchanged.

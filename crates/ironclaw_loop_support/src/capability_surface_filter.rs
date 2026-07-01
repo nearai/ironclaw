@@ -81,19 +81,12 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        // Delegate resolution to the inner port (e.g. the tool-disclosure
-        // forgiving path) rather than the LoopCapabilityPort default, which only
-        // searches THIS filter's already-filtered `tool_definitions` and so
-        // rejects every deferred/disclosed tool before the inner port can resolve
-        // it. Apply the same visible-scope check as `validate`/`register` so a
-        // genuinely non-visible call is still rejected.
-        let capability_ids = self.inner.provider_tool_call_capability_ids(tool_call)?;
-        validate_provider_tool_call_capability_scope(
-            capability_ids.clone(),
+        delegate_and_scope_tool_call_capability_ids(
+            &self.inner,
+            tool_call,
             |capability_id| self.permits(capability_id),
             "provider tool call is outside the model-visible capability view",
-        )?;
-        Ok(capability_ids)
+        )
     }
 
     fn validate_provider_tool_call(
@@ -217,19 +210,12 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        // Delegate resolution to the inner port (e.g. the tool-disclosure
-        // forgiving path) rather than the LoopCapabilityPort default, which only
-        // searches THIS filter's already-filtered `tool_definitions` and so
-        // rejects every deferred/disclosed tool before the inner port can resolve
-        // it. Apply the same deny-scope check as `validate`/`register` so a call
-        // targeting a disabled capability is still rejected.
-        let capability_ids = self.inner.provider_tool_call_capability_ids(tool_call)?;
-        validate_provider_tool_call_capability_scope(
-            capability_ids.clone(),
+        delegate_and_scope_tool_call_capability_ids(
+            &self.inner,
+            tool_call,
             |capability_id| self.permits(capability_id),
             "provider tool call targets a disabled capability",
-        )?;
-        Ok(capability_ids)
+        )
     }
 
     fn validate_provider_tool_call(
@@ -328,18 +314,16 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        // Delegate to the inner port instead of the LoopCapabilityPort default
-        // (which only searches this filter's filtered `tool_definitions`), then
-        // apply the run-profile scope — mirroring `validate`/`register`.
-        let capability_ids = self.inner.provider_tool_call_capability_ids(tool_call)?;
-        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            validate_provider_tool_call_capability_scope(
-                capability_ids.clone(),
-                |capability_id| self.allow_set.permits(capability_id),
-                "provider tool call is outside the run-profile surface",
-            )?;
-        }
-        Ok(capability_ids)
+        // An `All` allow-set permits every capability, so the scope check is a
+        // no-op and folds into the predicate (keeping the delegate-then-scope
+        // skeleton identical to the visible/deny filters).
+        let allow_all = matches!(self.allow_set.as_ref(), CapabilityAllowSet::All);
+        delegate_and_scope_tool_call_capability_ids(
+            &self.inner,
+            tool_call,
+            |capability_id| allow_all || self.allow_set.permits(capability_id),
+            "provider tool call is outside the run-profile surface",
+        )
     }
 
     fn validate_provider_tool_call(
@@ -513,6 +497,27 @@ fn apply_visible_filter_to_surface(
             visible_capability_ids.contains(capability_id)
         })
     });
+}
+
+/// Resolve `provider_tool_call_capability_ids` through the inner port, then
+/// scope-check the result against `permits`.
+///
+/// Every filtering decorator must resolve the call via the inner port rather
+/// than the `LoopCapabilityPort` default, because the default searches
+/// `self.tool_definitions()` — the decorator's *already-narrowed* advertised
+/// surface — and so rejects deferred/disclosed tools before the inner
+/// tool-disclosure forgiving path can resolve them. This helper is the one copy
+/// of that "delegate down, then apply my scope" skeleton shared by the visible,
+/// deny, and profile filters.
+fn delegate_and_scope_tool_call_capability_ids(
+    inner: &Arc<dyn LoopCapabilityPort>,
+    tool_call: &ProviderToolCall,
+    permits: impl Fn(&CapabilityId) -> bool,
+    denial_message: &'static str,
+) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+    let capability_ids = inner.provider_tool_call_capability_ids(tool_call)?;
+    validate_provider_tool_call_capability_scope(capability_ids.clone(), permits, denial_message)?;
+    Ok(capability_ids)
 }
 
 fn validate_provider_tool_call_capability_scope(
@@ -917,7 +922,7 @@ mod tests {
     async fn visible_capabilities_filters_descriptors() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![
                 descriptor("demo.a"),
@@ -1020,7 +1025,7 @@ mod tests {
     async fn visible_capabilities_preserve_capability_info_for_filtered_surface() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![
                 descriptor(capability_info::CAPABILITY_ID),
@@ -1637,7 +1642,7 @@ mod tests {
     async fn surface_version_preserved() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![descriptor("demo.allowed"), descriptor("demo.denied")],
         });
@@ -1681,7 +1686,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                "demo__deferred".to_string(),
+                provider_name("demo__deferred"),
                 provider_call_capability_ids(&["demo.deferred"]),
             );
         // The deferred tool's capability id IS in the model-visible view (it was
@@ -1709,7 +1714,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                "demo__hidden".to_string(),
+                provider_name("demo__hidden"),
                 provider_call_capability_ids(&["demo.hidden"]),
             );
         let error = filter
@@ -1737,7 +1742,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                "demo__deferred".to_string(),
+                provider_name("demo__deferred"),
                 provider_call_capability_ids(&["demo.deferred"]),
             );
         let filter = CapabilitySurfaceDenyFilter::new(
@@ -1760,7 +1765,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                "builtin__spawn_subagent".to_string(),
+                provider_name("builtin__spawn_subagent"),
                 provider_call_capability_ids(&["builtin.spawn_subagent"]),
             );
         let error = filter
@@ -1797,7 +1802,7 @@ mod tests {
     async fn deny_filter_strips_denied_visible_descriptors() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: vec![
                 descriptor("builtin.spawn_subagent"),

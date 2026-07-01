@@ -224,7 +224,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         *self.visible_calls.lock().unwrap() += 1;
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -293,7 +293,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         *self.visible_calls.lock().unwrap() += 1;
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -356,7 +356,7 @@ impl LoopCapabilityPort for AuthPassPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -415,7 +415,7 @@ impl LoopCapabilityPort for FixedToolPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -450,7 +450,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -486,7 +486,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -539,7 +539,7 @@ impl LoopCapabilityPort for FailingBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })

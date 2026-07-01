@@ -252,7 +252,11 @@ impl ToolResultReferenceEnvelope {
     /// genuine errors are ever considered for collapsing.
     pub fn error_observation_fingerprint(&self) -> Option<String> {
         let observation = self.model_observation.as_ref()?;
-        if observation.get("status").and_then(serde_json::Value::as_str) != Some("error") {
+        if observation
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            != Some("error")
+        {
             return None;
         }
         Some(observation.to_string())
@@ -886,10 +890,14 @@ mod tests {
         envelope.collapse_to_repeated_error_marker();
 
         // The collapsed marker is itself a valid error observation that round-trips.
-        envelope.validate().expect("collapsed observation validates");
+        envelope
+            .validate()
+            .expect("collapsed observation validates");
         let observation = envelope.model_observation.as_ref().expect("observation");
         assert_eq!(
-            observation.get("status").and_then(serde_json::Value::as_str),
+            observation
+                .get("status")
+                .and_then(serde_json::Value::as_str),
             Some("error")
         );
         assert_eq!(

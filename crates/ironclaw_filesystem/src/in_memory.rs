@@ -50,6 +50,7 @@ struct State {
     entries: HashMap<VirtualPath, StoredEntry>,
     indexes: HashMap<String, Vec<IndexSpec>>,
     event_logs: HashMap<String, Vec<EventRecord>>,
+    sequences: HashMap<String, SeqNo>,
 }
 
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
@@ -64,6 +65,7 @@ impl InMemoryBackend {
                 entries: HashMap::new(),
                 indexes: HashMap::new(),
                 event_logs: HashMap::new(),
+                sequences: HashMap::new(),
             }),
         }
     }
@@ -145,6 +147,8 @@ impl RootFilesystem for InMemoryBackend {
             state
                 .entries
                 .retain(|key, _| !key.as_str().starts_with(&prefix));
+            clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
+            clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
             return Ok(());
         }
         let prefix = with_trailing_slash(path.as_str());
@@ -152,6 +156,8 @@ impl RootFilesystem for InMemoryBackend {
         state
             .entries
             .retain(|key, _| !key.as_str().starts_with(&prefix));
+        clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
+        clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
         if state.entries.len() == before {
             return Err(FilesystemError::NotFound {
                 path: path.clone(),
@@ -432,6 +438,17 @@ impl RootFilesystem for InMemoryBackend {
             .collect())
     }
 
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let mut state = self.state.lock().await;
+        let next = state
+            .sequences
+            .entry(path.as_str().to_string())
+            .or_insert_with(|| SeqNo::ZERO.next());
+        let reserved = *next;
+        *next = next.next();
+        Ok(reserved)
+    }
+
     // Legacy bytes ops — default impls in the trait route them through put/get
     // and use our native implementations. The only one needing an explicit
     // impl is the required-method `list_dir`, which we already overrode above.
@@ -588,6 +605,28 @@ fn with_trailing_slash(s: &str) -> String {
     }
 }
 
+/// Drop any reserved sequence counter for `exact` and every path under
+/// `prefix` (the trailing-slash form of `exact`). Mirrors the entries-delete
+/// subtree semantics so a delete/recreate of the same path restarts its
+/// sequence from 1 instead of resuming stale state. The exact match is kept
+/// separate from the prefix scan so a sibling sharing a string prefix
+/// (`/a/b` vs `/a/bc`) is not swept.
+fn clear_sequences_under(sequences: &mut HashMap<String, SeqNo>, exact: &str, prefix: &str) {
+    sequences.retain(|key, _| key.as_str() != exact && !key.starts_with(prefix));
+}
+
+/// Drop the append-event log for `exact` and every log under `prefix`. Append-only
+/// finalized assistant messages live in `event_logs`, so a delete/recreate of the
+/// same thread path would otherwise rehydrate stale append-log history. Mirrors
+/// the entries/sequences subtree semantics.
+fn clear_event_logs_under(
+    event_logs: &mut HashMap<String, Vec<EventRecord>>,
+    exact: &str,
+    prefix: &str,
+) {
+    event_logs.retain(|key, _| key.as_str() != exact && !key.starts_with(prefix));
+}
+
 fn first_segment(s: &str) -> (&str, bool) {
     match s.find('/') {
         Some(idx) => (&s[..idx], true),
@@ -665,6 +704,46 @@ mod tests {
 
         // Empty batch is a no-op that returns no seqs.
         assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reserve_sequence_assigns_path_local_monotonic_values() {
+        let fs = InMemoryBackend::new();
+        let thread_a = vpath("/threads/a/message_sequence");
+        let thread_b = vpath("/threads/b/message_sequence");
+
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&thread_b).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_subtree_clears_its_reserved_sequences() {
+        // Counters are now path-scoped in a side table rather than embedded in
+        // the thread record, so delete must sweep them or a delete/recreate of
+        // the same path would resume from stale state. A sibling that merely
+        // shares a string prefix must NOT be swept.
+        let fs = InMemoryBackend::new();
+        let seq_path = vpath("/threads/a/message_sequence");
+        let sibling = vpath("/threads/ab/message_sequence");
+        let thread_dir = vpath("/threads/a");
+
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 1);
+
+        // Materialize an entry so the directory delete has something to remove,
+        // then delete the whole /threads/a subtree.
+        fs.put(&seq_path, Entry::bytes(vec![1]), CasExpectation::Any)
+            .await
+            .unwrap();
+        fs.delete(&thread_dir).await.unwrap();
+
+        // The deleted subtree's counter restarts from 1.
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        // The string-prefix sibling /threads/ab is untouched.
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 2);
     }
 
     #[tokio::test]
@@ -897,6 +976,48 @@ mod tests {
         // Now NotFound — the subtree is gone.
         let err = fs.delete(&dir).await.unwrap_err();
         assert!(matches!(err, FilesystemError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_sweeps_append_event_logs_under_path() {
+        // Append-only finalized assistant messages live in the per-thread
+        // append log. Deleting a thread must clear that log so a later
+        // recreate of the same path does not replay stale history. This covers
+        // both delete branches: an exact append-log path, and a thread-root
+        // directory delete whose log lives under the subtree.
+        let fs = InMemoryBackend::new();
+
+        // Exact-entry branch: an entry and an append log share the deleted
+        // path. Deleting the entry must also sweep the co-located log.
+        let exact = vpath("/threads/exact");
+        fs.put(&exact, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.append(&exact, b"finalized-a".to_vec()).await.unwrap();
+        assert_eq!(fs.tail(&exact, SeqNo::ZERO).await.unwrap().len(), 1);
+        fs.delete(&exact).await.unwrap();
+        assert!(fs.tail(&exact, SeqNo::ZERO).await.unwrap().is_empty());
+
+        // Directory branch: the thread root has no exact entry, but a child
+        // entry and an append log live under it. Deleting the root must sweep
+        // the log too.
+        let thread_root = vpath("/threads/t1");
+        let thread_doc = vpath("/threads/t1/thread.json");
+        let message_log = vpath("/threads/t1/messages_append.log");
+        fs.put(&thread_doc, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.append(&message_log, b"finalized-b".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(fs.tail(&message_log, SeqNo::ZERO).await.unwrap().len(), 1);
+
+        fs.delete(&thread_root).await.unwrap();
+
+        // History is gone, and recreating the same thread starts from an empty
+        // log rather than resurrecting the finalized message.
+        assert!(fs.get(&thread_doc).await.unwrap().is_none());
+        assert!(fs.tail(&message_log, SeqNo::ZERO).await.unwrap().is_empty());
     }
 
     #[tokio::test]

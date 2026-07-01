@@ -44,6 +44,8 @@ function contextFor(mutationState, queryCalls) {
       return { data: { requests: [] }, isLoading: false };
     },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useT: () => (key, params = {}) =>
+      `${key}${params.name ? `:${params.name}` : ""}`,
   };
 }
 

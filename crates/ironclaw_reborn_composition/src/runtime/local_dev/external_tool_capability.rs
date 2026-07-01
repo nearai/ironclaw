@@ -464,6 +464,7 @@ fn surface_lock_error() -> AgentLoopHostError {
 }
 
 fn catalog_error(error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+    tracing::debug!(?error, "external tool catalog operation failed");
     match error {
         ironclaw_turns::ExternalToolCatalogError::Unavailable => AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
@@ -511,6 +512,7 @@ mod tests {
             Ok(VisibleCapabilitySurface {
                 version: CapabilitySurfaceVersion::new("test.surface.v1").expect("surface version"),
                 descriptors: Vec::new(),
+                callable_capability_ids: None,
             })
         }
 

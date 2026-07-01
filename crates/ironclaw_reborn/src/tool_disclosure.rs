@@ -756,9 +756,18 @@ fn bridge_tool_definition(
     description: &'static str,
     parameters: Value,
 ) -> ProviderToolDefinition {
+    let tool_name = match ProviderToolName::new(name) {
+        Ok(tool_name) => tool_name,
+        Err(error) => {
+            // Static bridge names are validated literal identifiers. Reaching
+            // this branch means this source file was edited to contain an
+            // invalid bridge tool name.
+            panic!("invalid static bridge tool name: {error}");
+        }
+    };
     ProviderToolDefinition {
         capability_id: bridge_capability_id(name),
-        name: ProviderToolName::new(name).expect("valid static bridge tool name"),
+        name: tool_name,
         description: description.to_string(),
         parameters,
     }

@@ -11,7 +11,6 @@ import { ApprovalCard } from "./components/approval-card.js";
 import { AuthGenericCard } from "./components/auth-generic-card.js";
 import { AuthOauthCard } from "./components/auth-oauth-card.js";
 import { AuthTokenCard } from "./components/auth-token-card.js";
-import { ChannelConnectCard } from "./components/channel-connect-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
@@ -53,7 +52,6 @@ export function Chat({
     isProcessing,
     pendingGate,
     busyGateNotice,
-    channelConnectAction,
     suggestions,
     sseStatus,
     historyLoading,
@@ -70,7 +68,6 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    dismissChannelConnectAction,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -86,8 +83,7 @@ export function Chat({
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
-    activeThreadHasGate ||
-    Boolean(channelConnectAction);
+    activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
@@ -293,13 +289,6 @@ export function Chat({
               />
             `}
             ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
-            ${channelConnectAction &&
-            html`
-              <${ChannelConnectCard}
-                connectAction=${channelConnectAction}
-                onDismiss=${dismissChannelConnectAction}
-              />
-            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"

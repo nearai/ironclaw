@@ -100,8 +100,42 @@ struct ToolDisclosureTurnState {
 
 #[derive(Debug, Clone)]
 struct BridgeInvocation {
-    name: String,
+    kind: BridgeKind,
     arguments: Value,
+}
+
+/// Which synthetic bridge a stored [`BridgeInvocation`] resolves to at invoke
+/// time. Replaces discriminating on stashed name strings so the dispatch in
+/// [`ToolDisclosureCapabilityDecorator::invoke_bridge`] is exhaustive and
+/// legible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeKind {
+    /// `tool_search` — keyword-rank the deferred catalog.
+    Search,
+    /// `tool_describe` — return a named tool's parameter schema.
+    Describe,
+    /// Internal auto-schema (describe-first): return a deferred tool's schema
+    /// after a blind call to it failed pre-dispatch validation.
+    DescribeFirst,
+    /// `tool_call` — invoke a tool by name. Reaching invoke with this kind means
+    /// the target could not be resolved (a resolvable target is dispatched
+    /// directly and never stored as a bridge invocation), so it always errors
+    /// recoverably.
+    Call,
+}
+
+impl BridgeKind {
+    /// Map a stored bridge name to its kind. Returns `None` for a name that is
+    /// not one of the known bridges.
+    fn from_provider_name(name: &str) -> Option<Self> {
+        match name {
+            TOOL_SEARCH_NAME => Some(Self::Search),
+            TOOL_DESCRIBE_NAME => Some(Self::Describe),
+            DESCRIBE_FIRST_BRIDGE_NAME => Some(Self::DescribeFirst),
+            TOOL_CALL_NAME => Some(Self::Call),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +271,14 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             // early diagnostic, but always return Ok: registration falls back to
             // the bridge path on failure, surfacing a recoverable invalid_input
             // at invoke time that the model can correct and retry.
+            //
+            // NOTE: this makes `validate_provider_tool_call` no longer mean "this
+            // will pass" for the bridge path — the real gate is `register`. That
+            // muddied contract is a workaround for the gateway's discard-the-whole-
+            // response-on-validate-error behavior; the honest fix is upstream (fail
+            // only the offending call, not the whole response). Tracked in the
+            // context-management design doc under "validate contract"; remove this
+            // probe-and-swallow once the gateway stops discarding the response.
             if let Err(error) = self.inner.validate_provider_tool_call(&target.target_call) {
                 debug!(
                     tool_name = tool_call.name.as_str(),
@@ -277,24 +319,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     capability_id = target.definition.capability_id.as_str(),
                     "reborn tool disclosure registering direct deferred provider tool call"
                 );
-                // Describe-first: the blind-call regression tool disclosure
-                // introduced. Pre-disclosure the full schema was always in
-                // context, so the model filled required fields; now schemas are
-                // deferred and the model calls by name alone, omitting required
-                // arguments and looping on the opaque validation error. If the
-                // tool's schema has NOT been disclosed this turn AND the arguments
-                // fail pre-dispatch validation, return the schema (one-shot per
-                // undisclosed tool) instead of dispatching blind. Well-formed
-                // blind calls fall through and dispatch directly, so this adds no
-                // round-trip on correct calls. Once disclosed, a still-invalid
-                // call dispatches and fails normally, so the no-progress detector
-                // still observes the repeated failure.
-                if !self.is_disclosed(target.definition.name.as_str())?
-                    && self
-                        .inner
-                        .validate_provider_tool_call(&target.target_call)
-                        .is_err()
-                {
+                // Describe-first (see `should_describe_first`): a deferred tool
+                // called by name with arguments that fail pre-dispatch validation
+                // gets its schema instead of a blind dispatch, one-shot per
+                // undisclosed tool.
+                if self.should_describe_first(&target)? {
                     debug!(
                         tool_name = tool_call.name.as_str(),
                         capability_id = target.definition.capability_id.as_str(),
@@ -328,16 +357,9 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             // The model invoked the `tool_call` bridge itself (a valid wire
             // name); the replay reflects that actual call, not the target.
             let bridge_provider_tool_name = tool_call.name.clone();
-            // Describe-first (same rationale as the direct-deferred path above):
-            // an undisclosed tool called via the bridge with arguments that fail
-            // pre-dispatch validation gets its schema instead of a blind dispatch,
-            // one-shot per undisclosed tool.
-            if !self.is_disclosed(target.definition.name.as_str())?
-                && self
-                    .inner
-                    .validate_provider_tool_call(&target.target_call)
-                    .is_err()
-            {
+            // Describe-first (see `should_describe_first`): same as the
+            // direct-deferred path above, but for a tool reached via the bridge.
+            if self.should_describe_first(&target)? {
                 debug!(
                     tool_name = tool_call.name.as_str(),
                     target = target.definition.name.as_str(),
@@ -399,7 +421,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .collect();
         let mut state = self.turn_state()?;
         let Some(state) = state.as_mut() else {
-            surface.callable_capability_ids = callable_capability_ids;
+            surface.callable_capability_ids = Some(callable_capability_ids);
             return Ok(surface);
         };
         state.surface_version = Some(surface.version.clone());
@@ -442,7 +464,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 .iter()
                 .map(|descriptor| descriptor.capability_id.clone()),
         );
-        surface.callable_capability_ids = callable.into_iter().collect();
+        surface.callable_capability_ids = Some(callable.into_iter().collect());
         Ok(surface)
     }
 
@@ -619,7 +641,9 @@ impl ToolDisclosureCapabilityPort {
             .insert(
                 input_ref.as_str().to_string(),
                 BridgeInvocation {
-                    name: tool_call.name.to_string(),
+                    kind: BridgeKind::from_provider_name(tool_call.name.as_str()).ok_or_else(
+                        || invalid_invocation("bridge tool definition is unavailable"),
+                    )?,
                     arguments: tool_call.arguments.clone(),
                 },
             );
@@ -632,6 +656,29 @@ impl ToolDisclosureCapabilityPort {
             effective_capability_ids: Vec::new(),
             provider_replay: Some(provider_replay_for(&tool_call, tool_call.name.clone())),
         })
+    }
+
+    /// Whether a resolved deferred call should be answered with its schema
+    /// (describe-first) rather than dispatched blind.
+    ///
+    /// This is the blind-call regression tool disclosure introduces:
+    /// pre-disclosure the full schema was always in context so the model filled
+    /// required fields; with schemas deferred the model calls by name alone,
+    /// omitting required arguments and looping on the opaque validation error.
+    /// True when the target's schema has NOT been disclosed this turn AND its
+    /// arguments fail pre-dispatch validation. Once disclosed, a still-invalid
+    /// retry dispatches and fails normally, so the no-progress detector still
+    /// observes the repeated failure. Well-formed blind calls return false and
+    /// dispatch directly, adding no round-trip on correct calls.
+    fn should_describe_first(
+        &self,
+        target: &ResolvedToolTarget,
+    ) -> Result<bool, AgentLoopHostError> {
+        Ok(!self.is_disclosed(target.definition.name.as_str())?
+            && self
+                .inner
+                .validate_provider_tool_call(&target.target_call)
+                .is_err())
     }
 
     /// Register a deferred call whose arguments failed pre-dispatch validation as
@@ -679,7 +726,7 @@ impl ToolDisclosureCapabilityPort {
             .insert(
                 input_ref.as_str().to_string(),
                 BridgeInvocation {
-                    name: DESCRIBE_FIRST_BRIDGE_NAME.to_string(),
+                    kind: BridgeKind::DescribeFirst,
                     arguments: json!({ "name": target_name }),
                 },
             );
@@ -713,14 +760,13 @@ impl ToolDisclosureCapabilityPort {
             .get(request.input_ref.as_str())
             .cloned()
             .ok_or_else(|| invalid_invocation("bridge input is unavailable"))?;
-        match bridge.name.as_str() {
-            TOOL_SEARCH_NAME => self.invoke_tool_search(&request, &bridge).await,
-            TOOL_DESCRIBE_NAME => self.invoke_tool_describe(&request, &bridge).await,
-            DESCRIBE_FIRST_BRIDGE_NAME => self.invoke_describe_first(&request, &bridge).await,
-            TOOL_CALL_NAME => Ok(failed_invalid_input(
+        match bridge.kind {
+            BridgeKind::Search => self.invoke_tool_search(&request, &bridge).await,
+            BridgeKind::Describe => self.invoke_tool_describe(&request, &bridge).await,
+            BridgeKind::DescribeFirst => self.invoke_describe_first(&request, &bridge).await,
+            BridgeKind::Call => Ok(failed_invalid_input(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
-            _ => Ok(failed_invalid_input("unknown bridge tool")),
         }
     }
 
@@ -1219,7 +1265,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
-                callable_capability_ids: Vec::new(),
+                callable_capability_ids: None,
                 version: self.surface_version.clone(),
                 descriptors: self
                     .definitions
@@ -2006,8 +2052,13 @@ mod tests {
                 .any(|d| d.name.as_str() == TOOL_SEARCH_NAME),
             "fixture must be in deferred mode so the bridges are advertised"
         );
-        let callable: std::collections::HashSet<_> =
-            surface.callable_capability_ids.iter().cloned().collect();
+        let callable: std::collections::HashSet<_> = surface
+            .callable_capability_ids
+            .as_ref()
+            .expect("disclosure narrows the surface, so callable set is populated")
+            .iter()
+            .cloned()
+            .collect();
         // Every advertised tool — bridges included — must be authorizable, or the
         // visible-surface filter strips it from the model's tool list.
         for descriptor in &surface.descriptors {

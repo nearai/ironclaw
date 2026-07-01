@@ -249,16 +249,16 @@ impl<'a> PromptPlanningPipeline<'a> {
         // wider set so bridge / forgiving-direct calls to disclosed-but-unadvertised
         // tools aren't rejected as "outside the model-visible capability view".
         // Advertising and prompt rendering still use the narrow `descriptors`.
-        // Empty `callable_capability_ids` means no narrowing is in effect, so fall
-        // back to `descriptors` (preserves non-disclosure behavior exactly).
-        let visible_capability_ids = if surface.callable_capability_ids.is_empty() {
-            surface
+        // `None` callable_capability_ids means no narrowing is in effect, so fall
+        // back to `descriptors` (preserves non-disclosure behavior exactly). A
+        // `Some(_)` set is used verbatim, even when empty.
+        let visible_capability_ids = match &surface.callable_capability_ids {
+            Some(callable) => callable.clone(),
+            None => surface
                 .descriptors
                 .iter()
                 .map(|descriptor| descriptor.capability_id.clone())
-                .collect()
-        } else {
-            surface.callable_capability_ids.clone()
+                .collect(),
         };
         let capability_view = LoopModelCapabilityView {
             visible_capability_ids,

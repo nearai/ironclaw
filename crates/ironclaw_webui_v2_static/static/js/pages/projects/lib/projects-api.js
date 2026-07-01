@@ -1,7 +1,7 @@
 // Project endpoints now call the real WebChat v2 `/api/webchat/v2/projects`
-// surface (list/create/read/update/delete + membership ACL). Mission/thread/
-// widget reads remain TODO stubs until the v2 missions/threads-by-project
-// endpoints land — the page degrades to empty panels for those.
+// surface (list/create/read/update/delete + membership ACL) plus the v2
+// project-filtered thread list. Mission/widget reads remain TODO stubs until
+// those v2 project child endpoints land.
 
 import {
   addProjectMember as apiAddProjectMember,
@@ -13,6 +13,7 @@ import {
   removeProjectMember as apiRemoveProjectMember,
   updateProject as apiUpdateProject,
   updateProjectMemberRole as apiUpdateProjectMemberRole,
+  listThreads as apiListThreads,
 } from "../../../lib/api.js";
 
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
@@ -43,6 +44,17 @@ function toPageProject(project) {
     created_at: project.created_at,
     updated_at: project.updated_at,
     health: project.state === "archived" ? "muted" : "green",
+  };
+}
+
+function toPageThread(thread) {
+  if (!thread) return null;
+  return {
+    ...thread,
+    id: thread.thread_id,
+    state: thread.state || null,
+    turn_count: thread.turn_count || 0,
+    updated_at: thread.updated_at || null,
   };
 }
 
@@ -94,8 +106,13 @@ export function removeProjectMember(projectId, userId) {
 export function fetchProjectMissions(_projectId) {
   return Promise.resolve({ missions: [], todo: true });
 }
-export function fetchProjectThreads(_projectId) {
-  return Promise.resolve({ threads: [], todo: true });
+export async function fetchProjectThreads(projectId) {
+  if (!projectId) return { threads: [] };
+  const response = await apiListThreads({ projectId, limit: 200 });
+  return {
+    threads: (response?.threads || []).map(toPageThread).filter(Boolean),
+    next_cursor: response?.next_cursor || null,
+  };
 }
 export function fetchProjectWidgets(_projectId) {
   return Promise.resolve({ widgets: [], todo: true });

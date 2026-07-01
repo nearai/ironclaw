@@ -5,14 +5,6 @@
 //! not own provider clients, tool dispatchers, secrets, or runtime handles.
 #![warn(unreachable_pub)]
 
-/// Build tag for the capability-surface-filter provider-tool-call resolution path.
-/// Bumped when that resolution logic changes so a startup marker can prove THIS
-/// crate (not just a stale incremental codegen unit) is actually linked in.
-/// `delegate-to-inner` => the filters delegate `provider_tool_call_capability_ids`
-/// to the inner port (reaching the tool-disclosure forgiving path) instead of the
-/// LoopCapabilityPort default.
-pub const CAPABILITY_FILTER_RESOLUTION_BUILD: &str = "delegate-to-inner";
-
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -140,7 +132,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -828,7 +820,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
         Ok(VisibleCapabilitySurface {
             version: empty_surface_version()?,
             descriptors: Vec::new(),
-            callable_capability_ids: Vec::new(),
+            callable_capability_ids: None,
         })
     }
 
@@ -1483,6 +1475,16 @@ pub trait HostManagedModelGateway: Send + Sync {
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
+    /// Production gateways return None (identity) → host uses `self` unchanged.
+    /// Test harnesses override this to route per-thread scripted gateways.
+    fn resolve_for_scope(
+        &self,
+        _scope: &TurnScope,
+    ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
+        None
     }
 }
 

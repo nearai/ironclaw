@@ -152,7 +152,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -168,7 +167,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -185,7 +183,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -204,7 +201,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -303,7 +299,6 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
       messages: [],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -322,7 +317,6 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -346,7 +340,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       messages: [],
       isProcessing: false,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -363,7 +356,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -381,7 +373,6 @@ test("Chat links to scoped logs for the active thread run", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -397,7 +388,6 @@ test("Chat links to scoped logs for the active thread run", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 

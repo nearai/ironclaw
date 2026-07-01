@@ -122,12 +122,10 @@ impl ToolDisclosureMode {
         }
     }
 
-    /// TEMPORARY (revert before GA — tracked in the context-management plan):
-    /// tool disclosure defaults **on** when `REBORN_TOOL_DISCLOSURE` is unset,
-    /// so the remote benchmark — which cannot set env vars — exercises the
-    /// bridged path. Explicit `REBORN_TOOL_DISCLOSURE=off` is the escape hatch
-    /// and still disables it. To restore default-off, change the catch-all arm
-    /// back to `Self::Off`.
+    /// Progressive tool disclosure defaults **off** — an unset, empty, or
+    /// unrecognized `REBORN_TOOL_DISCLOSURE` leaves the request path
+    /// byte-identical to the pre-disclosure behavior. Only an explicit
+    /// `REBORN_TOOL_DISCLOSURE=bridged` opts into the bridged path.
     fn from_raw(raw: Option<&str>) -> Self {
         match raw {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
@@ -136,12 +134,12 @@ impl ToolDisclosureMode {
                 tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     value,
-                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to temporary default Bridged"
+                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
                 );
-                Self::Bridged
+                Self::Off
             }
-            // unset / empty -> temporarily ON for benchmarking.
-            _ => Self::Bridged,
+            // unset / empty -> default off (byte-identical request path).
+            _ => Self::Off,
         }
     }
 
@@ -161,7 +159,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
-    pub planned_default_iteration_limit: Option<u32>,
+    pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {
@@ -663,23 +661,8 @@ where
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
             .with_decorator(spawn_decorator);
     if parts.config.tool_disclosure.is_bridged() {
-        // Startup build marker + self-test: confirms which binary is running AND
-        // that the general-name matcher is actually compiled into THIS binary
-        // (guards against stale incremental-compilation codegen units). The
-        // dotted-form match only resolves `true` in the general-name-matcher
-        // build; an older binary would log `false` (or omit the field), making
-        // a stale server unmistakable. Bump the tag when resolution logic changes.
-        let matcher_selftest =
-            crate::tool_disclosure::encode_provider_tool_name("google-calendar.list_events")
-                == "google-calendar__list_events";
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            disclosure_build = "index-names-only-v16",
-            matcher_selftest,
-            // Echoes a const from ironclaw_loop_support: if this reads
-            // "delegate-to-inner", the surface-filter resolution fix is actually
-            // linked in (not a stale incremental build of that crate).
-            filter_build = ironclaw_loop_support::CAPABILITY_FILTER_RESOLUTION_BUILD,
             "reborn tool disclosure decorator wired (bridged)"
         );
         capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
@@ -899,27 +882,26 @@ mod tests {
     };
 
     #[test]
-    fn tool_disclosure_mode_temporarily_defaults_on_with_off_escape_hatch() {
+    fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
         use super::ToolDisclosureMode;
-        // TEMPORARY benchmark window: unset / empty / unrecognized resolve to
-        // Bridged so the remote benchmark (which cannot set env vars) exercises
-        // disclosure; explicit `off` is the escape hatch. `is_bridged()` is what
-        // gates whether the gateway attaches the decorator.
+        // Default off: unset / empty / unrecognized resolve to Off so the
+        // request path stays byte-identical. Only explicit `bridged` opts in.
+        // `is_bridged()` is what gates whether the gateway attaches the decorator.
         assert!(
-            ToolDisclosureMode::from_raw(None).is_bridged(),
-            "unset must temporarily default ON for the remote benchmark"
+            !ToolDisclosureMode::from_raw(None).is_bridged(),
+            "unset must default OFF (byte-identical request path)"
         );
-        assert!(ToolDisclosureMode::from_raw(Some("")).is_bridged());
+        assert!(!ToolDisclosureMode::from_raw(Some("")).is_bridged());
         assert!(
-            ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
-            "unrecognized values must still use the temporary Bridged default"
+            !ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
+            "unrecognized values must fall back to the default Off"
         );
         assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_bridged());
+        assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_bridged());
         assert!(
             !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),
-            "explicit REBORN_TOOL_DISCLOSURE=off must still disable disclosure"
+            "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"
         );
-        assert!(!ToolDisclosureMode::from_raw(Some("OFF")).is_bridged());
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());
         assert!(ToolDisclosureMode::Bridged.is_bridged());
