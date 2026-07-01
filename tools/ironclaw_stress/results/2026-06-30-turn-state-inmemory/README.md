@@ -21,6 +21,11 @@ concurrent same-user writers the 32-retry budget livelocks.
   distinct threads that all share that owner's single `state.json`. Without
   this the harness accidentally shards (thread ↔ owner 1:1), so the filesystem
   CAS never contends cross-thread and the bug doesn't reproduce.
+- `--gate-blocked-every N` — every Nth measured user-turn operation blocks its
+  run on a gate (alternating approval/auth), resumes it, then re-claims and
+  completes. 0 (default) = the pure claim/complete hot path. Combined with
+  `memory-persist-on-block` this drives the durable persist-on-block writes under
+  concurrency (see the blocking-workload section below).
 
 ## Scenario
 
@@ -99,10 +104,62 @@ runtime wires, so this measures the shipped durable config against plain
 
 The two backends track each other within run-to-run noise — persist-on-block adds
 no measurable hot-path cost while making gate-blocked turns durable across a
-restart. (A gate-blocked run's block/resume/terminate is exercised for
-correctness by the `ironclaw_turns` unit test
-`blocked_run_persists_to_sink_and_rehydrates_across_restart`, not by this
-never-blocking throughput workload.)
+restart.
 
 Artifacts: `chatturn-memory-persist-on-block-baseline.jsonl` (plain `memory`),
 `chatturn-memory-persist-on-block.jsonl`.
+
+## Persist-on-block under a *blocking* workload
+
+The sweep above is the hot path — it never blocks, so the sink stays idle. To
+actually exercise persist-on-block under load, `--gate-blocked-every N` routes
+every Nth measured operation through a real gate block + resume (alternating
+approval/auth), then re-claims and completes the resumed run. This drives the
+durable snapshot write on each blocked-set change under concurrency. Correctness
+of a single block → persist → rehydrate cycle (both approval and auth gates) is
+pinned by the `ironclaw_turns` unit test
+`blocked_run_persists_to_sink_and_rehydrates_across_restart`; this sweep measures
+the *cost* the durable writes add when many turns block concurrently.
+
+`--users 64 --active-thread-count 64 --threads-per-owner 1` (one thread per
+worker, so a blocked run's same-thread lock doesn't manufacture `ThreadBusy`
+noise), concurrency 8→64, `memory` (sink off) vs `memory-persist-on-block` (sink
+on) at two block rates:
+
+**25% of turns block (`--gate-blocked-every 4`) — a deliberately pathological rate:**
+
+| Concurrency | memory p99 → max (fail%) | persist-on-block p99 → max (fail%) | ops/s (off → on) |
+| ---: | ---: | ---: | ---: |
+| 8  | 130ms → 143ms (0%) | 155ms → 158ms (0%) | 65.1 → 53.9 |
+| 32 | 131ms → 163ms (0%) | 150ms → 203ms (0%) | 59.1 → 51.4 |
+| 64 | 133ms → 171ms (0%) | 215ms → 255ms (0%) | 48.8 → 40.8 |
+
+**5% of turns block (`--gate-blocked-every 20`) — closer to a realistic gate rate:**
+
+| Concurrency | memory p99 → max (fail%) | persist-on-block p99 → max (fail%) | ops/s (off → on) |
+| ---: | ---: | ---: | ---: |
+| 8  | 177ms → 187ms (0%) | 106ms → 114ms (0%) | 56.4 → 64.1 |
+| 32 | 139ms → 195ms (0%) | 131ms → 198ms (0%) | 58.0 → 56.8 |
+| 64 | 128ms → 181ms (0%) | 178ms → 259ms (0%) | 49.4 → 46.2 |
+
+Reading:
+
+- **0% failures at every block rate.** The block → resume → re-claim → complete
+  cycle works under concurrency; gate-blocked turns are persisted and re-claimed
+  cleanly, with no CAS livelock (contrast the filesystem backend, which livelocks
+  on the *non*-blocking hot path itself).
+- **Cost scales with block rate, not the hot path.** Each blocked turn triggers
+  two durable snapshot writes (one on block, one on resume) to the single
+  `/turns/state.json`; under a pathological 25% block rate that serialized write
+  costs ~15–20% throughput and a higher tail at c64. At a realistic ~5% rate the
+  two backends are within run-to-run noise apart from a modest tail bump at high
+  concurrency.
+- **Net:** persist-on-block is free on the hot path and cheap at realistic gate
+  rates. If a future workload ever parks a large fraction of turns on gates
+  concurrently, the snapshot-per-change write is the knob to revisit (an
+  append-only block delta would remove the full-snapshot cost).
+
+Artifacts: `chatturn-blocked-memory.jsonl`,
+`chatturn-blocked-memory-persist-on-block.jsonl` (25%);
+`chatturn-blocked5pct-memory.jsonl`,
+`chatturn-blocked5pct-memory-persist-on-block.jsonl` (5%).

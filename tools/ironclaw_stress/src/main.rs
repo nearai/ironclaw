@@ -131,6 +131,16 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 4)]
     pub(crate) prefill_concurrency: usize,
 
+    /// Exercise the gate-blocked turn path: every Nth measured user-turn
+    /// operation blocks its run on a gate (alternating approval/auth), resumes
+    /// it, then re-claims and completes. 0 (default) = never block, the pure
+    /// claim/complete hot path. Combine with
+    /// `--turn-state-backend memory-persist-on-block` to drive persist-on-block
+    /// writes under concurrency and confirm the durable sink does not
+    /// reintroduce contention.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) gate_blocked_every: usize,
+
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
 

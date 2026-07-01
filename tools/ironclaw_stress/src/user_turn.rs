@@ -28,11 +28,12 @@ use ironclaw_threads::{
     SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateStore, IdempotencyKey, InMemoryTurnStateStore, ReplyTargetBindingRef,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
-    runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
+    FilesystemTurnStateStore, GateRef, IdempotencyKey, InMemoryTurnStateStore,
+    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    runner::{BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -868,6 +869,19 @@ where
                 )
             })?;
 
+            // Optionally route this operation through a gate block + resume so
+            // persist-on-block fires under the concurrent workload. The resumed
+            // run comes back queued and is re-claimed, so the normal completion
+            // path below still owns finishing it.
+            let claimed = if args.gate_blocked_every > 0
+                && operation_index.is_multiple_of(args.gate_blocked_every)
+            {
+                self.gate_block_and_resume(&context, &turn_store, claimed, operation_index)
+                    .await?
+            } else {
+                claimed
+            };
+
             if matches!(args.scenario, Scenario::MixedUserSession) {
                 time_stage(
                     &mut stages.load_context,
@@ -1169,6 +1183,89 @@ where
         .map_err(|error| turn_failure("complete_run", error))?;
 
         Ok(())
+    }
+
+    /// Route a claimed run through a gate block + resume so persist-on-block
+    /// fires, then re-claim it and hand the fresh claim back for the caller to
+    /// complete. Alternates approval/auth gates by operation index so both gate
+    /// kinds exercise the durable sink.
+    async fn gate_block_and_resume(
+        &self,
+        context: &crate::synthetic::UserTurnContext,
+        turn_store: &Arc<dyn StressTurnStore>,
+        claimed: ClaimedTurnRun,
+        operation_index: usize,
+    ) -> Result<ClaimedTurnRun, OperationFailure> {
+        let run_id = claimed.state.run_id;
+        let is_auth = operation_index % 2 == 1;
+        let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
+            .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
+        let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))
+            .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
+        let reason = if is_auth {
+            BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            }
+        } else {
+            BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            }
+        };
+        turn_store
+            .block_run(BlockRunRequest {
+                run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref,
+                reason,
+            })
+            .await
+            .map_err(|error| turn_failure("block_run", error))?;
+
+        let precondition = if is_auth {
+            ResumeTurnPrecondition::BlockedAuthGate
+        } else {
+            ResumeTurnPrecondition::BlockedApprovalGate
+        };
+        turn_store
+            .resume_turn(ResumeTurnRequest {
+                scope: context.turn_scope.clone(),
+                actor: TurnActor::new(context.user_id.clone()),
+                run_id,
+                gate_resolution_ref: gate_ref,
+                source_binding_ref: SourceBindingRef::new(format!("stress-src:{run_id}"))
+                    .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                    "stress-reply:{run_id}"
+                ))
+                .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                idempotency_key: IdempotencyKey::new(format!("stress-resume:{run_id}"))
+                    .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                precondition,
+                resume_disposition: None,
+            })
+            .await
+            .map_err(|error| turn_failure("resume_turn", error))?;
+
+        // Resume returns the run to Queued — re-claim it so the normal
+        // completion path owns finishing it.
+        turn_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(context.turn_scope.clone()),
+            })
+            .await
+            .map_err(|error| turn_failure("reclaim_run", error))?
+            .ok_or_else(|| {
+                OperationFailure::new(
+                    "turn_claim_miss",
+                    "reclaim_run",
+                    "resumed run was not claimable",
+                )
+            })
     }
 
     fn turn_store_for_context(

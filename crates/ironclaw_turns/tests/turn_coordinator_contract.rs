@@ -951,31 +951,81 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         1,
         "blocking a run must persist exactly once"
     );
-    let blocked_snapshot = after_block.last().unwrap().clone();
-    let persisted_run = blocked_snapshot
+    let persisted_run = after_block
+        .last()
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
-        .expect("blocked run present in persisted snapshot");
+        .expect("blocked run present in persisted snapshot")
+        .clone();
     assert_eq!(persisted_run.status, TurnStatus::BlockedApproval);
 
-    // Rehydrate a fresh store from the last persisted snapshot — the gate-parked
-    // run must come back blocked so a later "Approve" lands on a real run.
+    // Auth gates take the same durable path: block a second run on an auth gate
+    // (via `block_run`, the path a `BlockedReason::Auth` uses) and confirm the
+    // sink fires again with the run recorded as `BlockedAuth`. This is the case
+    // that most needs durability — a turn parked on auth must survive a deploy.
+    let auth_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate-auth", "idem-gate-auth"))
+            .await
+            .unwrap(),
+    );
+    let auth_runner_id = TurnRunnerId::new();
+    let auth_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            scope_filter: Some(scope("thread-gate-auth")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id: auth_run_id,
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: GateRef::new("auth-gate").unwrap(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let after_auth_block = sink.snapshots();
+    assert_eq!(
+        after_auth_block.len(),
+        2,
+        "blocking a run on an auth gate must persist"
+    );
+
+    // The latest snapshot now carries both parked runs. Rehydrate a fresh store
+    // from it — both the approval- and auth-blocked runs must come back blocked
+    // so a later "Approve"/token submission lands on a real run.
+    let blocked_snapshot = after_auth_block.last().unwrap().clone();
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         blocked_snapshot,
         InMemoryTurnStateStoreLimits::default(),
     )
     .unwrap();
-    let restored_run = restored
-        .persistence_snapshot()
-        .runs
-        .into_iter()
+    let restored_runs = restored.persistence_snapshot().runs;
+    let restored_approval = restored_runs
+        .iter()
         .find(|record| record.run_id == run_id)
-        .expect("blocked run survives rehydration");
-    assert_eq!(restored_run.status, TurnStatus::BlockedApproval);
+        .expect("approval-blocked run survives rehydration");
+    assert_eq!(restored_approval.status, TurnStatus::BlockedApproval);
+    let restored_auth = restored_runs
+        .iter()
+        .find(|record| record.run_id == auth_run_id)
+        .expect("auth-blocked run survives rehydration");
+    assert_eq!(restored_auth.status, TurnStatus::BlockedAuth);
 
-    // Resuming the gate again changes the blocked set, so the sink fires a
-    // second time with the run no longer blocked.
+    // Resuming the approval gate changes the blocked set, so the sink fires
+    // again with that run no longer blocked.
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
             scope: scope("thread-gate"),
@@ -993,7 +1043,7 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     assert_eq!(resumed.status, TurnStatus::Queued);
     assert_eq!(
         sink.snapshots().len(),
-        2,
+        3,
         "resuming a blocked run must persist the blocked-set change"
     );
 }
