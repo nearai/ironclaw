@@ -180,7 +180,10 @@ impl DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
-        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired) {
+        if matches!(
+            status,
+            ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded
+        ) {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
@@ -221,7 +224,7 @@ impl DefaultApprovalInteractionService {
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
                     .await
             }
-            (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
+            (ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded, _) => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
@@ -352,7 +355,7 @@ impl DefaultApprovalInteractionService {
                     .await?;
             }
             ApprovalStatus::Denied => {}
-            ApprovalStatus::Approved | ApprovalStatus::Expired => {
+            ApprovalStatus::Approved | ApprovalStatus::Expired | ApprovalStatus::Discarded => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));

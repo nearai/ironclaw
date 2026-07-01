@@ -820,6 +820,93 @@ async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_s
     );
 }
 
+/// Regression: a no-op apply that runs under a non-`None` runner-lease overlay
+/// (`Run`/`All`) must NOT rewrite `state.json`.
+///
+/// The overlay patches time-varying lease fields (`last_heartbeat_at`,
+/// `lease_expires_at`) from the per-run sidecar into the snapshot the apply
+/// closure sees, so the overlaid snapshot diverges from the raw backend body
+/// (whose lease fields are frozen at claim time once heartbeats only touch the
+/// sidecar). The no-op baseline must therefore be the OVERLAID snapshot — if it
+/// is taken from the raw body, an inert transition is misread as a real
+/// mutation and the snapshot is rewritten on every call (version churn + CAS
+/// retries under load). `recover_expired_leases` with nothing expired is a true
+/// no-op apply under the `All` overlay, so it exercises exactly this path.
+#[tokio::test]
+async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_rewrite_snapshot() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-noop-active-lease"),
+        "idem-fs-noop-active-lease",
+    );
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Heartbeat updates only the sidecar lease, leaving state.json's lease
+    // fields frozen at claim time. This is the divergence the overlay bridges
+    // and the exact condition under which the no-op baseline matters.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let version_before = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after heartbeat")
+        .version;
+
+    // `now` well before the (heartbeat-refreshed) lease expiry, so nothing is
+    // recovered: the apply closure leaves the overlaid snapshot unchanged.
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc.with_ymd_and_hms(2026, 5, 17, 12, 0, 0).unwrap(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        recovered.recovered.is_empty(),
+        "active lease must not be recovered before its expiry"
+    );
+
+    let version_after = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after no-op recover")
+        .version;
+    assert_eq!(
+        version_after, version_before,
+        "a no-op apply under an active-lease overlay must not rewrite state.json \
+         (the no-op baseline is the overlaid snapshot, not the raw backend body)"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_after_reopen() {
     let backend = Arc::new(engine_filesystem());

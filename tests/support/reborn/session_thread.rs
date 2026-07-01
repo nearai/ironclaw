@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{
-    CompositeRootFilesystem, LocalFilesystem, RootFilesystem, ScopedFilesystem,
+    CompositeRootFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
@@ -12,14 +12,8 @@ use ironclaw_threads::{
 };
 use thiserror::Error;
 
-use super::filesystem::local_filesystem;
-
 #[derive(Debug, Error)]
 pub enum RebornThreadHarnessError {
-    #[error("failed to create thread harness tempdir: {0}")]
-    Tempdir(#[from] std::io::Error),
-    #[error("failed to configure local filesystem: {0}")]
-    Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("invalid mount view: {0}")]
     MountView(#[from] ironclaw_host_api::HostApiError),
     #[error("thread service failed: {0}")]
@@ -29,27 +23,36 @@ pub enum RebornThreadHarnessError {
 }
 
 /// Thin harness over a `FilesystemSessionThreadService<F>` for asserting thread
-/// history in integration and binary-E2E tests.
+/// history in integration and binary-tier tests.
 ///
-/// The type parameter `F` defaults to `LocalFilesystem` so that all existing
-/// binary-tier callers that write `RebornThreadHarness` (no type parameter) continue
-/// to compile as `RebornThreadHarness<LocalFilesystem>` without modification.
+/// The type parameter `F` defaults to `InMemoryBackend` so that all existing
+/// callers that write `RebornThreadHarness` (no type parameter) continue to
+/// compile as `RebornThreadHarness<InMemoryBackend>` without modification.
+/// `InMemoryBackend` (not `LocalFilesystem`) is the default because it is
+/// CAS-capable and models the production database-backed filesystem that these
+/// stores are mounted on in real deployments; `LocalFilesystem` is a byte-only
+/// backend that production never uses for record-shaped CAS stores (see
+/// e3e155803).
 ///
 /// The integration tier uses `RebornThreadHarness<CompositeRootFilesystem>` via
 /// `filesystem_shared_composite`, mounting the thread service directly on the
 /// per-`build()` production-path composite (threads at `/tenants/{t}/users/{u}/threads`).
-pub struct RebornThreadHarness<F = LocalFilesystem>
+pub struct RebornThreadHarness<F = InMemoryBackend>
 where
     F: RootFilesystem,
 {
     pub scope: ThreadScope,
     pub service: Arc<FilesystemSessionThreadService<F>>,
     backend: Arc<F>,
-    root: Arc<tempfile::TempDir>,
+    /// Backing `TempDir` to keep alive for tiers whose backend persists to
+    /// disk (e.g. the `CompositeRootFilesystem` integration tier). `None` for
+    /// in-memory tiers, which have nothing to keep alive.
+    root: Option<Arc<tempfile::TempDir>>,
     /// Path prefix inserted before `/tenants/...` when constructing the thread
-    /// scoped filesystem. Binary-tier instances use `"/engine"` (preserving the
-    /// `/engine/tenants/...` layout); integration-tier instances use `""` so
-    /// threads land at `/tenants/...` inside the production composite.
+    /// scoped filesystem. The default `InMemoryBackend` tier uses `"/engine"`
+    /// (preserving the historical `/engine/tenants/...` layout); the
+    /// integration-tier `CompositeRootFilesystem` harness uses `""` so threads
+    /// land at `/tenants/...` inside the production composite.
     root_prefix: String,
 }
 
@@ -63,7 +66,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
             scope: self.scope.clone(),
             service,
             backend: Arc::clone(&self.backend),
-            root: Arc::clone(&self.root),
+            root: self.root.clone(),
             root_prefix: self.root_prefix.clone(),
         })
     }
@@ -119,23 +122,18 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     }
 }
 
-/// `LocalFilesystem`-specific constructors (binary-E2E tier).
-impl RebornThreadHarness<LocalFilesystem> {
-    /// Create a harness with a private per-call `TempDir` and a fresh
-    /// `LocalFilesystem` mounted under `/engine`. Used by the binary-E2E tier.
+/// `InMemoryBackend`-specific constructors (default tier). CAS-capable, models
+/// the production database-backed filesystem mount — see e3e155803 for why a
+/// byte-only `LocalFilesystem` is wrong for these record-shaped stores.
+impl RebornThreadHarness<InMemoryBackend> {
     pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
-        let root = Arc::new(tempfile::tempdir()?);
-        let backend = Arc::new(local_filesystem(root.path())?);
-        Self::filesystem_shared_backend(scope, backend, root)
+        let backend = Arc::new(InMemoryBackend::new());
+        Self::filesystem_shared_backend(scope, backend)
     }
 
-    /// Create a harness sharing an already-constructed `LocalFilesystem` backend.
-    /// `root` keeps the backing `TempDir` alive for the harness's lifetime.
-    /// Uses the `/engine/tenants/...` path layout (binary-E2E convention).
     pub fn filesystem_shared_backend(
         scope: ThreadScope,
-        backend: Arc<LocalFilesystem>,
-        root: Arc<tempfile::TempDir>,
+        backend: Arc<InMemoryBackend>,
     ) -> Result<Self, RebornThreadHarnessError> {
         let scoped = scoped_threads_fs_at("/engine", Arc::clone(&backend), &scope)?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
@@ -143,7 +141,7 @@ impl RebornThreadHarness<LocalFilesystem> {
             scope,
             service,
             backend,
-            root,
+            root: None,
             root_prefix: "/engine".to_string(),
         })
     }
@@ -171,7 +169,7 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
             scope,
             service,
             backend,
-            root,
+            root: Some(root),
             root_prefix: String::new(),
         })
     }
@@ -180,7 +178,7 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
 /// Build the scoped thread filesystem for `scope`.
 ///
 /// `root_prefix` is prepended before `/tenants/...`:
-/// - Binary-E2E tier: `"/engine"` → `/engine/tenants/{t}/users/{u}/threads`
+/// - Default `InMemoryBackend` tier: `"/engine"` → `/engine/tenants/{t}/users/{u}/threads`
 /// - Integration tier: `""` → `/tenants/{t}/users/{u}/threads`
 fn scoped_threads_fs_at<F>(
     root_prefix: &str,

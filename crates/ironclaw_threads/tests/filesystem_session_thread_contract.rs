@@ -19,12 +19,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion, RootFilesystem,
-    ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, LocalFilesystem, Page, RecordVersion,
+    RootFilesystem, ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, ProjectId, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -2023,6 +2023,48 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
     assert!(
         history.messages[0].turn_run_id.is_none(),
         "legacy DeferredBusy message must have no turn_run_id"
+    );
+}
+
+/// Regression: `ensure_thread` was migrated to the shared `cas_update`
+/// helper, which maps `CasUpdateError::CasUnsupported` to
+/// `SessionThreadError::Backend(...)` (`map_cas_error`,
+/// `filesystem_service.rs`). Existing `ensure_thread` coverage only runs
+/// over `InMemoryBackend`, which supports versioned CAS — so the
+/// byte-only/`Unsupported` fail-closed branch for thread creation was
+/// unpinned.
+///
+/// `LocalFilesystem` is the canonical byte-only `RootFilesystem`: its
+/// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
+/// surfaces as `CasUnsupported`. This mirrors
+/// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
+/// `crates/ironclaw_run_state/tests/run_state_contract.rs`.
+#[tokio::test]
+async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+    let scoped = scoped_threads_fs_at(Arc::new(local_fs), "tenant-byte-only", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let err = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("byte-only"),
+            thread_id: Some(ThreadId::new("thread-byte-only").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect_err("ensure_thread must fail closed on a byte-only backend");
+    assert!(
+        matches!(&err, SessionThreadError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
     );
 }
 
