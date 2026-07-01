@@ -1,0 +1,322 @@
+{
+  "backend": "libsql",
+  "preset": null,
+  "scenario": "mixed-user-session",
+  "run_id": "2cb8fdc911374f46bb99bde5147c9157",
+  "target": "libsql://<redacted-local-path>",
+  "child_index": null,
+  "processes": 1,
+  "concurrency": 16,
+  "operations_per_thread": 10,
+  "duration_seconds": 0,
+  "warmup_seconds": 0,
+  "trace_jsonl_enabled": false,
+  "trace_interval_seconds": 1,
+  "users": 1000,
+  "active_thread_count": 0,
+  "tenants": 1,
+  "prefill_threads": 0,
+  "prefill_turns_per_thread": 0,
+  "prefill_concurrency": 4,
+  "model_latency_ms": 0,
+  "model_latency_profile": "fixed",
+  "model_latency_jitter_ms": 0,
+  "model_latency_spike_every": 0,
+  "model_latency_spike_ms": 0,
+  "user_message_bytes": 0,
+  "assistant_message_bytes": 0,
+  "context_max_messages": 20,
+  "context_growth_turns_per_operation": 4,
+  "tool_calls_per_turn": 2,
+  "tool_latency_ms": 0,
+  "tool_output_bytes": 1024,
+  "tool_failure_every": 0,
+  "attempted": 160,
+  "succeeded": 160,
+  "failed": 0,
+  "duration_ms": 5605,
+  "throughput_ops_sec": 28.542225247082854,
+  "latency": {
+    "min_us": 49412,
+    "p50_us": 488683,
+    "p95_us": 916483,
+    "p99_us": 1588756,
+    "max_us": 1695587
+  },
+  "process": {
+    "start": {
+      "rss_kb": 11392,
+      "peak_rss_kb": 11376,
+      "user_cpu_ms": 141,
+      "system_cpu_ms": 88,
+      "threads": null,
+      "open_fds": 10
+    },
+    "end": {
+      "rss_kb": 27472,
+      "peak_rss_kb": 27536,
+      "user_cpu_ms": 1715,
+      "system_cpu_ms": 1777,
+      "threads": null,
+      "open_fds": 10
+    },
+    "delta_user_cpu_ms": 1574,
+    "delta_system_cpu_ms": 1689,
+    "delta_cpu_ms": 3263,
+    "peak_rss_kb": 27536,
+    "peak_threads": null,
+    "peak_open_fds": 26
+  },
+  "db_probe": {
+    "before": {
+      "libsql_file_bytes": 32768,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "after": {
+      "libsql_file_bytes": 4886528,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    },
+    "delta": {
+      "libsql_file_bytes": 4853760,
+      "libsql_wal_bytes": 0,
+      "libsql_shm_bytes": 0
+    }
+  },
+  "operation_attribution": {
+    "thread_store_writes": {
+      "count": 160,
+      "latency": {
+        "min_us": 9376,
+        "p50_us": 34170,
+        "p95_us": 363173,
+        "p99_us": 1047464,
+        "max_us": 1252262
+      }
+    },
+    "context_reads": {
+      "count": 160,
+      "latency": {
+        "min_us": 356,
+        "p50_us": 671,
+        "p95_us": 5368,
+        "p99_us": 97037,
+        "max_us": 98063
+      }
+    },
+    "turn_store": {
+      "count": 160,
+      "latency": {
+        "min_us": 4058,
+        "p50_us": 9566,
+        "p95_us": 193171,
+        "p99_us": 604746,
+        "max_us": 1016630
+      }
+    },
+    "resource_governor": {
+      "count": 160,
+      "latency": {
+        "min_us": 32956,
+        "p50_us": 400153,
+        "p95_us": 556967,
+        "p99_us": 619017,
+        "max_us": 658549
+      }
+    },
+    "synthetic_wait": {
+      "count": 159,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    }
+  },
+  "stage_latency": {
+    "ensure_thread": {
+      "count": 160,
+      "latency": {
+        "min_us": 599,
+        "p50_us": 822,
+        "p95_us": 132355,
+        "p99_us": 479888,
+        "max_us": 687291
+      }
+    },
+    "accept_inbound": {
+      "count": 160,
+      "latency": {
+        "min_us": 2152,
+        "p50_us": 4736,
+        "p95_us": 108230,
+        "p99_us": 390677,
+        "max_us": 494501
+      }
+    },
+    "submit_turn": {
+      "count": 160,
+      "latency": {
+        "min_us": 607,
+        "p50_us": 847,
+        "p95_us": 17523,
+        "p99_us": 259340,
+        "max_us": 597903
+      }
+    },
+    "mark_submitted": {
+      "count": 160,
+      "latency": {
+        "min_us": 586,
+        "p50_us": 805,
+        "p95_us": 30473,
+        "p99_us": 143770,
+        "max_us": 1230156
+      }
+    },
+    "mark_rejected_busy": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "claim_run": {
+      "count": 160,
+      "latency": {
+        "min_us": 1227,
+        "p50_us": 1823,
+        "p95_us": 74160,
+        "p99_us": 152028,
+        "max_us": 225407
+      }
+    },
+    "append_assistant": {
+      "count": 160,
+      "latency": {
+        "min_us": 2257,
+        "p50_us": 4873,
+        "p95_us": 108205,
+        "p99_us": 196036,
+        "max_us": 245455
+      }
+    },
+    "finalize_assistant": {
+      "count": 160,
+      "latency": {
+        "min_us": 1101,
+        "p50_us": 1514,
+        "p95_us": 58291,
+        "p99_us": 145871,
+        "max_us": 1012732
+      }
+    },
+    "complete_run": {
+      "count": 160,
+      "latency": {
+        "min_us": 1642,
+        "p50_us": 2549,
+        "p95_us": 70322,
+        "p99_us": 182972,
+        "max_us": 1012968
+      }
+    },
+    "load_context": {
+      "count": 160,
+      "latency": {
+        "min_us": 356,
+        "p50_us": 671,
+        "p95_us": 5368,
+        "p99_us": 97037,
+        "max_us": 98063
+      }
+    },
+    "resource_reserve": {
+      "count": 160,
+      "latency": {
+        "min_us": 21422,
+        "p50_us": 192540,
+        "p95_us": 309030,
+        "p99_us": 328241,
+        "max_us": 354049
+      }
+    },
+    "model_wait": {
+      "count": 160,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "tool_wait": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "append_tool_result": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "append_tool_preview": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "update_assistant_draft": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    },
+    "resource_reconcile": {
+      "count": 160,
+      "latency": {
+        "min_us": 11533,
+        "p50_us": 202524,
+        "p95_us": 322778,
+        "p99_us": 361226,
+        "max_us": 366242
+      }
+    },
+    "resource_release": {
+      "count": 0,
+      "latency": {
+        "min_us": 0,
+        "p50_us": 0,
+        "p95_us": 0,
+        "p99_us": 0,
+        "max_us": 0
+      }
+    }
+  },
+  "errors": {}
+}

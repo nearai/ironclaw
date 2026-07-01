@@ -80,8 +80,9 @@ pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
+    LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
@@ -407,13 +408,14 @@ fn create_openai_compat_from_registry(
         normalize_openai_base_url(&config.base_url)
     };
 
-    let mut builder = openai::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        openai::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&normalized_base_url);
     }
@@ -489,13 +491,14 @@ fn create_anthropic_from_registry(
     // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
     // proxy for live chat too — not just model discovery. Remote hosts keep
     // default proxy behavior.
-    let mut builder = anthropic::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        anthropic::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -562,7 +565,7 @@ fn create_ollama_from_registry(
     use rig::client::Nothing;
     use rig::providers::ollama;
 
-    let client: ollama::Client = ollama::Client::<reqwest::Client>::builder()
+    let client: ollama::Client = ollama::Client::builder()
         .base_url(&config.base_url)
         .api_key(Nothing)
         .http_client(provider_http_client(
@@ -636,13 +639,14 @@ fn create_deepseek_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    let mut builder = deepseek::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        deepseek::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -722,13 +726,14 @@ fn create_openrouter_from_registry(
         extra_headers.insert(name, val);
     }
 
-    let mut builder = openrouter::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        openrouter::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -789,13 +794,14 @@ fn create_gemini_from_registry(
     // request. Discard any persisted shim URL and use the native default.
     let base_url = sanitize_gemini_base_url(&config.base_url);
 
-    let mut builder = gemini::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        gemini::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &base_url,
+                request_timeout_secs,
+            )?);
     if !base_url.is_empty() {
         builder = builder.base_url(&base_url);
     }
@@ -989,17 +995,22 @@ pub(crate) async fn build_provider_chain_components(
     build_provider_chain_components_with_options(config, session, true).await
 }
 
-async fn build_provider_chain_components_with_options(
+/// Apply the LLM decorator chain over a raw provider: Retry → SmartRouting →
+/// Failover → CircuitBreaker → ResponseCache. Each decorator is configured from
+/// `config`; when its config field is disabled/zero it is a passthrough that
+/// returns its inner provider unchanged. This is the single source of truth for
+/// decorator-chain assembly — assemble the chain only through this function, not
+/// inline or at a higher seam.
+///
+/// Crate-internal: production assembles the chain here, and the only
+/// cross-crate access is the test-only `testing::provider_chain_over` door
+/// (gated by the `testing` feature), so the production API is not widened.
+pub(crate) async fn apply_decorator_chain(
+    raw: Arc<dyn LlmProvider>,
     config: &LlmConfig,
     session: Arc<SessionManager>,
-    include_standalone_cheap: bool,
-) -> Result<ProviderChainComponents, LlmError> {
-    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
-        create_openai_codex_provider(config).await?
-    } else {
-        create_llm_provider(config, session.clone()).await?
-    };
-    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let llm = raw;
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
     // with fallback to NEARAI_* for backward compatibility).
@@ -1116,6 +1127,23 @@ async fn build_provider_chain_components_with_options(
     } else {
         llm
     };
+
+    Ok(llm)
+}
+
+async fn build_provider_chain_components_with_options(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+    include_standalone_cheap: bool,
+) -> Result<ProviderChainComponents, LlmError> {
+    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
+        create_openai_codex_provider(config).await?
+    } else {
+        create_llm_provider(config, session.clone()).await?
+    };
+    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+
+    let llm = apply_decorator_chain(llm, config, session.clone()).await?;
 
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = if include_standalone_cheap {

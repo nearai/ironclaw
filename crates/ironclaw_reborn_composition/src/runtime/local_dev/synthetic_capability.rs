@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
 use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 use ironclaw_turns::{
     CapabilityActivityId,
@@ -58,7 +58,7 @@ impl LocalDevSyntheticCapability {
 
 pub(super) struct LocalDevSyntheticCapabilityDescriptor {
     capability_id: CapabilityId,
-    provider_tool_name: String,
+    provider_tool_name: ProviderToolName,
     description: String,
     concurrency_hint: ConcurrencyHint,
     parameters_schema: serde_json::Value,
@@ -79,7 +79,12 @@ impl LocalDevSyntheticCapabilityDescriptor {
                     "synthetic capability id is invalid",
                 )
             })?,
-            provider_tool_name: provider_tool_name.to_string(),
+            provider_tool_name: ProviderToolName::new(provider_tool_name).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "synthetic provider tool name is invalid",
+                )
+            })?,
             description: description.to_string(),
             concurrency_hint,
             parameters_schema,
@@ -91,7 +96,7 @@ impl LocalDevSyntheticCapabilityDescriptor {
             capability_id: self.capability_id.clone(),
             provider: None,
             runtime: RuntimeKind::System,
-            safe_name: self.provider_tool_name.clone(),
+            safe_name: self.provider_tool_name.as_str().to_string(),
             safe_description: self.description.clone(),
             concurrency_hint: self.concurrency_hint,
             parameters_schema: self.parameters_schema.clone(),
@@ -134,7 +139,7 @@ struct LocalDevSyntheticCapabilityPort {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     capabilities_by_id: HashMap<CapabilityId, LocalDevSyntheticCapability>,
-    capability_ids_by_provider_tool_name: HashMap<String, CapabilityId>,
+    capability_ids_by_provider_tool_name: HashMap<ProviderToolName, CapabilityId>,
     current_surface_version: StdMutex<Option<CapabilitySurfaceVersion>>,
     provider_tool_call_registrations:
         StdMutex<HashMap<String, SyntheticProviderToolCallRegistration>>,
@@ -716,7 +721,7 @@ mod tests {
             provider_model_id: "test-model".to_string(),
             turn_id: Some("provider-turn-1".to_string()),
             id: "provider-call-1".to_string(),
-            name: TEST_PROVIDER_TOOL_NAME.to_string(),
+            name: ProviderToolName::new(TEST_PROVIDER_TOOL_NAME).expect("provider tool name"),
             arguments: serde_json::json!({"message": "hello"}),
             response_reasoning: None,
             reasoning: None,

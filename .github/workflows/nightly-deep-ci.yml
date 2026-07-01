@@ -1,8 +1,8 @@
 name: Nightly Deep CI
 
-# This workflow intentionally reuses the canonical Run Tests workflow instead
-# of duplicating job definitions here. With event_name == workflow_call,
-# .github/workflows/test.yml runs the deterministic deep suite:
+# This workflow intentionally reuses the Legacy Tests workflow instead of
+# duplicating job definitions here. The called .github/workflows/test.yml
+# workflow runs the legacy deterministic deep suite:
 # - full Rust test matrix: all-features, default, libsql-only
 # - heavy runtime integration tests
 # - Telegram integration partitions
@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   deterministic-deep-tests:
-    name: Deterministic Deep Tests
+    name: Legacy Tests
     uses: ./.github/workflows/test.yml
     with:
       ref: ${{ github.sha }}

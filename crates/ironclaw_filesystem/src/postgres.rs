@@ -622,6 +622,43 @@ impl RootFilesystem for PostgresRootFilesystem {
         seq_no_from_i64(path, id, FilesystemOperation::Append)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.client().await?;
+        // One multi-row INSERT via `unnest` so the SQL text is FIXED regardless
+        // of batch size (keeps `prepare_cached` to a single statement) while
+        // still collapsing N appends into one round-trip. `WITH ORDINALITY`
+        // tags each unnested element with its 1-based position; `ORDER BY ord`
+        // forces the planner to process rows in array order so BIGSERIAL ids
+        // are assigned in payload order. Sorting the RETURNING ids ASC then
+        // deterministically recovers that order (Postgres does not guarantee
+        // RETURNING row order).
+        let rows = cached_query(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                SELECT $1, payload
+                FROM unnest($2::bytea[]) WITH ORDINALITY AS t(payload, ord)
+                ORDER BY ord
+                RETURNING id
+                "#,
+            &[&path.as_str(), &payloads],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let mut ids: Vec<i64> = rows.iter().map(|row| row.get("id")).collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(|id| seq_no_from_i64(path, id, FilesystemOperation::Append))
+            .collect()
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,
@@ -709,6 +746,26 @@ impl RootFilesystem for PostgresRootFilesystem {
             )?)),
             None => Ok(None),
         }
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        let row = cached_query_one(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+                VALUES ($1, 2, NOW())
+                ON CONFLICT (path) DO UPDATE SET
+                    next_seq = root_filesystem_sequences.next_seq + 1,
+                    updated_at = NOW()
+                RETURNING next_seq - 1 AS reserved
+                "#,
+            &[&path.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+        let reserved: i64 = row.get("reserved");
+        seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1358,6 +1415,27 @@ async fn postgres_delete_with_client(
     if deleted == 0 {
         return Err(not_found(path.clone(), FilesystemOperation::Delete));
     }
+    // Sweep the append-event log for this path and its subtree. Append-only
+    // finalized assistant messages live in `root_filesystem_events`, so a
+    // delete/recreate of the same thread would otherwise replay stale history
+    // from the old log. Mirrors the entries-delete predicate above.
+    cached_execute(
+        client,
+        "DELETE FROM root_filesystem_events WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    // Sweep any reserved sequence counter for this path and its subtree so a
+    // delete/recreate restarts sequences from 1 rather than resuming stale
+    // state. Mirrors the entries-delete predicate above.
+    cached_execute(
+        client,
+        "DELETE FROM root_filesystem_sequences WHERE path = $1 OR (path >= $2 AND path < $3)",
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
     Ok(())
 }
 
@@ -1675,6 +1753,8 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V30__root_filesystem_events.sql"),
     "\n",
     include_str!("../../../migrations/V31__root_filesystem_path_collation.sql"),
+    "\n",
+    include_str!("../../../migrations/V32__root_filesystem_sequences.sql"),
 );
 
 #[cfg(all(test, feature = "postgres"))]

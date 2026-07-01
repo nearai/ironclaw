@@ -641,6 +641,56 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   );
 });
 
+test("useChatEvents: repeated failed projection updates existing error content", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: (input) =>
+      input.failureSummary || input.failureCategory || "run failed",
+  });
+
+  harness.setCurrentActiveRun({
+    runId: "run-failed-update",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed-update",
+              status: "failed",
+              failure_category: "driver_invalid_request",
+            },
+          },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed-update",
+              status: "failed",
+              failure_category: "driver_protocol_violation",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-failed-update");
+  assert.equal(harness.messages[0].content, "driver_protocol_violation");
+});
+
 test("useChatEvents: typed failed event appends visible error", () => {
   const seenFailureInputs = [];
   const harness = createUseChatEventsHarness({
@@ -675,6 +725,42 @@ test("useChatEvents: typed failed event appends visible error", () => {
       failureSummary: null,
     },
   ]);
+});
+
+test("useChatEvents: category-only failure update upgrades existing error", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureCategory, failureSummary }) =>
+      failureSummary || `category:${failureCategory || "unknown"}`,
+  });
+  harness.replaceMessages([
+    {
+      id: "err-run-category-upgrade",
+      role: "error",
+      content: "category:unknown",
+      timestamp: "2026-06-03T11:44:43Z",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-category-upgrade",
+              status: "failed",
+              failure_category: "model_unavailable",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-category-upgrade");
+  assert.equal(harness.messages[0].content, "category:model_unavailable");
 });
 
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {

@@ -373,6 +373,10 @@ pub enum LoopBlockedKind {
     Auth,
     Resource,
     AwaitDependentRun,
+    /// The model called a client-supplied ("external") tool. The loop parks the
+    /// run and returns control to the API client, which resumes by submitting
+    /// the tool output. Bridges to [`BlockedReason::ExternalTool`].
+    ExternalTool,
 }
 
 impl LoopBlockedKind {
@@ -390,6 +394,7 @@ impl LoopBlockedKind {
             },
             Self::Resource => BlockedReason::Resource { gate_ref },
             Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
+            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
         })
     }
 }

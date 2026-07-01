@@ -274,6 +274,17 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .append_batch(path, payloads)
+            .await
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,
@@ -291,6 +302,24 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?
             .backend
             .tail_bounded(path, from, max_records)
+            .await
+    }
+
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .head_seq(path, from)
+            .await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .reserve_sequence(path)
             .await
     }
 

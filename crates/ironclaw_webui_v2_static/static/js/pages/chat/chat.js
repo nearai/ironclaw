@@ -1,6 +1,7 @@
 import { React, html } from "../../lib/html.js";
 import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
+import { Icon } from "../../design-system/icons.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -10,7 +11,6 @@ import { ApprovalCard } from "./components/approval-card.js";
 import { AuthGenericCard } from "./components/auth-generic-card.js";
 import { AuthOauthCard } from "./components/auth-oauth-card.js";
 import { AuthTokenCard } from "./components/auth-token-card.js";
-import { ChannelConnectCard } from "./components/channel-connect-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
@@ -52,7 +52,6 @@ export function Chat({
     isProcessing,
     pendingGate,
     busyGateNotice,
-    channelConnectAction,
     suggestions,
     sseStatus,
     historyLoading,
@@ -69,7 +68,6 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    dismissChannelConnectAction,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -80,17 +78,23 @@ export function Chat({
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
+  const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
+    messages.length > 0 ||
+    activeThreadIsProcessing ||
+    activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = pendingGate
+  const approvalSubmitWarning = activeThreadHasGate
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    activeThreadHasGate ||
+    (activeThreadIsProcessing && !activeThreadHasGate) ||
+    cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
@@ -103,8 +107,8 @@ export function Chat({
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
-      isProcessing &&
-      !pendingGate
+      activeThreadIsProcessing &&
+      !activeThreadHasGate
   );
   const activeRunLogsPath =
     activeThreadId &&
@@ -116,14 +120,15 @@ export function Chat({
         )
       : null;
   const handleSend = React.useCallback(
-    async (content, { images = [], attachments = [] } = {}) => {
-      if (pendingGate) {
+    async (content, { images = [], attachments = [], displayContent } = {}) => {
+      if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
       const response = await send(content, {
         images,
         attachments,
+        displayContent,
         threadId: activeThreadId,
       });
       const responseThreadId = response?.thread_id || activeThreadId;
@@ -134,10 +139,10 @@ export function Chat({
     },
     [
       activeThreadId,
+      activeThreadHasGate,
       approvalSubmitWarning,
       composerSendDisabled,
       onSelectThread,
-      pendingGate,
       send,
     ]
   );
@@ -226,6 +231,19 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
+        ${isProcessing && !pendingGate && activeRunLogsPath && html`
+          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
+            <${Link}
+              to=${activeRunLogsPath}
+              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              title=${t("nav.logs")}
+            >
+              <${Icon} name="list" className="h-3.5 w-3.5" />
+              ${t("nav.logs")}
+            <//>
+          </div>
+        `}
+
         ${historyLoadError &&
         html`
           <div
@@ -261,7 +279,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isProcessing}
+            pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -270,26 +288,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`
-              <div className="flex flex-wrap items-center gap-3">
-                <${TypingIndicator} />
-                ${activeRunLogsPath && html`
-                  <${Link}
-                    to=${activeRunLogsPath}
-                    className="text-xs font-medium text-signal hover:underline"
-                  >
-                    ${t("nav.logs")}
-                  <//>
-                `}
-              </div>
-            `}
-            ${channelConnectAction &&
-            html`
-              <${ChannelConnectCard}
-                connectAction=${channelConnectAction}
-                onDismiss=${dismissChannelConnectAction}
-              />
-            `}
+            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"

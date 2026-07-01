@@ -250,6 +250,63 @@ async fn login_redirects_to_provider_with_state_and_callback_url() {
 }
 
 #[tokio::test]
+async fn login_from_non_canonical_host_redirects_before_state_creation() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let provider = StubProvider::google_with_profile(alice_profile());
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], store);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .header(header::HOST, "preview.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("utf-8");
+    assert_eq!(
+        location,
+        "https://gateway.example/auth/login/google?redirect_after=%2Fv2"
+    );
+}
+
+#[tokio::test]
+async fn canonical_login_redirect_does_not_echo_unsafe_redirect_after() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let provider = StubProvider::google_with_profile(alice_profile());
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], store);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google?redirect_after=%2F%2Fevil.example%2Fv2")
+                .header(header::HOST, "preview.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("utf-8");
+    assert_eq!(location, "https://gateway.example/auth/login/google");
+}
+
+#[tokio::test]
 async fn login_unknown_provider_returns_404() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let router = build_router(Vec::new(), store);

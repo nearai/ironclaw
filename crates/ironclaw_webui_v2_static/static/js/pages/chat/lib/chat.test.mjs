@@ -65,6 +65,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
+    Icon() {},
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
@@ -81,6 +82,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
     },
+    NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
     buildScopedLogsPath: (
       { threadId, runId } = {},
@@ -103,7 +105,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
 
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
-    threads: [{ id: activeThreadId }],
+    threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
     onSelectThread: () => {},
     isCreatingThread: false,
@@ -150,7 +152,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -166,7 +167,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -183,7 +183,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -202,7 +201,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -293,6 +291,48 @@ test("Chat keeps composer send blocked while a gate owns the run decision", asyn
   assert.equal(sendCount, 0);
 });
 
+test("Chat keeps the new-conversation composer sendable while a prior run is settling", async () => {
+  let sentBody = null;
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    hookState: {
+      messages: [],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async (content, options) => {
+        sentBody = { content, options };
+        return { thread_id: "thread-2" };
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const props = componentProps(emptyState, components.EmptyState);
+  assert.equal(props.sendDisabled, false);
+  assert.equal(props.canCancel, false);
+
+  await props.onSend("hi how are you");
+
+  assert.equal(sentBody.content, "hi how are you");
+  assert.equal(sentBody.options.threadId, null);
+  assert.equal(sentBody.options.images.length, 0);
+  assert.equal(sentBody.options.attachments.length, 0);
+});
+
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
   const historyLoadError = "Failed to load conversation history.";
   const { tree, components } = renderChat({
@@ -300,7 +340,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       messages: [],
       isProcessing: false,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -317,7 +356,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -335,7 +373,6 @@ test("Chat links to scoped logs for the active thread run", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -351,7 +388,6 @@ test("Chat links to scoped logs for the active thread run", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -362,6 +398,13 @@ test("Chat links to scoped logs for the active thread run", () => {
     "/v2/logs?thread_id=thread-1&run_id=run-1",
   );
   assert.ok(logsLink.values.includes("nav.logs"));
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    findComponent(messageList, components.Link),
+    null,
+    "active run logs link should not render in the message list footer near the composer",
+  );
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {

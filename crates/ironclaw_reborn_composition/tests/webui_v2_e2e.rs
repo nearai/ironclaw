@@ -32,7 +32,8 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityId, InvocationId, ProviderToolName, ResourceScope, SecretHandle, TenantId,
+    UserId,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -240,7 +241,7 @@ struct WriteFileGateway {
 
 async fn register_write(
     capabilities: &Arc<dyn LoopCapabilityPort>,
-    tool_name: &str,
+    tool_name: ProviderToolName,
     call_id: &str,
     path: &str,
     content: &str,
@@ -251,7 +252,7 @@ async fn register_write(
             provider_model_id: "e2e-model".to_string(),
             turn_id: Some("e2e-write-turn".to_string()),
             id: call_id.to_string(),
-            name: tool_name.to_string(),
+            name: tool_name,
             arguments: json!({"path": path, "content": content}),
             response_reasoning: None,
             reasoning: None,
@@ -311,7 +312,7 @@ impl HostManagedModelGateway for WriteFileGateway {
         if call_index == 0 {
             let csv = register_write(
                 &capabilities,
-                &write_tool.name,
+                write_tool.name.clone(),
                 "e2e-write-csv",
                 CSV_PATH,
                 CSV_BODY,
@@ -319,7 +320,7 @@ impl HostManagedModelGateway for WriteFileGateway {
             .await?;
             let pdf = register_write(
                 &capabilities,
-                &write_tool.name,
+                write_tool.name,
                 "e2e-write-pdf",
                 PDF_PATH,
                 PDF_BODY,
