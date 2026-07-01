@@ -28,10 +28,10 @@ use ironclaw_threads::{
     SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken,
-    TurnRunnerId, TurnStateStore,
+    AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
+    FilesystemTurnStateStore, IdempotencyKey, InMemoryTurnStateStore, ReplyTargetBindingRef,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
     runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
 };
 use serde::{Deserialize, Serialize};
@@ -1178,8 +1178,10 @@ where
         match self.turn_state_backend {
             // One shared authority for the whole process — concurrent same-user
             // writers coordinate in memory (fast lock), never on a per-user
-            // `state.json` CAS, so they don't livelock.
-            TurnStateBackend::Memory => {
+            // `state.json` CAS, so they don't livelock. `MemoryPersistOnBlock`
+            // shares the same authority; it differs only by the durable block
+            // sink attached at construction.
+            TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
                 Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
             }
             // Durable path: a per-context store whose `/turns/state.json`
@@ -1218,15 +1220,27 @@ where
     Ok(UserTurnServices {
         root,
         governor,
-        thread_service: Arc::new(FilesystemSessionThreadService::new(scoped)),
+        thread_service: Arc::new(FilesystemSessionThreadService::new(Arc::clone(&scoped))),
         model_latency,
         run_id,
         target,
         turn_state_backend,
         // Constructed once and shared across every worker (the workload is held
         // behind one Arc), so the Memory backend exercises a single shared
-        // authority exactly as the single-process runtime would.
-        memory_turn_store: Arc::new(InMemoryTurnStateStore::default()),
+        // authority exactly as the single-process runtime would. When the
+        // backend persists on block, attach the same durable filesystem sink the
+        // hosted-single-tenant-volume runtime wires so the retest measures the
+        // shipped config (the sink stays idle on this never-blocking workload,
+        // so what it measures is the extra probe cost per terminal transition).
+        memory_turn_store: Arc::new({
+            let store = InMemoryTurnStateStore::default();
+            if turn_state_backend.persists_on_block() {
+                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(&scoped)));
+                store.with_block_persistence(sink)
+            } else {
+                store
+            }
+        }),
     })
 }
 

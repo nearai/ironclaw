@@ -39,7 +39,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, RecordVersion, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 use tokio::sync::RwLock;
 
@@ -943,6 +945,88 @@ where
             },
         )
         .await
+    }
+}
+
+/// Filesystem-backed durable sink for the in-memory turn-state authority's
+/// blocked runs.
+///
+/// Writes the full [`TurnPersistenceSnapshot`] to the same `/turns/state.json`
+/// alias-relative path the [`FilesystemTurnStateStore`] uses, but only when the
+/// in-memory store reports a change to the set of gate-blocked runs (see
+/// [`TurnStateBlockPersistence`](crate::TurnStateBlockPersistence)). This keeps
+/// gate-parked turns (approval/auth) recoverable across a process restart while
+/// leaving the normal claim/complete hot path untouched.
+///
+/// On process start, composition calls [`load`](Self::load) once and rehydrates
+/// the in-memory store via
+/// [`InMemoryTurnStateStore::from_persistence_snapshot`](crate::InMemoryTurnStateStore::from_persistence_snapshot).
+pub struct FilesystemTurnStateBlockPersistence<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+}
+
+impl<F> FilesystemTurnStateBlockPersistence<F>
+where
+    F: RootFilesystem,
+{
+    /// Build a sink over the same scoped filesystem the store persists to.
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self { filesystem }
+    }
+
+    /// Load the last persisted snapshot for startup rehydration.
+    ///
+    /// Returns an empty snapshot when nothing has been persisted yet (fresh
+    /// tenant/user, or a store that never blocked a run).
+    pub async fn load(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        let path = snapshot_path()?;
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(Some(versioned)) => deserialize_snapshot(&versioned.entry.body),
+            Ok(None) => Ok(TurnPersistenceSnapshot::default()),
+            Err(error) => Err(fs_error(error)),
+        }
+    }
+}
+
+#[async_trait]
+impl<F> crate::TurnStateBlockPersistence for FilesystemTurnStateBlockPersistence<F>
+where
+    F: RootFilesystem,
+{
+    async fn persist(&self, snapshot: &TurnPersistenceSnapshot) {
+        // Best-effort by contract: a durable-write failure must never fail an
+        // already-applied in-memory transition, so log and swallow. The
+        // in-memory store remains authoritative; this snapshot only backs
+        // restart recovery of gate-blocked turns.
+        let path = match snapshot_path() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(%error, "turn-state block persistence: invalid snapshot path");
+                return;
+            }
+        };
+        let entry = match snapshot_entry(snapshot) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(%error, "turn-state block persistence: snapshot serialization failed");
+                return;
+            }
+        };
+        // Blind overwrite: the in-memory authority owns the truth and always
+        // hands us the complete current snapshot, so last-writer-wins is
+        // correct here — there is no cross-process snapshot to lose.
+        match put_with_cas(&self.filesystem, &path, entry, CasExpectation::Any).await {
+            Ok(_) => {}
+            Err(PutError::VersionMismatch) => {
+                tracing::debug!("turn-state block persistence: unexpected version mismatch on blind write");
+            }
+            Err(PutError::Other(error)) => {
+                tracing::debug!(%error, "turn-state block persistence: durable write failed");
+            }
+        }
     }
 }
 

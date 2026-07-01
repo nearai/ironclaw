@@ -7,6 +7,7 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod block_persistence;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
@@ -25,6 +26,7 @@ pub mod scope;
 mod status;
 mod store;
 
+pub use block_persistence::TurnStateBlockPersistence;
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
@@ -56,7 +58,7 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use filesystem_store::FilesystemTurnStateStore;
+pub use filesystem_store::{FilesystemTurnStateBlockPersistence, FilesystemTurnStateStore};
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,

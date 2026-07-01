@@ -31,7 +31,8 @@ use ironclaw_turns::{
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
     TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
     TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, TurnSurfaceType,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
+    TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -865,6 +866,136 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Cancelled);
     assert!(!cancelled.already_terminal);
+}
+
+/// Captures every snapshot the in-memory store hands the durable block sink so
+/// a test can assert both *that* persistence fired and *what* it persisted.
+#[derive(Default)]
+struct RecordingBlockPersistence {
+    snapshots: Mutex<Vec<ironclaw_turns::TurnPersistenceSnapshot>>,
+}
+
+impl RecordingBlockPersistence {
+    fn snapshots(&self) -> Vec<ironclaw_turns::TurnPersistenceSnapshot> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateBlockPersistence for RecordingBlockPersistence {
+    async fn persist(&self, snapshot: &ironclaw_turns::TurnPersistenceSnapshot) {
+        self.snapshots.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+/// The in-memory turn-state authority is volatile, but a turn parked on a human
+/// gate (approval/auth) must survive a process restart. This exercises the
+/// persist-on-block contract end to end: the durable sink fires only when the
+/// gate-blocked set changes (block, then resume) and never on the plain
+/// claim/complete hot path, and the last persisted snapshot rehydrates a fresh
+/// store with the blocked run intact.
+#[tokio::test]
+async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    // Hot path: a turn that runs to completion without ever blocking must not
+    // touch the durable sink — that is the contention the sink must not
+    // reintroduce.
+    let hot_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-hot", "idem-hot"))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(store.as_ref(), hot_run_id, "thread-hot").await;
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/complete hot path must not persist to the block sink"
+    );
+
+    // Block a turn on an approval gate — the blocked set changes, so the sink
+    // fires with a snapshot that carries the blocked run.
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate", "idem-gate"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:approval").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        approval_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let after_block = sink.snapshots();
+    assert_eq!(
+        after_block.len(),
+        1,
+        "blocking a run must persist exactly once"
+    );
+    let blocked_snapshot = after_block.last().unwrap().clone();
+    let persisted_run = blocked_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("blocked run present in persisted snapshot");
+    assert_eq!(persisted_run.status, TurnStatus::BlockedApproval);
+
+    // Rehydrate a fresh store from the last persisted snapshot — the gate-parked
+    // run must come back blocked so a later "Approve" lands on a real run.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        blocked_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_run = restored
+        .persistence_snapshot()
+        .runs
+        .into_iter()
+        .find(|record| record.run_id == run_id)
+        .expect("blocked run survives rehydration");
+    assert_eq!(restored_run.status, TurnStatus::BlockedApproval);
+
+    // Resuming the gate again changes the blocked set, so the sink fires a
+    // second time with the run no longer blocked.
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-gate"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-gate-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+    assert_eq!(
+        sink.snapshots().len(),
+        2,
+        "resuming a blocked run must persist the blocked-set change"
+    );
 }
 
 #[tokio::test]

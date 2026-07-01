@@ -132,6 +132,14 @@ pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    /// Optional durable sink for gate-blocked turns. When set, the store
+    /// persists the snapshot on blocked-set changes only (block / resume /
+    /// terminate-while-blocked) so a restart can recover parked-on-human turns.
+    /// `None` = pure in-memory (the default; used by tests and the stress tool).
+    // arch-exempt: optional_arc, genuinely optional — durability is only wired
+    // in the single-tenant-volume feature path; no-DB/test/stress builds run
+    // without it, plan 2026-06-30-turn-state-inmemory
+    block_persistence: Option<Arc<dyn crate::TurnStateBlockPersistence>>,
 }
 
 impl Default for InMemoryTurnStateStore {
@@ -299,7 +307,18 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            block_persistence: None,
         }
+    }
+
+    /// Attach a durable sink for gate-blocked turns (persist-on-block). Off the
+    /// hot path — the sink is called only when the blocked-run set changes.
+    pub fn with_block_persistence(
+        mut self,
+        block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
+    ) -> Self {
+        self.block_persistence = Some(block_persistence);
+        self
     }
 
     pub fn with_admission_limit_provider(
@@ -327,6 +346,7 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
+            block_persistence: None,
         }
     }
 
@@ -364,6 +384,7 @@ impl InMemoryTurnStateStore {
             inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
+            block_persistence: None,
         })
     }
 
@@ -371,6 +392,39 @@ impl InMemoryTurnStateStore {
         match self.inner.lock() {
             Ok(inner) => inner.persistence_snapshot(),
             Err(poisoned) => poisoned.into_inner().persistence_snapshot(),
+        }
+    }
+
+    /// Whether `run_id` is currently parked on a gate (any `Blocked*` status).
+    /// Used to decide whether a terminal transition changed the blocked set and
+    /// therefore needs a durable persist.
+    fn run_is_blocked(&self, run_id: TurnRunId) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner
+            .records
+            .get(&run_id)
+            .is_some_and(|record| record.status.get().is_blocked())
+    }
+
+    /// Probe whether `run_id` is gate-blocked, but only when a durable sink is
+    /// attached. When nothing consumes the answer (no sink — the default
+    /// in-memory authority used by tests, no-DB builds, and the stress tool),
+    /// skip the extra lock entirely so persist-on-block adds zero hot-path cost.
+    fn blocked_for_persistence(&self, run_id: TurnRunId) -> bool {
+        self.block_persistence.is_some() && self.run_is_blocked(run_id)
+    }
+
+    /// Persist the snapshot through the durable block sink, if one is attached.
+    /// Off the hot path — callers invoke this only when the set of gate-blocked
+    /// runs changed. Best-effort: the sink logs and swallows its own errors so a
+    /// durable-write failure never fails an already-applied transition.
+    async fn persist_blocked_state(&self) {
+        if let Some(sink) = self.block_persistence.clone() {
+            let snapshot = self.persistence_snapshot();
+            sink.persist(&snapshot).await;
         }
     }
 
@@ -794,17 +848,29 @@ impl TurnStateStore for InMemoryTurnStateStore {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        let mut inner = self.lock_inner()?;
-        let idempotency_key = RunIdempotencyKey {
-            scope: request.scope.clone(),
-            run_id: request.run_id,
-            key: request.idempotency_key.clone(),
+        let mut did_resume = false;
+        let result = {
+            let mut inner = self.lock_inner()?;
+            let idempotency_key = RunIdempotencyKey {
+                scope: request.scope.clone(),
+                run_id: request.run_id,
+                key: request.idempotency_key.clone(),
+            };
+            if let Some(replayed) = inner.resume_idempotency.get(&idempotency_key) {
+                // Idempotent replay — no state change, so no durable write.
+                replayed.clone()
+            } else {
+                let result = inner.resume_turn_once(&request);
+                inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+                did_resume = result.is_ok();
+                result
+            }
         };
-        if let Some(result) = inner.resume_idempotency.get(&idempotency_key) {
-            return result.clone();
+        // A gate-blocked run just left the blocked set — persist so the durable
+        // snapshot no longer replays it as blocked on restart.
+        if did_resume {
+            self.persist_blocked_state().await;
         }
-        let result = inner.resume_turn_once(&request);
-        inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
         result
     }
 
@@ -1438,9 +1504,10 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        let mut record = inner.take_record(request.run_id)?;
-        let result = (|| {
+        let result = {
+            let mut inner = self.lock_inner()?;
+            let mut record = inner.take_record(request.run_id)?;
+            let inner_result = (|| {
             let now = Utc::now();
             ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
             if !matches!(record.status.get(), TurnStatus::Running) {
@@ -1471,41 +1538,73 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             let state = record.state();
             inner.push_event(&record, TurnEventKind::Blocked, None);
             Ok(state)
-        })();
-        inner.records.insert(record.run_id, record);
+            })();
+            inner.records.insert(record.run_id, record);
+            inner_result
+        };
+        // A run just parked on a gate — persist so the blocked turn survives a
+        // process restart (off the hot path; only fires on a block).
+        if result.is_ok() {
+            self.persist_blocked_state().await;
+        }
         result
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.terminal_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Completed,
-            None,
-            TurnEventKind::Completed,
-        )
+        let was_blocked = self.blocked_for_persistence(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.terminal_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                TurnStatus::Completed,
+                None,
+                TurnEventKind::Completed,
+            )
+        };
+        if was_blocked && result.is_ok() {
+            self.persist_blocked_state().await;
+        }
+        result
     }
 
     async fn cancel_run(
         &self,
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.cancel_completion_transition(request.run_id, request.runner_id, request.lease_token)
+        let was_blocked = self.blocked_for_persistence(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.cancel_completion_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+            )
+        };
+        if was_blocked && result.is_ok() {
+            self.persist_blocked_state().await;
+        }
+        result
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.terminal_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Failed,
-            Some(request.failure),
-            TurnEventKind::Failed,
-        )
+        let was_blocked = self.blocked_for_persistence(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.terminal_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                TurnStatus::Failed,
+                Some(request.failure),
+                TurnEventKind::Failed,
+            )
+        };
+        if was_blocked && result.is_ok() {
+            self.persist_blocked_state().await;
+        }
+        result
     }
 
     async fn record_runner_failure(
@@ -1533,13 +1632,24 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.apply_validated_loop_exit_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            request.mapping,
-        )
+        let was_blocked = self.blocked_for_persistence(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.apply_validated_loop_exit_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                request.mapping,
+            )
+        };
+        // A validated loop exit can either park a run on a gate or terminate a
+        // blocked one — persist in both cases so the durable blocked set stays
+        // accurate across restart.
+        let now_blocked = self.blocked_for_persistence(request.run_id);
+        if (was_blocked || now_blocked) && result.is_ok() {
+            self.persist_blocked_state().await;
+        }
+        result
     }
 }
 

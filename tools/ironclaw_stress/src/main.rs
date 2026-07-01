@@ -109,8 +109,8 @@ pub(crate) struct Args {
     pub(crate) active_thread_count: usize,
 
     /// Distinct threads per owner-user that share one `/turns/state.json`. Set
-    /// >1 to reproduce the production contention shape (a user's foreground turn
-    /// + routine turns on different threads concurrently writing the same
+    /// above 1 to reproduce the production contention shape (a user's foreground
+    /// turn plus routine turns on different threads concurrently writing the same
     /// per-user turn-state document). Default 1 = one thread per owner.
     #[arg(long, default_value_t = 1)]
     pub(crate) threads_per_owner: usize,
@@ -460,6 +460,12 @@ pub(crate) enum TurnStateBackend {
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
+    /// The shipped hosted-single-tenant-volume config: the shared in-memory
+    /// authority with a durable persist-on-block sink attached. The sink fires
+    /// only when the gate-blocked set changes (off the hot path), so this
+    /// measures the extra cost the durability wiring adds to the normal
+    /// claim/complete path versus plain `Memory`.
+    MemoryPersistOnBlock,
 }
 
 impl TurnStateBackend {
@@ -467,7 +473,14 @@ impl TurnStateBackend {
         match self {
             Self::Filesystem => "filesystem",
             Self::Memory => "memory",
+            Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }
+    }
+
+    /// Whether a durable persist-on-block sink is attached to the in-memory
+    /// authority.
+    pub(crate) fn persists_on_block(self) -> bool {
+        matches!(self, Self::MemoryPersistOnBlock)
     }
 }
 

@@ -121,6 +121,11 @@ use ironclaw_triggers::{
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+use ironclaw_turns::{FilesystemTurnStateBlockPersistence, TurnPersistenceSnapshot};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 #[cfg(any(
@@ -1121,7 +1126,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         turn_state_store_limits,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
-    })?;
+    })
+    .await?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
@@ -1707,6 +1713,35 @@ where
     )))
 }
 
+/// Load the last persist-on-block snapshot for the in-memory turn-state
+/// authority's startup recovery. Best-effort: a missing snapshot is the normal
+/// fresh-start case, and any read fault falls back to an empty snapshot rather
+/// than wedging boot.
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+async fn restore_turn_state_block_snapshot<F>(
+    block_persistence: &FilesystemTurnStateBlockPersistence<F>,
+) -> TurnPersistenceSnapshot
+where
+    F: RootFilesystem,
+{
+    match block_persistence.load().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // silent-ok: startup recovery read; a missing snapshot is expected on
+            // a fresh volume and a read fault must not block boot — live traffic
+            // repopulates the in-memory authority regardless.
+            tracing::warn!(
+                %error,
+                "turn-state block persistence: startup recovery load failed; starting with empty turn state"
+            );
+            TurnPersistenceSnapshot::default()
+        }
+    }
+}
+
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -1819,7 +1854,7 @@ fn parse_bool_env_value(value: &str) -> Option<bool> {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn build_local_dev_store_graph(
+async fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let RebornLocalDevStoreGraphInput {
@@ -1839,10 +1874,12 @@ fn build_local_dev_store_graph(
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    #[cfg(not(feature = "inmemory-turn-state"))]
+    // The turn-state filesystem is needed by both backends: the durable
+    // filesystem store persists every transition to it, and the in-memory
+    // authority persists only its gate-blocked snapshot to it (persist-on-block
+    // durability, so a restart can recover turns parked on a human gate).
     let turn_state_scope =
         local_dev_nearai_mcp_owner_scope(owner_user_id.clone(), local_runtime_identity.as_ref())?;
-    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state_filesystem =
         owner_turn_state_filesystem(Arc::clone(&filesystem), &turn_state_scope)
             .map_err(RebornBuildError::Mount)?;
@@ -1866,7 +1903,33 @@ fn build_local_dev_store_graph(
     // arms satisfy every downstream consumer (coordinator, `LoopCheckpointStore`,
     // `RuntimeTurnStateStore`) with no trait-object plumbing.
     #[cfg(feature = "inmemory-turn-state")]
-    let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
+    let turn_state = {
+        // Persist-on-block: the in-memory authority owns turn state in-process
+        // (no per-user `state.json` CAS livelock) but is otherwise volatile.
+        // Attach a durable sink that snapshots only when the gate-blocked set
+        // changes, and rehydrate from the last such snapshot on startup so a
+        // deploy never silently drops a turn parked on approval/auth.
+        let block_persistence = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
+            &turn_state_filesystem,
+        )));
+        let restored = restore_turn_state_block_snapshot(block_persistence.as_ref()).await;
+        let store = match InMemoryTurnStateStore::from_persistence_snapshot(
+            restored,
+            turn_state_store_limits,
+        ) {
+            Ok(store) => store,
+            Err(error) => {
+                // Recovery is best-effort: a corrupt/incompatible snapshot must
+                // not wedge startup. Start clean and let live traffic repopulate.
+                tracing::warn!(
+                    %error,
+                    "turn-state block persistence: recovery snapshot rejected; starting with empty turn state"
+                );
+                InMemoryTurnStateStore::with_limits(turn_state_store_limits)
+            }
+        };
+        Arc::new(store.with_block_persistence(block_persistence))
+    };
     #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(
         FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
@@ -2007,7 +2070,7 @@ fn build_local_dev_store_graph(
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-fn build_local_dev_store_graph(
+async fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let RebornLocalDevStoreGraphInput {
