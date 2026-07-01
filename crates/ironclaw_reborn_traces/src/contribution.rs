@@ -27,6 +27,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::redaction::redact_sensitive_json;
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_llm::recording::{TraceFile, TraceResponse};
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
@@ -5813,14 +5814,15 @@ pub async fn mint_profile_attribution_token_for_scope_via_sink(
 /// contributor mints under the shared instance device key with a per-user
 /// pseudonymous subject rather than being falsely rejected as not enrolled.
 pub async fn mint_profile_attribution_token_for_user_via_sink(
-    tenant_id: &str,
-    user_id: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
     sink: &dyn ContributionHttpSink,
 ) -> anyhow::Result<ProfileAttributionToken> {
+    // Typed at the public boundary; stringify only for the dir-parameterised core.
     mint_profile_attribution_token_for_user_inner(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
-        tenant_id,
-        user_id,
+        tenant_id.as_str(),
+        user_id.as_str(),
         sink,
     )
     .await
@@ -5905,16 +5907,17 @@ pub async fn set_community_profile_for_scope_via_sink(
 /// instance-only contributor can publish a community profile under the shared
 /// instance device key with a per-user pseudonymous subject.
 pub async fn set_community_profile_for_user_via_sink(
-    tenant_id: &str,
-    user_id: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
     display_handle: &str,
     bio: Option<&str>,
     sink: &dyn ContributionHttpSink,
 ) -> anyhow::Result<()> {
+    // Typed at the public boundary; stringify only for the dir-parameterised core.
     set_community_profile_for_user_inner(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
-        tenant_id,
-        user_id,
+        tenant_id.as_str(),
+        user_id.as_str(),
         display_handle,
         bio,
         Some(sink),
@@ -6303,14 +6306,16 @@ fn account_traces_url(
 ///   `None`, i.e. personal-invite enrollment) to `/v1/account/login-links`.
 /// - Parses the `{ account_id, url }` response into [`AccountLoginLink`].
 pub async fn mint_account_login_link_via_sink(
-    tenant_id: &str,
-    user_id: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
     sink: &dyn ContributionHttpSink,
 ) -> anyhow::Result<AccountLoginLink> {
+    // Typed at the public boundary so callers can't transpose tenant/user;
+    // stringify only when handing off to the dir-parameterised core.
     mint_account_login_link_inner(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
-        tenant_id,
-        user_id,
+        tenant_id.as_str(),
+        user_id.as_str(),
         sink,
     )
     .await

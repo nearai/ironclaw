@@ -430,11 +430,12 @@ impl ContributionHttpSink for HostEgressContributionSink {
                     SecretMaterial::from(token),
                 )
                 .await
-                .map_err(|error| {
-                    // Preserve the staging cause for diagnosis (logged, never
-                    // returned) instead of collapsing it to an opaque string;
-                    // the wire message stays sanitized on the credential path.
-                    tracing::debug!(?error, "trace bearer staging failed");
+                .map_err(|_error| {
+                    // This is the bearer-material path: the host-runtime logging
+                    // guideline forbids emitting backend/storage error detail
+                    // (`_error` may carry secret-store internals). Log only the
+                    // safe fact of failure; the wire message stays sanitized.
+                    tracing::debug!("trace bearer staging failed");
                     ContributionHttpError::new("trace bearer could not be staged")
                 })?;
             credential_injections.push(RuntimeCredentialInjection {
@@ -803,8 +804,8 @@ pub(super) async fn dispatch_profile_token(
         secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
     match mint_profile_attribution_token_for_user_via_sink(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
+        &request.scope.tenant_id,
+        &request.scope.user_id,
         &sink,
     )
     .await
@@ -994,8 +995,8 @@ pub(super) async fn dispatch_profile_set(
         secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
     match set_community_profile_for_user_via_sink(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
+        &request.scope.tenant_id,
+        &request.scope.user_id,
         &input.display_handle,
         input.bio.as_deref(),
         &sink,
@@ -1130,12 +1131,8 @@ pub(super) async fn dispatch_account_login_link(
         capability_id: request.capability_id.clone(),
         secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
-    match mint_account_login_link_via_sink(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-        &sink,
-    )
-    .await
+    match mint_account_login_link_via_sink(&request.scope.tenant_id, &request.scope.user_id, &sink)
+        .await
     {
         Ok(link) => {
             // The persist path is blocking fs (mkdir/write/fsync/rename); keep it
