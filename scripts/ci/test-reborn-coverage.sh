@@ -518,6 +518,38 @@ else
   report_pass "C7: fake gh did not record a mutation (guard fires before gh use)"
 fi
 
+# C8: existing-but-malformed coverage JSON aborts before any gh mutation.
+#
+# Distinct path from C7: this fixture file exists, so it passes comment.sh's
+# "[ -f ]" guard and proceeds to call reborn-coverage-summary.sh to render
+# the body — and that render fails on jq's parse error under `set -e`,
+# before any POST/PATCH is ever issued. Pins the "render-before-mutate"
+# ordering.
+cat > "${fixtures_dir}/c8_malformed.json" <<'JSON'
+{ this is not valid json
+JSON
+
+c8_log="${tmp_root}/c8-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c8_log}" \
+  "${comment_sh}" "${fixtures_dir}/c8_malformed.json"
+# Non-zero, not an exact code: jq's parse-error exit differs across versions.
+if [ "${CAP_RC}" -ne 0 ]; then
+  report_pass "C8: comment script exits non-zero on malformed coverage JSON"
+else
+  report_fail "C8: comment script exits non-zero on malformed coverage JSON (got 0)"
+fi
+if [ -f "${c8_log}" ]; then
+  report_fail "C8: fake gh did not record a mutation (render fails before gh use)"
+else
+  report_pass "C8: fake gh did not record a mutation (render fails before gh use)"
+fi
+
 # ---------------------------------------------------------------------------
 # D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 # ---------------------------------------------------------------------------
