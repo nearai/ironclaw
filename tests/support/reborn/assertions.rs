@@ -1,6 +1,6 @@
-//! Egress + tool-result assertions for [`RebornIntegrationHarness`] — the
-//! canonical, richer egress-assertion API (design §3.3 `assertions.rs`, §3.6
-//! P1 ergonomics).
+//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`]
+//! — the canonical, richer egress-assertion API (design §3.3 `assertions.rs`,
+//! §3.6 P1 ergonomics).
 //!
 //! Slice 2 co-located three asserts in `builder.rs`
 //! (`assert_reply_contains`/`assert_tool_invoked`/`assert_egress_request_matching`,
@@ -11,9 +11,13 @@
 //! `pub(super)` accessors on the harness (`captured_egress_requests` /
 //! `captured_capability_results`) rather than re-reaching internals.
 //!
-//! All of these assert over the SAME captured `RecordingRuntimeHttpEgress`
-//! request log slice 2 wired — there is one egress-assertion API, not a parallel
-//! one (the O-egress MCP/OAuth interceptor folds its per-URL needs in here).
+//! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
+//! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
+//! over the SAME captured `RecordingRuntimeHttpEgress` request log slice 2 wired
+//! — there is one egress-assertion API, not a parallel one (the O-egress
+//! MCP/OAuth interceptor folds its per-URL needs in here). `assert_system_prompt_contains`
+//! reads a different capture source — the scripted `TraceLlm`'s captured requests,
+//! via the harness's `captured_system_prompts` accessor.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
@@ -112,17 +116,25 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// Assert some model-visible `System`-role prompt captured across the turn's
-    /// requests contains `text`. Reads the scripted `TraceLlm` retained before
-    /// the `dyn LlmProvider` upcast — proves prompt-injected content (safety
-    /// banners, skill instructions, profile lines) actually reached the model.
+    /// Assert some model-visible `System`-role prompt captured across all
+    /// requests captured by the harness so far contains `text`. Reads the
+    /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
+    /// proves prompt-injected content (safety banners, skill instructions,
+    /// profile lines) actually reached the model.
     pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
         let prompts = self.captured_system_prompts();
         if prompts.iter().any(|prompt| prompt.contains(text)) {
             return Ok(());
         }
+        let seen: Vec<String> = prompts
+            .iter()
+            .map(|prompt| match prompt.char_indices().nth(200) {
+                Some((cutoff, _)) => format!("{}...[truncated]", &prompt[..cutoff]),
+                None => prompt.clone(),
+            })
+            .collect();
         Err(format!(
-            "no captured system prompt containing {text:?}; saw {} system message(s)",
+            "no captured system prompt containing {text:?}; saw {} system message(s): {seen:?}",
             prompts.len()
         )
         .into())

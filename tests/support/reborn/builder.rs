@@ -35,6 +35,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
+use ironclaw_llm::Role;
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
@@ -46,9 +47,6 @@ use ironclaw_turns::{
     TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use crate::support::trace_llm::TraceLlm;
-use ironclaw_llm::Role;
-
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{
     HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
@@ -58,6 +56,7 @@ use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
+use crate::support::trace_llm::TraceLlm;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -480,6 +479,10 @@ impl RebornIntegrationHarness {
     /// call order. Reads the scripted `TraceLlm` retained before the
     /// `dyn LlmProvider` upcast (`scripted_llm`). Empty until the first turn is
     /// submitted. Read by `assert_system_prompt_contains` in `assertions.rs`.
+    ///
+    /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
+    /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
+    /// not a group-shared recorder, so it only ever holds this thread's requests.
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
