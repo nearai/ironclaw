@@ -1238,7 +1238,8 @@ mod tests {
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
+        protect_reborn_log_filter, resolve_google_oauth_config,
+        resolve_slack_personal_oauth_config, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -3119,6 +3120,49 @@ poll_interval_secs = 15
             resolve_google_oauth_config(|_| None).expect("empty env should not fail setup");
 
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_returns_none_when_unset() {
+        let config =
+            resolve_slack_personal_oauth_config(|_| None).expect("empty env should not fail setup");
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_errors_when_client_id_missing() {
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+        )]);
+        let error = resolve_slack_personal_oauth_config(|name| {
+            vars.get(name).map(|value| value.to_string())
+        })
+        .expect_err("redirect-only Slack personal OAuth config must fail closed");
+        assert!(error.to_string().contains("SLACK_PERSONAL_CLIENT_ID"));
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_config_builds_client_when_all_vars_set() {
+        let vars = HashMap::from([
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID",
+                "slack-client-id",
+            ),
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET",
+                "slack-client-secret",
+            ),
+            (
+                "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            ),
+        ]);
+        let config = resolve_slack_personal_oauth_config(|name| {
+            vars.get(name).map(|value| value.to_string())
+        })
+        .expect("valid Slack personal OAuth config resolves");
+        assert!(config.is_some());
     }
 
     #[test]

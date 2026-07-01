@@ -693,14 +693,19 @@ fn parse_slack_authed_user_token_response(
     let access_token = authed_user
         .access_token
         .ok_or(AuthProductError::TokenExchangeFailed)?;
+    // Slack returns granted user scopes as a COMMA-separated list, whereas
+    // OAuthTokenResponse::new splits on whitespace. Normalize commas to spaces
+    // so each scope is parsed individually (otherwise the whole list would be
+    // stored as one bogus scope and override the requested scopes).
     let response_scope = authed_user
         .scope
         .as_deref()
+        .map(|scope| scope.replace(',', " "))
         .filter(|scope| !scope.trim().is_empty());
     OAuthTokenResponse::new(
         access_token,
         authed_user.refresh_token,
-        response_scope,
+        response_scope.as_deref(),
         authed_user.expires_in,
     )
     .map_err(|_| AuthProductError::TokenExchangeFailed)
