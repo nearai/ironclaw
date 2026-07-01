@@ -1,6 +1,9 @@
 use ironclaw_turns::{
     LoopExit,
-    run_profile::{AgentLoopDriverHost, LoopDriverNoteKind, LoopProgressEvent, ParentLoopOutput},
+    run_profile::{
+        AgentLoopDriverHost, CapabilityCallCandidate, LoopDriverNoteKind, LoopProgressEvent,
+        ParentLoopOutput, VisibleCapabilitySurface,
+    },
 };
 use tracing::debug;
 
@@ -305,14 +308,11 @@ impl DefaultExecutorPipeline {
                     pending_input_ack = resume.pending_input_ack;
                     pending_input_ack.ack(host).await?;
                     let completed = self
-                        .capabilities
-                        .process(
+                        .process_resume_capability_calls(
                             ctx,
-                            CapabilityInput {
-                                state: resume.state,
-                                surface: resume.surface,
-                                calls: vec![resume.call],
-                            },
+                            resume.state,
+                            resume.surface,
+                            vec![resume.call],
                         )
                         .await?;
 
@@ -458,4 +458,32 @@ impl DefaultExecutorPipeline {
             }
         }
     }
+
+    pub(super) async fn process_resume_capability_calls(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+        surface: VisibleCapabilitySurface,
+        calls: Vec<CapabilityCallCandidate>,
+    ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        let capability_input = resume_capability_input(state, surface, calls)?;
+        self.capabilities.process(ctx, capability_input).await
+    }
+}
+
+pub(super) fn resume_capability_input(
+    state: LoopExecutionState,
+    surface: VisibleCapabilitySurface,
+    calls: Vec<CapabilityCallCandidate>,
+) -> Result<CapabilityInput, AgentLoopExecutorError> {
+    if calls.len() != 1 {
+        return Err(AgentLoopExecutorError::PlannerContract {
+            detail: "resume dispatch must contain exactly one capability call",
+        });
+    }
+    Ok(CapabilityInput {
+        state,
+        surface,
+        calls,
+    })
 }

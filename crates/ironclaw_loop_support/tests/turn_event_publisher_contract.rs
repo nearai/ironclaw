@@ -89,6 +89,7 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
             lease_token: blocked_lease,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:block-state").unwrap(),
+            blocked_activity_id: None,
             reason: BlockedReason::AwaitDependentRun {
                 gate_ref: GateRef::new("gate-dependent-run").unwrap(),
             },

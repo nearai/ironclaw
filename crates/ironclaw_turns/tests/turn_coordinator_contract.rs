@@ -12,9 +12,9 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
-    BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
+    BlockedReason, CancelRunRequest, CancelRunResponse, CapabilityActivityId,
+    DefaultTurnCoordinator, DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
     ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
@@ -1771,6 +1771,61 @@ async fn lifecycle_publishing_store_publishes_failed_run_event() {
 }
 
 #[tokio::test]
+async fn lifecycle_publishing_store_publishes_blocked_event_activity_id_from_block_run() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lifecycle-blocked-activity",
+                "idem-lifecycle-blocked-activity",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-lifecycle-blocked-activity")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let gate_ref = GateRef::new("gate:lifecycle-blocked-activity").unwrap();
+    let blocked_activity_id = CapabilityActivityId::new();
+    let blocked_state = transition_port
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            blocked_activity_id: Some(blocked_activity_id),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(blocked_state.blocked_activity_id, Some(blocked_activity_id));
+    let blocked_event = sink
+        .events()
+        .into_iter()
+        .find(|event| event.run_id == run_id && event.kind == TurnEventKind::Blocked)
+        .expect("blocked lifecycle event");
+    let blocked_gate = blocked_event.blocked_gate.expect("blocked gate metadata");
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(blocked_gate.activity_id, Some(blocked_activity_id));
+}
+
+#[tokio::test]
 async fn lifecycle_publishing_store_publishes_record_runner_failure_as_failed_event() {
     let raw_store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
@@ -1847,6 +1902,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -2478,6 +2534,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -2605,6 +2662,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -3806,6 +3864,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
             run_id,
             runner_id,
             lease_token,
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -3957,6 +4016,7 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
             lease_token,
             checkpoint_id,
             state_ref: state_ref.clone(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -4040,6 +4100,7 @@ async fn block_run_with_reason_yields_expected_blocked_gate(
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref,
+            blocked_activity_id: None,
             reason: reason_builder(gate_ref.clone()),
         })
         .await
@@ -4112,6 +4173,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -4459,6 +4521,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -4558,6 +4621,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -5351,6 +5415,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
             lease_token,
             checkpoint_id,
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -5417,6 +5482,7 @@ async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() 
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -5485,6 +5551,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -5558,6 +5625,7 @@ async fn cancel_run_from_foreign_actor_is_denied_without_mutating_run() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -5628,6 +5696,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: GateRef::new("approval-gate").unwrap(),
             },
@@ -5826,6 +5895,7 @@ async fn cancelled_running_run_cannot_be_reopened_as_blocked() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: GateRef::new("approval-gate").unwrap(),
             },
@@ -6057,6 +6127,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::AwaitDependentRun {
                 gate_ref: gate_ref.clone(),
             },
@@ -7287,6 +7358,7 @@ async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
@@ -7353,6 +7425,7 @@ async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
             lease_token: claimed.lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref2.clone(),
                 credential_requirements: Vec::new(),

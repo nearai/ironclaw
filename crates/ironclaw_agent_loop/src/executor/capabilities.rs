@@ -1104,6 +1104,7 @@ impl CapabilityStage {
         ControlFlow<TurnCompletedStep, (LoopExecutionState, Vec<CapabilityCallCandidate>)>,
         AgentLoopExecutorError,
     > {
+        ensure_unique_activity_ids_for_denied_resume(&visible_calls)?;
         let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
             .into_iter()
             .partition(|call| call.activity_id == denied_activity_id);
@@ -1160,6 +1161,20 @@ impl CapabilityStage {
         // when there is nothing left to dispatch.
         Ok(ControlFlow::Continue((state, remaining_calls)))
     }
+}
+
+fn ensure_unique_activity_ids_for_denied_resume(
+    calls: &[CapabilityCallCandidate],
+) -> Result<(), AgentLoopExecutorError> {
+    let mut activity_ids = HashSet::new();
+    for call in calls {
+        if !activity_ids.insert(call.activity_id) {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "denied resume batch contains duplicate activity id",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn clear_matching_pending_approval_resume(

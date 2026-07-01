@@ -1454,7 +1454,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             inner.apply_status_transition(transition, &record);
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
-            record.blocked_activity_id = None;
+            record.blocked_activity_id = request.blocked_activity_id;
             record.credential_requirements = request.reason.credential_requirements().to_vec();
             record.runner_id = None;
             record.lease_token = None;

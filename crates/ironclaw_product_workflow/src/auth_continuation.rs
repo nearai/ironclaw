@@ -703,6 +703,7 @@ mod tests {
                 lease_token,
                 checkpoint_id: TurnCheckpointId::new(),
                 state_ref: LoopCheckpointStateRef::new("checkpoint:auth-real").unwrap(),
+                blocked_activity_id: None,
                 reason: BlockedReason::Auth {
                     gate_ref: GateRef::new("gate:auth-real").unwrap(),
                     credential_requirements: Vec::new(),

@@ -223,6 +223,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:auth-callback").unwrap(),
+            blocked_activity_id: None,
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
@@ -733,6 +734,7 @@ async fn submit_and_block_auth_run(
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:auth-callback-2").unwrap(),
+            blocked_activity_id: None,
             reason: BlockedReason::Auth {
                 gate_ref: ironclaw_turns::GateRef::new(gate_ref).unwrap(),
                 credential_requirements: Vec::new(),

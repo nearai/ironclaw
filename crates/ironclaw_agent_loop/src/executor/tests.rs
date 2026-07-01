@@ -32,10 +32,11 @@ use crate::test_support::compaction::{
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
-    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
-    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    CapabilityStage, DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, ExitStage,
+    GateInput, GateStage, HostStage, InputStage, InputStep, PendingInputAck, PromptInput,
+    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, consume_drainable_inputs, resume_capability_input,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -6713,6 +6714,191 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
     );
     assert!(final_state.pending_auth_resume.is_none());
     assert!(final_state.result_refs.contains(&y_result_ref));
+}
+
+#[tokio::test]
+async fn capability_stage_denied_auth_resume_rejects_duplicate_activity_id_before_side_effects() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let denied_activity_id = CapabilityActivityId::new();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:auth-deny-duplicate-activity").expect("valid"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:duplicate-activity-resume").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        resume_token: None,
+        activity_id: denied_activity_id,
+        prior_approval: None,
+        replay: None,
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+    });
+
+    let calls = vec![
+        CapabilityCallCandidate {
+            activity_id: denied_activity_id,
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: CapabilityInputRef::new("input:duplicate-activity-a").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_duplicate_a".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
+                arguments: serde_json::json!({"message": "a"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+        },
+        CapabilityCallCandidate {
+            activity_id: denied_activity_id,
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: CapabilityInputRef::new("input:duplicate-activity-b").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_duplicate_b".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
+                arguments: serde_json::json!({"message": "b"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+        },
+    ];
+
+    let result = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentLoopExecutorError::PlannerContract { detail })
+            if detail == "denied resume batch contains duplicate activity id"
+    ));
+    assert!(
+        host.batch_invocations().is_empty(),
+        "duplicate denied activity ids must not reach capability dispatch"
+    );
+    assert!(
+        host.appended_result_refs().is_empty(),
+        "duplicate denied activity ids must not append model-visible failures"
+    );
+    assert!(
+        !host.progress_events().iter().any(|event| matches!(
+            event,
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                reason_kind: CapabilityFailureKind::GateDeclined,
+                ..
+            } if *activity_id == denied_activity_id
+        )),
+        "ambiguous denied activity ids must not emit a terminal activity milestone"
+    );
+}
+
+#[test]
+fn resume_capability_input_rejects_batched_resume_calls() {
+    let host = MockHost::new(Vec::new());
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: capability_id(),
+        input_ref: CapabilityInputRef::new("input:resume-single").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+    };
+    let mut second_call = call.clone();
+    second_call.activity_id = CapabilityActivityId::new();
+    second_call.input_ref = CapabilityInputRef::new("input:resume-extra").expect("valid");
+
+    let result = resume_capability_input(
+        state,
+        ironclaw_turns::run_profile::VisibleCapabilitySurface {
+            version: surface_version(),
+            descriptors: Vec::new(),
+        },
+        vec![call, second_call],
+    );
+
+    assert!(matches!(
+        result,
+        Err(AgentLoopExecutorError::PlannerContract { detail })
+            if detail == "resume dispatch must contain exactly one capability call"
+    ));
+}
+
+#[tokio::test]
+async fn executor_resume_dispatch_rejects_batched_calls_before_host_invocation() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: capability_id(),
+        input_ref: CapabilityInputRef::new("input:resume-dispatch-single").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+    };
+    let mut second_call = call.clone();
+    second_call.activity_id = CapabilityActivityId::new();
+    second_call.input_ref = CapabilityInputRef::new("input:resume-dispatch-extra").expect("valid");
+    let surface = ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let result = DefaultExecutorPipeline::default()
+        .process_resume_capability_calls(ctx, state, surface, vec![call, second_call])
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentLoopExecutorError::PlannerContract { detail })
+            if detail == "resume dispatch must contain exactly one capability call"
+    ));
+    assert!(
+        host.batch_invocations().is_empty(),
+        "batched resume dispatch must not reach capability batch invocation"
+    );
+    assert!(
+        host.single_invocations().is_empty(),
+        "batched resume dispatch must not reach single capability invocation"
+    );
 }
 
 /// Regression test: partition + sizing invariant with 1 denied + 2 remaining calls.
