@@ -329,7 +329,6 @@ impl RebornIntegrationGroup {
         RebornThreadBuilder {
             group: self,
             conversation_id: conversation_id.into(),
-            actor_id: HARNESS_ACTOR_ID.to_string(),
             replies: Vec::new(),
         }
     }
@@ -710,7 +709,6 @@ impl RebornIntegrationGroupBuilder {
 pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
-    actor_id: String,
     replies: Vec<RebornScriptedReply>,
 }
 
@@ -719,23 +717,6 @@ impl<'g> RebornThreadBuilder<'g> {
     /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
-        self
-    }
-
-    /// Submit this thread's turns as a distinct actor id (E-MULTIUSER seam).
-    ///
-    /// The actor flows through binding resolution (the probe) and turn
-    /// submission, so two threads with different actor ids resolve to **distinct
-    /// bindings** — distinct `thread_id` and `subject_user_id`. This is
-    /// binding-scope isolation only.
-    ///
-    /// IMPORTANT: capability-scope isolation (per-actor memory / approvals /
-    /// projects / auto-approve keys) is NOT provided by this seam alone — the
-    /// group's capability harness is still constructed under the single
-    /// `resolve_canonical_subject_user(HARNESS_ACTOR_ID)` owner. Per-actor
-    /// capability ownership lands with the C-MULTIUSER coverage workstream.
-    pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
-        self.actor_id = actor_id.into();
         self
     }
 
@@ -764,7 +745,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let ingress = RebornTestIngress::new(adapter);
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
-            &self.actor_id,
+            HARNESS_ACTOR_ID,
             &self.conversation_id,
             "hi",
             ProductTriggerReason::DirectChat,
@@ -851,7 +832,6 @@ impl<'g> RebornThreadBuilder<'g> {
             ingress,
             workflow,
             conversation_id: self.conversation_id,
-            actor_id: self.actor_id,
             binding,
             turn_scope,
             turn_store: Arc::clone(&shared.turn_store),
