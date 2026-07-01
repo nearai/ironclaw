@@ -711,11 +711,28 @@ impl ToolDisclosureCapabilityPort {
         &self,
         target: &ResolvedToolTarget,
     ) -> Result<bool, AgentLoopHostError> {
-        Ok(!self.is_disclosed(target.definition.name.as_str())?
-            && self
-                .inner
-                .validate_provider_tool_call(&target.target_call)
-                .is_err())
+        if self.is_disclosed(target.definition.name.as_str())? {
+            return Ok(false);
+        }
+        // Resolution failure: the inner port can't even resolve the call.
+        if self
+            .inner
+            .validate_provider_tool_call(&target.target_call)
+            .is_err()
+        {
+            return Ok(true);
+        }
+        // Input-schema failure: the call resolves, but its arguments don't satisfy
+        // the tool's parameter schema. Pre-disclosure the full schema was always
+        // in context so the model formatted the call; deferred, it calls the tool
+        // blind and a nested-shape error (e.g. a `schedule` `oneOf`) hands back no
+        // schema to recover from, so a weak model guesses the shape and spirals.
+        // Probe the arguments against the catalog schema and describe-first on a
+        // mismatch so the model's retry carries the real schema + examples.
+        Ok(!arguments_satisfy_schema(
+            &target.target_call.arguments,
+            &target.definition.parameters,
+        ))
     }
 
     /// Register a deferred call whose arguments failed pre-dispatch validation as
@@ -1097,6 +1114,21 @@ impl ToolDisclosureCapabilityPort {
     }
 }
 
+/// Whether `arguments` satisfy `schema`, used only as a describe-first *assist*
+/// (never as a gate).
+///
+/// Conservative by design: if the schema can't be compiled — an unresolved
+/// `$ref`, a dialect `jsonschema` rejects — we return `true` ("satisfied") so the
+/// call dispatches normally and the real capability-input validator remains the
+/// single source of truth. This probe only decides whether to hand the model the
+/// schema early; a false negative would merely block that assist, never a call.
+fn arguments_satisfy_schema(arguments: &Value, schema: &Value) -> bool {
+    match jsonschema::validator_for(schema) {
+        Ok(validator) => validator.is_valid(arguments),
+        Err(_) => true,
+    }
+}
+
 /// Choose the wire name to record in a forgiving direct-deferred replay.
 ///
 /// Preserve the model's emitted name when it is already a valid provider tool
@@ -1183,6 +1215,43 @@ fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arguments_satisfy_schema_gates_describe_first_on_nested_shape() {
+        // trigger_create's `schedule` must be an object (oneOf cron/once); a weak
+        // model that calls it deferred often sends a bare cron string. That must
+        // read as "does not satisfy" so describe-first hands over the schema.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "schedule": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"kind": {"const": "cron"}}, "required": ["kind", "expression"]},
+                        {"type": "object", "properties": {"kind": {"const": "once"}}, "required": ["kind", "at"]}
+                    ]
+                }
+            },
+            "required": ["name", "schedule"]
+        });
+        assert!(
+            !arguments_satisfy_schema(&json!({"name": "r", "schedule": "*/30 * * * *"}), &schema),
+            "a bare-string schedule must fail the object oneOf → describe-first"
+        );
+        assert!(
+            arguments_satisfy_schema(
+                &json!({"name": "r", "schedule": {"kind": "cron", "expression": "*/30 * * * *"}}),
+                &schema
+            ),
+            "the correct object shape must satisfy the schema → dispatch directly"
+        );
+        // Unresolved $ref / uncompilable schema is treated as satisfied (assist,
+        // never a gate): the real capability validator stays authoritative.
+        assert!(arguments_satisfy_schema(
+            &json!({"anything": true}),
+            &json!({"$ref": "https://example.com/not-resolvable.json"})
+        ));
+    }
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_loop_support::CapabilityWriteResult;
