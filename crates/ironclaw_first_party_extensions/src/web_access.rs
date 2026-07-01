@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    net::IpAddr,
     sync::{Arc, Mutex},
 };
 
@@ -10,6 +11,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind,
 };
 use serde_json::{Value, json};
+use url::{Host, Url};
 
 pub const WEB_ACCESS_EXTENSION_ID: &str = "web-access";
 pub const WEB_SEARCH_CAPABILITY_ID: &str = "web-access.search";
@@ -24,11 +26,15 @@ const MAX_QUERIES: usize = 10;
 const MAX_QUERY_CHARS: usize = 500;
 const MAX_DOMAIN_FILTERS: usize = 20;
 const MAX_DOMAIN_CHARS: usize = 200;
+const MAX_FETCH_URLS: usize = 10;
+const MAX_URL_CHARS: usize = 2_048;
 const MAX_STORED_RESPONSES: usize = 100;
 /// 50 MiB total content budget across all cached responses.
 const MAX_STORED_CONTENT_BYTES: u64 = 50 * 1024 * 1024;
 const DEFAULT_CONTEXT_CHARS: u64 = 3_000;
 const INCLUDE_CONTENT_CONTEXT_CHARS: u64 = 50_000;
+const DEFAULT_FETCH_MAX_CHARACTERS: u64 = 50_000;
+const MAX_FETCH_MAX_CHARACTERS: u64 = 50_000;
 const DEFAULT_TIMEOUT_MS: u32 = 60_000;
 const RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 
@@ -126,7 +132,7 @@ impl WebAccessExecutor {
     ) -> Result<WebAccessDispatchResult, WebAccessDispatchError> {
         match request.capability_id.as_str() {
             WEB_SEARCH_CAPABILITY_ID => self.search(request).await,
-            WEB_GET_CONTENT_CAPABILITY_ID => self.get_content(request),
+            WEB_GET_CONTENT_CAPABILITY_ID => self.get_content(request).await,
             _ => Err(WebAccessDispatchError::new(
                 RuntimeDispatchErrorKind::UndeclaredCapability,
             )),
@@ -147,7 +153,23 @@ impl WebAccessExecutor {
         }
     }
 
-    fn get_content(
+    async fn get_content(
+        &self,
+        request: WebAccessDispatchRequest<'_>,
+    ) -> Result<WebAccessDispatchResult, WebAccessDispatchError> {
+        if request.input.get("response_id").is_some() {
+            reject_keys(request.input, &["urls", "max_characters", "maxCharacters"])?;
+            return self.get_cached_content(request);
+        }
+        reject_keys(request.input, &["query", "url_index"])?;
+        let urls = fetch_url_list(request.input)?;
+        if urls.is_empty() {
+            return Err(input_error());
+        }
+        self.fetch_content(request, urls).await
+    }
+
+    fn get_cached_content(
         &self,
         request: WebAccessDispatchRequest<'_>,
     ) -> Result<WebAccessDispatchResult, WebAccessDispatchError> {
@@ -171,6 +193,9 @@ impl WebAccessExecutor {
         } else {
             stored.queries.first().ok_or_else(operation_error)?
         };
+        if url_selector.is_some() && url_index.is_some() {
+            return Err(input_error());
+        }
         let selected = if let Some(url) = url_selector {
             selected_query
                 .results
@@ -190,11 +215,68 @@ impl WebAccessExecutor {
             output: json!({
                 "response_id": response_id,
                 "query": selected_query.query,
+                "provider_used": "cache",
                 "title": selected.title,
                 "url": selected.url,
                 "content": selected.content,
+                "contents": [{
+                    "title": selected.title,
+                    "url": selected.url,
+                    "content": selected.content,
+                }],
             }),
             usage: ResourceUsage::default(),
+        })
+    }
+
+    async fn fetch_content(
+        &self,
+        request: WebAccessDispatchRequest<'_>,
+        urls: Vec<String>,
+    ) -> Result<WebAccessDispatchResult, WebAccessDispatchError> {
+        let max_characters = fetch_max_characters(request.input)?;
+        let egress = request
+            .runtime_http_egress
+            .as_ref()
+            .ok_or_else(|| WebAccessDispatchError::new(RuntimeDispatchErrorKind::NetworkDenied))?
+            .clone();
+        let response_text = call_exa_mcp_fetch(
+            egress,
+            request.capability_id,
+            request.scope,
+            &urls,
+            max_characters,
+        )
+        .await
+        .map_err(|e| {
+            let total_bytes = e.total_bytes();
+            map_egress_error(e.inner).with_accumulated_bytes(total_bytes)
+        })?;
+        let results = parse_fetch_results(&response_text.body, &urls)?;
+        let Some(first) = results.first() else {
+            return Err(operation_error());
+        };
+        let output = json!({
+            "provider_used": "exa_mcp",
+            "title": first.title,
+            "url": first.url,
+            "content": first.content,
+            "contents": results.iter().map(|result| json!({
+                "title": result.title,
+                "url": result.url,
+                "content": result.content,
+            })).collect::<Vec<_>>(),
+        });
+        let output_bytes = serde_json::to_vec(&output)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        Ok(WebAccessDispatchResult {
+            output,
+            usage: ResourceUsage {
+                output_bytes,
+                network_egress_bytes: response_text.request_bytes,
+                ..ResourceUsage::default()
+            },
         })
     }
 
@@ -226,7 +308,7 @@ impl WebAccessExecutor {
         let mut stored_queries = Vec::new();
         for query in queries {
             let enriched_query = build_mcp_query(&query, recency_filter.as_deref(), &domain_filter);
-            let response_text = call_exa_mcp(
+            let response_text = call_exa_mcp_search(
                 Arc::clone(&egress),
                 request.capability_id,
                 request.scope,
@@ -395,13 +477,54 @@ fn mcp_initialize_params() -> Value {
     })
 }
 
-async fn call_exa_mcp(
+async fn call_exa_mcp_search(
     egress: Arc<dyn RuntimeHttpEgress>,
     capability_id: &CapabilityId,
     scope: &ResourceScope,
     query: &str,
     num_results: u64,
     include_content: bool,
+) -> Result<EgressText, EgressCallError> {
+    let arguments = json!({
+        "query": query,
+        "numResults": num_results,
+        "livecrawl": "fallback",
+        "type": "auto",
+        "contextMaxCharacters": if include_content {
+            INCLUDE_CONTENT_CONTEXT_CHARS
+        } else {
+            DEFAULT_CONTEXT_CHARS
+        },
+    });
+    call_exa_mcp_tool(egress, capability_id, scope, "web_search_exa", arguments).await
+}
+
+async fn call_exa_mcp_fetch(
+    egress: Arc<dyn RuntimeHttpEgress>,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    urls: &[String],
+    max_characters: u64,
+) -> Result<EgressText, EgressCallError> {
+    call_exa_mcp_tool(
+        egress,
+        capability_id,
+        scope,
+        "web_fetch_exa",
+        json!({
+            "urls": urls,
+            "maxCharacters": max_characters,
+        }),
+    )
+    .await
+}
+
+async fn call_exa_mcp_tool(
+    egress: Arc<dyn RuntimeHttpEgress>,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    tool_name: &str,
+    arguments: Value,
 ) -> Result<EgressText, EgressCallError> {
     let mut prior_bytes = 0_u64;
 
@@ -472,18 +595,8 @@ async fn call_exa_mcp(
 
     // 3. tools/call with session ID.
     let call_params = json!({
-        "name": "web_search_exa",
-        "arguments": {
-            "query": query,
-            "numResults": num_results,
-            "livecrawl": "fallback",
-            "type": "auto",
-            "contextMaxCharacters": if include_content {
-                INCLUDE_CONTENT_CONTEXT_CHARS
-            } else {
-                DEFAULT_CONTEXT_CHARS
-            },
-        }
+        "name": tool_name,
+        "arguments": arguments,
     });
     let call_body = json_rpc_body(Some(2), "tools/call", Some(call_params))
         .map_err(|e| EgressCallError::new(e).with_prior(prior_bytes))?;
@@ -601,6 +714,85 @@ fn parse_mcp_block(block: &str) -> Option<SearchResult> {
     })
 }
 
+fn parse_fetch_results(
+    text: &str,
+    requested_urls: &[String],
+) -> Result<Vec<SearchResult>, WebAccessDispatchError> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let requested = requested_urls
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if lines
+        .iter()
+        .any(|line| fetch_error_mentions_requested(line, &requested))
+    {
+        return Err(operation_error());
+    }
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let next = lines.get(index + 1)?;
+            let url = next.strip_prefix("URL: ")?.trim();
+            (line.starts_with("# ") && requested.contains(url)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let mut results = Vec::new();
+    for (position, start) in starts.iter().enumerate() {
+        let end = starts.get(position + 1).copied().unwrap_or(lines.len());
+        let title = lines[*start]
+            .strip_prefix("# ")
+            .unwrap_or(lines[*start])
+            .trim()
+            .to_string();
+        let url = lines[*start + 1]
+            .strip_prefix("URL: ")
+            .unwrap_or(lines[*start + 1])
+            .trim()
+            .to_string();
+        let content = lines[*start + 2..end].join("\n").trim().to_string();
+        results.push(SearchResult {
+            title,
+            url,
+            content,
+        });
+    }
+
+    if !results.is_empty() {
+        return Ok(results);
+    }
+
+    let Some(first_url) = requested_urls.first() else {
+        return Err(input_error());
+    };
+    let title = text
+        .lines()
+        .find_map(|line| line.strip_prefix("# ").map(str::trim))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(first_url)
+        .to_string();
+    Ok(vec![SearchResult {
+        title,
+        url: first_url.clone(),
+        content: text.trim().to_string(),
+    }])
+}
+
+fn fetch_error_mentions_requested(line: &str, requested: &HashSet<&str>) -> bool {
+    let Some(remainder) = line.strip_prefix("Error fetching ") else {
+        return false;
+    };
+    let remainder = remainder.trim();
+    requested.iter().any(|url| {
+        remainder == *url
+            || remainder
+                .strip_prefix(*url)
+                .is_some_and(|suffix| suffix.trim_start().starts_with(':'))
+    })
+}
+
 fn line_value(block: &str, prefix: &str) -> Option<String> {
     block.lines().find_map(|line| {
         line.strip_prefix(prefix)
@@ -665,6 +857,104 @@ fn query_list(input: &Value) -> Result<Vec<String>, WebAccessDispatchError> {
         return Err(input_error());
     }
     Ok(queries)
+}
+
+fn fetch_url_list(input: &Value) -> Result<Vec<String>, WebAccessDispatchError> {
+    let single_url = optional_string(input, "url")?
+        .map(|url| validated_fetch_url(&url))
+        .transpose()?;
+    let urls = bounded_string_array(input, "urls", MAX_FETCH_URLS, MAX_URL_CHARS)?
+        .into_iter()
+        .map(|url| validated_fetch_url(&url))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    match (single_url, urls.is_empty()) {
+        (Some(_), false) => Err(input_error()),
+        (Some(url), true) => Ok(vec![url]),
+        (None, false) => Ok(urls),
+        (None, true) => Ok(Vec::new()),
+    }
+}
+
+fn fetch_max_characters(input: &Value) -> Result<u64, WebAccessDispatchError> {
+    let snake_case = optional_u64(input, "max_characters")?;
+    let camel_case = optional_u64(input, "maxCharacters")?;
+    match (snake_case, camel_case) {
+        (Some(_), Some(_)) => Err(input_error()),
+        (Some(0), None) | (None, Some(0)) => Err(input_error()),
+        (Some(value), None) | (None, Some(value)) if value <= MAX_FETCH_MAX_CHARACTERS => Ok(value),
+        (Some(_), None) | (None, Some(_)) => Err(input_error()),
+        (None, None) => Ok(DEFAULT_FETCH_MAX_CHARACTERS),
+    }
+}
+
+fn reject_keys(input: &Value, keys: &[&str]) -> Result<(), WebAccessDispatchError> {
+    if keys.iter().any(|key| input.get(*key).is_some()) {
+        return Err(input_error());
+    }
+    Ok(())
+}
+
+fn validated_fetch_url(value: &str) -> Result<String, WebAccessDispatchError> {
+    let url = bounded_trimmed_string(value, MAX_URL_CHARS)?;
+    let parsed = Url::parse(&url).map_err(|_| input_error())?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(input_error());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(input_error());
+    }
+    if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err(input_error());
+    }
+    let host = parsed.host().ok_or_else(input_error)?;
+    if disallowed_fetch_host(host) {
+        return Err(input_error());
+    }
+    Ok(url)
+}
+
+fn disallowed_fetch_host(host: Host<&str>) -> bool {
+    match host {
+        Host::Domain(host) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            host == "localhost"
+                || host.ends_with(".localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .map(fetch_ip_is_not_public)
+                    .unwrap_or(false)
+        }
+        Host::Ipv4(ip) => fetch_ip_is_not_public(IpAddr::V4(ip)),
+        Host::Ipv6(ip) => fetch_ip_is_not_public(IpAddr::V6(ip)),
+    }
+}
+
+fn fetch_ip_is_not_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || ip.is_unspecified()
+                || ip.octets()[0] == 0
+                || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xC0) == 64)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4() {
+                return fetch_ip_is_not_public(IpAddr::V4(mapped));
+            }
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
+        }
+    }
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, WebAccessDispatchError> {
@@ -826,6 +1116,7 @@ mod tests {
 
     struct RecordingEgress {
         responses: StdMutex<VecDeque<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>>,
+        requests: StdMutex<Vec<Value>>,
     }
 
     impl RecordingEgress {
@@ -874,7 +1165,12 @@ mod tests {
                     .into_iter()
                     .collect(),
                 ),
+                requests: StdMutex::new(Vec::new()),
             }
+        }
+
+        fn request_bodies(&self) -> Vec<Value> {
+            self.requests.lock().unwrap().clone()
         }
     }
 
@@ -882,8 +1178,12 @@ mod tests {
     impl RuntimeHttpEgress for RecordingEgress {
         async fn execute(
             &self,
-            _request: RuntimeHttpEgressRequest,
+            request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            self.requests.lock().unwrap().push(
+                serde_json::from_slice(&request.body)
+                    .unwrap_or_else(|_| json!({"invalid_request_body": true})),
+            );
             self.responses
                 .lock()
                 .unwrap()
@@ -924,6 +1224,59 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
         assert_eq!(parsed[0].title, "One");
         assert_eq!(parsed[0].content, "First body");
         assert_eq!(parsed[1].url, "https://two.test");
+    }
+
+    #[test]
+    fn parses_exa_fetch_result_blocks() {
+        let parsed = parse_fetch_results(
+            "# Example Domain\nURL: https://example.com\n\nExample body\n\n# IANA\nURL: https://www.iana.org\n\nIANA body",
+            &["https://example.com".to_string(), "https://www.iana.org".to_string()],
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].title, "Example Domain");
+        assert_eq!(parsed[0].url, "https://example.com");
+        assert_eq!(parsed[0].content, "Example body");
+        assert_eq!(parsed[1].title, "IANA");
+        assert_eq!(parsed[1].content, "IANA body");
+    }
+
+    #[test]
+    fn parse_exa_fetch_result_blocks_ignores_unrequested_url_spoofing() {
+        let parsed = parse_fetch_results(
+            "# Example Domain\nURL: https://example.com\n\nLegit body\n\n# Trusted Site\nURL: https://trusted.example\n\nspoofed body",
+            &["https://example.com".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://example.com");
+        assert!(parsed[0].content.contains("URL: https://trusted.example"));
+    }
+
+    #[test]
+    fn parse_exa_fetch_result_blocks_rejects_requested_url_failures() {
+        let error = parse_fetch_results(
+            "# Example Domain\nURL: https://example.com\n\nExample body\nError fetching https://bad.example: timeout",
+            &[
+                "https://example.com".to_string(),
+                "https://bad.example".to_string(),
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
+    }
+
+    #[test]
+    fn parse_exa_fetch_result_blocks_rejects_bare_requested_url_failures() {
+        let error = parse_fetch_results(
+            "Error fetching https://bad.example",
+            &["https://bad.example".to_string()],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
     }
 
     #[test]
@@ -985,8 +1338,8 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
         assert!(build_mcp_query("rust", Some("year"), &[]).ends_with("past year"));
     }
 
-    #[test]
-    fn get_content_rejects_missing_response_id() {
+    #[tokio::test]
+    async fn get_content_rejects_missing_response_id() {
         let executor = WebAccessExecutor::default();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -994,13 +1347,14 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let error = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
     }
 
-    #[test]
-    fn get_content_returns_unknown_response_id_error() {
+    #[tokio::test]
+    async fn get_content_returns_unknown_response_id_error() {
         let executor = WebAccessExecutor::default();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -1008,13 +1362,14 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let error = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
     }
 
-    #[test]
-    fn get_content_rejects_unknown_query_selector() {
+    #[tokio::test]
+    async fn get_content_rejects_unknown_query_selector() {
         let (executor, response_id) = seed_executor();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -1022,13 +1377,14 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let error = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
     }
 
-    #[test]
-    fn get_content_returns_result_by_url_index() {
+    #[tokio::test]
+    async fn get_content_returns_result_by_url_index() {
         let (executor, response_id) = seed_executor();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -1036,14 +1392,16 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let result = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap();
 
         assert_eq!(result.output["url"], "https://two.test");
         assert_eq!(result.output["content"], "second body");
+        assert_eq!(result.output["provider_used"], "cache");
     }
 
-    #[test]
-    fn get_content_returns_result_by_url_selector() {
+    #[tokio::test]
+    async fn get_content_returns_result_by_url_selector() {
         let (executor, response_id) = seed_executor();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -1051,13 +1409,14 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let result = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap();
 
         assert_eq!(result.output["title"], "First");
     }
 
-    #[test]
-    fn get_content_rejects_out_of_bounds_url_index() {
+    #[tokio::test]
+    async fn get_content_rejects_out_of_bounds_url_index() {
         let (executor, response_id) = seed_executor();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
@@ -1065,9 +1424,252 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
 
         let error = executor
             .get_content(request(&capability, &scope, &input, None))
+            .await
             .unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::OperationFailed);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_multiple_cached_result_selectors() {
+        let (executor, response_id) = seed_executor();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"response_id": response_id, "url": "https://one.test", "url_index": 0});
+
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_cached_request_with_fetch_only_fields() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"response_id": "cached", "urls": ["https://example.com"]});
+
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_fetch_request_with_cached_selector_fields() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url": "https://example.com", "url_index": 0});
+
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_duplicate_fetch_max_character_aliases() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input =
+            json!({"url": "https://example.com", "max_characters": 1000, "maxCharacters": 1000});
+
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_out_of_range_fetch_max_characters() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url": "https://example.com", "max_characters": 0});
+
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+
+        let input =
+            json!({"url": "https://example.com", "max_characters": MAX_FETCH_MAX_CHARACTERS + 1});
+        let error = executor
+            .get_content(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    #[tokio::test]
+    async fn get_content_fetch_returns_network_denied_when_egress_is_none() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url": "https://example.com"});
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_invalid_fetch_urls_before_egress() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let overlong_url = format!("https://example.com/{}", "x".repeat(MAX_URL_CHARS));
+        let too_many_urls = (0..=MAX_FETCH_URLS)
+            .map(|index| format!("https://example.com/{index}"))
+            .collect::<Vec<_>>();
+        let cases = [
+            json!({"url": "ftp://example.com/page"}),
+            json!({"url": "https://example.com/a b"}),
+            json!({"url": overlong_url}),
+            json!({"urls": too_many_urls}),
+        ];
+
+        for input in cases {
+            let error = executor
+                .dispatch(request(&capability, &scope, &input, None))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+            assert!(error.usage().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_local_or_private_fetch_urls_before_egress() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+
+        for url in [
+            "http://localhost/page",
+            "https://service.localhost/page",
+            "http://127.0.0.1/page",
+            "http://10.0.0.1/page",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/page",
+            "http://[::ffff:10.0.0.1]/page",
+        ] {
+            let input = json!({"url": url});
+            let error = executor
+                .dispatch(request(&capability, &scope, &input, None))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode, "{url}");
+            assert!(error.usage().is_none(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_content_rejects_fetch_urls_with_userinfo_before_egress() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url": "https://user:secret@example.com/page"});
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, None))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(error.usage().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_content_fetches_url_with_exa_web_fetch_tool() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url":"https://example.com", "max_characters": 1000});
+        let egress = Arc::new(RecordingEgress::for_mcp_search(json!({
+            "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
+        })));
+
+        let result = executor
+            .dispatch(request(
+                &capability,
+                &scope,
+                &input,
+                Some(egress.clone() as Arc<dyn RuntimeHttpEgress>),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output["provider_used"], "exa_mcp");
+        assert_eq!(result.output["title"], "Example Domain");
+        assert_eq!(result.output["url"], "https://example.com");
+        assert_eq!(result.output["content"], "Example body");
+        let request_bodies = egress.request_bodies();
+        assert_eq!(request_bodies[2]["method"], "tools/call");
+        assert_eq!(request_bodies[2]["params"]["name"], "web_fetch_exa");
+        assert_eq!(
+            request_bodies[2]["params"]["arguments"]["urls"][0],
+            "https://example.com"
+        );
+        assert_eq!(
+            request_bodies[2]["params"]["arguments"]["maxCharacters"],
+            1000
+        );
+    }
+
+    #[tokio::test]
+    async fn get_content_fetches_multiple_urls_with_exa_web_fetch_tool() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"urls":["https://example.com", "https://www.iana.org"]});
+        let egress = Arc::new(RecordingEgress::for_mcp_search(json!({
+            "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body\n\n# IANA\nURL: https://www.iana.org\n\nIANA body"}]}
+        })));
+
+        let result = executor
+            .dispatch(request(
+                &capability,
+                &scope,
+                &input,
+                Some(egress.clone() as Arc<dyn RuntimeHttpEgress>),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output["provider_used"], "exa_mcp");
+        assert_eq!(result.output["contents"].as_array().unwrap().len(), 2);
+        assert_eq!(result.output["contents"][0]["url"], "https://example.com");
+        assert_eq!(result.output["contents"][1]["content"], "IANA body");
+        let request_bodies = egress.request_bodies();
+        assert_eq!(request_bodies[2]["params"]["name"], "web_fetch_exa");
+        assert_eq!(
+            request_bodies[2]["params"]["arguments"]["urls"],
+            json!(["https://example.com", "https://www.iana.org"])
+        );
+        assert_eq!(
+            request_bodies[2]["params"]["arguments"]["maxCharacters"],
+            DEFAULT_FETCH_MAX_CHARACTERS
+        );
     }
 
     #[test]

@@ -82,6 +82,8 @@ Don't just translate `CREATE TABLE`. Also check:
 
 Multi-step operations (INSERT+INSERT, UPDATE+DELETE, read-modify-write) MUST be wrapped in a transaction. Ask: "If this crashes between step N and N+1, is the database consistent?" If not, wrap in a transaction. Applies to both backends.
 
+For the `RootFilesystem`/`ScopedFilesystem` mount plane, a filesystem read-modify-write MUST go through `ironclaw_filesystem::cas_update` (the one shared bounded-CAS-retry helper). Never wrap it in a per-record `tokio::sync::Mutex` held across the backend `.await` — it is a redundant serializer over a backend that already does versioned CAS and convoys/wedges the runtime under burst. See `crates/ironclaw_filesystem/CLAUDE.md` invariant 2 and `docs/plans/2026-06-25-cas-migration.md`.
+
 ## libSQL Connection Model
 
 `LibSqlBackend::connect()` creates a fresh connection per operation with `PRAGMA busy_timeout = 5000`. This is intentional -- no pool exists. Never hold connections open across `await` points. Satellite stores (`LibSqlSecretsStore`, `LibSqlWasmToolStore`) receive `Arc<LibSqlDatabase>` via `shared_db()` and call `.connect()` themselves -- never pass a live `Connection`.

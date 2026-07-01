@@ -115,6 +115,7 @@ ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = f
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }

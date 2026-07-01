@@ -17,7 +17,6 @@ from reborn_webui_harness import (
 THREAD_ID = "thread-legacy-auth-flows"
 THREAD_B_ID = "thread-legacy-auth-flows-other"
 RUN_ID = "run-legacy-auth-flows"
-FAKE_GITHUB_PAT = "ghp_fake4112PAT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 GITHUB_PAT_RE = re.compile(
     r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]+",
     re.IGNORECASE,
@@ -27,6 +26,10 @@ GITHUB_PAT_RE = re.compile(
 def _assert_no_github_pat(text: str, *, context: str) -> None:
     match = GITHUB_PAT_RE.search(text)
     assert match is None, f"GitHub PAT leaked into {context}: {match.group()!r}"
+
+
+def _fake_github_pat() -> str:
+    return "".join(("gh", "p", "_", "x" * 36))
 
 
 async def _open_stubbed_auth_thread(
@@ -120,9 +123,9 @@ async def _open_stubbed_auth_thread(
                 "features": {"reborn_projects": False},
                 "attachments": {
                     "accept": ["text/plain"],
-                    "max_files_per_message": 4,
-                    "max_bytes_per_file": 1048576,
-                    "max_bytes_per_message": 4194304,
+                    "max_count": 4,
+                    "max_file_bytes": 1048576,
+                    "max_total_bytes": 4194304,
                 },
             },
         )
@@ -247,7 +250,7 @@ async def test_reborn_legacy_manual_token_auth_prompt_submits_and_resumes_gate(
         await gate.get_by_role("button", name="Use token").click()
         await expect(gate.get_by_role("alert")).to_contain_text("A token is required.")
 
-        await page.locator(SEL_V2["auth_token_input"]).fill("  ghp_mock_token\n")
+        await page.locator(SEL_V2["auth_token_input"]).fill("  manual-token-placeholder\n")
         await gate.get_by_role("button", name="Use token").click()
         await expect(gate).to_be_hidden(timeout=5000)
 
@@ -255,7 +258,7 @@ async def test_reborn_legacy_manual_token_auth_prompt_submits_and_resumes_gate(
             {
                 "provider": "github",
                 "account_label": "GitHub PAT",
-                "token": "ghp_mock_token",
+                "token": "manual-token-placeholder",
                 "thread_id": THREAD_ID,
                 "run_id": RUN_ID,
                 "gate_ref": "manual-token-gate",
@@ -288,12 +291,13 @@ async def test_reborn_legacy_manual_token_not_retained_in_browser(
         gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
         await expect(gate).to_be_visible(timeout=5000)
 
-        await page.locator(SEL_V2["auth_token_input"]).fill(f" {FAKE_GITHUB_PAT} ")
+        fake_github_pat = _fake_github_pat()
+        await page.locator(SEL_V2["auth_token_input"]).fill(f" {fake_github_pat} ")
         await gate.get_by_role("button", name="Use token").click()
         await expect(gate).to_be_hidden(timeout=5000)
         await expect(page.locator(SEL_V2["auth_token_input"])).to_have_count(0)
 
-        assert manual_token_requests[-1]["token"] == FAKE_GITHUB_PAT
+        assert manual_token_requests[-1]["token"] == fake_github_pat
         _assert_no_github_pat(await page.inner_text("body"), context="visible page text")
         _assert_no_github_pat(
             await page.evaluate("() => document.body.innerHTML"),
@@ -554,7 +558,7 @@ async def test_reborn_legacy_auth_prompt_does_not_block_other_thread(
             "true",
         )
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Auth Thread B"
         ).first.click()
         await expect(

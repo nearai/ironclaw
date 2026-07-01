@@ -16,6 +16,7 @@ function pairingSectionSourceForTest() {
 function createReactStub(state) {
   return {
     useCallback: (fn) => fn,
+    useEffect: () => {},
     useState: (initial) => {
       if (state.manualCode === undefined) {
         state.manualCode = typeof initial === "function" ? initial() : initial;

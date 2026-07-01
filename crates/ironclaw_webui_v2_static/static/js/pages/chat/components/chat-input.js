@@ -170,6 +170,8 @@ export function ChatInput({
       // later add.
       stagingQueueRef.current = stagingQueueRef.current
         .then(async () => {
+          const expectedDraftKey = draftKey;
+          const expectedStorageScope = storageScope;
           const { staged, errors } = await stageFiles(files, {
             limits,
             existing: attachmentsRef.current,

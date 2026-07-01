@@ -209,8 +209,7 @@ pub struct SubmittedTurn {
 pub struct RebornHarnessSharedStorage {
     product_backend: Arc<LocalFilesystem>,
     product_root: Arc<tempfile::TempDir>,
-    thread_backend: Arc<LocalFilesystem>,
-    thread_root: Arc<tempfile::TempDir>,
+    thread_backend: Arc<InMemoryBackend>,
     turn_backend: Arc<HarnessTurnStorageBackend>,
     turn_root: Arc<tempfile::TempDir>,
 }
@@ -218,13 +217,11 @@ pub struct RebornHarnessSharedStorage {
 impl RebornHarnessSharedStorage {
     pub fn new() -> HarnessResult<Self> {
         let product_root = Arc::new(tempfile::tempdir()?);
-        let thread_root = Arc::new(tempfile::tempdir()?);
         let turn_root = Arc::new(tempfile::tempdir()?);
         Ok(Self {
             product_backend: Arc::new(local_filesystem(product_root.path())?),
             product_root,
-            thread_backend: Arc::new(local_filesystem(thread_root.path())?),
-            thread_root,
+            thread_backend: Arc::new(InMemoryBackend::new()),
             turn_backend: Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
             turn_root,
         })
@@ -867,7 +864,6 @@ impl RebornBinaryE2EHarness {
             RebornThreadHarness::filesystem_shared_backend(
                 thread_scope.clone(),
                 Arc::clone(&storage.thread_backend),
-                Arc::clone(&storage.thread_root),
             )?
         } else {
             RebornThreadHarness::filesystem_temp(thread_scope.clone())?
@@ -1427,7 +1423,7 @@ impl Drop for RebornBinaryE2EHarness {
 }
 
 struct HarnessLoopExitEvidencePort {
-    inner: ThreadCheckpointLoopExitEvidencePort<FilesystemSessionThreadService<LocalFilesystem>>,
+    inner: ThreadCheckpointLoopExitEvidencePort<FilesystemSessionThreadService<InMemoryBackend>>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     accept_harness_blocked_evidence: bool,
 }

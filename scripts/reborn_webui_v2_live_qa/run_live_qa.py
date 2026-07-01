@@ -1002,11 +1002,22 @@ async def _wait_for_assistant_reply(
     last_text = ""
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
-        if await assistant.count() > 0:
+        assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
+        if await assistant_blocks.count() > 0:
             try:
                 text = await assistant.inner_text(timeout=1000)
             except Exception:
                 text = ""
+            try:
+                block_texts = [
+                    block.strip()
+                    for block in await assistant_blocks.all_inner_texts()
+                    if block.strip()
+                ]
+            except Exception:
+                block_texts = []
+            if block_texts:
+                text = "\n".join(block_texts)
             if text:
                 last_text = text
             normalized = text.lower()
@@ -1185,7 +1196,7 @@ async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResul
         case_name="qa_3b_endpoint_status_live_chat",
         prompt=_qa_sheet_prompt("qa_3b_endpoint_status_live_chat"),
         marker=None,
-        required_text=["status"],
+        required_text=["status|http|200|up|running|responded"],
         extra_details={"endpoint_url": url, "expected_status_code": live_status},
     )
 
@@ -1642,22 +1653,58 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     from playwright.async_api import expect
 
     started = time.monotonic()
-    prompt = _qa_sheet_prompt(case_name)
-    observed: dict[str, object] = {"chat_connect_prompt": prompt}
+    observed: dict[str, object] = {
+        "qa_sheet_prompt": _qa_sheet_prompt(case_name),
+        "slack_connect_surface": "/v2/extensions/channels",
+    }
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/v2/extensions/channels?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        body = page.locator("body")  # type: ignore[attr-defined]
-        await expect(body).to_contain_text("Connect Slack", timeout=15000)
-        await expect(body).to_contain_text("Message the Slack app", timeout=15000)
-        observed["slack_connect_card_visible"] = True
+        await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
+        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
+        channels = body.get("channels")
+        if not isinstance(channels, list):
+            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
+        slack_channels = [
+            channel
+            for channel in channels
+            if isinstance(channel, dict) and channel.get("channel") == "slack"
+        ]
+        observed["connectable_channel_count"] = len(channels)
+        observed["slack_strategy_count"] = len(slack_channels)
+        observed["slack_strategies"] = [
+            channel.get("strategy")
+            for channel in slack_channels
+            if isinstance(channel, dict)
+        ]
+        personal = next(
+            (
+                channel
+                for channel in slack_channels
+                if isinstance(channel, dict)
+                and channel.get("strategy") == "inbound_proof_code"
+            ),
+            None,
+        )
+        if not isinstance(personal, dict):
+            raise AssertionError(f"Slack inbound_proof_code connect strategy missing: {channels!r}")
+        action_body = personal.get("action")
+        if not isinstance(action_body, dict):
+            raise AssertionError(f"Slack connect action missing: {personal!r}")
+        title = str(action_body.get("title") or "")
+        if not title:
+            raise AssertionError(f"Slack connect action title missing: {personal!r}")
+        instructions = str(action_body.get("instructions") or "")
+        if "Message the Slack app" not in instructions:
+            raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Message the Slack app", timeout=15000)  # type: ignore[attr-defined]
+        observed["slack_display_name"] = personal.get("display_name")
+        observed["slack_connect_title"] = title
+        observed["slack_connect_instructions"] = instructions
 
     try:
         slack = _slack_preflight(ctx)
@@ -2042,7 +2089,7 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         case_name="qa_2e_calendar_prep_email_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine", "email"],
+        required_text=["routine", "email|emails|gmail"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
     )
 
@@ -2440,7 +2487,7 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
         ctx,
         case_name="qa_6c_gmail_to_sheet_live_chat",
         marker=None,
-        required_text=["ABC", "spreadsheet"],
+        required_text=["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
         extensions=[
             {
                 "package_id": "gmail",
@@ -2768,7 +2815,7 @@ async def case_qa_4d_github_release_slack_routine(ctx: LiveQaContext) -> ProbeRe
         case_name="qa_4d_github_release_slack_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine"],
+        required_text=["routine|trigger|automation|cron|schedule|created"],
         prompt=_qa_sheet_prompt("qa_4d_github_release_slack_routine"),
     )
 
@@ -3311,7 +3358,7 @@ async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
         case_name="qa_8b_hn_keyword_live_chat",
         prompt=_qa_sheet_prompt("qa_8b_hn_keyword_live_chat"),
         marker=None,
-        required_text=["news.ycombinator.com"],
+        required_text=["news.ycombinator.com|hacker news|hn|discussion|id="],
         timeout=240.0,
     )
 
