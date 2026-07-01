@@ -978,8 +978,25 @@ async fn recover_expired_leases(transitions: Arc<dyn TurnRunTransitionPort>) {
             scope_filter: None,
         })
         .await;
-    if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler lease recovery failed");
+    match result {
+        Ok(response) => {
+            for state in response.recovered {
+                debug!(
+                    thread_id = %state.scope.thread_id,
+                    run_id = %state.run_id,
+                    status = ?state.status,
+                    failure_category = %state
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.category())
+                        .unwrap_or("unknown"),
+                    "turn run scheduler recovered expired lease"
+                );
+            }
+        }
+        Err(error) => {
+            debug!(error = %error, "turn run scheduler lease recovery failed");
+        }
     }
 }
 
