@@ -263,12 +263,9 @@ export function MessageList({
         to=${logsPath}
         aria-label=${t("nav.logs")}
         title=${t("nav.logs")}
-        className="group absolute bottom-5 right-5 inline-flex h-9 items-center gap-0 overflow-hidden rounded-full border border-white/10 bg-[color-mix(in_srgb,var(--v2-canvas-strong)_82%,transparent)] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] shadow-[0_12px_28px_-18px_rgba(0,0,0,0.9)] backdrop-blur-md transition-all hover:gap-1.5 hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)] hover:px-3 hover:text-[var(--v2-text-strong)] focus:gap-1.5 focus:px-3 focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_38%,transparent)]"
+        className="group absolute bottom-5 right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]"
       >
-        <${Icon} name="logs" className="h-3.5 w-3.5" />
-        <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all group-hover:max-w-12 group-hover:opacity-100 group-focus:max-w-12 group-focus:opacity-100">
-          ${t("nav.logs")}
-        </span>
+        <${Icon} name="logs" className="size-5" />
       <//>
     `}
     ${!atBottom &&

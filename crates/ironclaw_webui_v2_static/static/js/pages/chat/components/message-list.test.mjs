@@ -191,7 +191,7 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*group absolute bottom-5 right-5[\s\S]*<\$\{Icon\} name="logs"[\s\S]*group-hover:max-w-12[\s\S]*\$\{t\("nav\.logs"\)\}/,
-    "thread logs shortcut should render as a subtle bottom-right expandable button",
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*group absolute bottom-5 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\][\s\S]*<\$\{Icon\} name="logs"/,
+    "thread logs shortcut should render as a visible bottom-right icon button",
   );
 });
