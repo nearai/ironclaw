@@ -876,7 +876,12 @@ where
             let claimed = if args.gate_blocked_every > 0
                 && operation_index.is_multiple_of(args.gate_blocked_every)
             {
-                self.gate_block_and_resume(&context, &turn_store, claimed, operation_index)
+                // Alternate approval/auth by *blocked-hit* count, not raw
+                // operation-index parity: every blocked index is a multiple of
+                // `gate_blocked_every`, so parity alone would only ever pick one
+                // gate kind for even intervals.
+                let use_auth_gate = (operation_index / args.gate_blocked_every) % 2 == 1;
+                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate)
                     .await?
             } else {
                 claimed
@@ -1187,17 +1192,17 @@ where
 
     /// Route a claimed run through a gate block + resume so persist-on-block
     /// fires, then re-claim it and hand the fresh claim back for the caller to
-    /// complete. Alternates approval/auth gates by operation index so both gate
-    /// kinds exercise the durable sink.
+    /// complete. The caller alternates `use_auth_gate` per blocked hit so both
+    /// approval and auth gate kinds exercise the durable sink.
     async fn gate_block_and_resume(
         &self,
         context: &crate::synthetic::UserTurnContext,
         turn_store: &Arc<dyn StressTurnStore>,
         claimed: ClaimedTurnRun,
-        operation_index: usize,
+        use_auth_gate: bool,
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
-        let is_auth = operation_index % 2 == 1;
+        let is_auth = use_auth_gate;
         let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
         let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))

@@ -647,6 +647,9 @@ struct RunSummary {
     trace_interval_seconds: u64,
     users: usize,
     active_thread_count: usize,
+    threads_per_owner: usize,
+    turn_state_backend: TurnStateBackend,
+    gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
     prefill_turns_per_thread: usize,
@@ -1121,6 +1124,18 @@ fn validate_args(args: &Args) -> Result<(), String> {
         }
         if args.prefill_threads > args.users {
             return Err("--prefill-threads must be less than or equal to --users".to_string());
+        }
+        // Prefill warms one thread per owner (`user_turn_context_for_user_index`,
+        // no slot), while measured runs spread across `threads_per_owner`
+        // slot-suffixed threads. Combining the two would warm different thread
+        // IDs than the workload benchmarks, so reject it rather than silently
+        // prefilling the wrong threads.
+        if args.threads_per_owner > 1 {
+            return Err(
+                "--prefill-threads is incompatible with --threads-per-owner > 1 (prefill would \
+                 warm different thread IDs than the measured slotted threads)"
+                    .to_string(),
+            );
         }
         if let Some(min_sweep_users) = args.sweep_users.iter().min()
             && args.prefill_threads > *min_sweep_users
@@ -1761,6 +1776,9 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
         active_thread_count: args.active_thread_count,
+        threads_per_owner: args.threads_per_owner,
+        turn_state_backend: args.turn_state_backend,
+        gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
         prefill_turns_per_thread: args.prefill_turns_per_thread,

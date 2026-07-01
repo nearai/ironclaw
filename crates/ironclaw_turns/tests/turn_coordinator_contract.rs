@@ -1046,6 +1046,59 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         3,
         "resuming a blocked run must persist the blocked-set change"
     );
+
+    // A resumed run completes from `Running`, not from a blocked state. The
+    // durable snapshot must still converge to the terminal state so a restart
+    // does not rehydrate an already-finished run as a live `Queued`/`Running`
+    // run — persist-on-block tracks the gate-touched run through its terminal
+    // transition to guarantee this.
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+        })
+        .await
+        .unwrap();
+    let after_complete = sink.snapshots();
+    assert_eq!(
+        after_complete.len(),
+        4,
+        "completing a gate-resumed run must persist its terminal state"
+    );
+    let terminal_snapshot = after_complete.last().unwrap().clone();
+    let terminal_run = terminal_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("resumed run present in terminal snapshot");
+    assert_eq!(terminal_run.status, TurnStatus::Completed);
+
+    // Rehydrate from the terminal snapshot — the run must come back Completed,
+    // not Queued/Running, so recovery does not re-run a finished turn.
+    let restored_terminal = InMemoryTurnStateStore::from_persistence_snapshot(
+        terminal_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_terminal_run = restored_terminal
+        .persistence_snapshot()
+        .runs
+        .into_iter()
+        .find(|record| record.run_id == run_id)
+        .expect("completed run survives rehydration");
+    assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
 }
 
 #[tokio::test]

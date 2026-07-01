@@ -109,57 +109,56 @@ restart.
 Artifacts: `chatturn-memory-persist-on-block-baseline.jsonl` (plain `memory`),
 `chatturn-memory-persist-on-block.jsonl`.
 
-## Persist-on-block under a *blocking* workload
+## Persist-on-block under a *blocking* workload (correctness, not throughput)
 
 The sweep above is the hot path — it never blocks, so the sink stays idle. To
 actually exercise persist-on-block under load, `--gate-blocked-every N` routes
 every Nth measured operation through a real gate block + resume (alternating
-approval/auth), then re-claims and completes the resumed run. This drives the
-durable snapshot write on each blocked-set change under concurrency. Correctness
-of a single block → persist → rehydrate cycle (both approval and auth gates) is
-pinned by the `ironclaw_turns` unit test
-`blocked_run_persists_to_sink_and_rehydrates_across_restart`; this sweep measures
-the *cost* the durable writes add when many turns block concurrently.
+approval/auth by blocked-hit count), then re-claims and completes the resumed
+run — driving a durable snapshot write on each blocked-set change under
+concurrency. Command shape:
 
-`--users 64 --active-thread-count 64 --threads-per-owner 1` (one thread per
-worker, so a blocked run's same-thread lock doesn't manufacture `ThreadBusy`
-noise), concurrency 8→64, `memory` (sink off) vs `memory-persist-on-block` (sink
-on) at two block rates:
+```bash
+ironclaw_stress --backend libsql --scenario chat-turn \
+  --turn-state-backend memory-persist-on-block --gate-blocked-every 4 \
+  --users 64 --active-thread-count 64 --threads-per-owner 1 --operations 20 \
+  --sweep-concurrency 8,32,64
+```
 
-**25% of turns block (`--gate-blocked-every 4`) — a deliberately pathological rate:**
+What this run establishes:
 
-| Concurrency | memory p99 → max (fail%) | persist-on-block p99 → max (fail%) | ops/s (off → on) |
-| ---: | ---: | ---: | ---: |
-| 8  | 130ms → 143ms (0%) | 155ms → 158ms (0%) | 65.1 → 53.9 |
-| 32 | 131ms → 163ms (0%) | 150ms → 203ms (0%) | 59.1 → 51.4 |
-| 64 | 133ms → 171ms (0%) | 215ms → 255ms (0%) | 48.8 → 40.8 |
+- **0% failures at every block rate (4 and 20).** The block → resume → re-claim →
+  complete cycle works under concurrency for both approval and auth gates; gate
+  turns are persisted and re-claimed cleanly, with no CAS livelock (contrast the
+  filesystem backend, which livelocks on the *non*-blocking hot path itself). The
+  `memory` (sink-off) arm at the same block rate stays flat at ~130–190 ms p99 /
+  ~45–60 ops/s, confirming the block/resume/reclaim machinery itself is cheap.
 
-**5% of turns block (`--gate-blocked-every 20`) — closer to a realistic gate rate:**
+**Why this harness does *not* give a production throughput number for the sink.**
+The harness deliberately shares **one** `InMemoryTurnStateStore` across every
+synthetic user (that shared authority is the whole point of the CAS-livelock
+repro above). So its persist-on-block snapshot grows to *all* accumulated
+synthetic runs — hundreds to thousands — and every block-set change serializes
+and writes that entire blob. A production hosted-single-tenant-volume runtime has
+a **separate, small** store per tenant/user volume and blocks only on rare human
+gates, so its snapshot is tiny and the write is cheap. The sink-on arm's
+throughput under this shared-store harness is therefore a pessimistic artifact of
+the harness model (a giant snapshot), **not** a production estimate, and is not
+reported here to avoid being misread as one.
 
-| Concurrency | memory p99 → max (fail%) | persist-on-block p99 → max (fail%) | ops/s (off → on) |
-| ---: | ---: | ---: | ---: |
-| 8  | 177ms → 187ms (0%) | 106ms → 114ms (0%) | 56.4 → 64.1 |
-| 32 | 139ms → 195ms (0%) | 131ms → 198ms (0%) | 58.0 → 56.8 |
-| 64 | 128ms → 181ms (0%) | 178ms → 259ms (0%) | 49.4 → 46.2 |
+Correctness of the durable path — block → persist → rehydrate for both approval
+and auth gates, plus terminal convergence (a resumed-then-completed run rehydrates
+as `Completed`, not a live `Queued`) — is pinned by the `ironclaw_turns` unit
+test `blocked_run_persists_to_sink_and_rehydrates_across_restart`. Concurrent
+block-set changes are coalesced and stale snapshots are dropped (monotonic
+sequence + stale-skip in `persist_blocked_state`) so an older snapshot can never
+blind-overwrite a newer durable one. If a future *production* workload ever parks
+a large fraction of a single volume's turns on gates at once, the
+snapshot-per-change write is the knob to revisit (an append-only block delta would
+remove the full-snapshot cost).
 
-Reading:
-
-- **0% failures at every block rate.** The block → resume → re-claim → complete
-  cycle works under concurrency; gate-blocked turns are persisted and re-claimed
-  cleanly, with no CAS livelock (contrast the filesystem backend, which livelocks
-  on the *non*-blocking hot path itself).
-- **Cost scales with block rate, not the hot path.** Each blocked turn triggers
-  two durable snapshot writes (one on block, one on resume) to the single
-  `/turns/state.json`; under a pathological 25% block rate that serialized write
-  costs ~15–20% throughput and a higher tail at c64. At a realistic ~5% rate the
-  two backends are within run-to-run noise apart from a modest tail bump at high
-  concurrency.
-- **Net:** persist-on-block is free on the hot path and cheap at realistic gate
-  rates. If a future workload ever parks a large fraction of turns on gates
-  concurrently, the snapshot-per-change write is the knob to revisit (an
-  append-only block delta would remove the full-snapshot cost).
-
-Artifacts: `chatturn-blocked-memory.jsonl`,
-`chatturn-blocked-memory-persist-on-block.jsonl` (25%);
+Artifacts (raw 0%-failure runs, config recorded in each row):
+`chatturn-blocked-memory.jsonl`,
+`chatturn-blocked-memory-persist-on-block.jsonl` (25% block rate);
 `chatturn-blocked5pct-memory.jsonl`,
-`chatturn-blocked5pct-memory-persist-on-block.jsonl` (5%).
+`chatturn-blocked5pct-memory-persist-on-block.jsonl` (5% block rate).

@@ -977,7 +977,6 @@ fn snapshot_run_actor_matches(
         .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 // Only referenced by the durable filesystem snapshot path (async `Result`);
 // the in-memory authority's snapshot is infallible.
 #[cfg(all(
