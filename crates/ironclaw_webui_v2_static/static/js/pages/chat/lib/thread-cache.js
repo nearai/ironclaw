@@ -36,17 +36,22 @@ export function upsertThreadList(data, thread) {
 
   const current = threadListData(data);
   const threads = Array.isArray(current.threads) ? current.threads : [];
-  let found = false;
-  const nextThreads = threads.map((existing) => {
-    if (threadIdFor(existing) !== record.thread_id) return existing;
-    found = true;
-    return { ...existing, ...record, thread_id: record.thread_id };
-  });
-  if (!found) nextThreads.unshift(record);
+  let promoted = null;
+  const remaining = [];
+
+  for (const existing of threads) {
+    if (threadIdFor(existing) !== record.thread_id) {
+      remaining.push(existing);
+      continue;
+    }
+    if (!promoted) {
+      promoted = { ...existing, ...record, thread_id: record.thread_id };
+    }
+  }
 
   return {
     ...current,
-    threads: nextThreads,
+    threads: [promoted || record, ...remaining],
     next_cursor: current.next_cursor ?? null,
   };
 }
@@ -58,31 +63,36 @@ export function touchThreadList(data, { threadId, messageContent, updatedAt }) {
   const threads = Array.isArray(current.threads) ? current.threads : [];
   const derivedTitle = deriveSidebarTitle(messageContent);
   const timestamp = updatedAt || new Date().toISOString();
-  let found = false;
+  let promoted = null;
+  const remaining = [];
 
-  const nextThreads = threads.map((existing) => {
-    if (threadIdFor(existing) !== threadId) return existing;
-    found = true;
-    return {
-      ...existing,
-      thread_id: threadId,
-      title: existing.title || derivedTitle || null,
-      updated_at: timestamp,
-    };
-  });
+  for (const existing of threads) {
+    if (threadIdFor(existing) !== threadId) {
+      remaining.push(existing);
+      continue;
+    }
+    if (!promoted) {
+      promoted = {
+        ...existing,
+        thread_id: threadId,
+        title: existing.title || derivedTitle || null,
+        updated_at: timestamp,
+      };
+    }
+  }
 
-  if (!found) {
-    nextThreads.unshift({
+  if (!promoted) {
+    promoted = {
       thread_id: threadId,
       title: derivedTitle,
       created_at: timestamp,
       updated_at: timestamp,
-    });
+    };
   }
 
   return {
     ...current,
-    threads: nextThreads,
+    threads: [promoted, ...remaining],
     next_cursor: current.next_cursor ?? null,
   };
 }

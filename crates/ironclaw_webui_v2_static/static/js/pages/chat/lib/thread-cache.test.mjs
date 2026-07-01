@@ -68,14 +68,22 @@ test("upsertThreadList inserts a created thread and preserves pagination metadat
 test("upsertThreadList merges an existing thread record", () => {
   const { upsertThreadList } = loadThreadCache();
   const data = {
-    threads: [{ thread_id: "thread-1", title: null, created_at: "before" }],
+    threads: [
+      { thread_id: "thread-newer", title: "Newer" },
+      { thread_id: "thread-1", title: null, created_at: "before" },
+      { thread_id: "thread-older", title: "Older" },
+    ],
     next_cursor: null,
   };
 
   assert.deepEqual(
     normalize(upsertThreadList(data, { thread_id: "thread-1", title: "Updated" })),
     {
-      threads: [{ thread_id: "thread-1", title: "Updated", created_at: "before" }],
+      threads: [
+        { thread_id: "thread-1", title: "Updated", created_at: "before" },
+        { thread_id: "thread-newer", title: "Newer" },
+        { thread_id: "thread-older", title: "Older" },
+      ],
       next_cursor: null,
     },
   );
@@ -84,7 +92,11 @@ test("upsertThreadList merges an existing thread record", () => {
 test("touchThreadList updates activity without overwriting an existing title", () => {
   const { touchThreadList } = loadThreadCache();
   const data = {
-    threads: [{ thread_id: "thread-1", title: "Existing", updated_at: "before" }],
+    threads: [
+      { thread_id: "thread-newer", title: "Newer", updated_at: "newer" },
+      { thread_id: "thread-1", title: "Existing", updated_at: "before" },
+      { thread_id: "thread-older", title: "Older", updated_at: "older" },
+    ],
     next_cursor: "cursor-1",
   };
 
@@ -97,7 +109,11 @@ test("touchThreadList updates activity without overwriting an existing title", (
       }),
     ),
     {
-      threads: [{ thread_id: "thread-1", title: "Existing", updated_at: "after" }],
+      threads: [
+        { thread_id: "thread-1", title: "Existing", updated_at: "after" },
+        { thread_id: "thread-newer", title: "Newer", updated_at: "newer" },
+        { thread_id: "thread-older", title: "Older", updated_at: "older" },
+      ],
       next_cursor: "cursor-1",
     },
   );
