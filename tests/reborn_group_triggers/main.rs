@@ -28,7 +28,7 @@ mod scenario_verbs_lifecycle;
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
-async fn triggers_group() {
+async fn triggers_group_e2e() {
     let g = RebornIntegrationGroup::triggers()
         .await
         .expect("group builds");
