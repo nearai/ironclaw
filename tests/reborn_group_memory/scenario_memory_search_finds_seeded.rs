@@ -49,10 +49,16 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
-    searcher.submit_turn("what is the rollback codename").await?;
-    searcher.assert_tool_invoked("builtin.memory_search").await?;
+    searcher
+        .submit_turn("what is the rollback codename")
+        .await?;
+    searcher
+        .assert_tool_invoked("builtin.memory_search")
+        .await?;
     // The hit's snippet includes the marker → search located the seeded doc.
-    searcher.assert_tool_result_contains("osprey-meridian-7").await?;
+    searcher
+        .assert_tool_result_contains("osprey-meridian-7")
+        .await?;
 
     // Committed negative guard (non-vacuity): a marker that was never written
     // must be ABSENT from the search result, so `assert_tool_result_contains`

@@ -39,10 +39,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lister = g
         .thread("conv-memory-tree-lister")
         .script([
-            RebornScriptedReply::tool_call(
-                "builtin.memory_tree",
-                json!({"path": "", "depth": 3}),
-            ),
+            RebornScriptedReply::tool_call("builtin.memory_tree", json!({"path": "", "depth": 3})),
             RebornScriptedReply::text("listed"),
         ])
         .build()
@@ -58,9 +55,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // must be ABSENT, so the positive assertions discriminate rather than pass
     // unconditionally.
     if lister.assert_tool_result_contains("phantom/").await.is_ok() {
-        return Err(
-            "negative guard failed: tree must not contain an uncreated directory".into(),
-        );
+        return Err("negative guard failed: tree must not contain an uncreated directory".into());
     }
 
     Ok(())
