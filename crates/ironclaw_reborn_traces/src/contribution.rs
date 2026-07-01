@@ -5056,16 +5056,24 @@ fn trace_upload_claim_cache_key(
     // dir (scope `None`), so `scope_dir_key` is identical across users — the
     // per-user `subject` is what distinguishes their minted claims. Omitting it
     // would let a claim minted for one subject be served from cache to another,
-    // mis-attributing traces / leaking across users. Hash it for parity with the
-    // other key components (the subject is already an opaque pseudonym, but the
-    // hash keeps the cache key uniform and bounded).
-    let subject_key = context
-        .subject
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("sha256:{}", hex::encode(Sha256::digest(s.as_bytes()))))
-        .unwrap_or_default();
+    // mis-attributing traces / leaking across users.
+    //
+    // The key MUST hash the EXACT bytes the issuer request sends (see
+    // `build_trace_upload_claim_issuer_request`: DeviceKey carries `subject`,
+    // WorkloadTokenEnv never does) with a `None`/`Some` discriminator. Trimming
+    // or collapsing empties here (the old behavior) let `None`, `Some("")`, and
+    // whitespace variants share a key while minting different payloads.
+    let payload_subject = match policy.auth_mode {
+        TraceUploadAuthMode::DeviceKey => context.subject.as_deref(),
+        TraceUploadAuthMode::WorkloadTokenEnv => None,
+    };
+    let subject_key = match payload_subject {
+        Some(subject) => format!(
+            "some:sha256:{}",
+            hex::encode(Sha256::digest(subject.as_bytes()))
+        ),
+        None => "none".to_string(),
+    };
     Ok(format!(
         "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}|scope_dir={}|subject={}",
         issuer,
@@ -15564,6 +15572,20 @@ mod tests {
         let none_key = trace_upload_claim_cache_key(&policy, &no_subject).unwrap();
         assert_ne!(alice, none_key);
         assert_ne!(bob, none_key);
+
+        // The key hashes the exact optional bytes with a None/Some discriminator,
+        // so `Some("")` and whitespace variants never collide with `None` or with
+        // each other (which would let one payload's claim serve another's).
+        let empty_key = trace_upload_claim_cache_key(&policy, &ctx_for("")).unwrap();
+        assert_ne!(
+            empty_key, none_key,
+            "Some(\"\") must not share a key with None"
+        );
+        let padded = trace_upload_claim_cache_key(&policy, &ctx_for("  sha256:alice  ")).unwrap();
+        assert_ne!(
+            padded, alice,
+            "whitespace-padded subject must not collide with its trimmed form"
+        );
     }
 
     #[test]
