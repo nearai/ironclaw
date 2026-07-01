@@ -101,7 +101,7 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `assertions.rs` — the richer egress + tool-result assertions
   (`assert_egress_count` / `assert_egress_url_order` / `assert_egress_method_order`
   / `assert_egress_body_contains` / `assert_tool_result_contains` /
-  `assert_tool_error_summary_contains`).
+  `assert_tool_error`).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
@@ -150,7 +150,7 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_method_order(&[methods])` — HTTP methods in call order (case-insensitive).
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
-- `assert_tool_error_summary_contains(needle)` — a persisted `ToolResultReference` transcript message's `safe_summary` contains the text. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `needle` must include the `"capability failed with "` / `"capability denied with "` prefix to discriminate outcome class, not just a bare failure-kind token (see doc comment). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
 
 ### Keyed HTTP responses
 

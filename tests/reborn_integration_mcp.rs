@@ -12,6 +12,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
@@ -129,7 +130,7 @@ async fn mcp_tool_call_error_surfaces_recoverable_failed() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked before the error");
-    h.assert_tool_error_summary_contains("capability failed with backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "backend")
         .await
         .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")
@@ -165,7 +166,7 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool call reached the server before the 5xx");
-    h.assert_tool_error_summary_contains("capability failed with backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "backend")
         .await
         .expect("server 5xx surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")

@@ -16,6 +16,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
@@ -181,7 +182,7 @@ async fn http_network_policy_denied_surfaces_recoverable_denied() {
         .await
         .expect("harness builds");
     h.submit_turn("fetch").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("capability denied with policy_denied")
+    h.assert_tool_error(ToolErrorClass::Denied, "policy_denied")
         .await
         .expect("policy-denied surfaced as a model-visible Denied tool error");
     h.assert_reply_contains("done")
@@ -208,7 +209,7 @@ async fn http_oversize_response_surfaces_recoverable_failed() {
         .await
         .expect("harness builds");
     h.submit_turn("fetch").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("capability failed with output_too_large")
+    h.assert_tool_error(ToolErrorClass::Failed, "output_too_large")
         .await
         .expect("oversize response surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")
@@ -216,13 +217,15 @@ async fn http_oversize_response_surfaces_recoverable_failed() {
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
-/// Guards `assert_tool_error_summary_contains` against a vacuous pass, mirroring
-/// the sibling negative guards (`shell_assertions_fail_when_no_shell_call_ran`,
-/// `assert_mcp_tool_called_fails_when_no_mcp_call_ran`). Two ways it must return
-/// `Err`: (a) a completed turn that persisted NO tool-error reference at all, and
-/// (b) a real `Denied` turn probed with a needle that isn't in the summary.
+/// Guards `assert_tool_error` against a vacuous pass, mirroring the sibling
+/// negative guards (`shell_assertions_fail_when_no_shell_call_ran`,
+/// `assert_mcp_tool_called_fails_when_no_mcp_call_ran`). Three ways it must
+/// return `Err`: (a) a completed turn that persisted NO tool-error reference at
+/// all, (b) a real `Denied` turn probed with the wrong reason, and (c) that same
+/// `Denied` turn probed with the WRONG CLASS but the right reason token —
+/// proving the class discriminates structurally, not just the reason.
 #[tokio::test]
-async fn tool_error_summary_assertion_fails_without_matching_tool_error() {
+async fn tool_error_assertion_fails_without_matching_tool_error() {
     // (a) Plain text turn — no tool call, so no `ToolResultReference` is persisted.
     let clean = RebornIntegrationHarness::test_default()
         .script([RebornScriptedReply::text("no tool")])
@@ -235,13 +238,13 @@ async fn tool_error_summary_assertion_fails_without_matching_tool_error() {
         .expect("turn completes");
     assert!(
         clean
-            .assert_tool_error_summary_contains("capability denied with policy_denied")
+            .assert_tool_error(ToolErrorClass::Denied, "policy_denied")
             .await
             .is_err(),
         "assertion must reject a turn that persisted no tool-error reference"
     );
 
-    // (b) Real `Denied` turn, but probed with a needle that isn't in the summary.
+    // A real `Denied{policy_denied}` turn for cases (b) and (c).
     let denied = RebornIntegrationHarness::test_default()
         .with_keyed_http_responses([ScriptedHttpResponse::network_error(
             ERR_URL,
@@ -255,11 +258,21 @@ async fn tool_error_summary_assertion_fails_without_matching_tool_error() {
         .await
         .expect("harness builds");
     denied.submit_turn("fetch").await.expect("turn completes");
+    // (b) Right class, wrong reason.
     assert!(
         denied
-            .assert_tool_error_summary_contains("capability failed with backend")
+            .assert_tool_error(ToolErrorClass::Denied, "backend")
             .await
             .is_err(),
-        "assertion must reject a needle that is absent from the persisted summary"
+        "assertion must reject a reason that is absent from the persisted summary"
+    );
+    // (c) Wrong class, right reason token — the crux of the class-discrimination
+    // fix: `policy_denied` is present, but the outcome is `Denied`, not `Failed`.
+    assert!(
+        denied
+            .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
+            .await
+            .is_err(),
+        "assertion must discriminate the outcome class, not just the reason token"
     );
 }

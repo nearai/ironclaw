@@ -11,6 +11,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -100,7 +101,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
         .await
         .expect("harness builds");
     h.submit_turn("run shell").await.expect("turn completes");
-    h.assert_tool_error_summary_contains("capability failed with resource")
+    h.assert_tool_error(ToolErrorClass::Failed, "resource")
         .await
         .expect("timeout surfaced as a model-visible Failed{Resource} tool error");
     h.assert_reply_contains("done")
