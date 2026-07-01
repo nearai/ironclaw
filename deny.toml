@@ -3,11 +3,9 @@ unmaintained = "workspace"
 yanked = "deny"
 ignore = [
     # Pre-existing advisories — tracked for upgrade in separate PRs
-    # serde_yml unsound/unmaintained — direct dep, upgrade tracked separately
-    "RUSTSEC-2025-0068",
     # tokio-tar PAX header parsing — sandbox containers only
     "RUSTSEC-2025-0111",
-    # rustls-webpki advisories — 0.102.8 remains pinned by a libsql 0.6.0 transitive dep
+    # rustls-webpki advisories — 0.102.8 remains pinned by a libsql 0.9.30 transitive dep
     # (via rustls 0.22 → hyper-rustls 0.25); keep ignored until that pin is gone.
     # RUSTSEC-2026-0104: panic on empty `onlySomeReasons` BIT STRING during CRL parsing.
     # We do not use CRLs, and the advisory explicitly notes apps that don't parse CRLs

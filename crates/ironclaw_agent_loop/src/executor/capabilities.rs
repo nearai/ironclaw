@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
@@ -38,6 +39,7 @@ use super::{
 pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
+const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
 
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
@@ -534,12 +536,21 @@ fn prefixed_capability_summary(
     prefix: String,
     safe_summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    let safe_summary = strategy_safe_capability_summary_detail(safe_summary);
     let detail = sanitized_strategy_summary(safe_summary)?;
     let detail = truncate_summary_detail(
         detail.as_str(),
         MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
     );
     sanitized_strategy_summary(format!("{prefix}{detail}"))
+}
+
+fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
+    if safe_summary == INPUT_ENCODE_HUMAN_SUMMARY {
+        STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string()
+    } else {
+        safe_summary
+    }
 }
 
 fn truncate_summary_detail(detail: &str, max_bytes: usize) -> &str {
@@ -1117,6 +1128,9 @@ impl CapabilityStage {
                         activity_id: denied_activity_id,
                         capability_id: call.capability_id.clone(),
                         reason_kind: CapabilityFailureKind::GateDeclined,
+                        // Gate denial carries no host-authored message; the
+                        // model-visible text is produced separately below.
+                        safe_summary: None,
                     },
                 )
                 .await;
@@ -1454,5 +1468,19 @@ mod tests {
             Err(AgentLoopExecutorError::PlannerContract { detail })
                 if detail == "host returned unsafe strategy summary"
         ));
+    }
+
+    #[test]
+    fn prefixed_capability_summary_rephrases_fixed_input_encode_summary() {
+        let summary = prefixed_capability_summary(
+            "capability failed with invalid_input: ".to_string(),
+            INPUT_ENCODE_HUMAN_SUMMARY.to_string(),
+        )
+        .expect("fixed input encode summary should be strategy-safe");
+
+        assert_eq!(
+            summary.as_str(),
+            "capability failed with invalid_input: input could not be encoded"
+        );
     }
 }

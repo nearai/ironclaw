@@ -28,10 +28,14 @@ use ironclaw_threads::{
     SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, DefaultTurnCoordinator, FilesystemTurnStateStore, IdempotencyKey,
-    ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId,
-    runner::{ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort},
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
+    FilesystemTurnStateStore, GateRef, IdempotencyKey, InMemoryTurnStateStore,
+    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    runner::{
+        BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -39,13 +43,22 @@ use tokio::time::sleep;
 
 use crate::{
     Args, Backend, LatencySummary, ModelLatencyProfile, ModelLatencySource, OperationTarget,
-    Sample, Scenario,
+    Sample, Scenario, TurnStateBackend,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     resource_ops,
     summary::{FailureCause, latency_summary},
     synthetic::SyntheticIds,
     trace::{spawn_trace_reporter, stop_trace_reporter},
 };
+
+/// Backend-agnostic turn store for the stress workload. Both the durable
+/// `FilesystemTurnStateStore` and the shared `InMemoryTurnStateStore` already
+/// implement the supertraits, so the impls are empty — this lets
+/// `turn_store_for_context` return one `Arc<dyn StressTurnStore>` and the
+/// workload submit/claim/complete against either without per-method dispatch.
+pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
+impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
+impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
 where
@@ -57,6 +70,11 @@ where
     model_latency: Arc<ModelLatencyDriver>,
     run_id: String,
     target: String,
+    turn_state_backend: TurnStateBackend,
+    /// Single shared in-process turn-state authority, used when
+    /// `turn_state_backend == Memory`. Shared across all workers (one process)
+    /// to faithfully model the production single-process design.
+    memory_turn_store: Arc<InMemoryTurnStateStore>,
 }
 
 pub(crate) enum UserTurnWorkload {
@@ -179,6 +197,7 @@ async fn build_libsql_user_turn_workload(
         run_id,
         target,
         model_latency,
+        args.turn_state_backend,
     )?))
 }
 
@@ -202,6 +221,7 @@ async fn build_postgres_user_turn_workload(
         run_id,
         target,
         model_latency,
+        args.turn_state_backend,
     )?))
 }
 
@@ -851,6 +871,24 @@ where
                 )
             })?;
 
+            // Optionally route this operation through a gate block + resume so
+            // persist-on-block fires under the concurrent workload. The resumed
+            // run comes back queued and is re-claimed, so the normal completion
+            // path below still owns finishing it.
+            let claimed = if args.gate_blocked_every > 0
+                && operation_index.is_multiple_of(args.gate_blocked_every)
+            {
+                // Alternate approval/auth by *blocked-hit* count, not raw
+                // operation-index parity: every blocked index is a multiple of
+                // `gate_blocked_every`, so parity alone would only ever pick one
+                // gate kind for even intervals.
+                let use_auth_gate = (operation_index / args.gate_blocked_every) % 2 == 1;
+                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate)
+                    .await?
+            } else {
+                claimed
+            };
+
             if matches!(args.scenario, Scenario::MixedUserSession) {
                 time_stage(
                     &mut stages.load_context,
@@ -993,7 +1031,7 @@ where
         args: &Args,
         context: &crate::synthetic::UserTurnContext,
         thread_id: &ThreadId,
-        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        turn_store: &Arc<dyn StressTurnStore>,
         claimed: &ClaimedTurnRun,
         assistant_message: &str,
         operation_ref: &str,
@@ -1121,7 +1159,7 @@ where
         &self,
         context: &crate::synthetic::UserTurnContext,
         thread_id: &ThreadId,
-        turn_store: &Arc<FilesystemTurnStateStore<F>>,
+        turn_store: &Arc<dyn StressTurnStore>,
         claimed: &ClaimedTurnRun,
         assistant_message: String,
         stages: &mut UserTurnStageDurations,
@@ -1154,17 +1192,116 @@ where
         Ok(())
     }
 
+    /// Route a claimed run through a gate block + resume so persist-on-block
+    /// fires, then re-claim it and hand the fresh claim back for the caller to
+    /// complete. The caller alternates `use_auth_gate` per blocked hit so both
+    /// approval and auth gate kinds exercise the durable sink.
+    async fn gate_block_and_resume(
+        &self,
+        context: &crate::synthetic::UserTurnContext,
+        turn_store: &Arc<dyn StressTurnStore>,
+        claimed: ClaimedTurnRun,
+        use_auth_gate: bool,
+    ) -> Result<ClaimedTurnRun, OperationFailure> {
+        let run_id = claimed.state.run_id;
+        let is_auth = use_auth_gate;
+        let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
+            .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
+        let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))
+            .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
+        let reason = if is_auth {
+            BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            }
+        } else {
+            BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            }
+        };
+        turn_store
+            .block_run(BlockRunRequest {
+                run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref,
+                reason,
+            })
+            .await
+            .map_err(|error| turn_failure("block_run", error))?;
+
+        let precondition = if is_auth {
+            ResumeTurnPrecondition::BlockedAuthGate
+        } else {
+            ResumeTurnPrecondition::BlockedApprovalGate
+        };
+        turn_store
+            .resume_turn(ResumeTurnRequest {
+                scope: context.turn_scope.clone(),
+                actor: TurnActor::new(context.user_id.clone()),
+                run_id,
+                gate_resolution_ref: gate_ref,
+                source_binding_ref: SourceBindingRef::new(format!("stress-src:{run_id}"))
+                    .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                    "stress-reply:{run_id}"
+                ))
+                .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                idempotency_key: IdempotencyKey::new(format!("stress-resume:{run_id}"))
+                    .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
+                precondition,
+                resume_disposition: None,
+            })
+            .await
+            .map_err(|error| turn_failure("resume_turn", error))?;
+
+        // Resume returns the run to Queued — re-claim it so the normal
+        // completion path owns finishing it.
+        turn_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(context.turn_scope.clone()),
+            })
+            .await
+            .map_err(|error| turn_failure("reclaim_run", error))?
+            .ok_or_else(|| {
+                OperationFailure::new(
+                    "turn_claim_miss",
+                    "reclaim_run",
+                    "resumed run was not claimable",
+                )
+            })
+    }
+
     fn turn_store_for_context(
         &self,
         context: &crate::synthetic::UserTurnContext,
-    ) -> Result<Arc<FilesystemTurnStateStore<F>>, OperationFailure> {
-        let view = user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
-            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
-        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.root),
-            view,
-        ));
-        Ok(Arc::new(FilesystemTurnStateStore::new(scoped)))
+    ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
+        match self.turn_state_backend {
+            // One shared authority for the whole process — concurrent same-user
+            // writers coordinate in memory (fast lock), never on a per-user
+            // `state.json` CAS, so they don't livelock. `MemoryPersistOnBlock`
+            // shares the same authority; it differs only by the durable block
+            // sink attached at construction.
+            TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
+                Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
+            }
+            // Durable path: a per-context store whose `/turns/state.json`
+            // resolves per (tenant, agent, project, user), so all of a user's
+            // concurrent turns contend on one document via CAS.
+            TurnStateBackend::Filesystem => {
+                let view =
+                    user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
+                        .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+                let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                    Arc::clone(&self.root),
+                    view,
+                ));
+                Ok(Arc::new(FilesystemTurnStateStore::new(scoped)) as Arc<dyn StressTurnStore>)
+            }
+        }
     }
 }
 
@@ -1173,6 +1310,7 @@ fn user_turn_services_from_root<F>(
     run_id: &str,
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
+    turn_state_backend: TurnStateBackend,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1186,10 +1324,29 @@ where
     Ok(UserTurnServices {
         root,
         governor,
-        thread_service: Arc::new(FilesystemSessionThreadService::new(scoped)),
+        thread_service: Arc::new(FilesystemSessionThreadService::new(Arc::clone(&scoped))),
         model_latency,
         run_id,
         target,
+        turn_state_backend,
+        // Constructed once and shared across every worker (the workload is held
+        // behind one Arc), so the Memory backend exercises a single shared
+        // authority exactly as the single-process runtime would. When the
+        // backend persists on block, attach the same durable filesystem sink the
+        // hosted-single-tenant-volume runtime wires so the retest measures the
+        // shipped config (the sink stays idle on this never-blocking workload,
+        // so what it measures is the extra probe cost per terminal transition).
+        memory_turn_store: Arc::new({
+            let store = InMemoryTurnStateStore::default();
+            if turn_state_backend.persists_on_block() {
+                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
+                    &scoped,
+                )));
+                store.with_block_persistence(sink)
+            } else {
+                store
+            }
+        }),
     })
 }
 

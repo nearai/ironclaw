@@ -125,6 +125,7 @@ registerPack("ko", {
   "approval.always": "항상 허용",
   "approval.approveAndAlways": "승인 및 항상 허용",
   "approval.alwaysAllowToolLabel": "묻지 않고 항상 {tool} 허용",
+  "approval.globalAutoApproveLink": "모든 작업을 자동으로 승인하고 실행",
   "approval.thisTool": "이 도구",
   "approval.viewFullCommand": "전체 명령 보기",
   "approval.showCommandPreview": "미리보기 표시",

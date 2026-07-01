@@ -56,7 +56,11 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChat({ hookState, activeThreadId = "thread-1" }) {
+function renderChat({
+  hookState,
+  activeThreadId = "thread-1",
+  globalAutoApproveEnabled = false,
+}) {
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -110,6 +114,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
+    globalAutoApproveEnabled,
   });
   return { tree, components };
 }
@@ -441,6 +446,7 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
 
   const approvalCard = findComponent(tree, components.ApprovalCard);
   const props = componentProps(approvalCard, components.ApprovalCard);
+  assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
 });

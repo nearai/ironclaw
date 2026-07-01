@@ -125,6 +125,7 @@ registerPack("zh-CN", {
   "approval.always": "始终允许",
   "approval.approveAndAlways": "批准并始终允许",
   "approval.alwaysAllowToolLabel": "始终允许 {tool} （不再询问）",
+  "approval.globalAutoApproveLink": "自动批准并执行所有操作",
   "approval.thisTool": "此工具",
   "approval.viewFullCommand": "查看完整命令",
   "approval.showCommandPreview": "显示预览",

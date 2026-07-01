@@ -11,6 +11,7 @@
  * actual persistence scope.
  */
 import { React, html } from "../../../lib/html.js";
+import { Link } from "react-router";
 import { useT } from "../../../lib/i18n.js";
 import { Button } from "../../../design-system/button.js";
 import { Badge } from "../../../design-system/badge.js";
@@ -35,7 +36,13 @@ function approvalPayloadPreview(value, expanded) {
   return `${value.slice(0, APPROVAL_PAYLOAD_PREVIEW_LIMIT).trimEnd()}\n...`;
 }
 
-export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
+export function ApprovalCard({
+  gate,
+  globalAutoApproveEnabled = null,
+  onApprove,
+  onDeny,
+  onAlways,
+}) {
   const t = useT();
   const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
   const [always, setAlways] = React.useState(false);
@@ -58,6 +65,8 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const toolLabel = toolName || t("approval.thisTool");
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
   const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
+  const showGlobalAutoApproveLink =
+    allowAlways && globalAutoApproveEnabled === false;
 
   const resolve = React.useCallback(async (handler) => {
     if (isResolvingRef.current) return;
@@ -141,6 +150,16 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
           />
           ${t("approval.alwaysAllowToolLabel", { tool: toolLabel })}
         </label>
+      `}
+
+      ${showGlobalAutoApproveLink &&
+      html`
+        <${Link}
+          to="/settings/tools"
+          className="mb-3 block text-xs font-medium text-[var(--v2-accent-text)] hover:text-[var(--v2-accent)]"
+        >
+          ${t("approval.globalAutoApproveLink")}
+        <//>
       `}
 
       <div className="flex flex-wrap gap-2">

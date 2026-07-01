@@ -26,6 +26,7 @@ function approvalCardSourceForTest() {
 function renderApprovalCard({
   expandedPayload = false,
   gate = defaultApprovalGate(),
+  globalAutoApproveEnabled = null,
   onAlways,
   onApprove,
   onDeny,
@@ -74,6 +75,7 @@ function renderApprovalCard({
       {
         "approval.approve": "Approve",
         "approval.deny": "Deny",
+        "approval.globalAutoApproveLink": "Automatically approve and execute all actions",
         "approval.showCommandPreview": "Show preview",
         "approval.thisTool": "this tool",
         "approval.title": "Approval required",
@@ -83,16 +85,25 @@ function renderApprovalCard({
     Button() {},
     Badge() {},
     Icon() {},
+    Link() {},
     classifyRisk: () => ({ key: "tool.riskExec", tone: "danger" }),
   };
   vm.runInNewContext(approvalCardSourceForTest(), context);
   const rendered = context.globalThis.__testExports.ApprovalCard({
     gate,
+    globalAutoApproveEnabled,
     onAlways,
     onApprove,
     onDeny,
   });
-  return { rendered, effects, expandedPayloadUpdates, resolvingUpdates, refs };
+  return {
+    rendered,
+    effects,
+    expandedPayloadUpdates,
+    resolvingUpdates,
+    refs,
+    Link: context.Link,
+  };
 }
 
 function defaultApprovalGate() {
@@ -120,6 +131,17 @@ function collectStrings(node, output = []) {
   collectStrings(node.strings, output);
   collectStrings(node.values, output);
   return output;
+}
+
+function findComponent(node, component) {
+  if (!node || typeof node !== "object") return null;
+  if (!Array.isArray(node.values)) return null;
+  if (node.values.includes(component)) return node;
+  for (const value of node.values) {
+    const found = findComponent(value, component);
+    if (found) return found;
+  }
+  return null;
 }
 
 function findPrimaryOnClick(node) {
@@ -194,6 +216,30 @@ test("ApprovalCard resets expanded command details when the gate changes", () =>
 
   effects[0].fn();
   assert.deepEqual(expandedPayloadUpdates, [false]);
+});
+
+test("ApprovalCard links to tool settings when global auto-approve is off", () => {
+  const { rendered, Link } = renderApprovalCard({
+    gate: { ...defaultApprovalGate(), allowAlways: true },
+    globalAutoApproveEnabled: false,
+  });
+  const text = collectStrings(rendered).join("\n");
+  const link = findComponent(rendered, Link);
+
+  assert.match(text, /Automatically approve and execute all actions/);
+  assert.ok(link, "global auto-approve link should render");
+  assert.ok(link.strings.some((part) => part.includes('to="/settings/tools"')));
+});
+
+test("ApprovalCard hides the global settings link when global auto-approve is on", () => {
+  const { rendered, Link } = renderApprovalCard({
+    gate: { ...defaultApprovalGate(), allowAlways: true },
+    globalAutoApproveEnabled: true,
+  });
+  const text = collectStrings(rendered).join("\n");
+
+  assert.doesNotMatch(text, /Automatically approve and execute all actions/);
+  assert.equal(findComponent(rendered, Link), null);
 });
 
 test("ApprovalCard leaves a newer gate resolving when an older resolution finishes", async () => {

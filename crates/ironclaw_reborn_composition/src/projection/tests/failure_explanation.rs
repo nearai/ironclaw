@@ -53,6 +53,24 @@ async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
     .await;
 }
 
+// Regression: a terminal capability failure reaches the projection as the
+// `capability_protocol_error` category (from `LoopFailureKind::as_str()`).
+// Before the fix it was unmapped in
+// `reborn_failure_summary_for_category`, so the fallback degraded to the
+// generic "The run failed before producing a reply." and the LLM explainer
+// paraphrased it into a vague "driver protocol error" that hid the real tool
+// failure. With no explainer wired, the projection must now carry the specific
+// fallback summary end-to-end.
+#[tokio::test]
+async fn webui_event_stream_projects_capability_protocol_error_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-capability-protocol-thread",
+        "capability_protocol_error",
+        "The run stopped because a tool returned a response it could not process.",
+    )
+    .await;
+}
+
 async fn assert_failed_run_status_summary(
     thread_id: &str,
     failure_category: &str,

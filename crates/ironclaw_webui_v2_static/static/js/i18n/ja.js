@@ -125,6 +125,7 @@ registerPack("ja", {
   "approval.always": "常に",
   "approval.approveAndAlways": "承認して常に許可",
   "approval.alwaysAllowToolLabel": "確認せずに {tool} を常に許可",
+  "approval.globalAutoApproveLink": "すべてのアクションを自動的に承認して実行",
   "approval.thisTool": "このツール",
   "approval.viewFullCommand": "コマンド全体を表示",
   "approval.showCommandPreview": "プレビューを表示",

@@ -948,6 +948,8 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
     ))
 }
 
+// `internal_from` logs the backend cause while keeping the facade payload
+// sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
     RebornServicesError::internal_from(error)
 }
@@ -1628,6 +1630,18 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError>;
+
+    /// Return the effective global auto-approve toggle for the authenticated
+    /// caller. This is a narrow session-bootstrap read, not the operator
+    /// config key/value surface; implementations must derive scope from the
+    /// trusted caller. The default returns `Ok(false)` for compositions that
+    /// have not wired the approval settings surface.
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        Ok(false)
+    }
 
     /// Read the raw bytes of one landed attachment so the browser can render an
     /// image thumbnail (or download a file) for a persisted message. The default
@@ -2628,6 +2642,30 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn global_auto_approve_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        let Some(config) = &self.operator_approval_config else {
+            return Ok(false);
+        };
+        let scope = caller_resource_scope(&caller);
+        let operator_scope = operator_tool_permission_scope(&scope);
+        config
+            .auto_approve
+            .is_enabled(&operator_scope)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    tenant_id = %caller.tenant_id,
+                    user_id = %caller.user_id,
+                    error = %error,
+                    "failed to read global auto-approve setting"
+                );
+                operator_config_store_error(error)
+            })
+    }
+
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,

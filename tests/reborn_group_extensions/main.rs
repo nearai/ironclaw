@@ -17,6 +17,11 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+// Scenario modules, declared alphabetically because rustfmt reorders `mod`
+// declarations. The execution order — install → remove → activate — is set by
+// the `report.record(...)` call sequence in `extensions_group_e2e` below, not
+// by declaration order.
+mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_remove_then_absent_cross_thread;
 
@@ -45,6 +50,16 @@ async fn extensions_group_e2e() {
     report.record(
         "remove_then_absent_cross_thread",
         scenario_remove_then_absent_cross_thread::run(&g).await,
+    );
+
+    // Scenario 3: install in thread A → activate in thread B → search in thread C
+    // confirms the extension reports `installation_phase:active` over the shared
+    // store. Closes the `extension_activate` int-tier gap. Independent of
+    // Scenarios 1 & 2: it uses "web-access" (the only credential-free bundled
+    // extension), untouched by "github"/"notion", so it is self-contained.
+    report.record(
+        "activate_then_active_cross_thread",
+        scenario_activate_then_active_cross_thread::run(&g).await,
     );
 
     report.assert_all_passed();

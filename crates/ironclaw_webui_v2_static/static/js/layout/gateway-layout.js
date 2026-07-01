@@ -22,6 +22,7 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
+  globalAutoApproveEnabled = false,
   onSignOut,
 }) {
   const t = useT();
@@ -151,6 +152,7 @@ export function GatewayLayout({
               currentUser: profile,
               isChecking,
               isAdmin,
+              globalAutoApproveEnabled,
               threadsState,
             }}
           />

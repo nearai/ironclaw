@@ -125,6 +125,7 @@ registerPack("uk", {
   "approval.always": "Завжди",
   "approval.approveAndAlways": "Затверджувати та завжди дозволяти",
   "approval.alwaysAllowToolLabel": "Завжди дозволяти {tool} без запиту",
+  "approval.globalAutoApproveLink": "Автоматично затверджувати й виконувати всі дії",
   "approval.thisTool": "цей інструмент",
   "approval.viewFullCommand": "Переглянути повну команду",
   "approval.showCommandPreview": "Показати попередній перегляд",

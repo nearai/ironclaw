@@ -7,6 +7,7 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod block_persistence;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
@@ -31,6 +32,7 @@ pub use admission::{
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
     GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
@@ -56,7 +58,7 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use filesystem_store::FilesystemTurnStateStore;
+pub use filesystem_store::{FilesystemTurnStateBlockPersistence, FilesystemTurnStateStore};
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,

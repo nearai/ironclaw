@@ -45,6 +45,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  globalAutoApproveEnabled = false,
 }) {
   const t = useT();
   const {
@@ -318,6 +319,7 @@ export function Chat({
               : html`
               <${ApprovalCard}
                 gate=${pendingGate}
+                globalAutoApproveEnabled=${globalAutoApproveEnabled}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>

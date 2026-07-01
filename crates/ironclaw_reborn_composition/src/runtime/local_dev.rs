@@ -323,6 +323,7 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityDisplayPreviewStatus,
     ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
             return None;
@@ -339,7 +340,7 @@ impl LocalDevCapabilityIo {
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
                 invocation_id,
                 capability_id: capability_id.clone(),
-                status: CapabilityDisplayPreviewStatus::Completed,
+                status,
                 title: record.title,
                 subtitle: record.subtitle,
                 input_summary: record.input_summary,
@@ -617,7 +618,12 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Completed,
+            )
             .await
         {
             self.display_previews
@@ -638,6 +644,36 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+    }
+
+    async fn stage_capability_failure_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        self.display_previews.record_failure_preview(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            capability_id,
+            summary,
+        );
+        // Persist the failure preview to the durable timeline (status Failed)
+        // so the detail survives refresh/replay, mirroring the success path in
+        // `write_capability_result`.
+        if let Some(message_id) = self
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Failed,
+            )
+            .await
+        {
+            self.display_previews
+                .attach_timeline_message_id(invocation_id, message_id);
+        }
     }
 
     async fn update_capability_result(
