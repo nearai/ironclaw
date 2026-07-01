@@ -50,10 +50,12 @@ jq -r --arg re "${reborn_regex}" --arg mode "${mode}" '
   # Round to 2 decimal places.
   def round2: . * 100 | round / 100;
 
-  # All instrumented files that belong to a Reborn crate family. The "?" and
-  # "// []" route an empty/missing "data" array (no coverage produced) through
-  # the $total == 0 branch below instead of crashing on a null iteration.
-  [ (.data[0]?.files // [])[]
+  # All instrumented files that belong to a Reborn crate family. llvm-cov nests
+  # files under data[]; iterate every dataset (a single `cargo llvm-cov --json`
+  # emits one, but the export format permits several) so no coverage is dropped.
+  # The trailing "?"s swallow a missing/empty data or files, routing no-coverage
+  # runs through the $total == 0 branch below instead of erroring.
+  [ (.data[]?.files[]?)
     | select(.filename | test($re))
     | { crate: (.filename | capture("/crates/(?<c>ironclaw_[a-z0-9_]+)/").c),
         covered: .summary.lines.covered,

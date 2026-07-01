@@ -48,10 +48,11 @@ jobs:
   reborn-coverage:
     name: Reborn Coverage
     runs-on: ubuntu-latest
-    # No explicit timeout: a cold-cache instrumented build of the Reborn closure
-    # is heavy, so inherit GitHub's 360-minute default — matching the analogous
-    # full-workspace instrumented `coverage` job in coverage.yml, which also runs
-    # `cargo llvm-cov --workspace` without mold and without a tighter timeout.
+    # Generous backstop, not a tight bound: a cold-cache instrumented build of
+    # the Reborn closure is heavy (no mold), so this only catches a runaway/hung
+    # run — it sits well above any real build yet halves GitHub's 360-minute
+    # default, which would otherwise tie up a runner for hours.
+    timeout-minutes: 180
     env:
       # Reborn suites must not reach a live LLM (mirrors reborn-tests.yml).
       ANTHROPIC_API_KEY: ""

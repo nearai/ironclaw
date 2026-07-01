@@ -32,6 +32,7 @@ fi
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 : "${PR_NUMBER:?PR_NUMBER must be set}"
+: "${GH_TOKEN:?GH_TOKEN must be set — gh api needs it (the workflow passes github.token)}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
