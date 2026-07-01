@@ -2051,27 +2051,14 @@ async fn expired_lease_reconciler_fails_running_run() {
         .unwrap()
         .unwrap();
 
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let state = store
-                .get_run_state(ironclaw_turns::GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await
-                .unwrap();
-            if state.status == TurnStatus::Failed {
-                assert_eq!(
-                    state.failure.as_ref().map(|failure| failure.category()),
-                    Some("lease_expired")
-                );
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("expired lease was not reconciled");
+    let failed_state = wait_for_status(&*store, scope, run_id, TurnStatus::Failed).await;
+    assert_eq!(
+        failed_state
+            .failure
+            .as_ref()
+            .map(|failure| failure.category()),
+        Some("lease_expired")
+    );
     handle.shutdown().await;
 
     let run_id_str = run_id.to_string();
@@ -2252,7 +2239,8 @@ async fn wait_for_status<S>(
     scope: TurnScope,
     run_id: ironclaw_turns::TurnRunId,
     expected: TurnStatus,
-) where
+) -> TurnRunState
+where
     S: TurnStateStore + ?Sized,
 {
     timeout(Duration::from_secs(2), async {
@@ -2265,13 +2253,13 @@ async fn wait_for_status<S>(
                 .await
                 .unwrap();
             if state.status == expected {
-                return;
+                return state;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("run did not reach expected status");
+    .expect("run did not reach expected status")
 }
 
 fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {

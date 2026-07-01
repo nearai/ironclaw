@@ -2,9 +2,12 @@ use async_trait::async_trait;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
@@ -132,6 +135,35 @@ pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    /// Optional durable sink for gate-blocked turns. When set, the store
+    /// persists the snapshot on blocked-set changes only (block / resume /
+    /// terminate-while-blocked) so a restart can recover parked-on-human turns.
+    /// `None` = pure in-memory (the default; used by tests and the stress tool).
+    // arch-exempt: optional_arc, genuinely optional — durability is only wired
+    // in the single-tenant-volume feature path; no-DB/test/stress builds run
+    // without it, plan #5486
+    block_persistence: Option<Arc<dyn crate::TurnStateBlockPersistence>>,
+    /// Serializes the durable *write* (not the snapshot clone) in
+    /// [`Self::persist_blocked_state`] and guards the `last_persisted_seq`
+    /// compare-and-store, so concurrent blocked-set changes cannot let an older
+    /// snapshot blind-overwrite a newer one. Held only around the sink write,
+    /// which fires only on a blocked-set change (off the hot path).
+    persist_lock: AsyncMutex<()>,
+    /// Monotonic sequence assigned to each block-persistence snapshot at capture
+    /// time (under the inner lock, so sequence order matches snapshot order).
+    persist_seq: AtomicU64,
+    /// Highest sequence already durably written. A persist whose sequence is
+    /// below this is stale — a newer (superset) snapshot already landed — so it
+    /// skips its write instead of blind-overwriting. This also coalesces a burst
+    /// of concurrent blocked-set changes down to the latest snapshot.
+    last_persisted_seq: AtomicU64,
+    /// Runs that have an outstanding gate-persisted snapshot and therefore still
+    /// need a durable *terminal* write. A run enters on block, stays across
+    /// resume (its durable state is now live, not terminal), and is cleared when
+    /// it reaches a terminal state — at which point we persist once more so the
+    /// durable snapshot converges to the terminal state and a restart does not
+    /// rehydrate an already-finished run as live.
+    gate_persisted_runs: Mutex<HashSet<TurnRunId>>,
 }
 
 impl Default for InMemoryTurnStateStore {
@@ -299,7 +331,56 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            block_persistence: None,
+            persist_lock: AsyncMutex::new(()),
+            persist_seq: AtomicU64::new(0),
+            last_persisted_seq: AtomicU64::new(0),
+            gate_persisted_runs: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Attach a durable sink for gate-blocked turns (persist-on-block). Off the
+    /// hot path — the sink is called only when the blocked-run set changes.
+    pub fn with_block_persistence(
+        mut self,
+        block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
+    ) -> Self {
+        self.block_persistence = Some(block_persistence);
+        // Seed the gate-persisted set from any *gate-touched, not-yet-terminal*
+        // run rehydrated from a recovery snapshot via `from_persistence_snapshot`.
+        // `mark_gate_persisted` only fires for runs that block *live* after the
+        // sink is attached, so the restore path must be seeded here or a recovered
+        // run would reach a terminal state with `is_gate_persisted == false`, skip
+        // its durable terminal-convergence write, and be resurrected as live on
+        // the next restart.
+        //
+        // A currently-blocked run is the obvious case, but a run that blocked then
+        // resumed is persisted as `Queued`/`Running`, so status alone misses it.
+        // `checkpoint_id` is set only on the gate-block paths (`block_run` and the
+        // loop-exit block) and is not cleared on resume, so it is the durable
+        // marker that a not-yet-terminal run was gate-touched — seed from that.
+        let gate_touched: Vec<TurnRunId> = {
+            let inner = match self.inner.lock() {
+                Ok(inner) => inner,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            inner
+                .records
+                .iter()
+                .filter(|(_, record)| {
+                    !record.status.get().is_terminal() && record.checkpoint_id.is_some()
+                })
+                .map(|(run_id, _)| *run_id)
+                .collect()
+        };
+        if !gate_touched.is_empty() {
+            let mut set = match self.gate_persisted_runs.lock() {
+                Ok(set) => set,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            set.extend(gate_touched);
+        }
+        self
     }
 
     pub fn with_admission_limit_provider(
@@ -327,6 +408,11 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
+            block_persistence: None,
+            persist_lock: AsyncMutex::new(()),
+            persist_seq: AtomicU64::new(0),
+            last_persisted_seq: AtomicU64::new(0),
+            gate_persisted_runs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -364,6 +450,11 @@ impl InMemoryTurnStateStore {
             inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
             submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
+            block_persistence: None,
+            persist_lock: AsyncMutex::new(()),
+            persist_seq: AtomicU64::new(0),
+            last_persisted_seq: AtomicU64::new(0),
+            gate_persisted_runs: Mutex::new(HashSet::new()),
         })
     }
 
@@ -371,6 +462,141 @@ impl InMemoryTurnStateStore {
         match self.inner.lock() {
             Ok(inner) => inner.persistence_snapshot(),
             Err(poisoned) => poisoned.into_inner().persistence_snapshot(),
+        }
+    }
+
+    /// Whether `run_id` is currently parked on a gate (any `Blocked*` status).
+    /// Used to decide whether a terminal transition changed the blocked set and
+    /// therefore needs a durable persist.
+    fn run_is_blocked(&self, run_id: TurnRunId) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner
+            .records
+            .get(&run_id)
+            .is_some_and(|record| record.status.get().is_blocked())
+    }
+
+    /// Mark `run_id` as having an outstanding gate-persisted snapshot that must
+    /// be durably cleaned up when the run terminates. No-op (and no lock taken)
+    /// when no durable sink is attached, so the default in-memory authority keeps
+    /// its exact hot-path cost.
+    fn mark_gate_persisted(&self, run_id: TurnRunId) {
+        if self.block_persistence.is_none() {
+            return;
+        }
+        let mut set = match self.gate_persisted_runs.lock() {
+            Ok(set) => set,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        set.insert(run_id);
+    }
+
+    /// Whether `run_id` has an outstanding gate-persisted snapshot (blocked at
+    /// least once and not yet durably cleaned up on termination). Short-circuits
+    /// to `false` with no lock when no durable sink is attached.
+    fn is_gate_persisted(&self, run_id: TurnRunId) -> bool {
+        if self.block_persistence.is_none() {
+            return false;
+        }
+        let set = match self.gate_persisted_runs.lock() {
+            Ok(set) => set,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        set.contains(&run_id)
+    }
+
+    /// Drop `run_id` from the gate-persisted set once its terminal state has been
+    /// durably written.
+    fn clear_gate_persisted(&self, run_id: TurnRunId) {
+        let mut set = match self.gate_persisted_runs.lock() {
+            Ok(set) => set,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        set.remove(&run_id);
+    }
+
+    /// Capture the persistence snapshot together with a monotonic sequence,
+    /// atomically under the inner lock so that sequence order matches snapshot
+    /// order (a higher sequence is guaranteed to be a same-or-newer snapshot).
+    fn snapshot_with_seq(&self) -> (u64, TurnPersistenceSnapshot) {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let seq = self.persist_seq.fetch_add(1, Ordering::SeqCst);
+        (seq, inner.persistence_snapshot())
+    }
+
+    /// Persist the snapshot through the durable block sink, if one is attached.
+    /// Off the hot path — callers invoke this only when the set of gate-persisted
+    /// runs changed. Best-effort: the sink logs and swallows its own errors so a
+    /// durable-write failure never fails an already-applied transition.
+    ///
+    /// The snapshot is cloned *without* holding `persist_lock` (so concurrent
+    /// captures stay parallel), then only the write is serialized under
+    /// `persist_lock` with a stale-skip guard: a snapshot whose sequence is below
+    /// the highest already written is a stale superset-loser and is dropped
+    /// rather than blind-overwriting the newer durable state (the sink writes with
+    /// `CasExpectation::Any`, so ordering is the store's responsibility). This
+    /// also coalesces a burst of concurrent blocked-set changes down to the
+    /// latest snapshot instead of one durable write per change.
+    async fn persist_blocked_state(&self) {
+        let Some(sink) = self.block_persistence.clone() else {
+            return;
+        };
+        let (seq, snapshot) = self.snapshot_with_seq();
+        let _serialize = self.persist_lock.lock().await;
+        if seq < self.last_persisted_seq.load(Ordering::SeqCst) {
+            return;
+        }
+        self.last_persisted_seq.store(seq, Ordering::SeqCst);
+        sink.persist(&snapshot).await;
+    }
+
+    /// Durably flush the full current turn-state snapshot through the block sink.
+    ///
+    /// Persist-on-block only writes when the gate-blocked set changes, so between
+    /// gate events the durable snapshot lags the live in-memory state. On a
+    /// *graceful* shutdown (a planned deploy's SIGTERM) the runtime calls this so
+    /// the restart recovers **in-flight** turns too, not just gate-blocked ones —
+    /// closing the "deploy silently drops in-progress turns" gap. It writes the
+    /// same full snapshot `persist_blocked_state` does (going through the same
+    /// sequence/stale-skip guard, so a racing gate persist cannot clobber it), and
+    /// is a no-op when no durable sink is attached (the default in-memory store
+    /// used by tests, no-DB builds, and the stress tool). A hard crash (SIGKILL /
+    /// OOM) still loses in-flight state — bounding that needs a periodic flush,
+    /// which is a separate follow-up.
+    pub async fn flush(&self) {
+        self.persist_blocked_state().await;
+    }
+
+    /// After a terminal transition, if `run_id` still had an outstanding
+    /// gate-persisted snapshot, write once more so the durable snapshot converges
+    /// to the terminal state — otherwise a run that blocked, resumed, and then
+    /// completed from `Running` would leave its last durable state as
+    /// `Queued`/`Running` and be rehydrated as a live run after restart. Then
+    /// stop tracking it. No-op when the transition failed or the run was never
+    /// gate-persisted (the plain claim/complete hot path).
+    async fn persist_terminal_cleanup(
+        &self,
+        run_id: TurnRunId,
+        gate_persisted: bool,
+        result: &Result<TurnRunState, TurnError>,
+    ) {
+        // Only converge on an actually-terminal outcome: `complete`/`cancel`/`fail`
+        // always land terminal here, but `record_runner_failure` may leave the run
+        // live (retry), and clearing the tracking there would drop a later real
+        // terminal write.
+        if gate_persisted
+            && result
+                .as_ref()
+                .is_ok_and(|state| state.status.is_terminal())
+        {
+            self.persist_blocked_state().await;
+            self.clear_gate_persisted(run_id);
         }
     }
 
@@ -794,17 +1020,29 @@ impl TurnStateStore for InMemoryTurnStateStore {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        let mut inner = self.lock_inner()?;
-        let idempotency_key = RunIdempotencyKey {
-            scope: request.scope.clone(),
-            run_id: request.run_id,
-            key: request.idempotency_key.clone(),
+        let mut did_resume = false;
+        let result = {
+            let mut inner = self.lock_inner()?;
+            let idempotency_key = RunIdempotencyKey {
+                scope: request.scope.clone(),
+                run_id: request.run_id,
+                key: request.idempotency_key.clone(),
+            };
+            if let Some(replayed) = inner.resume_idempotency.get(&idempotency_key) {
+                // Idempotent replay — no state change, so no durable write.
+                replayed.clone()
+            } else {
+                let result = inner.resume_turn_once(&request);
+                inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+                did_resume = result.is_ok();
+                result
+            }
         };
-        if let Some(result) = inner.resume_idempotency.get(&idempotency_key) {
-            return result.clone();
+        // A gate-blocked run just left the blocked set — persist so the durable
+        // snapshot no longer replays it as blocked on restart.
+        if did_resume {
+            self.persist_blocked_state().await;
         }
-        let result = inner.resume_turn_once(&request);
-        inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
         result
     }
 
@@ -1438,87 +1676,129 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        let mut record = inner.take_record(request.run_id)?;
-        let result = (|| {
-            let now = Utc::now();
-            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
-            if !matches!(record.status.get(), TurnStatus::Running) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status.get(),
-                    to: request.reason.status(),
-                });
-            }
-            // Running → Blocked: decrement per-user running counter.
-            let transition = record.status.set(request.reason.status());
-            inner.apply_status_transition(transition, &record);
-            record.checkpoint_id = Some(request.checkpoint_id);
-            record.gate_ref = Some(request.reason.gate_ref().clone());
-            record.blocked_activity_id = None;
-            record.credential_requirements = request.reason.credential_requirements().to_vec();
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = inner.next_cursor();
-            inner.record_checkpoint(
-                &record,
-                request.checkpoint_id,
-                request.state_ref,
-                request.reason.gate_ref().clone(),
-                now,
-            );
-            inner.update_active_lock(&record, now);
-            let state = record.state();
-            inner.push_event(&record, TurnEventKind::Blocked, None);
-            Ok(state)
-        })();
-        inner.records.insert(record.run_id, record);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            let mut record = inner.take_record(request.run_id)?;
+            let inner_result = (|| {
+                let now = Utc::now();
+                ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
+                if !matches!(record.status.get(), TurnStatus::Running) {
+                    return Err(TurnError::InvalidTransition {
+                        from: record.status.get(),
+                        to: request.reason.status(),
+                    });
+                }
+                // Running → Blocked: decrement per-user running counter.
+                let transition = record.status.set(request.reason.status());
+                inner.apply_status_transition(transition, &record);
+                record.checkpoint_id = Some(request.checkpoint_id);
+                record.gate_ref = Some(request.reason.gate_ref().clone());
+                record.blocked_activity_id = None;
+                record.credential_requirements = request.reason.credential_requirements().to_vec();
+                record.runner_id = None;
+                record.lease_token = None;
+                record.lease_expires_at = None;
+                record.event_cursor = inner.next_cursor();
+                inner.record_checkpoint(
+                    &record,
+                    request.checkpoint_id,
+                    request.state_ref,
+                    request.reason.gate_ref().clone(),
+                    now,
+                );
+                inner.update_active_lock(&record, now);
+                let state = record.state();
+                inner.push_event(&record, TurnEventKind::Blocked, None);
+                Ok(state)
+            })();
+            inner.records.insert(record.run_id, record);
+            inner_result
+        };
+        // A run just parked on a gate — track it for durable terminal cleanup
+        // and persist so the blocked turn survives a process restart (off the hot
+        // path; only fires on a block).
+        if result.is_ok() {
+            self.mark_gate_persisted(request.run_id);
+            self.persist_blocked_state().await;
+        }
         result
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.terminal_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Completed,
-            None,
-            TurnEventKind::Completed,
-        )
+        let gate_persisted = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.terminal_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                TurnStatus::Completed,
+                None,
+                TurnEventKind::Completed,
+            )
+        };
+        self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)
+            .await;
+        result
     }
 
     async fn cancel_run(
         &self,
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.cancel_completion_transition(request.run_id, request.runner_id, request.lease_token)
+        let gate_persisted = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.cancel_completion_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+            )
+        };
+        self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)
+            .await;
+        result
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.terminal_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Failed,
-            Some(request.failure),
-            TurnEventKind::Failed,
-        )
+        let gate_persisted = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.terminal_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                TurnStatus::Failed,
+                Some(request.failure),
+                TurnEventKind::Failed,
+            )
+        };
+        self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)
+            .await;
+        result
     }
 
     async fn record_runner_failure(
         &self,
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.runner_failure_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            request.failure,
-        )
+        // A runner failure can also terminate a run (Running → Failed,
+        // CancelRequested → Cancelled), so it must converge the durable snapshot
+        // for a gate-persisted run exactly like the other terminal paths —
+        // otherwise a restart could resurrect the finished run as live.
+        let gate_persisted = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.runner_failure_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                request.failure,
+            )
+        };
+        self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)
+            .await;
+        result
     }
 
     async fn relinquish_run(
@@ -1533,13 +1813,30 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.lock_inner()?;
-        inner.apply_validated_loop_exit_transition(
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            request.mapping,
-        )
+        let tracked_before = self.is_gate_persisted(request.run_id);
+        let result = {
+            let mut inner = self.lock_inner()?;
+            inner.apply_validated_loop_exit_transition(
+                request.run_id,
+                request.runner_id,
+                request.lease_token,
+                request.mapping,
+            )
+        };
+        // A validated loop exit can either park a run on a gate or terminate one
+        // (possibly a previously-blocked one). Persist so the durable snapshot
+        // stays accurate across restart, and converge the terminal case so a
+        // finished run is not rehydrated as live.
+        if result.is_ok() && self.block_persistence.is_some() {
+            if self.run_is_blocked(request.run_id) {
+                self.mark_gate_persisted(request.run_id);
+                self.persist_blocked_state().await;
+            } else if tracked_before {
+                self.persist_blocked_state().await;
+                self.clear_gate_persisted(request.run_id);
+            }
+        }
+        result
     }
 }
 
