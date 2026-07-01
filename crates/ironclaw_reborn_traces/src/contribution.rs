@@ -5515,13 +5515,19 @@ async fn read_bounded_trace_upload_claim_response(
             safe_trace_upload_claim_issuer_url_label(issuer_url)
         )
     })? {
-        bytes.extend_from_slice(&chunk);
+        // Check the cap BEFORE growing the buffer so an oversized chunk can't
+        // push `bytes` past the hard ceiling before the error returns.
+        let next_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow::anyhow!("Trace Commons upload claim response size overflow"))?;
         anyhow::ensure!(
-            bytes.len() <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES,
+            next_len <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES,
             "Trace Commons upload claim response from {} exceeded {} bytes",
             safe_trace_upload_claim_issuer_url_label(issuer_url),
             TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES
         );
+        bytes.extend_from_slice(&chunk);
     }
     String::from_utf8(bytes).with_context(|| {
         format!(
@@ -5545,12 +5551,18 @@ async fn read_bounded_account_traces_response(
         .await
         .map_err(|e| anyhow::anyhow!("failed to read account traces response body: {e}"))?
     {
-        bytes.extend_from_slice(&chunk);
+        // Check the cap BEFORE growing the buffer so an oversized chunk can't
+        // push `bytes` past the hard ceiling before the error returns.
+        let next_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow::anyhow!("account traces response size overflow"))?;
         anyhow::ensure!(
-            bytes.len() <= ACCOUNT_TRACES_MAX_RESPONSE_BYTES,
+            next_len <= ACCOUNT_TRACES_MAX_RESPONSE_BYTES,
             "account traces response exceeded {} bytes",
             ACCOUNT_TRACES_MAX_RESPONSE_BYTES
         );
+        bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
 }
