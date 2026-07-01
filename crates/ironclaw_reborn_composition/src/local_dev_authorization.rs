@@ -422,6 +422,7 @@ mod tests {
             effects: effects.clone(),
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
             resource_profile: None,
         };
         let policy = local_dev_capability_policy().expect("capability policy");
@@ -472,6 +473,7 @@ mod tests {
             effects: effects.clone(),
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
             resource_profile: None,
         };
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));

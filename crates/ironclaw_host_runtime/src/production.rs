@@ -104,7 +104,7 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -1658,13 +1658,17 @@ impl DefaultHostRuntime {
         }
 
         for handle in &required_secrets {
-            // `secret_present` is the single owner of the presence rule, shared with
-            // the dispatch-time obligation backstop (obligations::preflight_secret_injection)
-            // so the two paths cannot drift on "what counts as a present credential".
-            // The happy path intentionally re-checks at dispatch time; this pre-flight
-            // read is only for gate ordering. (Accepted double-read; the backstop is the
-            // authority — see the thread on collapsing it.)
-            match secret_present(secret_store.as_ref(), scope, handle).await {
+            // `secret_owner_scope` is the single owner of the presence+ownership rule,
+            // shared with the dispatch-time obligation backstop
+            // (obligations::preflight_secret_injection / inject_secrets) so the paths
+            // cannot drift on "what counts as a present credential" or "which scope owns
+            // it". Here we only need presence (Some vs None) for gate ordering; the happy
+            // path intentionally re-checks at dispatch time, where the backstop is the
+            // authority. (Accepted double-read.)
+            match secret_owner_scope(secret_store.as_ref(), scope, handle)
+                .await
+                .map(|owner| owner.is_some())
+            {
                 Ok(true) => {
                     // Secret present — continue checking.
                 }

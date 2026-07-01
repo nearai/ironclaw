@@ -147,6 +147,7 @@ pub(super) fn mock_mcp_extension_package(
             prompt_doc_ref: None,
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
             resource_profile: None,
         }],
     };
@@ -163,6 +164,7 @@ pub(super) fn mock_mcp_extension_package(
         effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;

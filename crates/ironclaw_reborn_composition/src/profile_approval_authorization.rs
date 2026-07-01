@@ -576,6 +576,7 @@ mod tests {
             effects,
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
             resource_profile: None,
         }
     }
