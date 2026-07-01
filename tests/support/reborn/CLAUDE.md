@@ -79,7 +79,7 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   MCP assertion (`assert_mcp_tool_called`), approval methods
   (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
-  `captured_capability_results`) the assertion file reads.
+  `captured_capability_results` / `captured_system_prompts`) the assertion file reads.
 - `harness_mcp.rs` — the mock-MCP scaffolding extracted from `harness.rs`:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
@@ -100,7 +100,9 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   `.with_keyed_http_responses([..])`).
 - `assertions.rs` — the richer egress + tool-result assertions
   (`assert_egress_count` / `assert_egress_url_order` / `assert_egress_method_order`
-  / `assert_egress_body_contains` / `assert_tool_result_contains`).
+  / `assert_egress_body_contains` / `assert_tool_result_contains`), plus the
+  model-prompt assertion `assert_system_prompt_contains` (reads the scripted
+  `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress log).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.

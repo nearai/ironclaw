@@ -45,4 +45,14 @@ async fn replies_to_greeting() {
         .assert_system_prompt_contains("Use only visible capabilities.")
         .await
         .expect("composed capability policy reached the model as a system prompt");
+    // Negative guard: the user's own turn text appears in the captured request
+    // but only in a `User`-role message, so the `System`-only filter must not
+    // match it — proves the assertion discriminates on role, not mere presence.
+    assert!(
+        harness
+            .assert_system_prompt_contains("hi there")
+            .await
+            .is_err(),
+        "system-prompt assertion must not match user-role text"
+    );
 }
