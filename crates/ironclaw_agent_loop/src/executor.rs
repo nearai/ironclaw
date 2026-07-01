@@ -192,10 +192,10 @@ enum TurnCompletedStep {
 }
 
 impl TurnCompletedStep {
-    fn iteration(&self) -> u32 {
+    fn iteration_or(&self, fallback: u32) -> u32 {
         match self {
             Self::Continue { state, .. } => state.iteration,
-            Self::Exit(_) => 0,
+            Self::Exit(_) => fallback,
         }
     }
 }

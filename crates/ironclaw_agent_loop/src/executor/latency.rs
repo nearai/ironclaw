@@ -73,3 +73,21 @@ pub(super) fn result<T, E>(
         Err(error) => operation_error(operation, context, iteration, started_at, error),
     }
 }
+
+macro_rules! stage {
+    ($operation:expr, $context:expr, $iteration:expr, $future:expr $(,)?) => {{
+        let iteration = $iteration;
+        let stage_started_at = $crate::executor::latency::started_at();
+        let result = $future.await;
+        $crate::executor::latency::result(
+            $operation,
+            $context,
+            iteration,
+            stage_started_at,
+            &result,
+        );
+        result
+    }};
+}
+
+pub(super) use stage;

@@ -26,34 +26,20 @@ impl DefaultExecutorPipeline {
         let ctx = StageContext { planner, host };
         let mut pending_input_ack = PendingInputAck::default();
 
-        macro_rules! trace_stage {
-            ($operation:expr, $iteration:expr, $future:expr) => {{
-                let iteration = $iteration;
-                let started_at = latency::started_at();
-                let result = $future.await;
-                latency::result(
-                    $operation,
-                    host.run_context(),
-                    iteration,
-                    started_at,
-                    &result,
-                );
-                result
-            }};
-        }
-
         loop {
-            state = match trace_stage!(
+            state = match latency::stage!(
                 "cancel_check",
+                host.run_context(),
                 state.iteration,
-                CheckpointStage.cancel_if_requested(ctx, state)
+                CheckpointStage.cancel_if_requested(ctx, state),
             )? {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
 
-            match trace_stage!(
+            match latency::stage!(
                 "budget",
+                host.run_context(),
                 state.iteration,
                 self.budget.process(
                     ctx,
@@ -61,7 +47,7 @@ impl DefaultExecutorPipeline {
                         state,
                         pending_input_ack: std::mem::take(&mut pending_input_ack),
                     },
-                )
+                ),
             )? {
                 BudgetStep::Continue {
                     state: next,
@@ -89,8 +75,9 @@ impl DefaultExecutorPipeline {
                 progress_started_at,
             );
 
-            match trace_stage!(
+            match latency::stage!(
                 "input_drain_steering",
+                host.run_context(),
                 state.iteration,
                 self.input.process(
                     ctx,
@@ -99,7 +86,7 @@ impl DefaultExecutorPipeline {
                         pending_input_ack: std::mem::take(&mut pending_input_ack),
                         mode: UserFacingInputDrainMode::Steering,
                     },
-                )
+                ),
             )? {
                 InputStep::Continue {
                     state: next,
@@ -112,8 +99,9 @@ impl DefaultExecutorPipeline {
                 InputStep::Exit(exit) => return Ok(exit),
             }
 
-            match trace_stage!(
+            match latency::stage!(
                 "prompt",
+                host.run_context(),
                 state.iteration,
                 self.prompt.process(
                     ctx,
@@ -121,7 +109,7 @@ impl DefaultExecutorPipeline {
                         state,
                         pending_input_ack: std::mem::take(&mut pending_input_ack),
                     },
-                )
+                ),
             )? {
                 PromptStep::Exit(exit) => return Ok(exit),
 
@@ -130,8 +118,9 @@ impl DefaultExecutorPipeline {
                     state = prompt.state;
                     pending_input_ack = prompt.pending_input_ack;
 
-                    state = trace_stage!(
+                    state = latency::stage!(
                         "checkpoint_before_model",
+                        host.run_context(),
                         state.iteration,
                         CheckpointStage.process(
                             ctx,
@@ -139,7 +128,7 @@ impl DefaultExecutorPipeline {
                                 state,
                                 kind: CheckpointKind::BeforeModel,
                             },
-                        )
+                        ),
                     )?
                     .state;
                     if prompt.rendered_repeated_call_warning {
@@ -164,14 +153,16 @@ impl DefaultExecutorPipeline {
                             note_started_at,
                         );
                     }
-                    trace_stage!(
+                    latency::stage!(
                         "ack_pending_input_before_model",
+                        host.run_context(),
                         state.iteration,
-                        pending_input_ack.ack(host)
+                        pending_input_ack.ack(host),
                     )?;
 
-                    let model_response = match trace_stage!(
+                    let model_response = match latency::stage!(
                         "model",
+                        host.run_context(),
                         state.iteration,
                         self.model.process(
                             ctx,
@@ -181,7 +172,7 @@ impl DefaultExecutorPipeline {
                                 surface_version: prompt.surface.version.clone(),
                                 capability_view: prompt.capability_view,
                             },
-                        )
+                        ),
                     )? {
                         ModelStep::Response(next, response) => {
                             state = *next;
@@ -202,17 +193,20 @@ impl DefaultExecutorPipeline {
                     // turns in a row. `None` is "unknown" and must NOT count as
                     // a zero-output turn against the detector.
                     let response_usage = model_response.usage;
+                    let turn_iteration = state.iteration;
                     let completed = match model_response.output {
                         ParentLoopOutput::AssistantReply(reply) => {
-                            match trace_stage!(
+                            match latency::stage!(
                                 "reply_admission",
-                                state.iteration,
+                                host.run_context(),
+                                turn_iteration,
                                 self.reply_admission
-                                    .process(ctx, ReplyAdmissionInput { state, reply })
+                                    .process(ctx, ReplyAdmissionInput { state, reply }),
                             )? {
-                                ReplyAdmissionStep::Accept { state, reply } => trace_stage!(
+                                ReplyAdmissionStep::Accept { state, reply } => latency::stage!(
                                     "assistant_reply",
-                                    state.iteration,
+                                    host.run_context(),
+                                    turn_iteration,
                                     self.assistant_reply.process(
                                         ctx,
                                         AssistantReplyInput {
@@ -220,7 +214,7 @@ impl DefaultExecutorPipeline {
                                             reply,
                                             usage: response_usage,
                                         },
-                                    )
+                                    ),
                                 )?,
                                 ReplyAdmissionStep::Reject { state } => {
                                     TurnCompletedStep::Continue {
@@ -230,9 +224,10 @@ impl DefaultExecutorPipeline {
                                 }
                             }
                         }
-                        ParentLoopOutput::CapabilityCalls(calls) => trace_stage!(
+                        ParentLoopOutput::CapabilityCalls(calls) => latency::stage!(
                             "capabilities",
-                            state.iteration,
+                            host.run_context(),
+                            turn_iteration,
                             self.capabilities.process(
                                 ctx,
                                 CapabilityInput {
@@ -240,14 +235,15 @@ impl DefaultExecutorPipeline {
                                     surface: prompt.surface,
                                     calls,
                                 },
-                            )
+                            ),
                         )?,
                     };
 
-                    let completed = trace_stage!(
+                    let completed = latency::stage!(
                         "post_capability",
-                        completed.iteration(),
-                        self.post_capability.process(ctx, completed)
+                        host.run_context(),
+                        completed.iteration_or(turn_iteration),
+                        self.post_capability.process(ctx, completed),
                     )?;
 
                     let (next_state, summary) = match completed {
@@ -256,8 +252,9 @@ impl DefaultExecutorPipeline {
                     };
                     let completed_kind = summary.kind;
 
-                    let (mut next_state, summary) = match trace_stage!(
+                    let (mut next_state, summary) = match latency::stage!(
                         "stop_observe",
+                        host.run_context(),
                         next_state.iteration,
                         self.stop.observe(
                             ctx,
@@ -265,7 +262,7 @@ impl DefaultExecutorPipeline {
                                 state: next_state,
                                 summary,
                             },
-                        )
+                        ),
                     )? {
                         StopObservationStep::Continue { state, summary } => (*state, summary),
                         StopObservationStep::Exit(exit) => return Ok(exit),
@@ -276,8 +273,9 @@ impl DefaultExecutorPipeline {
                             iteration = next_state.iteration,
                             "agent loop checking follow-up input after reply-only turn end"
                         );
-                        match trace_stage!(
+                        match latency::stage!(
                             "input_drain_follow_up",
+                            host.run_context(),
                             next_state.iteration,
                             self.input.process(
                                 ctx,
@@ -286,7 +284,7 @@ impl DefaultExecutorPipeline {
                                     pending_input_ack: std::mem::take(&mut pending_input_ack),
                                     mode: UserFacingInputDrainMode::FollowUp,
                                 },
-                            )
+                            ),
                         )? {
                             InputStep::Continue {
                                 state: next,
@@ -309,8 +307,9 @@ impl DefaultExecutorPipeline {
                         }
                     }
 
-                    match trace_stage!(
+                    match latency::stage!(
                         "stop_decide",
+                        host.run_context(),
                         next_state.iteration,
                         self.stop.decide(
                             ctx,
@@ -319,19 +318,26 @@ impl DefaultExecutorPipeline {
                                 summary,
                                 pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
-                        )
+                        ),
                     )? {
                         StopStep::Stop {
                             state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit = trace_stage!(
+                            let exit_iteration = state.iteration;
+                            let exit = latency::stage!(
                                 "exit",
-                                state.iteration,
-                                self.exit.process(ctx, ExitInput { state, kind })
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(ctx, ExitInput { state, kind }),
                             )?;
-                            trace_stage!("ack_pending_input_before_exit", 0, ack.ack(host))?;
+                            latency::stage!(
+                                "ack_pending_input_before_exit",
+                                host.run_context(),
+                                exit_iteration,
+                                ack.ack(host),
+                            )?;
                             return Ok(exit);
                         }
                         StopStep::Continue {
@@ -351,15 +357,18 @@ impl DefaultExecutorPipeline {
                 | PromptStep::ResumeAuth(resume)
                 | PromptStep::ResumeExternalTool(resume) => {
                     let resume = *resume;
+                    let resume_iteration = resume.state.iteration;
                     pending_input_ack = resume.pending_input_ack;
-                    trace_stage!(
+                    latency::stage!(
                         "ack_pending_input_before_resume_capability",
-                        resume.state.iteration,
-                        pending_input_ack.ack(host)
+                        host.run_context(),
+                        resume_iteration,
+                        pending_input_ack.ack(host),
                     )?;
-                    let completed = trace_stage!(
+                    let completed = latency::stage!(
                         "capabilities_resume",
-                        resume.state.iteration,
+                        host.run_context(),
+                        resume_iteration,
                         self.capabilities.process(
                             ctx,
                             CapabilityInput {
@@ -367,13 +376,14 @@ impl DefaultExecutorPipeline {
                                 surface: resume.surface,
                                 calls: vec![resume.call],
                             },
-                        )
+                        ),
                     )?;
 
-                    let completed = trace_stage!(
+                    let completed = latency::stage!(
                         "post_capability_resume",
-                        completed.iteration(),
-                        self.post_capability.process(ctx, completed)
+                        host.run_context(),
+                        completed.iteration_or(resume_iteration),
+                        self.post_capability.process(ctx, completed),
                     )?;
 
                     let (next_state, summary) = match completed {
@@ -381,8 +391,9 @@ impl DefaultExecutorPipeline {
                         TurnCompletedStep::Exit(exit) => return Ok(exit),
                     };
 
-                    let (next_state, summary) = match trace_stage!(
+                    let (next_state, summary) = match latency::stage!(
                         "stop_observe_resume",
+                        host.run_context(),
                         next_state.iteration,
                         self.stop.observe(
                             ctx,
@@ -390,14 +401,15 @@ impl DefaultExecutorPipeline {
                                 state: next_state,
                                 summary,
                             },
-                        )
+                        ),
                     )? {
                         StopObservationStep::Continue { state, summary } => (*state, summary),
                         StopObservationStep::Exit(exit) => return Ok(exit),
                     };
 
-                    match trace_stage!(
+                    match latency::stage!(
                         "stop_decide_resume",
+                        host.run_context(),
                         next_state.iteration,
                         self.stop.decide(
                             ctx,
@@ -406,19 +418,26 @@ impl DefaultExecutorPipeline {
                                 summary,
                                 pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
-                        )
+                        ),
                     )? {
                         StopStep::Stop {
                             state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit = trace_stage!(
+                            let exit_iteration = state.iteration;
+                            let exit = latency::stage!(
                                 "exit_resume",
-                                state.iteration,
-                                self.exit.process(ctx, ExitInput { state, kind })
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(ctx, ExitInput { state, kind }),
                             )?;
-                            trace_stage!("ack_pending_input_before_exit_resume", 0, ack.ack(host))?;
+                            latency::stage!(
+                                "ack_pending_input_before_exit_resume",
+                                host.run_context(),
+                                exit_iteration,
+                                ack.ack(host),
+                            )?;
                             return Ok(exit);
                         }
                         StopStep::Continue {
@@ -450,15 +469,17 @@ impl DefaultExecutorPipeline {
                     pending_input_ack = ack;
                     // Deliver the ack before stop.observe, mirroring the timing
                     // of the Prepared path (line ~133: ack before ModelStage).
-                    trace_stage!(
+                    latency::stage!(
                         "ack_pending_input_skip_model",
+                        host.run_context(),
                         skipped_state.iteration,
-                        pending_input_ack.ack(host)
+                        pending_input_ack.ack(host),
                     )?;
                     let summary = crate::strategies::TurnSummary::compaction_only();
 
-                    let (mut next_state, summary) = match trace_stage!(
+                    let (mut next_state, summary) = match latency::stage!(
                         "stop_observe_skip_model",
+                        host.run_context(),
                         skipped_state.iteration,
                         self.stop.observe(
                             ctx,
@@ -466,7 +487,7 @@ impl DefaultExecutorPipeline {
                                 state: skipped_state,
                                 summary,
                             },
-                        )
+                        ),
                     )? {
                         StopObservationStep::Continue { state, summary } => (*state, summary),
                         StopObservationStep::Exit(exit) => return Ok(exit),
@@ -475,8 +496,9 @@ impl DefaultExecutorPipeline {
                     // Follow-up drain is skipped: CompactionOnly != ReplyOnly,
                     // so the condition is naturally false here.
 
-                    match trace_stage!(
+                    match latency::stage!(
                         "stop_decide_skip_model",
+                        host.run_context(),
                         next_state.iteration,
                         self.stop.decide(
                             ctx,
@@ -485,22 +507,25 @@ impl DefaultExecutorPipeline {
                                 summary,
                                 pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
-                        )
+                        ),
                     )? {
                         StopStep::Stop {
                             state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit = trace_stage!(
+                            let exit_iteration = state.iteration;
+                            let exit = latency::stage!(
                                 "exit_skip_model",
-                                state.iteration,
-                                self.exit.process(ctx, ExitInput { state, kind })
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(ctx, ExitInput { state, kind }),
                             )?;
-                            trace_stage!(
+                            latency::stage!(
                                 "ack_pending_input_before_exit_skip_model",
-                                0,
-                                ack.ack(host)
+                                host.run_context(),
+                                exit_iteration,
+                                ack.ack(host),
                             )?;
                             return Ok(exit);
                         }
