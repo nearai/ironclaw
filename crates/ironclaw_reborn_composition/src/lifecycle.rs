@@ -486,6 +486,19 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         }
         unsupported_projection(Some(package_ref))
     }
+
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let Some(extension_management) = &self.extension_management else {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "extension management is not available in this runtime".to_string(),
+            });
+        };
+        extension_management.import_bundle(&bundle).await
+    }
 }
 
 fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowError> {

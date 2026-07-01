@@ -1,0 +1,23 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "ascii-renderer"
+name = "ASCII Renderer"
+version = "0.1.0"
+description = "Toy tool (#5459 test fixture): returns canned ASCII art. No network, no credential — the pure-compute case: an admin installs it and every user can use it with no obligations at all."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/ascii_renderer_tool.wasm"
+
+# No-network, no-key capability: declares only `dispatch_capability`, so it gets
+# NO ApplyNetworkPolicy and NO secret obligation. (The v2 parser rejects
+# `network_targets` here because there is no `network` effect.)
+[[capabilities]]
+id = "ascii-renderer.draw"
+description = "Render a small piece of ASCII art. Optional `subject` selects the drawing (cat, dog, robot); defaults to robot. Takes no network access."
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/ascii-renderer/draw.input.v1.json"
+output_schema_ref = "schemas/ascii-renderer/draw.output.v1.json"
+prompt_doc_ref = "prompts/ascii-renderer/draw.md"
