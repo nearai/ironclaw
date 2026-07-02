@@ -170,3 +170,50 @@ impl LlmProvider for ParkingLlm {
         self.inner.complete_with_tools(request).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Enforces both concurrency guarantees documented on `ParkingModelGate`
+    /// (module docs above) that the committed `reborn_integration_cancel`
+    /// integration test does not exercise directly, since it always calls
+    /// `release()` *after* the provider has already parked.
+    ///
+    /// Guarantee 1 — release-before-await ordering: `release()` sends on a
+    /// `oneshot::Sender` and `oneshot::Sender::send` buffers the value
+    /// regardless of whether a receiver is already awaiting, so calling
+    /// `release()` before `park()` has ever run must not be a lost wakeup —
+    /// the eventual `park()` call must still resolve promptly rather than
+    /// hanging forever waiting on `release_rx`.
+    ///
+    /// Guarantee 2 — second call does not block: `parked_tx`/`release_tx` are
+    /// `Mutex<Option<..>>` `take()`-based single-shot channels, so once the
+    /// first `park()` call has consumed them, a second `park()` call (e.g.
+    /// simulating a retry/failover hop in the real decorator chain) must
+    /// return immediately instead of blocking on an already-consumed
+    /// channel.
+    #[tokio::test]
+    async fn parking_llm_release_before_await_and_second_call_do_not_block() {
+        let gate = ParkingModelGate::new();
+
+        // Guarantee 1: release fires before any `park()` call exists to
+        // receive it.
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), gate.park())
+            .await
+            .expect(
+                "park() must resolve promptly when release() ran first \
+                 (oneshot send is lost-wakeup free)",
+            );
+
+        // Guarantee 2: a second park() call, after the first full
+        // park+release cycle already consumed both channels, must not
+        // block.
+        tokio::time::timeout(Duration::from_secs(5), gate.park())
+            .await
+            .expect("second park() call must return immediately, not block");
+    }
+}

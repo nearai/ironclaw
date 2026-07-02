@@ -1615,16 +1615,19 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     skill_activation_source: Option<SkillActivationTestSource>,
 }
 
-/// Tenant the E-SKILL skill context source is constructed under. Must match the
-/// int-tier group's run scope tenant (`group.rs` `build_base`) so
-/// `skill_activate` resolves the seeded user skill against the same tenant the
-/// turn runs under.
-const SKILL_ACTIVATION_RUN_TENANT: &str = "tenant-itest";
-
 struct HostRuntimeHarnessOptions {
     mounts: MountView,
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     seed_extension_credentials: bool,
+    /// Tenant the E-SKILL skill context source is constructed under, when this
+    /// harness surfaces the synthetic `skill_activate` capability. Only
+    /// `skill_activation_tools()` sets this (via
+    /// `with_skill_activation_tenant`), passing the SAME tenant the caller's
+    /// group run scope resolved (`group.rs` `build_base`'s
+    /// `canonical_binding.tenant_id`) — never a separately hardcoded literal —
+    /// so `skill_activate` resolves the seeded user skill against the same
+    /// tenant the turn runs under. `None` for every other harness variant.
+    skill_activation_tenant: Option<TenantId>,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1636,11 +1639,17 @@ impl HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
             seed_extension_credentials: false,
+            skill_activation_tenant: None,
         }
     }
 
     fn with_seed_extension_credentials(mut self) -> Self {
         self.seed_extension_credentials = true;
+        self
+    }
+
+    fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
+        self.skill_activation_tenant = Some(tenant);
         self
     }
 }
@@ -1964,13 +1973,14 @@ impl HostRuntimeCapabilityHarness {
 
     /// Harness surfacing the local-dev synthetic `skill_activate` capability
     /// (E-SKILL seam). `new_with_options` builds the `skill_activation_source`
-    /// (because `SKILL_ACTIVATE_CAPABILITY_ID` is in the allowlist), which
-    /// `create_capability_port` wraps onto the port and `into_group` wires as
-    /// the runtime's `skill_context_source`. The skill file the model activates
-    /// is seeded as a system-scoped skill by
-    /// `RebornIntegrationGroup::skill_activation_tools`. Mirrors
-    /// `skill_management_tools`/`project_tools`.
-    pub(crate) async fn skill_activation_tools() -> HarnessResult<Self> {
+    /// (because `SKILL_ACTIVATE_CAPABILITY_ID` is in the allowlist) under
+    /// `tenant` — the caller's ACTUAL group run-scope tenant, passed through
+    /// rather than re-hardcoded here — which `create_capability_port` wraps
+    /// onto the port and `into_group` wires as the runtime's
+    /// `skill_context_source`. The skill file the model activates is seeded as
+    /// a system-scoped skill by `RebornIntegrationGroup::skill_activation_tools`.
+    /// Mirrors `skill_management_tools`/`project_tools`.
+    pub(crate) async fn skill_activation_tools(tenant: &TenantId) -> HarnessResult<Self> {
         let mut harness = Self::new_with_options(
             "reborn-e2e-skill-activation-tools",
             vec![CapabilityId::new(
@@ -1990,7 +2000,8 @@ impl HostRuntimeCapabilityHarness {
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
                     true,
                 )?),
-            ),
+            )
+            .with_skill_activation_tenant(tenant.clone()),
         )
         .await?;
         harness.network_policy = http_test_policy();
@@ -2172,6 +2183,7 @@ impl HostRuntimeCapabilityHarness {
             mounts,
             runtime_policy,
             seed_extension_credentials,
+            skill_activation_tenant,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2209,13 +2221,16 @@ impl HostRuntimeCapabilityHarness {
         let project_service = services.local_dev_project_service_for_test();
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
-        // `skill_activation_tools`). Built with the int-tier run tenant so
-        // activation visibility matches the turn's scope. Must precede the
-        // `services.host_runtime` move (it borrows `&services`).
+        // `skill_activation_tools`). Built with the caller-supplied tenant
+        // (`HostRuntimeHarnessOptions::with_skill_activation_tenant`, sourced
+        // from the group's actual run-scope tenant) so activation visibility
+        // matches the turn's scope. Must precede the `services.host_runtime`
+        // move (it borrows `&services`).
         let skill_activation_source = if capability_ids.iter().any(|id| {
             id.as_str() == ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID
         }) {
-            let tenant = ironclaw_host_api::TenantId::new(SKILL_ACTIVATION_RUN_TENANT)?;
+            let tenant = skill_activation_tenant
+                .ok_or("skill_activation_tools harness requires with_skill_activation_tenant")?;
             ironclaw_reborn_composition::test_support::build_local_dev_skill_context_source_for_test(
                 &services, &tenant, true,
             )

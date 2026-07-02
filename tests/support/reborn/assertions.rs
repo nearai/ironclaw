@@ -170,6 +170,27 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that some model request this thread sent to the scripted provider
+    /// contains `needle` anywhere in its serialized messages — the caller-tier
+    /// proof that host-injected context (e.g. activated-skill instructions)
+    /// actually reached the model. Reads the retained `TraceLlm`'s captured
+    /// requests (E-SKILL half B).
+    pub async fn assert_model_request_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        for messages in &requests {
+            let rendered = serde_json::to_string(messages)
+                .map_err(|e| format!("serialize captured model request: {e}"))?;
+            if rendered.contains(needle) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "no model request contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Assert a model-visible tool error of `class` carrying `reason` was
     /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
     /// reads the in-process recorder, populated only on the *Completed* write

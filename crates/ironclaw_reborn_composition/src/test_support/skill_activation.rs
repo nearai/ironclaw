@@ -54,7 +54,7 @@ pub fn build_local_dev_skill_context_source_for_test(
             tenant_id,
             regex_skill_activation_enabled,
         )
-        .expect("build local-dev skill context source for test");
+        .unwrap_or_else(|error| panic!("build local-dev skill context source for test: {error}"));
     Some(SkillActivationTestSource {
         source,
         activation_source,

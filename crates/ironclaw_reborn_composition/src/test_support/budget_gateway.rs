@@ -84,6 +84,10 @@ pub struct BudgetTestGateway {
     calls: Mutex<Vec<HostManagedModelRequest>>,
 }
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl BudgetTestGateway {
     pub fn new() -> Self {
         Self::default()
@@ -101,25 +105,16 @@ impl BudgetTestGateway {
 
     /// Push one scripted reply. Replies are consumed in FIFO order.
     pub fn push(&self, reply: ScriptedReply) {
-        self.replies
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(reply);
+        lock(&self.replies).push(reply);
     }
 
     /// Number of `stream_model` calls observed so far.
     pub fn call_count(&self) -> usize {
-        self.calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        lock(&self.calls).len()
     }
 
     fn next_reply(&self) -> ScriptedReply {
-        let mut script = self
-            .replies
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut script = lock(&self.replies);
         if script.is_empty() {
             return self
                 .fallback
@@ -136,10 +131,7 @@ impl HostManagedModelGateway for BudgetTestGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        self.calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(request);
+        lock(&self.calls).push(request);
         Ok(self.next_reply().into_response())
     }
 
@@ -151,10 +143,7 @@ impl HostManagedModelGateway for BudgetTestGateway {
         // The budget tests don't need capability dispatch — fall through
         // to the plain stream path. If a future test needs tool calls,
         // extend this with a separate scripted-tool-call queue.
-        self.calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(request);
+        lock(&self.calls).push(request);
         Ok(self.next_reply().into_response())
     }
 }

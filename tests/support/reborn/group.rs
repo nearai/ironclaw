@@ -746,7 +746,13 @@ impl RebornIntegrationGroupBuilder {
     /// run's scope owner — the seam only needs the skill to exist.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        let host_runtime = HostRuntimeCapabilityHarness::skill_activation_tools().await?;
+        // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
+        // above) rather than a separately hardcoded literal, so the E-SKILL
+        // skill context source is built for the same tenant the turn runs
+        // under — see `HostRuntimeCapabilityHarness::skill_activation_tools`.
+        let host_runtime =
+            HostRuntimeCapabilityHarness::skill_activation_tools(&base.canonical_binding.tenant_id)
+                .await?;
         host_runtime.seed_system_skill_for_test(
             "greet",
             "greets the user warmly",
