@@ -62,6 +62,13 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         });
     }
     let channel_connection = slack_mounts.map(slack_channel_connection_facade);
+    // Fill the extension-lifecycle handler's late-binding facade slot so an
+    // inbound-channel activation can gate on the caller's channel connection.
+    // Idempotent; shares the same facade the WebUI connectable-channel surface
+    // uses.
+    if let Some(facade) = channel_connection.as_ref() {
+        runtime.set_channel_connection_facade(Arc::clone(facade));
+    }
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
