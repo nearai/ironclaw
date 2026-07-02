@@ -966,6 +966,13 @@ pub enum AuthPromptChallengeKind {
     OAuthUrl,
     /// User must type a manual token (PAT, API key) into the chat form.
     ManualToken,
+    /// Per-user connection to an inbound channel (e.g. Slack pairing): the user
+    /// establishes the connection out-of-band (message the app, redeem a code)
+    /// and the browser renders a channel pairing card. `provider` carries the
+    /// channel id; `body` carries the channel's connect instructions. The gate
+    /// is resolved by redeeming the code and then resolving this gate, which
+    /// resumes the parked turn.
+    ChannelConnection,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,

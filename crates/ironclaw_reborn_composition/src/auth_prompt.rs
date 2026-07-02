@@ -175,7 +175,29 @@ fn auth_prompt_from_credential_requirement(
         RuntimeCredentialAccountSetup::OAuth { .. } => {
             view.challenge_kind = Some(AuthPromptChallengeKind::OAuthUrl);
         }
+        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
+            // Render the in-chat channel pairing card from the single
+            // backend-authored connect copy (the same builder the connectable
+            // descriptor uses), so any inbound channel gets correct instructions
+            // — including Slack's "/pair" recovery — with no per-channel frontend
+            // code. `provider` carries the channel id (set below); `body` carries
+            // the instructions.
+            let requirement =
+                crate::extension_lifecycle::channel_connection_requirement(channel, channel);
+            view.challenge_kind = Some(AuthPromptChallengeKind::ChannelConnection);
+            view.headline = format!("Connect {}", capitalize_channel(channel));
+            view.body = requirement.instructions;
+            view.account_label = None;
+        }
     }
     view.provider = Some(provider);
     view
+}
+
+fn capitalize_channel(channel: &str) -> String {
+    let mut chars = channel.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => channel.to_string(),
+    }
 }
