@@ -68,7 +68,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
 
 # Agent Client Protocol (ACP) — standard communication with coding agents
-agent-client-protocol = "0.10"
+agent-client-protocol = "1.0"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -187,11 +187,11 @@ pgvector = { version = "0.4", features = ["postgres"], optional = true }
 # Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
 wasmtime = { version = "46.0.1", features = ["component-model"] }
 wasmtime-wasi = "46.0.1"  # WASI support for component model
-wasmparser = "0.250.0"  # WASM binary parsing for validation
+wasmparser = "0.252.0"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes = "0.9"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 hmac = "0.13"
 md-5 = "0.11"
@@ -291,7 +291,7 @@ ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
-rstest = "0.23"
+rstest = "0.26"
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
