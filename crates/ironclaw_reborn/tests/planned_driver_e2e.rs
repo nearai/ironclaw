@@ -30,9 +30,9 @@ use ironclaw_turns::{
         LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
         LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, RunProfileResolver,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ResolvedRunProfile,
+        RunProfileResolver, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -132,6 +132,37 @@ fn assert_completed_via_nudge(exit: LoopExit, host: &MockAgentLoopDriverHost) {
     );
 }
 
+/// Drives `resolved` through the real `PlannedDriver` with the shared
+/// no-progress script and asserts the final-answer nudge fired. Shared by
+/// every `*_profile_completes_via_final_answer_nudge` test — each caller
+/// only needs to resolve its own profile and pick a `test_run_context` label.
+async fn assert_nudge_fires_for_resolved_profile(
+    resolved: ResolvedRunProfile,
+    context_label: &str,
+) {
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let base_context = test_run_context(context_label);
+    let context = LoopRunContext::new(
+        base_context.scope,
+        base_context.turn_id,
+        base_context.run_id,
+        resolved,
+    );
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .run_context(context)
+        .script(no_progress_script())
+        .build();
+    let request = run_request(&driver, &host);
+
+    let exit = driver
+        .run(request, &host)
+        .await
+        .expect("planned driver run should succeed");
+
+    assert_completed_via_nudge(exit, &host);
+}
+
 #[tokio::test]
 async fn default_planned_driver_smoke() {
     let registry = build_loop_family_registry().expect("registry should build");
@@ -228,27 +259,7 @@ async fn planned_default_profile_completes_via_final_answer_nudge() {
         "planned_default must have driver-specific nudges enabled"
     );
 
-    let registry = build_loop_family_registry().expect("registry should build");
-    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
-    let base_context = test_run_context("planned-default-nudge");
-    let context = LoopRunContext::new(
-        base_context.scope,
-        base_context.turn_id,
-        base_context.run_id,
-        resolved.clone(),
-    );
-    let (host, _) = MockAgentLoopDriverHost::builder()
-        .run_context(context)
-        .script(no_progress_script())
-        .build();
-    let request = run_request(&driver, &host);
-
-    let exit = driver
-        .run(request, &host)
-        .await
-        .expect("planned driver run should succeed");
-
-    assert_completed_via_nudge(exit, &host);
+    assert_nudge_fires_for_resolved_profile(resolved, "planned-default-nudge").await;
 }
 
 #[tokio::test]
@@ -275,27 +286,7 @@ async fn scheduled_trigger_profile_completes_via_final_answer_nudge() {
         "scheduled_trigger must have driver-specific nudges enabled"
     );
 
-    let registry = build_loop_family_registry().expect("registry should build");
-    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
-    let base_context = test_run_context("scheduled-trigger-nudge");
-    let context = LoopRunContext::new(
-        base_context.scope,
-        base_context.turn_id,
-        base_context.run_id,
-        resolved.clone(),
-    );
-    let (host, _) = MockAgentLoopDriverHost::builder()
-        .run_context(context)
-        .script(no_progress_script())
-        .build();
-    let request = run_request(&driver, &host);
-
-    let exit = driver
-        .run(request, &host)
-        .await
-        .expect("planned driver run should succeed");
-
-    assert_completed_via_nudge(exit, &host);
+    assert_nudge_fires_for_resolved_profile(resolved, "scheduled-trigger-nudge").await;
 }
 
 #[tokio::test]
