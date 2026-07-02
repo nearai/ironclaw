@@ -44,8 +44,7 @@
   user-select: none;
 }
 
-/* Instance name: looks like plain text, reveals a rename pencil on hover.
-   Lighter weight by design — the brand row should read quiet, not bold. */
+/* Product name — static text, deliberately not an affordance. */
 .sidebar-brand-name {
   display: flex;
   align-items: center;
@@ -53,9 +52,6 @@
   flex: 1;
   min-width: 0;
   padding: 2px 4px;
-  background: none;
-  border: none;
-  border-radius: 6px;
   font-family: inherit;
   font-size: 15px;
   font-weight: 500;
@@ -64,27 +60,12 @@
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
-  cursor: pointer;
-}
-
-.sidebar-brand-name:hover {
-  background: var(--hover-subtle);
+  user-select: none;
 }
 
 .sidebar-brand-name #instance-name-text {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.instance-rename-icon {
-  flex-shrink: 0;
-  color: var(--text-muted);
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-
-.sidebar-brand-name:hover .instance-rename-icon {
-  opacity: 1;
 }
 
 .instance-name-input {
@@ -124,17 +105,17 @@
   color: var(--text);
 }
 
-/* ── New chat ── */
+/* ── New chat (docked above the footer row) ── */
 
 .sidebar-new-chat {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 4px 10px 8px;
+  margin: 8px 10px 2px;
   padding: 9px 12px;
   background: none;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--v2-radius-md);
   color: var(--text);
   font-size: var(--text-base);
   font-weight: 500;
@@ -153,6 +134,21 @@
 .sidebar-new-chat svg {
   flex-shrink: 0;
   color: var(--text-secondary);
+}
+
+.sidebar-new-chat .sidebar-label {
+  flex: 1;
+  text-align: left;
+}
+
+.sidebar-new-chat-kbd {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  color: var(--text-dimmed);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.4;
 }
 
 /* ── Primary nav ── */
@@ -257,20 +253,23 @@
   white-space: nowrap;
 }
 
+/* Tree-guide rule beside the chats (an ↳ without the arrowhead). */
 .sidebar-threads .thread-list {
   flex: 1;
   overflow-y: auto;
   padding-bottom: 8px;
+  margin-left: 14px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
 }
 
-/* ── Footer (utilities + account) ── */
+/* ── Footer (utilities + account) — borderless, quiet ── */
 
 .sidebar-footer {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
+  padding: 8px 12px 10px;
   flex-shrink: 0;
 }
 
@@ -537,3 +536,4 @@
     padding: var(--space-4) var(--space-4) 0;
   }
 }
+

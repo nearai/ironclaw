@@ -297,10 +297,10 @@
 
 .user-avatar-btn {
   position: relative;
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
   flex-shrink: 0;
   border-radius: 50%;
   border: none;
@@ -314,8 +314,8 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
 }
 
@@ -327,9 +327,11 @@
 
 .user-avatar-initials {
   background: var(--accent);
-  color: var(--bg);
-  font-size: 14px;
-  font-weight: 600;
+  color: var(--v2-on-accent);
+  /* Pixel tag face — the initial gets some character. */
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  font-weight: 500;
   display: flex;
   align-items: center;
   justify-content: center;

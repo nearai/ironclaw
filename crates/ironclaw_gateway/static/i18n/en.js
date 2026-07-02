@@ -286,6 +286,7 @@ I18n.register('en', {
   'thread.new': 'New thread',
   'thread.untitled': 'New chat',
   'thread.renameHint': 'Click to rename this chat',
+  'sidebar.newChatTooltip': 'New chat \u2014 press N',
   'thread.renameFailed': 'Rename failed: {message}',
   'flow.connect': 'Connect',
   'flow.connecting': 'Connecting\u2026',

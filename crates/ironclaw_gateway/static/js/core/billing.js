@@ -101,16 +101,13 @@ function renderSidebarCredits() {
   const fractionLeft = state.total > 0 ? remaining / state.total : 0;
   const plan = billingPlan();
   btn.classList.toggle('low', remaining < BILLING_LOW_THRESHOLD);
+  // Compact widget: ring + amount, plan detail in the tooltip.
   btn.title = I18n.t('billing.ringTooltip', {
     remaining: billingFormatUsd(remaining),
     total: billingFormatUsd(state.total),
-  });
-  btn.innerHTML = billingRingSvg(fractionLeft, 22, 3)
-    + '<span class="sidebar-label sidebar-credits-text">'
-    + '<span class="sidebar-credits-amount">' + escapeHtml(billingFormatUsd(remaining)) + '</span>'
-    + '<span class="sidebar-credits-caption">'
-    + escapeHtml(plan ? plan.name : I18n.t('billing.freeCredits'))
-    + '</span></span>';
+  }) + ' \u00b7 ' + (plan ? plan.name : I18n.t('billing.freeCredits'));
+  btn.innerHTML = billingRingSvg(fractionLeft, 16, 2.5)
+    + '<span class="sidebar-credits-amount">' + escapeHtml(billingFormatUsd(remaining)) + '</span>';
 }
 
 document.getElementById('sidebar-credits')?.addEventListener('click', () => {

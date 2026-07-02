@@ -1441,7 +1441,7 @@
 .thread-item:hover {
   background: var(--bg-tertiary);
   color: var(--text);
-  transform: translateX(2px);
+  /* No horizontal shift on hover — rows stay put. */
 }
 
 .thread-item.active {

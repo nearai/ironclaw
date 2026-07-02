@@ -1,21 +1,21 @@
 /* ── Billing surface + credits ring + payment reminder (all MOCK) ──────── */
 
-/* Sidebar credits row */
+/* Sidebar credits row — compact widget in the footer, beside the
+   account chip. Ring + amount only; plan detail lives in the tooltip. */
 
 .sidebar-credits {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  margin: 6px 10px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 4px 9px;
+  margin-right: 2px;
   background: none;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--v2-radius-full);
   font-family: inherit;
   color: var(--text);
   cursor: pointer;
   flex-shrink: 0;
-  text-align: left;
   transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
@@ -24,25 +24,12 @@
   border-color: var(--border-hover);
 }
 
-.sidebar-credits-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.25;
-}
-
 .sidebar-credits-amount {
-  font-size: var(--text-sm);
-  font-weight: 500;
-  color: var(--text);
-}
-
-.sidebar-credits-caption {
-  font-family: var(--font-pixel);
-  text-transform: uppercase;
-  letter-spacing: var(--v2-tracking-tag);
-  font-size: 9px;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--v2-font-size-label);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .sidebar-credits.low .sidebar-credits-amount {
@@ -50,9 +37,7 @@
 }
 
 .app-sidebar.collapsed .sidebar-credits {
-  justify-content: center;
-  padding: 8px 0;
-  border-color: transparent;
+  display: none;
 }
 
 /* Radial ring (shared) */

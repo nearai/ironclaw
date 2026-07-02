@@ -208,23 +208,15 @@
         <svg class="sidebar-logo" viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">
           <path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z" />
         </svg>
-        <!-- Customizable instance name (MOCK: persisted in localStorage,
-             click to rename inline — see initInstanceName in ui-helpers.js). -->
-        <button class="sidebar-brand-name" id="instance-name-btn" type="button"
-          data-i18n="sidebar.renameInstance" data-i18n-attr="title" title="Rename this instance">
+        <!-- Product name — intentionally NOT editable here. -->
+        <span class="sidebar-brand-name" id="instance-name-btn">
           <span id="instance-name-text">IronClaw</span>
-          <svg class="instance-rename-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        </button>
+        </span>
         <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" type="button"
           data-i18n="sidebar.collapse" data-i18n-attr="title" title="Collapse sidebar" aria-label="Collapse sidebar">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
         </button>
       </div>
-      <button class="sidebar-new-chat" id="thread-new-btn" type="button"
-        data-i18n="chat.newThread" data-i18n-attr="title" title="New chat (Ctrl/Cmd+N)">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        <span class="sidebar-label" data-i18n="sidebar.newChat">New chat</span>
-      </button>
       <nav class="sidebar-nav tab-bar" id="sidebar-nav">
         <button class="sidebar-nav-item active" data-tab="chat">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
@@ -276,9 +268,14 @@
         <div class="sidebar-threads-header"><span data-i18n="sidebar.conversations">Chats</span></div>
         <div class="thread-list" id="thread-list"></div>
       </div>
-      <!-- MOCK credits ring (see js/core/billing.js): remaining vs total,
-           decrements per agent message, click opens Billing. -->
-      <button class="sidebar-credits" id="sidebar-credits" type="button"></button>
+      <!-- Primary action lives at the bottom of the rail (item: New chat,
+           keyboard shortcut N). -->
+      <button class="sidebar-new-chat" id="thread-new-btn" type="button"
+        data-i18n="sidebar.newChatTooltip" data-i18n-attr="title" title="New chat — press N">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        <span class="sidebar-label" data-i18n="sidebar.newChat">New chat</span>
+        <kbd class="sidebar-new-chat-kbd" aria-hidden="true">N</kbd>
+      </button>
       <div class="sidebar-footer">
         <a class="sidebar-footer-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer"
           data-i18n="tab.docs" data-i18n-attr="title" title="Docs" aria-label="Docs">
@@ -309,6 +306,9 @@
         </button>
         <span id="theme-announce" class="sr-only" aria-live="polite"></span>
         <div class="sidebar-footer-spacer"></div>
+        <!-- MOCK credits (see js/core/billing.js): compact ring + amount
+             beside the account chip; click opens Billing. -->
+        <button class="sidebar-credits" id="sidebar-credits" type="button"></button>
         <div class="user-account" id="user-account">
           <button class="user-avatar-btn" id="user-avatar-btn" title="Account" aria-label="Account menu" data-i18n="auth.accountMenu" data-i18n-attr="aria-label">
             <span id="user-avatar-initials" class="user-avatar-initials">?</span>

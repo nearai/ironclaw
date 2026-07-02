@@ -89,8 +89,24 @@ function startInstanceRename() {
   input.addEventListener('blur', () => finish(true));
 }
 
-document.getElementById('instance-name-btn')?.addEventListener('click', () => startInstanceRename());
+// The brand name in the sidebar header is intentionally not editable
+// (startInstanceRename stays for the Settings surface to reuse).
 applyInstanceName();
+
+// Keyboard shortcut: `n` starts a new chat (ignored while typing).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'n' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+  const target = e.target;
+  if (target && (
+    target.tagName === 'INPUT'
+    || target.tagName === 'TEXTAREA'
+    || target.tagName === 'SELECT'
+    || target.isContentEditable
+  )) return;
+  e.preventDefault();
+  if (currentTab !== 'chat') switchTab('chat');
+  createNewThread();
+});
 
 // --- Agent home / welcome card ---
 //
