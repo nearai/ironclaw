@@ -7,14 +7,20 @@
 //! persisted run state observable at the coordinator boundary
 //! (`TurnCoordinator::get_run_state`).
 //!
-//! This is a smoke slice, not the exhaustive matrix: it asserts only that the
-//! submission is accepted and that the resulting run state carries the
-//! scheduled-trigger origin. It does not drive the scripted model — the
-//! triggered turn executes under its own resolved scope, which intentionally
-//! has no registered gateway, so this test asserts submission + persisted
-//! `product_context` only, not turn completion. The exhaustive origin/delivery
-//! matrix (surface types, adapters, delivery routing) is separate later
-//! coverage under C-TRIGGERED-ORIGIN / C-TRIGGERED-DELIVERY.
+//! Three slices, one wire:
+//! - `triggered_submit_carries_scheduled_trigger_origin` — submission accepted,
+//!   run state carries the scheduled-trigger origin (unscripted: the run then
+//!   fails benignly on the scope-miss sentinel, which this slice never reads).
+//! - `interactive_submit_carries_inbound_origin_not_scheduled_trigger` — the
+//!   discriminating contrast arm (C-TRIGGERED-ORIGIN).
+//! - `triggered_run_completes_and_persists_reply_in_trigger_thread` — drives a
+//!   triggered run to completion via `submit_triggered_turn_scripted` and pins
+//!   the int-tier-observable delivery contract (reply persisted in the
+//!   trigger's own thread; see that test's docs for why the outbound push leg
+//!   is out of reach at this tier).
+//!
+//! The Slack push/delivery-routing matrix stays with the services-shell spike
+//! (C-TRIGGERED-DELIVERY defer).
 
 // The support tree is large and shared; a single-test file exercises only a
 // slice of it, so suppress dead-code warnings on the includes (matches
@@ -104,4 +110,53 @@ async fn interactive_submit_carries_inbound_origin_not_scheduled_trigger() {
          proving the ScheduledTrigger origin on the triggered path is really \
          propagated from the submission path, not a constant",
     );
+}
+
+/// Post-fire delivery semantics at int tier: a triggered run driven to
+/// completion persists its final reply in the TRIGGER's own thread, readable
+/// through the same thread-history boundary interactive replies use.
+///
+/// Probe finding this pins (Wave-3 item 1): at this tier a completed run's
+/// final reply does NOT route through `ProductAdapter::render_outbound` (and
+/// therefore never reaches an `OutboundDeliverySink`) — the only production
+/// constructor of `ProductOutboundDeliveryRequest` is the Slack delivery
+/// services-shell (`slack_delivery.rs`, feature-gated), which no harness
+/// composition wires. The int-tier-observable delivery contract of a triggered
+/// run is therefore: reply finalized + persisted in the trigger's own thread —
+/// the same persisted state production's `deliver_triggered_run` reads via its
+/// finalized-message lookup before pushing. That is what this test asserts;
+/// the push leg itself stays with the services-shell spike
+/// (C-TRIGGERED-DELIVERY defer).
+#[tokio::test]
+async fn triggered_run_completes_and_persists_reply_in_trigger_thread() {
+    let harness = RebornIntegrationHarness::test_default()
+        .build()
+        .await
+        .expect("harness builds");
+
+    let submission = harness
+        .submit_triggered_turn_scripted(
+            "run the scheduled digest",
+            [RebornScriptedReply::text("scheduled digest complete")],
+        )
+        .await
+        .expect("scripted triggered submit accepted");
+
+    harness
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            ironclaw_turns::TurnStatus::Completed,
+        )
+        .await
+        .expect("triggered run completes on the shared scheduler");
+
+    harness
+        .thread_harness
+        .assert_final_reply(
+            submission.turn_scope.thread_id.clone(),
+            "scheduled digest complete",
+        )
+        .await
+        .expect("triggered run's final reply persisted in the trigger's own thread");
 }

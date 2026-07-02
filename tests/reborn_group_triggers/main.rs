@@ -23,6 +23,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -46,10 +47,16 @@ async fn triggers_group_e2e() {
     //     `tests/reborn_integration_triggered_submit.rs`. It lives as a flat
     //     single-thread test (submit + read run state), so it does NOT belong in
     //     this multi-thread group binary — do not duplicate it here.
-    //   - STILL OUT — a triggered turn that raises a real `BlockedApproval` gate
-    //     mid-fire → approve/deny → resume: authorable now the seam exists; add
-    //     when C-TRIGGERED coverage is extended.
-    //   - BLOCKED (C-TRIGGERED-DELIVERY) — triggered run → outbound delivery sink:
+    //   - DONE — a triggered turn that raises a real `BlockedApproval` gate
+    //     mid-fire → approve/deny → resume: `triggered_gate_group` below
+    //     (`scenario_triggered_gate::{run_approve,run_deny}`), driven through
+    //     `submit_triggered_turn_scripted`.
+    //   - PARTIAL (C-TRIGGERED-DELIVERY) — the int-tier-observable half (triggered
+    //     run completes; final reply persisted in the trigger's own thread — the
+    //     state the production push leg reads) is pinned by
+    //     `triggered_run_completes_and_persists_reply_in_trigger_thread` in
+    //     `tests/reborn_integration_triggered_submit.rs`. The PUSH half
+    //     (triggered run → outbound delivery sink) stays BLOCKED:
     //     the delivery leg (`deliver_triggered_run`) is a PRIVATE fn in the
     //     Slack services-shell (`slack_delivery.rs`), reachable only via a
     //     detached-`tokio::spawn` public entry (`PostSubmitDeliveryHook`), and is
@@ -64,6 +71,39 @@ async fn triggers_group_e2e() {
     // `crates/ironclaw_triggers/tests/repository_contract.rs`; the trigger →
     // Slack outbound-delivery leg lives in the trigger-delivery-hook tests in
     // `crates/ironclaw_reborn_composition/src/slack_host_beta.rs`.
+
+    report.assert_all_passed();
+}
+
+/// Triggered-origin runs raise, park on, and resume from REAL approval gates
+/// (mid-fire gate → approve/deny → resume), exactly like interactive runs.
+///
+/// Lives in this binary (not `reborn_group_approvals`) because the scenario's
+/// subject is the TRIGGERED submit wire, not the approval machinery — the
+/// approval arms mirror `reborn_group_approvals/scenario_gate_then_{approve,deny}`
+/// over the trusted-trigger origin. Each arm gets its OWN `live_approvals`
+/// group (see `scenario_triggered_gate` docs), so this is a separate
+/// `#[tokio::test]` rather than more scenarios on the verbs group above (the
+/// `triggers()` group has auto-approve ENABLED — a gate can never raise there).
+#[tokio::test]
+async fn triggered_gate_group() {
+    let mut report = ScenarioReport::new();
+
+    let g_approve = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("approve-arm group builds");
+    report.record(
+        "triggered_gate_approve",
+        scenario_triggered_gate::run_approve(&g_approve).await,
+    );
+
+    let g_deny = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("deny-arm group builds");
+    report.record(
+        "triggered_gate_deny",
+        scenario_triggered_gate::run_deny(&g_deny).await,
+    );
 
     report.assert_all_passed();
 }
