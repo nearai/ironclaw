@@ -113,6 +113,7 @@ mod runtime_input;
 mod runtime_profile_approval_policy;
 mod skill_learning;
 mod skill_listing;
+mod multi_agent;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -272,6 +273,12 @@ pub use runtime_input::{
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
+pub use multi_agent::{
+    MultiAgentDemoOptions, MultiAgentError, MultiAgentRunOptions, MultiAgentRunReport,
+    format_demo_output, format_run_output, run_reborn_multi_agent_demo, run_reborn_multi_agent_task,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use multi_agent::run_reborn_multi_agent_task_with_llm;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,

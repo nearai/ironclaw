@@ -28,6 +28,7 @@ pub mod local_trigger_access;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
+pub mod multi_agent;
 mod model_failure_mapping;
 pub mod model_routes;
 pub mod planned_driver;
