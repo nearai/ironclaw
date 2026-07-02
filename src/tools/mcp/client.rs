@@ -1026,6 +1026,17 @@ impl Tool for McpToolWrapper {
         // explicit nulls for fields that should simply be absent.
         let params = strip_top_level_nulls(params);
 
+        // TEMP DIAG: confirms (a) this build carries the thread-scoped-mcp merge
+        // and (b) whether the tool call is thread-scoped (conversation_id=Some →
+        // io.ironclaw/threadId gets injected) or user-scoped (None → no _meta).
+        tracing::info!(
+            server = %self.server_name,
+            tool = %self.tool.name,
+            user = %ctx.user_id,
+            conversation_id = ?ctx.conversation_id,
+            "[DIAG] MCP execute: thread scope for tool call"
+        );
+
         let client = self
             .client_store
             .resolve_for_thread(&ctx.user_id, &self.server_name, ctx.conversation_id)
