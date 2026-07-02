@@ -95,17 +95,32 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
     // The discriminating proof: no `Failed{Backend}` tool-error was persisted
     // for this capability. Mutation-verified — see the module doc above — a
     // `Failed{Backend, "resume requires run_state"}` result only exists when
-    // the deny short-circuit was bypassed and the parked capability was
-    // actually re-dispatched to the capability host a second time. Under
-    // correct behavior the short-circuit fires before any second dispatch, so
-    // this assertion returns `Err` (nothing recorded) and `.is_err()` holds.
+    // the deny short-circuit was bypassed and re-dispatched. Match the
+    // SPECIFIC not-found message (not any `Err`) so a harness-level bug (e.g.
+    // a history-read failure) can't masquerade as a pass.
     let leaked_redispatch = harness
         .assert_tool_error(ToolErrorClass::Failed, "backend")
         .await;
-    assert!(
-        leaked_redispatch.is_err(),
-        "a persisted Failed{{Backend}} tool-error for github.create_issue means the denied \
-         auth gate was re-dispatched to the capability host instead of being short-circuited; \
-         found: {leaked_redispatch:?}"
-    );
+    match &leaked_redispatch {
+        Err(err)
+            if err.to_string().contains(
+                "no persisted tool-error summary of class Failed with reason \"backend\"",
+            ) => {}
+        other => panic!(
+            "expected no persisted Failed{{Backend}} tool-error for github.create_issue (a \
+             leaked re-dispatch); got {other:?} instead of the expected not-found error"
+        ),
+    }
+
+    // Positive proof of the CORRECT outcome: `short_circuit_denied_resume`
+    // (capabilities.rs ~1149) persists its raw planner summary via
+    // `SanitizedStrategySummary::from_trusted_static("auth gate denied by
+    // user")`, deliberately bypassing the "capability denied with " prefix
+    // (no host-returned text to prefix for a gate denial) — so
+    // `assert_tool_error(Denied, ..)` cannot express this; use the raw-summary
+    // assertion instead.
+    harness
+        .assert_tool_error_summary_contains("auth gate denied by user")
+        .await
+        .expect("the deny short-circuit's planner summary was persisted");
 }

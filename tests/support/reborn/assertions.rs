@@ -221,16 +221,15 @@ impl RebornIntegrationHarness {
     /// harness construction, mirroring `baseline_egress_count` etc.) — do not
     /// assume this helper is safe to reuse as-is once a thread has more than one
     /// turn.
-    pub async fn assert_tool_error(
-        &self,
-        class: ToolErrorClass,
-        reason: &str,
-    ) -> HarnessResult<()> {
+    /// Collects the persisted `safe_summary` field of every `ToolResultReference`
+    /// message on this thread's FULL history (not baseline-sliced — same caveat
+    /// as `assert_tool_error`: safe only for single-turn harnesses today).
+    async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
         let history = self
             .thread_harness
             .history(self.binding.thread_id.clone())
             .await?;
-        let summaries: Vec<String> = history
+        Ok(history
             .iter()
             .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
             .filter_map(|message| message.content.as_deref())
@@ -238,7 +237,15 @@ impl RebornIntegrationHarness {
                 serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
             })
             .map(|envelope| envelope.safe_summary.as_str().to_string())
-            .collect();
+            .collect())
+    }
+
+    pub async fn assert_tool_error(
+        &self,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
         let prefix = class.summary_prefix();
         if summaries
             .iter()
@@ -250,6 +257,27 @@ impl RebornIntegrationHarness {
             "no persisted tool-error summary of class {class:?} with reason {reason:?}; saw {summaries:?}"
         )
         .into())
+    }
+
+    /// Assert some persisted `ToolResultReference`'s raw `safe_summary` text
+    /// contains `text` — NO class-prefix requirement. Complements
+    /// [`assert_tool_error`] for `CapabilityErrorSummary`s the executor builds
+    /// via `SanitizedStrategySummary::from_trusted_static` in
+    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs` (filtered-surface
+    /// denial, stale-surface retry, auth/approval gate-declined short-circuit) —
+    /// those are fixed host-authored literals with no host-returned text to
+    /// prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary`
+    /// prefix match can never succeed for them. Use only for known
+    /// executor-synthesized literals.
+    pub async fn assert_tool_error_summary_contains(&self, text: &str) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
+        if summaries.iter().any(|summary| summary.contains(text)) {
+            return Ok(());
+        }
+        Err(
+            format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
+                .into(),
+        )
     }
 
     /// Assert that any captured **network** egress request whose URL

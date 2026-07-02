@@ -815,7 +815,13 @@ impl RebornIntegrationHarness {
         self.capability_recorder
             .approve_local_dev_gate(gate_ref)
             .await?;
-        self.resume_run(run_id, gate_ref.clone(), None).await
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::AnyBlockedGate,
+        )
+        .await
     }
 
     /// Deny a blocked approval gate and resume the run (the user-declines path).
@@ -830,6 +836,7 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::AnyBlockedGate,
         )
         .await
     }
@@ -841,11 +848,24 @@ impl RebornIntegrationHarness {
     /// `short_circuit_denied_resume` then surfaces a model-visible gate-declined failure for the
     /// parked capability instead of re-dispatching it (which would re-block on the still-missing
     /// credential → infinite loop).
+    ///
+    /// Unlike `deny_gate`, which resumes with `ResumeTurnPrecondition::AnyBlockedGate`, this
+    /// resumes with `ResumeTurnPrecondition::BlockedAuthGate` — the same precondition
+    /// `AuthInteractionService` uses for its production auth-resume path. That precondition is
+    /// enforced server-side (`resume_turn_once` requires `record.status == BlockedAuth`), so a
+    /// stale or wrong (non-auth) gate ref fails the resume with `TurnError::InvalidTransition`
+    /// instead of silently resuming whatever gate class happens to be blocked. A client-side
+    /// `gate:auth-` prefix check (mirroring `submit_turn_until_auth_blocked`) adds cheap
+    /// defense-in-depth on top of that server-side check.
     pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
         self.resume_run(
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedAuthGate,
         )
         .await
     }
@@ -874,6 +894,7 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         gate_ref: GateRef,
         resume_disposition: Option<GateResumeDisposition>,
+        precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
         let response = self
             .coordinator
@@ -882,7 +903,7 @@ impl RebornIntegrationHarness {
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
-                precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                precondition,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
