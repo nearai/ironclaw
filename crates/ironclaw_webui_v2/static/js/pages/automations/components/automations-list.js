@@ -59,7 +59,7 @@ export function AutomationsList({
 
         <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
           <div
-            className="inline-flex h-8 max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] p-0.5"
+            className="inline-flex h-[var(--v2-control-h-sm)] max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] p-0.5"
             role="group"
             aria-label=${t("automations.filterLabel")}
           >
@@ -81,7 +81,7 @@ export function AutomationsList({
             `)}
           </div>
           <label
-            className="inline-flex h-8 shrink-0 items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] pl-3 focus-within:border-[var(--v2-accent)]"
+            className="inline-flex h-[var(--v2-control-h-sm)] shrink-0 items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] pl-3 focus-within:border-[var(--v2-accent)]"
           >
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
               ${t("automations.sort.label")}

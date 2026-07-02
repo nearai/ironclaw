@@ -35,15 +35,23 @@ const BASE =
 
 /* ── Size classes ──────────────────────────────────────────────────── */
 
-// Compact, Linear-like density (design review): buttons sit at 32/36/40px
-// instead of the previous 36/44–50/54px so control rows read as chrome, not
-// content. Radii step down with the heights (8/10/12px).
+/* Compact control-density scale (design system PR #5563): heights and
+   paddings come from the --v2-control-* tokens so buttons, inputs, and
+   toolbar controls align in mixed rows. sm 28px / md 32px / lg 36px. */
 const SIZES = {
-  sm:      "h-8 rounded-[8px] px-2.5 text-xs",
-  md:      "h-9 rounded-[10px] px-3.5 text-[13px]",
-  lg:      "h-10 rounded-[12px] px-5 text-sm",
-  icon:    "h-9 w-9 rounded-[10px]",
-  "icon-sm": "h-8 w-8 rounded-[8px]",
+  sm:
+    "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] " +
+    "px-[var(--v2-control-px-sm)] text-xs",
+  md:
+    "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-md)] text-[13px]",
+  lg:
+    "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-lg)] text-sm",
+  icon:
+    "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
+  "icon-sm":
+    "h-[var(--v2-control-h-sm)] w-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */
@@ -98,10 +106,10 @@ export function Button({
           BASE,
           sizeClass,
           fullClass,
-          // Arbitrary-value class on purpose: the `.text-white` compat shim in
-          // app.css remaps plain `text-white` to the theme ink, which would
-          // render dark text on the accent gradient in light mode.
-          "relative overflow-hidden text-[#ffffff] group",
+          // text-[var(--v2-on-accent)], not `text-white`: the legacy compat
+          // shim in app.css remaps `.text-white` to the theme ink, which
+          // would render dark text on the accent gradient in light mode.
+          "relative overflow-hidden text-[var(--v2-on-accent)] group",
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}

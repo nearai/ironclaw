@@ -108,6 +108,26 @@
   color-scheme: light;
 }
 
+/* ── Structural tokens (theme-independent) ───────────────────────── */
+/* Control density + radii from the design system (PR #5563, commit
+   2f8da38de): compact Linear-like control heights shared by buttons
+   and toolbar controls so mixed rows align. `--v2-on-accent` is the
+   text colour on accent fills — a token (not the `text-white` utility,
+   which the compat shim below remaps to theme ink). */
+:root {
+  --v2-radius-sm: 8px;
+  --v2-radius-md: 10px;
+
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+
+  --v2-on-accent: #ffffff;
+}
+
 /* ── Global resets ───────────────────────────────────────────────── */
 
 *, *::before, *::after {
