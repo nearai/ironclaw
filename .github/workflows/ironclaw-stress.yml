@@ -74,7 +74,7 @@ jobs:
             2> target/ironclaw-stress/pr-suite-report.txt
 
       - name: Run nightly libsql bottleneck suite
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.head_ref == 'ci-force-full-pr-checks'
         run: |
           mkdir -p target/ironclaw-stress
           cargo run -p ironclaw_stress --release -- \
@@ -111,7 +111,7 @@ jobs:
     name: libsql concurrency ramp
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.head_ref == 'ci-force-full-pr-checks'
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

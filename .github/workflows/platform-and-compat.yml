@@ -145,7 +145,10 @@ jobs:
           FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"}]'
 
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
+          if [ "${{ github.head_ref }}" = "ci-force-full-pr-checks" ]; then
+            echo "test_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+            echo "windows_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "test_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
             echo "windows_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
@@ -206,7 +209,7 @@ jobs:
   windows-build:
     name: Windows Build (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call' || github.head_ref == 'ci-force-full-pr-checks')
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -281,7 +284,7 @@ jobs:
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || github.head_ref == 'ci-force-full-pr-checks') &&
       needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -311,7 +314,7 @@ jobs:
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
+      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker) || github.head_ref == 'ci-force-full-pr-checks')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

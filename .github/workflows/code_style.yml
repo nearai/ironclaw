@@ -88,7 +88,9 @@ jobs:
           FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--all-features"}]'
 
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
+          if [ "${{ github.head_ref }}" = "ci-force-full-pr-checks" ]; then
+            echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
             echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
@@ -199,7 +201,7 @@ jobs:
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
     needs: [changes, clippy-matrix]
-    if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
+    if: needs.changes.outputs.has_code == 'true' && (github.event_name == 'push' || github.head_ref == 'ci-force-full-pr-checks')
     runs-on: windows-latest
     strategy:
       fail-fast: false
