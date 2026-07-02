@@ -78,7 +78,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
@@ -123,9 +123,12 @@ use super::harness::{
 use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
-use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
+use super::scripted_provider::{
+    ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
+};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use crate::support::trace_llm::TraceLlm;
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -258,8 +261,9 @@ impl GroupCapability {
 /// runtime so state written by thread A is visible to thread B.
 ///
 /// Construct with [`live_approvals`](Self::live_approvals),
-/// [`builtin_tools`](Self::builtin_tools), or
-/// [`extension_lifecycle`](Self::extension_lifecycle), or via
+/// [`builtin_tools`](Self::builtin_tools),
+/// [`extension_lifecycle`](Self::extension_lifecycle), or
+/// [`triggers`](Self::triggers), or via
 /// [`builder`](Self::builder) for custom storage mode.
 pub struct RebornIntegrationGroup {
     pub(crate) shared: Arc<GroupSharedStorage>,
@@ -310,6 +314,24 @@ impl RebornIntegrationGroup {
         Self::builder().profile_tools().await
     }
 
+    /// Group with trigger-management tools
+    /// (trigger_create/list/pause/resume/remove). Auto-approve is enabled for
+    /// all capability ids in the group scope so the `Ask`-mode verbs dispatch
+    /// through the real capability path instead of raising approval gates.
+    pub async fn triggers() -> HarnessResult<Self> {
+        Self::builder().triggers().await
+    }
+
+    /// Group whose ONLY capability is `builtin.skill_activate` (E-SKILL seam).
+    /// A system-scoped `greet` skill is seeded for the run; a scripted
+    /// `builtin.skill_activate` call for `greet` dispatches the synthetic
+    /// capability and injects the skill's instructions into the model
+    /// request through the runtime's `skill_context_source`. Auto-approve is
+    /// enabled.
+    pub async fn skill_activation_tools() -> HarnessResult<Self> {
+        Self::builder().skill_activation_tools().await
+    }
+
     /// Builder for advanced configuration (e.g. `StorageMode::LibSql`).
     /// Defaults to `StorageMode::InMemory`.
     pub fn builder() -> RebornIntegrationGroupBuilder {
@@ -330,6 +352,7 @@ impl RebornIntegrationGroup {
             group: self,
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
+            park_gate: None,
         }
     }
 
@@ -389,6 +412,22 @@ struct GroupBaseData {
     /// valid stand-in for the whole group (see `ensure_thread_scope_matches_turn_scope`,
     /// which checks only tenant/agent/project, never thread_id).
     canonical_binding: ResolvedBinding,
+}
+
+impl GroupBaseData {
+    /// The canonical binding's resolved subject user id — the hashed `UserId`
+    /// the actor `host-user` resolves to. `live_approvals` and `profile_tools`
+    /// both pin their capability harness's executor user to this so capability
+    /// dispatch shares the run's `(tenant, user)` with the turn-store /
+    /// evidence scope resolved from the SAME `canonical_binding` (see the
+    /// `canonical_binding` field docs above).
+    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+        Ok(self
+            .canonical_binding
+            .subject_user_id
+            .clone()
+            .ok_or("canonical binding missing subject user id")?)
+    }
 }
 
 /// Builder for `RebornIntegrationGroup` with optional storage mode selection.
@@ -552,8 +591,26 @@ impl RebornIntegrationGroupBuilder {
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
+            // E-GATEWAY: the parking scripted gateway (`park_model`) plus
+            // `cancel_run` are the covered seam. This optional `cancellation_factory`
+            // is intentionally left `None`: it does NOT gate whether a run reaches
+            // `Cancelled`. `RebornLoopDriverHostFactory` always builds its own
+            // default `TurnStateRunCancellationFactory` internally
+            // (`ironclaw_reborn::loop_driver_host`), whose cancel poll loop
+            // (`DEFAULT_CANCEL_POLL_INTERVAL`, 25ms) observes the durable
+            // `CancelRequested` and drives the parked run to `Cancelled` on resume —
+            // which is what `reborn_integration_cancel` asserts (verified 12/12).
+            // Supplying a factory here would only add the coordinator's
+            // `CompositeTurnRunWakeNotifier` fan-out for product-live retained-run-handle
+            // observation (`ironclaw_reborn::runtime` `wake_notifier`), a path this
+            // test does not exercise — so wiring one would be dead, untested code.
             cancellation_factory: None,
-            skill_context_source: None,
+            // E-SKILL: wire the local-dev skill context source so an activated
+            // skill's instructions inject into the model request. `Some` only for
+            // `skill_activation_tools()` harnesses; `None` for every other backend,
+            // so all existing group tests are behavior-identical (production wires
+            // this in `build_reborn_runtime`, runtime.rs ~2875).
+            skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             // E-PROFILE: in HostRuntime mode, back the profile source with the
@@ -620,11 +677,7 @@ impl RebornIntegrationGroupBuilder {
         // binding `build_base` already resolved for the shared turn-store /
         // evidence scope, so the approval user and the turn-store scope are
         // derived from one probe and cannot drift.
-        let subject_user = base
-            .canonical_binding
-            .subject_user_id
-            .clone()
-            .ok_or("canonical binding missing subject user id")?;
+        let subject_user = base.canonical_subject_user()?;
         let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
             .await?
             .with_user_id(subject_user);
@@ -685,7 +738,50 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        let host_runtime = HostRuntimeCapabilityHarness::profile_tools().await?;
+        // Execute `builtin.profile_set` under the run's CANONICAL binding
+        // subject user (the hashed `UserId` the actor `host-user` resolves
+        // to), not the constructor's fixed test user, so capability dispatch
+        // and the loop's `resolve_user_profile` read-back share the SAME
+        // `(tenant, user)` — matching production and mirroring
+        // `live_approvals`'s alignment above. Without this, a second thread's
+        // loop resolves the profile under the canonical binding subject user
+        // while the write dispatched under the fixed constructor user, so the
+        // read-back never sees it.
+        let subject_user = base.canonical_subject_user()?;
+        let host_runtime = HostRuntimeCapabilityHarness::profile_tools()
+            .await?
+            .with_user_id(subject_user);
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a trigger-management group. See [`RebornIntegrationGroup::triggers`].
+    pub async fn triggers(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = HostRuntimeCapabilityHarness::trigger_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a skill-activation group. See
+    /// [`RebornIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
+    /// skill BEFORE `into_group` so the runtime's `skill_context_source` (and the
+    /// `skill_activate` capability's `activate_skills_for_run`) resolve it at
+    /// activation time. A system skill is used so resolution is independent of the
+    /// run's scope owner — the seam only needs the skill to exist.
+    pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
+        // above) rather than a separately hardcoded literal, so the E-SKILL
+        // skill context source is built for the same tenant the turn runs
+        // under — see `HostRuntimeCapabilityHarness::skill_activation_tools`.
+        let host_runtime =
+            HostRuntimeCapabilityHarness::skill_activation_tools(&base.canonical_binding.tenant_id)
+                .await?;
+        host_runtime.seed_system_skill_for_test(
+            "greet",
+            "greets the user warmly",
+            "GREET_SKILL_PROMPT_SENTINEL",
+        )?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
@@ -710,6 +806,10 @@ pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
+    /// When set, this thread's model call parks until the gate is released
+    /// (E-GATEWAY seam), enabling a mid-turn cancel test. `None` = normal
+    /// scripted playback.
+    park_gate: Option<ParkingModelGate>,
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -717,6 +817,20 @@ impl<'g> RebornThreadBuilder<'g> {
     /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
+        self
+    }
+
+    /// Park this thread's model call until `gate` is released (E-GATEWAY seam).
+    /// The parking provider sits at the same vendor-SDK seam as the scripted
+    /// provider, so the real decorator chain still runs on top.
+    pub fn park_model(self, gate: ParkingModelGate) -> Self {
+        self.park_model_opt(Some(gate))
+    }
+
+    /// Internal: set the optional park gate (used by the flat builder to thread
+    /// its own `park_gate` through the degenerate one-thread group).
+    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
+        self.park_gate = gate;
         self
     }
 
@@ -767,7 +881,25 @@ impl<'g> RebornThreadBuilder<'g> {
         // --- per-thread scripted gateway, registered before any submit ---------
         // Session path is per-conversation so group threads do not clobber each
         // other's LLM session cache under the same `turn_root`.
-        let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(self.replies));
+        // Retain the concrete `TraceLlm` before the `dyn LlmProvider` upcast so
+        // tests can inspect the model-visible requests via `captured_requests()`:
+        // the system prompt (`assert_system_prompt_contains`, T0-SYSPROMPT) and
+        // host-injected context such as activated-skill instructions
+        // (`assert_model_request_contains`, E-SKILL half B).
+        //
+        // E-GATEWAY: when a park gate is set, swap the scripted provider for a
+        // parking one at the SAME vendor-SDK seam (the decorator chain still runs
+        // on top). Parking mode is only a wrapper around the same scripted
+        // provider, so the `TraceLlm` is built unconditionally first and the
+        // parking wrapper holds/clones that same `Arc` — the trace is retained
+        // either way, so tests can inspect captured requests
+        // (`assert_system_prompt_contains`, `assert_model_request_contains`)
+        // regardless of whether this thread is parked.
+        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
+        let raw: Arc<dyn LlmProvider> = match self.park_gate {
+            Some(gate) => Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+            None => scripted_llm.clone(),
+        };
         let session = create_session_manager(SessionConfig {
             session_path: shared
                 .turn_root
@@ -800,6 +932,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_egress_count = capability_recorder.runtime_http_requests().len();
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
+        let baseline_network_count = capability_recorder.network_http_requests().len();
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -839,11 +972,13 @@ impl<'g> RebornThreadBuilder<'g> {
             coordinator: Arc::clone(&shared.coordinator),
             event_seq: AtomicU64::new(1),
             capability_recorder,
+            scripted_llm,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,
             baseline_result_count,
             baseline_process_count,
+            baseline_network_count,
         })
     }
 }

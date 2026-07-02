@@ -79,7 +79,7 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   MCP assertion (`assert_mcp_tool_called`), approval methods
   (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
-  `captured_capability_results`) the assertion file reads.
+  `captured_capability_results` / `captured_system_prompts`) the assertion file reads.
 - `harness_mcp.rs` — the mock-MCP scaffolding extracted from `harness.rs`:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
@@ -101,7 +101,10 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `assertions.rs` — the richer egress + tool-result assertions
   (`assert_egress_count` / `assert_egress_url_order` / `assert_egress_method_order`
   / `assert_egress_body_contains` / `assert_tool_result_contains` /
-  `assert_tool_error`).
+  `assert_tool_error` / `assert_network_egress_header_contains`), plus the
+  model-prompt assertion `assert_system_prompt_contains` (reads the scripted
+  `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
+  log).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
@@ -151,6 +154,10 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
+- `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
 ### Keyed HTTP responses
 
@@ -196,6 +203,22 @@ so the mock's OAuth gate passes; it rejects any URL not prefixed by the configur
 Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
+
+### Credential injection (GitHub)
+
+`.with_github_issue_tools()` wires the real GitHub first-party WASM
+capabilities behind a `GithubHarnessAuthorizer`, which authorizes every
+dispatch with an `InjectCredentialAccountOnce` obligation. A scripted
+`github.*` tool call executes the real WASM module; its outbound HTTP
+request gets a synthetic `Authorization: Bearer <token>` credential
+injected by the host egress pipeline before it reaches the recording
+network egress. This is the credential-injection-reaches-the-wire proof
+(T0-SECRET-INJECT).
+
+Script with `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
+followed by a trailing `RebornScriptedReply::text(..)` turn.
+
+- `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — see the "Richer assertions" list below; this is the assertion for this capability.
 
 ### OAuth / product-auth
 
@@ -351,6 +374,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 
 ### Key accessors on `RebornIntegrationGroup`
@@ -364,7 +388,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 ### Per-thread baseline (R2)
 
 Each `RebornIntegrationHarness` records `baseline_invocation_count`,
-`baseline_egress_count`, and `baseline_result_count` at construction from the
-shared recorder's current lengths. All assertion methods (`assert_tool_invoked`,
-`assert_egress_request_matching`, etc.) slice `[baseline..]` so a thread never
-spuriously passes on a prior thread's entries.
+`baseline_egress_count`, `baseline_result_count`, `baseline_process_count`, and
+`baseline_network_count` at construction from the shared recorder's current
+lengths. All assertion methods (`assert_tool_invoked`,
+`assert_egress_request_matching`, `assert_network_egress_header_contains`,
+etc.) slice `[baseline..]` so a thread never spuriously passes on a prior
+thread's entries.

@@ -29,21 +29,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
+use ironclaw_llm::Role;
+use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    FilesystemTurnStateStore, GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
+    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
+    TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
@@ -54,8 +58,10 @@ use super::harness::{
 use super::http_matcher::ScriptedHttpResponse;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
+use super::scripted_provider::ParkingModelGate;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
+use crate::support::trace_llm::TraceLlm;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -104,6 +110,13 @@ enum RebornCapabilityBackend {
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
     MockMcp { mcp_url: String },
+    /// GitHub first-party WASM capabilities with a `GithubHarnessAuthorizer`
+    /// that attaches an `InjectCredentialAccountOnce` obligation, so a dispatched
+    /// `github.*` tool call gets a synthetic access token injected onto the
+    /// outbound request (T0-SECRET-INJECT). The credential lands on the recorded
+    /// **network** egress (`assert_network_egress_header_contains`); the runtime
+    /// egress recorder is inert for this wiring — see that assertion's docs.
+    GithubIssueTools,
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -120,6 +133,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// construction — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
+    /// E-GATEWAY: when set, the model call parks until released, enabling a
+    /// mid-turn cancel test. Threaded into the degenerate one-thread group.
+    park_gate: Option<ParkingModelGate>,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -150,6 +166,14 @@ impl RebornIntegrationHarnessBuilder {
     /// test on-disk durability via `assert_reply_persists_after_reopen`.
     pub fn storage(mut self, mode: StorageMode) -> Self {
         self.storage = mode;
+        self
+    }
+
+    /// Park this harness's model call until `gate` is released (E-GATEWAY seam),
+    /// so a test can cancel the run mid-turn. See
+    /// [`RebornThreadBuilder::park_model`].
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.park_gate = Some(gate);
         self
     }
 
@@ -208,6 +232,23 @@ impl RebornIntegrationHarnessBuilder {
     ) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.keyed_http_responses = responses.into_iter().collect();
+        self
+    }
+
+    /// Wire the GitHub first-party WASM capabilities behind a
+    /// `GithubHarnessAuthorizer`, which allows every dispatch with an
+    /// `InjectCredentialAccountOnce` obligation. A scripted `github.*` tool call
+    /// then executes the real WASM module, whose outbound HTTP request has a
+    /// synthetic `Authorization: Bearer <token>` credential injected by the host
+    /// egress pipeline before it reaches the recording network egress. Proves
+    /// credential injection reaches the wire (T0-SECRET-INJECT).
+    ///
+    /// Script the model with
+    /// `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
+    /// followed by a `RebornScriptedReply::text(..)` turn, then assert with
+    /// [`assert_network_egress_header_contains`](RebornIntegrationHarness::assert_network_egress_header_contains).
+    pub fn with_github_issue_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
         self
     }
 
@@ -274,6 +315,13 @@ impl RebornIntegrationHarnessBuilder {
                 .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
+            RebornCapabilityBackend::GithubIssueTools => {
+                // T0-SECRET-INJECT: GitHub WASM caps behind `GithubHarnessAuthorizer`
+                // (InjectCredentialAccountOnce). No approval gate / user alignment —
+                // the authorizer allows every dispatch outright.
+                let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
         };
 
         // Routed through the group/thread builder (one assembly path for both
@@ -287,6 +335,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
+            .park_model_opt(self.park_gate)
             .build()
             .await
     }
@@ -308,6 +357,17 @@ pub struct RebornIntegrationHarness {
     pub(crate) coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) event_seq: AtomicU64,
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
+    /// The concrete scripted `TraceLlm` retained before it was upcast to
+    /// `dyn LlmProvider` in the per-thread gateway build. Its
+    /// `captured_requests()` lets assertions inspect the exact model-visible
+    /// requests: the system prompt (safety banners, profile lines —
+    /// `captured_system_prompts()`/`assert_system_prompt_contains`) and any
+    /// host-injected context such as activated-skill instructions
+    /// (`assert_model_request_contains`, E-SKILL half B). Retained even when
+    /// the thread parks the model (`park_model`, E-GATEWAY): parking mode is
+    /// only a wrapper (`ParkingLlm`) around this SAME `TraceLlm`, so captured
+    /// requests are still inspectable for a parked thread.
+    pub(crate) scripted_llm: Arc<TraceLlm>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -324,6 +384,8 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
+    /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
+    pub(crate) baseline_network_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -341,6 +403,7 @@ impl RebornIntegrationHarness {
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
             shell_mode: ShellMode::default(),
+            park_gate: None,
         }
     }
 
@@ -484,6 +547,44 @@ impl RebornIntegrationHarness {
         }
     }
 
+    /// E-DURABLE: assert an installed extension survives an independent reopen
+    /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
+    /// at the capability harness's on-disk `storage_root` (a handle independent
+    /// of the live `Arc`) and asserts `extension_id` is present — proving the
+    /// install persisted to disk, not just to in-memory state. Parallels
+    /// `assert_reply_persists_after_reopen` for capability-produced state.
+    pub async fn assert_extension_install_persists_after_reopen(
+        &self,
+        extension_id: &str,
+    ) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err("no host-runtime capability backend for durable reopen".into());
+            }
+        };
+        let store =
+            ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+                &harness.storage_root_for_test(),
+            )
+            .await?;
+        let installations = store.list_installations().await?;
+        if installations
+            .iter()
+            .any(|installation| installation.extension_id().as_str() == extension_id)
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = installations
+            .iter()
+            .map(|installation| installation.extension_id().as_str())
+            .collect();
+        Err(
+            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
+                .into(),
+        )
+    }
+
     /// Assert the named capability was invoked through the real capability path
     /// (proves the scripted tool call actually ran the tool).
     ///
@@ -534,6 +635,34 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_egress_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         let all = self.capability_recorder.runtime_http_requests();
         all[self.baseline_egress_count..].to_vec()
+    }
+
+    /// Every `System`-role prompt the model saw across the captured requests, in
+    /// call order. Reads the scripted `TraceLlm` retained before the
+    /// `dyn LlmProvider` upcast (`scripted_llm`). Empty until the first turn is
+    /// submitted. Read by `assert_system_prompt_contains` in `assertions.rs`.
+    ///
+    /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
+    /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
+    /// not a group-shared recorder, so it only ever holds this thread's requests.
+    pub(super) fn captured_system_prompts(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::System))
+            .map(|message| message.content)
+            .collect()
+    }
+
+    /// Snapshot of the captured **network** egress requests for this thread only
+    /// (`[baseline_network_count..]` delta), in call order. Read by
+    /// `assert_network_egress_header_contains` (assertions.rs) — the T0-SECRET-INJECT
+    /// credential-injection assertion, which observes a different recorder lane
+    /// than `captured_egress_requests` (see that assertion's docs for why).
+    pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
+        let mut all = self.capability_recorder.network_http_requests();
+        all.split_off(self.baseline_network_count)
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process
@@ -682,17 +811,39 @@ impl RebornIntegrationHarness {
     /// Approve a blocked approval gate and resume the run (the user-approves path).
     /// Resolves the persisted approval request to an issued lease, then resumes the
     /// run so the originally-gated capability re-dispatches and the turn completes.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .approve_local_dev_gate(gate_ref)
             .await?;
-        self.resume_run(run_id, gate_ref.clone(), None).await
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
     }
 
     /// Deny a blocked approval gate and resume the run (the user-declines path).
     /// Resolves the persisted request to `Denied` (no lease) and resumes with
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
     /// authorization failure to the model rather than re-dispatching the gate.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_local_dev_gate(gate_ref)
@@ -701,6 +852,37 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
+    /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
+    /// [`deny_gate`](Self::deny_gate) (approval gates, which resolve a persisted request in the
+    /// local-dev approval store), auth gates have no such store entry — there is nothing to
+    /// resolve — so this resumes directly with `GateResumeDisposition::Denied`. The executor's
+    /// `short_circuit_denied_resume` then surfaces a model-visible gate-declined failure for the
+    /// parked capability instead of re-dispatching it (which would re-block on the still-missing
+    /// credential → infinite loop).
+    ///
+    /// Like `deny_gate` (which resumes with its own gate-class-specific
+    /// `ResumeTurnPrecondition::BlockedApprovalGate`), this resumes with a
+    /// gate-class-specific precondition — `ResumeTurnPrecondition::BlockedAuthGate` — the same
+    /// precondition `AuthInteractionService` uses for its production auth-resume path. That precondition is
+    /// enforced server-side (`resume_turn_once` requires `record.status == BlockedAuth`), so a
+    /// stale or wrong (non-auth) gate ref fails the resume with `TurnError::InvalidTransition`
+    /// instead of silently resuming whatever gate class happens to be blocked. A client-side
+    /// `gate:auth-` prefix check (mirroring `submit_turn_until_auth_blocked`) adds cheap
+    /// defense-in-depth on top of that server-side check.
+    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedAuthGate,
         )
         .await
     }
@@ -729,6 +911,7 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         gate_ref: GateRef,
         resume_disposition: Option<GateResumeDisposition>,
+        precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
         let response = self
             .coordinator
@@ -737,7 +920,7 @@ impl RebornIntegrationHarness {
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
-                precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                precondition,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
@@ -748,6 +931,22 @@ impl RebornIntegrationHarness {
             return Err(format!("expected resumed run to queue, got {:?}", response.status).into());
         }
         Ok(())
+    }
+
+    /// Request cancellation of an in-flight run (E-GATEWAY seam). Mirrors
+    /// `resume_run`'s coordinator-call shape; drives the mid-turn cancel path so
+    /// a parked model call can be cancelled and the run reaches `Cancelled`.
+    pub async fn cancel_run(&self, run_id: TurnRunId) -> HarnessResult<CancelRunResponse> {
+        self.coordinator
+            .cancel_run(CancelRunRequest {
+                scope: self.turn_scope.clone(),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
+            })
+            .await
+            .map_err(Into::into)
     }
 }
 

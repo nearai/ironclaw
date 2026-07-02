@@ -108,6 +108,7 @@ use ironclaw_reborn::{
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
 };
+use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
     RebornLocalDevApprovalTestParts, build_reborn_services, visible_capability_request_for_run,
@@ -289,6 +290,18 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
+    /// `skill_context_source` for this backend, if any. `None` for the Echo
+    /// backend and for HostRuntime harnesses without skill activation.
+    pub(crate) fn skill_context_source(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.skill_context_source_for_test(),
+        }
+    }
+
     pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
@@ -305,7 +318,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+    pub(crate) fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
@@ -1623,12 +1636,30 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `capability_ids` (i.e. only `project_tools()` surfaces it), so other
     /// local-dev groups are unaffected. Tests read projects back via `project_service`.
     project_service: Option<Arc<dyn ProjectService>>,
+    /// Local-dev skill context source for the synthetic `skill_activate`
+    /// capability and runtime prompt injection (E-SKILL seam). `Some` only for
+    /// `skill_activation_tools()`; `None` otherwise. `create_capability_port`
+    /// wraps the port with the synthetic `skill_activate` capability ONLY when
+    /// `SKILL_ACTIVATE_CAPABILITY_ID` is also in `capability_ids`, and its
+    /// `context_source()` is wired as the runtime's `skill_context_source` in
+    /// `into_group`. Held as the opaque test-support handle so this crate never
+    /// names the crate-private source type.
+    skill_activation_source: Option<SkillActivationTestSource>,
 }
 
 struct HostRuntimeHarnessOptions {
     mounts: MountView,
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     seed_extension_credentials: bool,
+    /// Tenant the E-SKILL skill context source is constructed under, when this
+    /// harness surfaces the synthetic `skill_activate` capability. Only
+    /// `skill_activation_tools()` sets this (via
+    /// `with_skill_activation_tenant`), passing the SAME tenant the caller's
+    /// group run scope resolved (`group.rs` `build_base`'s
+    /// `canonical_binding.tenant_id`) — never a separately hardcoded literal —
+    /// so `skill_activate` resolves the seeded user skill against the same
+    /// tenant the turn runs under. `None` for every other harness variant.
+    skill_activation_tenant: Option<TenantId>,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1640,11 +1671,17 @@ impl HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
             seed_extension_credentials: false,
+            skill_activation_tenant: None,
         }
     }
 
     fn with_seed_extension_credentials(mut self) -> Self {
         self.seed_extension_credentials = true;
+        self
+    }
+
+    fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
+        self.skill_activation_tenant = Some(tenant);
         self
     }
 }
@@ -1836,6 +1873,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            skill_activation_source: None,
         })
     }
 
@@ -1965,7 +2003,47 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
-    async fn trigger_management_tools() -> HarnessResult<Self> {
+    /// Harness surfacing the local-dev synthetic `skill_activate` capability
+    /// (E-SKILL seam). `new_with_options` builds the `skill_activation_source`
+    /// (because `SKILL_ACTIVATE_CAPABILITY_ID` is in the allowlist) under
+    /// `tenant` — the caller's ACTUAL group run-scope tenant, passed through
+    /// rather than re-hardcoded here — which `create_capability_port` wraps
+    /// onto the port and `into_group` wires as the runtime's
+    /// `skill_context_source`. The skill file the model activates is seeded as
+    /// a system-scoped skill by `RebornIntegrationGroup::skill_activation_tools`.
+    /// Mirrors `skill_management_tools`/`project_tools`.
+    pub(crate) async fn skill_activation_tools(tenant: &TenantId) -> HarnessResult<Self> {
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-skill-activation-tools",
+            vec![CapabilityId::new(
+                ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
+            )?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-skill-activation-user")?,
+            HostRuntimeHarnessOptions::new(
+                skill_mounts()?,
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_skill_activation_tenant(tenant.clone()),
+        )
+        .await?;
+        harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    pub(crate) async fn trigger_management_tools() -> HarnessResult<Self> {
         let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
@@ -2137,6 +2215,7 @@ impl HostRuntimeCapabilityHarness {
             mounts,
             runtime_policy,
             seed_extension_credentials,
+            skill_activation_tenant,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2172,6 +2251,24 @@ impl HostRuntimeCapabilityHarness {
         // `services.host_runtime` is moved out below (E-PROFILE / E-PROJ seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
         let project_service = services.local_dev_project_service_for_test();
+        // E-SKILL: build the local-dev skill context source only when this
+        // harness surfaces the synthetic `skill_activate` capability (i.e.
+        // `skill_activation_tools`). Built with the caller-supplied tenant
+        // (`HostRuntimeHarnessOptions::with_skill_activation_tenant`, sourced
+        // from the group's actual run-scope tenant) so activation visibility
+        // matches the turn's scope. Must precede the `services.host_runtime`
+        // move (it borrows `&services`).
+        let skill_activation_source = if capability_ids.iter().any(|id| {
+            id.as_str() == ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID
+        }) {
+            let tenant = skill_activation_tenant
+                .ok_or("skill_activation_tools harness requires with_skill_activation_tenant")?;
+            ironclaw_reborn_composition::test_support::build_local_dev_skill_context_source_for_test(
+                &services, &tenant, true,
+            )
+        } else {
+            None
+        };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -2205,6 +2302,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem,
             project_service,
+            skill_activation_source,
         })
     }
 
@@ -2351,10 +2449,14 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            skill_activation_source: None,
         })
     }
 
-    async fn github_issue_tools() -> HarnessResult<Self> {
+    /// Wires the GitHub first-party WASM capabilities behind `GithubHarnessAuthorizer`.
+    /// See `github_issue_tools_with_credential_result` for the credential-injection
+    /// coupling this relies on (T0-SECRET-INJECT).
+    pub(crate) async fn github_issue_tools() -> HarnessResult<Self> {
         // Credential account resolves to a real handle → capability dispatches.
         Self::github_issue_tools_with_credential_result(Ok(SecretHandle::new(
             "github_manual_access",
@@ -2371,6 +2473,29 @@ impl HostRuntimeCapabilityHarness {
     /// Shared GitHub-extension constructor (E-AUTHGATE): the only difference
     /// between the happy-path and auth-blocked variants is the credential account
     /// resolver result, so the full `Self {..}` literal lives here once.
+    ///
+    /// **Credential injection runs through two mechanisms here, not one — worth
+    /// knowing before you change either.** The authorizer's
+    /// `InjectCredentialAccountOnce` obligation is one path. The
+    /// `local_dev_host_runtime_with_registry_and_egress` helper this calls into
+    /// separately auto-wires `SharedHostWasmRuntimeCredentials` with product-auth
+    /// restaging via `try_with_wasm_runtime` (since both `.with_secret_store` and
+    /// `.with_runtime_credential_account_resolver` are always set on that path),
+    /// which independently resolves the GitHub manifest's declared
+    /// `runtime_credentials` and stages the same secret. That staging path runs
+    /// unconditionally on every WASM HTTP call (`WasmRuntimeHttpAdapter::request`)
+    /// — it is not gated on the authorizer's `Decision`. So a test asserting on the
+    /// injected header proves the *end-to-end* wire outcome, not that the
+    /// authorizer's obligation specifically is the sole producer of the header.
+    ///
+    /// As currently wired (manually verified once, not re-checked by CI — treat as
+    /// current-harness observation, not a guaranteed contract): removing the
+    /// obligation does not make the call fall back to an unauthenticated request;
+    /// the run instead hangs and never reaches `Completed`. That's why the
+    /// mutation-verify in `reborn_integration_secret_injection.rs` proves the
+    /// obligation's secret reaches the wire by flipping the secret *value* (a fast,
+    /// specific assertion failure) rather than by removing the obligation (which
+    /// would only yield a slow, ambiguous timeout — a poor mutation-test signal).
     fn github_issue_tools_with_credential_result(
         credential_account_result: Result<SecretHandle, CredentialStageError>,
     ) -> HarnessResult<Self> {
@@ -2419,6 +2544,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            skill_activation_source: None,
         })
     }
 
@@ -2492,6 +2618,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            skill_activation_source: None,
         })
     }
 
@@ -2693,14 +2820,69 @@ impl HostRuntimeCapabilityHarness {
         self.project_service.clone()
     }
 
+    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
+    /// `skill_context_source` in `into_group`, so activated-skill instructions
+    /// inject into the model request. `Some` only for `skill_activation_tools()`.
+    pub(crate) fn skill_context_source_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+        self.skill_activation_source
+            .as_ref()
+            .map(|source| source.context_source())
+    }
+
+    /// E-DURABLE: the on-disk local-dev storage root this harness's capability
+    /// stores persist under (`<tempdir>/local-dev`). Mirrors the `storage_root`
+    /// computed inline in `new_with_options`. A durability test reopens a fresh,
+    /// independent store at this path (see
+    /// `open_local_dev_extension_installation_store_for_test`) to prove capability
+    /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
+    /// Tests only.
+    pub(crate) fn storage_root_for_test(&self) -> PathBuf {
+        self.root.path().join("local-dev")
+    }
+
+    /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill
+    /// filesystem so the model can activate it (`skill_activate`/`$name`). Writes
+    /// `<storage_root>/system/skills/<name>/SKILL.md` — the system bundle root is
+    /// always present in the skills extension's roots regardless of the run's
+    /// tenant/user (`FirstPartySkillsExtensionHandles::bundle_roots`), so both
+    /// `activate_skills_for_run` (the `skill_activate` capability) and the
+    /// runtime's `skill_context_source` resolve it deterministically without
+    /// depending on the harness's run-scope owner resolution. User-scoped skill
+    /// filesystem resolution is already covered by the runtime.rs suite; this
+    /// seam only needs the skill to exist so the capability + context wiring can
+    /// be driven. Mirrors the runtime-test system-skill layout
+    /// (runtime.rs `system/skills/<name>/SKILL.md`). Tests only.
+    pub(crate) fn seed_system_skill_for_test(
+        &self,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        let dir = self
+            .storage_root_for_test()
+            .join("system")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir)?;
+        let body = format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        );
+        std::fs::write(dir.join("SKILL.md"), body)?;
+        Ok(())
+    }
+
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness
     /// surfaces, in one linear step (keeps the capability-specific knowledge out
     /// of `create_capability_port`'s main assembly chain).
     ///
-    /// Partial synthetic wrap: only `project_create`. The `skill_activation` and
-    /// `outbound_delivery_*` synthetic capabilities are wired by their own
-    /// coverage PRs. See `LocalDevCapabilityPortFactory::build_inner()` for the
-    /// full production set.
+    /// Partial synthetic wrap: `project_create` (E-PROJ) and `skill_activate`
+    /// (E-SKILL), each layered independently when this harness both holds the
+    /// backing handle and surfaces the capability in its allowlist, so other
+    /// local-dev groups are unaffected. The `outbound_delivery_*` synthetic
+    /// capabilities are wired by their own coverage PRs. See
+    /// `LocalDevCapabilityPortFactory::build_inner()` for the full production set.
     fn apply_synthetic_capability_wrappers(
         &self,
         port: Arc<dyn LoopCapabilityPort>,
@@ -2708,26 +2890,41 @@ impl HostRuntimeCapabilityHarness {
         input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        // Wrap project_create only when this harness both has a project service
-        // and surfaces the capability in its allowlist (i.e. `project_tools`),
-        // so other local-dev groups are unaffected.
-        let Some(project_service) = &self.project_service else {
-            return Ok(port);
-        };
-        let surfaces_project_create = self.capability_ids.iter().any(|id| {
-            id.as_str() == ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID
-        });
-        if !surfaces_project_create {
-            return Ok(port);
+        let mut port = port;
+        // project_create (E-PROJ): wrapped only for `project_tools`.
+        if let Some(project_service) = &self.project_service
+            && self.capability_ids.iter().any(|id| {
+                id.as_str()
+                    == ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID
+            })
+        {
+            port =
+                ironclaw_reborn_composition::test_support::wrap_project_create_capability_for_test(
+                    port,
+                    Arc::clone(project_service),
+                    self.user_id.clone(),
+                    run_context.clone(),
+                    input_resolver.clone(),
+                    result_writer.clone(),
+                )?;
         }
-        ironclaw_reborn_composition::test_support::wrap_project_create_capability_for_test(
-            port,
-            Arc::clone(project_service),
-            self.user_id.clone(),
-            run_context.clone(),
-            input_resolver,
-            result_writer,
-        )
+        // skill_activate (E-SKILL): wrapped only for `skill_activation_tools`.
+        if let Some(skill_source) = &self.skill_activation_source
+            && self.capability_ids.iter().any(|id| {
+                id.as_str()
+                    == ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID
+            })
+        {
+            port =
+                ironclaw_reborn_composition::test_support::wrap_skill_activation_capability_for_test(
+                    port,
+                    skill_source,
+                    run_context.clone(),
+                    input_resolver,
+                    result_writer,
+                )?;
+        }
+        Ok(port)
     }
 
     /// Override the user this capability harness executes first-party tools under.
@@ -4036,6 +4233,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             descriptors,
+            callable_capability_ids: None,
         })
     }
 

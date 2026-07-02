@@ -812,6 +812,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: harness_surface_version(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: harness_capability_id(&self.capability.capability_id),

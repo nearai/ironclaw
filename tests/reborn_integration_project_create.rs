@@ -21,6 +21,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 
@@ -88,4 +89,48 @@ async fn project_create_capability_dispatches_and_persists_project() {
          ProjectService — a no-op create_project that still fabricates a \
          success payload must fail this assertion; got projects: {projects:?}"
     );
+}
+
+/// An oversized `name` (201 ASCII bytes, over `MAX_PROJECT_NAME_BYTES=200`)
+/// passes `parse_project_create_input`'s non-empty check but fails
+/// `ProjectRecord::validate()` inside the real `ProjectService`, which returns
+/// `ProjectServiceError::InvalidInput`. `project_service_outcome` maps that to
+/// `CapabilityOutcome::Failed(CapabilityFailureKind::InvalidInput)`, persisted
+/// as a `ToolResultReference` with `safe_summary` `"capability failed with
+/// invalid_input: ..."` — a recoverable, model-visible tool error, not a
+/// terminal `driver_unavailable` crash. Distinct from the happy-path test
+/// above: this proves the reject path routes through the same
+/// Completed-turn/Failed-outcome plumbing instead of aborting the run.
+#[tokio::test]
+async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
+    let group = RebornIntegrationGroup::project_lifecycle()
+        .await
+        .expect("project-lifecycle group builds");
+    let oversized_name = "a".repeat(201);
+    let harness = group
+        .thread("conv-project-create-invalid")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.project_create",
+                serde_json::json!({"name": oversized_name}),
+            ),
+            RebornScriptedReply::text("that name didn't work"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn("create a project with a very long name")
+        .await
+        .expect("turn completes despite the rejected project_create");
+
+    harness
+        .assert_tool_invoked("builtin.project_create")
+        .await
+        .expect("project_create dispatched through the synthetic-capability port");
+    harness
+        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .await
+        .expect("oversized name surfaces as a Failed(InvalidInput) capability outcome");
 }

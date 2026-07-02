@@ -145,6 +145,12 @@ fn pending_auth_resume_staged_input_candidate(
 pub(super) struct CapabilitySurfaceIndex<'a> {
     version: &'a CapabilitySurfaceVersion,
     descriptors: HashMap<&'a CapabilityId, &'a CapabilityDescriptorView>,
+    /// The wider set of capabilities the model may *invoke* this turn, distinct
+    /// from the advertised `descriptors`. Under progressive tool disclosure the
+    /// advertised set is narrowed for token economy, but bridge / forgiving-direct
+    /// calls can still reach disclosed-but-unadvertised catalog tools. `None`
+    /// means no narrowing is in effect (callable == advertised).
+    callable: Option<HashSet<&'a CapabilityId>>,
 }
 
 impl<'a> CapabilitySurfaceIndex<'a> {
@@ -154,9 +160,14 @@ impl<'a> CapabilitySurfaceIndex<'a> {
             .iter()
             .map(|descriptor| (&descriptor.capability_id, descriptor))
             .collect();
+        let callable = surface
+            .callable_capability_ids
+            .as_ref()
+            .map(|ids| ids.iter().collect());
         Self {
             version: &surface.version,
             descriptors,
+            callable,
         }
     }
 }
@@ -183,7 +194,20 @@ pub(super) fn capability_is_visible(
     if &call.surface_version != surface.version {
         return false;
     }
-    surface.descriptors.contains_key(&call.capability_id)
+    if surface.descriptors.contains_key(&call.capability_id) {
+        return true;
+    }
+    // Under progressive tool disclosure the advertised `descriptors` are a
+    // narrowed view; a bridge / forgiving-direct call resolves to a
+    // disclosed-but-unadvertised catalog tool that is authorized to run this turn.
+    // Authorize it against the wider callable set (the same set the port-level
+    // model-visible filter uses), or this executor gate would reject the very
+    // calls disclosure is meant to allow. `None` = no narrowing, so only the
+    // advertised descriptors are visible (pre-disclosure behavior, unchanged).
+    surface
+        .callable
+        .as_ref()
+        .is_some_and(|callable| callable.contains(&call.capability_id))
 }
 
 pub(super) fn apply_capability_filter(
@@ -634,6 +658,69 @@ mod tests {
             Some(&2000)
         );
         assert_eq!(state.result_refs.len(), 3);
+    }
+
+    #[test]
+    fn capability_is_visible_authorizes_disclosed_but_unadvertised_callable_tool() {
+        use ironclaw_host_api::RuntimeKind;
+        use ironclaw_turns::run_profile::{
+            CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint, VisibleCapabilitySurface,
+        };
+
+        let version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+        let advertised = CapabilityId::new("test.tool_search").unwrap();
+        let deferred = CapabilityId::new("google-docs.get_document").unwrap();
+
+        let descriptor = CapabilityDescriptorView {
+            capability_id: advertised.clone(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "tool_search".to_string(),
+            safe_description: "search".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
+            parameters_schema: serde_json::json!({"type": "object"}),
+        };
+        let candidate = |cap: &CapabilityId| CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            surface_version: version.clone(),
+            capability_id: cap.clone(),
+            input_ref: CapabilityInputRef::new("input:x").unwrap(),
+            effective_capability_ids: vec![cap.clone()],
+            provider_replay: None,
+        };
+
+        // Disclosure narrows `descriptors` to the advertised bridge, but the
+        // deferred catalog tool is in the wider callable set → it MUST be visible
+        // (this is the bug that made bridge calls loop on "not visible in the
+        // filtered surface").
+        let narrowed = VisibleCapabilitySurface {
+            version: version.clone(),
+            descriptors: vec![descriptor.clone()],
+            callable_capability_ids: Some(vec![advertised.clone(), deferred.clone()]),
+        };
+        let index = CapabilitySurfaceIndex::new(&narrowed);
+        assert!(
+            capability_is_visible(&index, &candidate(&deferred)),
+            "a disclosed-but-unadvertised tool in the callable set must be visible"
+        );
+        assert!(
+            capability_is_visible(&index, &candidate(&advertised)),
+            "the advertised tool stays visible"
+        );
+
+        // No narrowing (callable None): only advertised descriptors are visible —
+        // pre-disclosure behavior, unchanged.
+        let unnarrowed = VisibleCapabilitySurface {
+            version: version.clone(),
+            descriptors: vec![descriptor],
+            callable_capability_ids: None,
+        };
+        let index = CapabilitySurfaceIndex::new(&unnarrowed);
+        assert!(
+            !capability_is_visible(&index, &candidate(&deferred)),
+            "without a callable set, an unadvertised tool is not visible"
+        );
+        assert!(capability_is_visible(&index, &candidate(&advertised)));
     }
 
     #[test]

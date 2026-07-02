@@ -71,13 +71,15 @@ pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridge (E-PROJ seam), co-located with the capability it wraps in
-/// `project_create.rs` and re-exported here for the `runtime` caller.
+/// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
+/// each wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,

@@ -45,6 +45,7 @@ use ironclaw_network::{
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
     AssistantReply, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
     RebornProductAuthServices, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -353,6 +354,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
             source_binding_id: "qa-trace-source".to_string(),
             reply_target_binding_id: "qa-trace-reply".to_string(),
         })
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_model_gateway_override(gateway);
     if trigger_poller_enabled {
         input = input.with_trigger_poller_settings(

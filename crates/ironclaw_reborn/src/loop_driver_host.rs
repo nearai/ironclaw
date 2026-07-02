@@ -191,6 +191,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::ProviderToolCallCapabilityIds, AgentLoopHostError>
+    {
+        // MUST delegate to inner. The LoopCapabilityPort default resolves a call by
+        // searching `self.tool_definitions()` (the disclosed/advertised surface),
+        // which rejects every deferred tool with "outside the visible capability
+        // surface" before the inner tool-disclosure forgiving path can resolve it.
+        // This is the model gateway's resolvability pre-check, so it must reach
+        // inner — same reason validate/register below already delegate.
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,

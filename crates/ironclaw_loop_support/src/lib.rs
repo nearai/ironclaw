@@ -820,6 +820,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
         Ok(VisibleCapabilitySurface {
             version: empty_surface_version()?,
             descriptors: Vec::new(),
+            callable_capability_ids: None,
         })
     }
 

@@ -55,6 +55,7 @@ use crate::{
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
+    tool_disclosure_port::ToolDisclosureCapabilityDecorator,
     turn_run_executor::RebornTurnRunExecutor,
 };
 
@@ -92,6 +93,61 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
+pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolDisclosureMode {
+    #[default]
+    Off,
+    Bridged,
+}
+
+impl ToolDisclosureMode {
+    pub fn from_env() -> Self {
+        match std::env::var(REBORN_TOOL_DISCLOSURE_ENV) {
+            Ok(value) => Self::from_raw(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::from_raw(None),
+            // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
+            // unreadable (a misconfiguration). Surface it, then fall back to the
+            // unset default.
+            Err(error @ std::env::VarError::NotUnicode(_)) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    env = REBORN_TOOL_DISCLOSURE_ENV,
+                    error = %error,
+                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; using default"
+                );
+                Self::from_raw(None)
+            }
+        }
+    }
+
+    /// Progressive tool disclosure defaults **off** — an unset, empty, or
+    /// unrecognized `REBORN_TOOL_DISCLOSURE` leaves the request path
+    /// byte-identical to the pre-disclosure behavior. Only an explicit
+    /// `REBORN_TOOL_DISCLOSURE=bridged` opts into the bridged path.
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw {
+            Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
+            Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
+            Some(value) if !value.is_empty() => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::runtime",
+                    value,
+                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
+                );
+                Self::Off
+            }
+            // unset / empty -> default off (byte-identical request path).
+            _ => Self::Off,
+        }
+    }
+
+    pub fn is_bridged(self) -> bool {
+        matches!(self, Self::Bridged)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -102,6 +158,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub worker_count: Option<std::num::NonZeroUsize>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+    pub tool_disclosure: ToolDisclosureMode,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
 }
 
@@ -113,6 +170,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
+            tool_disclosure: ToolDisclosureMode::from_env(),
             planned_default_iteration_limit: None,
         }
     }
@@ -599,6 +657,18 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
+    let mut capability_factory_builder =
+        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
+            .with_decorator(spawn_decorator);
+    if parts.config.tool_disclosure.is_bridged() {
+        tracing::debug!(
+            target: "ironclaw::reborn::runtime",
+            "reborn tool disclosure decorator wired (bridged)"
+        );
+        capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
+            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
+        ));
+    }
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
     // spawn_subagent capability from the model-facing surface across all
     // profiles. Applied as the OUTERMOST decorator so it strips the capability
@@ -612,9 +682,6 @@ where
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
-    let mut capability_factory_builder =
-        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator);
     if !disabled.is_empty() {
         capability_factory_builder = capability_factory_builder
             .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(disabled)));
@@ -813,6 +880,32 @@ mod tests {
     use ironclaw_loop_support::{
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
+        use super::ToolDisclosureMode;
+        // Default off: unset / empty / unrecognized resolve to Off so the
+        // request path stays byte-identical. Only explicit `bridged` opts in.
+        // `is_bridged()` is what gates whether the gateway attaches the decorator.
+        assert!(
+            !ToolDisclosureMode::from_raw(None).is_bridged(),
+            "unset must default OFF (byte-identical request path)"
+        );
+        assert!(!ToolDisclosureMode::from_raw(Some("")).is_bridged());
+        assert!(
+            !ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
+            "unrecognized values must fall back to the default Off"
+        );
+        assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_bridged());
+        assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_bridged());
+        assert!(
+            !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),
+            "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"
+        );
+        // Per-variant gating is unchanged.
+        assert!(!ToolDisclosureMode::Off.is_bridged());
+        assert!(ToolDisclosureMode::Bridged.is_bridged());
+    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {
