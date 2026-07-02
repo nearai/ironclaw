@@ -1,5 +1,7 @@
 name: Reborn E2E
 
+# CI sweep trigger: comment-only changes here exercise Reborn E2E PR filters.
+
 on:
   workflow_call:
     inputs:

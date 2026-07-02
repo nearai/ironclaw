@@ -1,4 +1,6 @@
 name: Code Style
+
+# CI sweep trigger: comment-only changes here exercise PR style gates.
 on:
   pull_request:
   merge_group:
