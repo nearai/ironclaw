@@ -345,8 +345,7 @@ mod tests {
         // The redesign surfaces pause/resume/delete from the per-automation
         // detail modal (the legacy side panel was replaced by the modal +
         // full-page detail view).
-        let detail_modal =
-            asset_text("js/pages/automations/components/automation-detail-modal.js");
+        let detail_modal = asset_text("js/pages/automations/components/automation-detail-modal.js");
         assert!(detail_modal.contains("onPauseAutomation"));
         assert!(detail_modal.contains("onResumeAutomation"));
         assert!(detail_modal.contains("onDeleteAutomation"));

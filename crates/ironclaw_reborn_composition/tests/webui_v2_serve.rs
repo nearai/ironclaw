@@ -3009,17 +3009,26 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
 
+    // The redesigned strip only spreads to five cells on large screens and
+    // reflows to two/three columns below that, so detail text stays readable.
     assert!(
-        body.contains("lg:grid-cols-3"),
-        "summary strip must cap cards per row so detail text stays readable"
+        body.contains("grid-cols-2 sm:grid-cols-3"),
+        "summary strip must reflow to fewer cards per row on narrow screens"
     );
     assert!(
         !body.contains("xl:grid-cols-5"),
-        "summary strip must not force five cards into one row"
+        "summary strip must not force five cards into one row on medium screens"
+    );
+    // The NEXT RUN headline is a compact live countdown (m:ss / Nh MMm / Nd Nh)
+    // instead of a full date, so the value never truncates; cells still guard
+    // overflow with min-w-0 + truncate and surface the full text via title.
+    assert!(
+        body.contains("formatCountdown"),
+        "the NEXT RUN card must render a compact countdown so the value is not truncated"
     );
     assert!(
-        body.contains("valueClassName"),
-        "the NEXT RUN card must pass a smaller value font so the date is not truncated"
+        body.contains("min-w-0") && body.contains("truncate"),
+        "summary cells must guard against overflow so detail text stays readable"
     );
 }
 
