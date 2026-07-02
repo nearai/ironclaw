@@ -59,6 +59,15 @@
   min-width: 0;
 }
 
+.integration-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.integration-card-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
 .integrations-empty {
   grid-column: 1 / -1;
   display: flex;

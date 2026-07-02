@@ -313,3 +313,51 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   transform: rotate(45deg);
   pointer-events: none;
 }
+
+/* ── Shared card anatomy (Discover / Integrations / Skills) ──
+   icon · title(+version) · action top-right · description · tag list. */
+
+.card-app-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.card-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.card-version {
+  font-family: var(--font-mono);
+  font-size: var(--v2-font-size-label);
+  color: var(--text-dimmed);
+}
+
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--v2-space-2);
+}
+
+.card-tag {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-full);
+  background: var(--v2-surface-muted);
+  color: var(--text-secondary);
+}

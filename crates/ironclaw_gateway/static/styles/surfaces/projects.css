@@ -598,3 +598,10 @@
     grid-template-columns: 1fr;
   }
 }
+
+.cr-view-header {
+  padding: var(--v2-space-5) var(--v2-space-6) 0;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}

@@ -408,10 +408,14 @@
       </div>
     </div>
 
-    <!-- Discover Tab (unified marketplace). Single title in the top bar. -->
+    <!-- Discover Tab (unified marketplace). The view owns its header. -->
     <div class="tab-panel" id="tab-discover">
       <div class="discover-container">
-        <div class="discover-toolbar">
+        <div class="view-header">
+          <div class="view-header-title" data-i18n="discover.title">Discover</div>
+          <div class="view-header-desc" data-i18n="discover.subtitle">Channels, tools, and skills for your agent — or just ask it to build what's missing.</div>
+        </div>
+        <div class="discover-toolbar view-toolbar-sticky">
           <div class="discover-search">
             <input type="text" id="discover-search-input" data-i18n="discover.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search channels, tools, MCP servers, skills...">
           </div>
@@ -460,10 +464,14 @@
       </div>
     </div>
 
-    <!-- Tasks Tab (missions + jobs in one surface). The "Tasks" title
-         lives in the top bar only; the header row carries the segments. -->
+    <!-- Tasks Tab (missions + jobs in one surface). The view owns its
+         header: title + description left, segments right. -->
     <div class="tab-panel" id="tab-tasks">
       <div class="tasks-header">
+        <div class="view-header">
+          <div class="view-header-title" data-i18n="tab.tasks">Tasks</div>
+          <div class="view-header-desc" data-i18n="tasks.subtitle">Everything your agent is working on — recurring missions and one-off jobs.</div>
+        </div>
         <div class="tasks-segments" role="tablist">
           <button class="tasks-segment active" data-tasks-segment="missions" data-i18n="tab.missions">Missions</button>
           <button class="tasks-segment" data-tasks-segment="jobs" data-i18n="tab.jobs">Jobs</button>
@@ -508,6 +516,10 @@
          the onboarding handoff — see js/surfaces/integrations.js) -->
     <div class="tab-panel" id="tab-integrations">
       <div class="integrations-container">
+        <div class="view-header">
+          <div class="view-header-title" data-i18n="integrations.title">Integrations</div>
+          <div class="view-header-desc" data-i18n="integrations.subtitle">Connect the tools your agent works with — email, chat, calendars, and more.</div>
+        </div>
         <div class="integrations-connected-section" id="integrations-connected-section" style="display:none">
           <h3 data-i18n="integrations.connected">Connected</h3>
           <div class="integrations-grid" id="integrations-connected-grid"></div>
@@ -522,10 +534,12 @@
     <!-- Skills Tab (promoted out of Settings) -->
     <div class="tab-panel" id="tab-skills">
       <div class="skills-page">
-        <!-- Linear-style view toolbar: search is the primary affordance,
-             install-by-URL is an escape hatch. The page name lives in the
-             topbar only (no duplicated h1). -->
-        <div class="skills-toolbar">
+        <!-- The view owns its header (topbar is suppressed here). -->
+        <div class="view-header">
+          <div class="view-header-title" data-i18n="tab.skills">Skills</div>
+          <div class="view-header-desc" data-i18n="skills.subtitle">Teach your agent new tricks — install skills from ClawHub or by URL.</div>
+        </div>
+        <div class="skills-toolbar view-toolbar-sticky">
           <div class="skills-search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search installed skills and ClawHub...">
@@ -581,7 +595,9 @@
          controls on the right (Linear view-toolbar pattern). -->
     <div class="tab-panel" id="tab-logs">
       <div class="logs-container">
+        <!-- Title merged into the toolbar row (one line of chrome). -->
         <div class="logs-toolbar">
+          <span class="logs-toolbar-title" data-i18n="tab.logs">Logs</span>
           <div class="logs-search">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="text" id="logs-target-filter" data-i18n="logs.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search messages and targets...">
@@ -623,6 +639,10 @@
     <!-- Projects Tab (engine v2 control room) -->
     <div class="tab-panel" id="tab-projects">
       <div class="cr-shell" id="cr-shell">
+        <div class="view-header cr-view-header">
+          <div class="view-header-title" data-i18n="tab.projects">Projects</div>
+          <div class="view-header-desc" data-i18n="projects.subtitle">Autonomous workspaces with their own goals, tasks, and budgets.</div>
+        </div>
         <!-- Attention bar — only visible when items exist -->
         <div class="cr-attention" id="cr-attention" style="display:none"></div>
         <!-- Project cards grid (Layer 1 — default view) -->

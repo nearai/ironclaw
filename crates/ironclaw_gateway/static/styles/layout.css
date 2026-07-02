@@ -186,3 +186,36 @@
 }
 
 
+
+/* ── View header (list surfaces own their titles; topbar suppressed) ── */
+
+.view-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--v2-space-5) 0 var(--v2-space-3);
+}
+
+.view-header-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--heading-tracking);
+  color: var(--text);
+}
+
+.view-header-desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Sticky toolbar shared by the list views: stays reachable on scroll. */
+.view-toolbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  padding-top: var(--v2-space-2);
+  padding-bottom: var(--v2-space-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--v2-space-4);
+}

@@ -171,22 +171,70 @@ function discoverStatusForItem(item) {
   return 'setup';
 }
 
+// Icon resolution shared with Integrations: brand app mark → lucide mark →
+// per-skill icon → sparkles.
+function discoverCardIcon(item) {
+  const catalog = typeof integrationCatalogEntry === 'function'
+    ? integrationCatalogEntry(item.name)
+    : null;
+  if (catalog && catalog.icon) {
+    return '<img class="card-app-icon" src="' + escapeHtml(catalog.icon) + '" alt="" aria-hidden="true">';
+  }
+  const lucide = item.lucideIcon
+    || (item.kind === 'skill' && item.installed && item.installed.icon)
+    || item.icon;
+  return '<span class="card-glyph" aria-hidden="true">' + lucideGlyphSvg(lucide || 'sparkles', 16) + '</span>';
+}
+
+// Unified card anatomy (Discover + Integrations): icon, title(+version),
+// ACTION in the top-right, description, then a tag list underneath.
 function renderDiscoverCard(item) {
   const card = document.createElement('div');
   card.className = 'discover-card';
 
   const header = document.createElement('div');
   header.className = 'discover-card-header';
+  header.innerHTML = discoverCardIcon(item);
 
   const name = document.createElement('span');
   name.className = 'discover-card-name';
   name.textContent = item.displayName;
   header.appendChild(name);
 
-  const kind = document.createElement('span');
-  kind.className = 'discover-kind kind-' + item.kind;
-  kind.textContent = DISCOVER_KIND_LABELS[item.kind] || item.kind;
-  header.appendChild(kind);
+  if (item.version) {
+    const version = document.createElement('span');
+    version.className = 'card-version';
+    version.textContent = 'v' + item.version;
+    header.appendChild(version);
+  }
+
+  // Action sits top-right where the kind tag used to be.
+  const action = document.createElement('span');
+  action.className = 'discover-card-action';
+  const status = discoverStatusForItem(item);
+  if (status === 'active') {
+    const label = document.createElement('span');
+    label.className = 'discover-status active';
+    label.textContent = item.kind === 'skill' ? I18n.t('status.installed') : I18n.t('ext.active');
+    action.appendChild(label);
+  } else if (status === 'pairing' || status === 'setup') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'discover-btn secondary';
+    btn.textContent = status === 'pairing'
+      ? I18n.t('nux.enterPairingCode')
+      : I18n.t('nux.finishSetup');
+    btn.addEventListener('click', () => showConfigureModal(item.name));
+    action.appendChild(btn);
+  } else {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'discover-btn primary';
+    btn.textContent = I18n.t('extensions.install');
+    btn.addEventListener('click', () => installDiscoverItem(item, btn));
+    action.appendChild(btn);
+  }
+  header.appendChild(action);
 
   card.appendChild(header);
 
@@ -197,38 +245,22 @@ function renderDiscoverCard(item) {
     card.appendChild(desc);
   }
 
-  const actions = document.createElement('div');
-  actions.className = 'discover-card-actions';
+  // Tags under the description — the kind plus any capability keywords
+  // (entries exposing several skills/tools list them all here).
+  const tags = document.createElement('div');
+  tags.className = 'card-tags';
+  const kindTag = document.createElement('span');
+  kindTag.className = 'card-tag kind-' + item.kind;
+  kindTag.textContent = DISCOVER_KIND_LABELS[item.kind] || item.kind;
+  tags.appendChild(kindTag);
+  (item.keywords || []).slice(0, 4).forEach((kw) => {
+    const tag = document.createElement('span');
+    tag.className = 'card-tag';
+    tag.textContent = kw;
+    tags.appendChild(tag);
+  });
+  card.appendChild(tags);
 
-  const status = discoverStatusForItem(item);
-  if (status === 'active') {
-    const label = document.createElement('span');
-    label.className = 'discover-status active';
-    label.textContent = item.kind === 'skill' ? I18n.t('status.installed') : I18n.t('ext.active');
-    actions.appendChild(label);
-  } else if (status === 'pairing' || status === 'setup') {
-    const label = document.createElement('span');
-    label.className = 'discover-status pending';
-    label.textContent = status === 'pairing'
-      ? I18n.t('status.awaitingPairing')
-      : I18n.t('discover.needsSetup');
-    actions.appendChild(label);
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'discover-btn secondary';
-    btn.textContent = I18n.t('nux.finishSetup');
-    btn.addEventListener('click', () => showConfigureModal(item.name));
-    actions.appendChild(btn);
-  } else {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'discover-btn primary';
-    btn.textContent = I18n.t('extensions.install');
-    btn.addEventListener('click', () => installDiscoverItem(item, btn));
-    actions.appendChild(btn);
-  }
-
-  card.appendChild(actions);
   return card;
 }
 
@@ -263,21 +295,37 @@ function renderDiscoverCatalogSkillCard(entry) {
 
   const header = document.createElement('div');
   header.className = 'discover-card-header';
+  header.innerHTML = '<span class="card-glyph" aria-hidden="true">' + lucideGlyphSvg(entry.icon || 'sparkles', 16) + '</span>';
 
   const name = document.createElement('span');
   name.className = 'discover-card-name';
   name.textContent = entry.name || entry.slug;
   header.appendChild(name);
 
-  const kind = document.createElement('span');
-  kind.className = 'discover-kind kind-skill';
-  kind.textContent = DISCOVER_KIND_LABELS.skill;
-  header.appendChild(kind);
+  if (entry.version) {
+    const version = document.createElement('span');
+    version.className = 'card-version';
+    version.textContent = 'v' + entry.version;
+    header.appendChild(version);
+  }
 
-  const source = document.createElement('span');
-  source.className = 'discover-source';
-  source.textContent = 'ClawHub';
-  header.appendChild(source);
+  // Install action top-right, matching the unified card anatomy.
+  const action = document.createElement('span');
+  action.className = 'discover-card-action';
+  const slug = entry.slug || entry.name;
+  const installBtn = document.createElement('button');
+  installBtn.type = 'button';
+  installBtn.className = 'discover-btn primary';
+  installBtn.textContent = I18n.t('extensions.install');
+  installBtn.addEventListener('click', () => {
+    installBtn.disabled = true;
+    installBtn.textContent = I18n.t('extensions.installing');
+    // Reuses the skills surface installer (toast + installed-state handling).
+    installSkill(entry.name || slug, null, installBtn, slug);
+    setTimeout(() => loadDiscover(true), 1500);
+  });
+  action.appendChild(installBtn);
+  header.appendChild(action);
 
   card.appendChild(header);
 
@@ -288,23 +336,11 @@ function renderDiscoverCatalogSkillCard(entry) {
     card.appendChild(desc);
   }
 
-  const actions = document.createElement('div');
-  actions.className = 'discover-card-actions';
-  const slug = entry.slug || entry.name;
-  const installBtn = document.createElement('button');
-  installBtn.type = 'button';
-  installBtn.className = 'discover-btn primary';
-  installBtn.textContent = I18n.t('extensions.install');
-  installBtn.addEventListener('click', () => {
-    if (!confirm(I18n.t('skills.confirmInstallHub', { name: entry.name || slug }))) return;
-    installBtn.disabled = true;
-    installBtn.textContent = I18n.t('extensions.installing');
-    // Reuses the skills surface installer (toast + installed-state handling).
-    installSkill(entry.name || slug, null, installBtn, slug);
-    setTimeout(() => loadDiscover(true), 1500);
-  });
-  actions.appendChild(installBtn);
-  card.appendChild(actions);
+  const tags = document.createElement('div');
+  tags.className = 'card-tags';
+  tags.innerHTML = '<span class="card-tag kind-skill">' + escapeHtml(DISCOVER_KIND_LABELS.skill) + '</span>'
+    + '<span class="card-tag">ClawHub</span>';
+  card.appendChild(tags);
 
   return card;
 }

@@ -196,3 +196,11 @@
 @media (max-width: 768px) {
   .log-target { display: none; }
 }
+
+.logs-toolbar-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  letter-spacing: var(--heading-tracking);
+  color: var(--text);
+  margin-right: var(--v2-space-2);
+}

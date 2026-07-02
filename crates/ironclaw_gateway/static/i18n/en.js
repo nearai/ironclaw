@@ -135,6 +135,7 @@ I18n.register('en', {
   'tasks.emptyDesc': 'Tasks are the work your agent runs on its own \u2014 schedules, monitors, and event triggers. Describe one in chat and it shows up here with its runs and status.',
   'tasks.emptyStartersLabel': 'Start with one of these',
   'tasks.emptyFootnote': 'Or just tell the agent what to take off your plate \u2014 in your own words.',
+  'projects.subtitle': 'Autonomous workspaces with their own goals, tasks, and budgets.',
   'projects.newBlurb': 'A dedicated workspace with its own goals, tasks, and budget.',
   'projects.startersLabel': 'Start from a template',
   'projects.startersHint': 'Each one kicks off in chat \u2014 the agent sets up the workspace and its first tasks.',

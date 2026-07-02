@@ -213,25 +213,10 @@ function renderIntegrationCard(item) {
   name.textContent = item.label;
   header.appendChild(name);
 
-  if (item.kind && INTEGRATION_KIND_LABELS[item.kind]) {
-    const kind = document.createElement('span');
-    kind.className = 'integration-kind';
-    kind.textContent = INTEGRATION_KIND_LABELS[item.kind];
-    header.appendChild(kind);
-  }
-
-  card.appendChild(header);
-
-  if (item.blurb) {
-    const desc = document.createElement('div');
-    desc.className = 'integration-desc';
-    desc.textContent = item.blurb;
-    card.appendChild(desc);
-  }
-
-  const actions = document.createElement('div');
-  actions.className = 'integration-actions';
-
+  // Action lives top-right (unified card anatomy); the kind tag moves
+  // under the description as part of the tag list.
+  const action = document.createElement('span');
+  action.className = 'integration-card-action';
   if (item.state === 'connected') {
     const badge = document.createElement('span');
     badge.className = 'integration-badge connected';
@@ -240,20 +225,16 @@ function renderIntegrationCard(item) {
       // Make the prototype nature visible on hover without cluttering the UI.
       badge.title = I18n.t('integrations.mockConnectedHint');
     }
-    actions.appendChild(badge);
+    action.appendChild(badge);
   } else if (item.state === 'pairing' || item.state === 'setup') {
-    const badge = document.createElement('span');
-    badge.className = 'integration-badge pending';
-    badge.textContent = item.state === 'pairing'
-      ? I18n.t('status.awaitingPairing')
-      : I18n.t('discover.needsSetup');
-    actions.appendChild(badge);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'discover-btn secondary';
-    btn.textContent = I18n.t('nux.finishSetup');
+    btn.textContent = item.state === 'pairing'
+      ? I18n.t('nux.enterPairingCode')
+      : I18n.t('nux.finishSetup');
     btn.addEventListener('click', () => showConfigureModal(item.id));
-    actions.appendChild(btn);
+    action.appendChild(btn);
   } else if (item.kind) {
     // Real registry entry: reuse the canonical install flow.
     const btn = document.createElement('button');
@@ -261,7 +242,7 @@ function renderIntegrationCard(item) {
     btn.className = 'discover-btn primary';
     btn.textContent = I18n.t('integrations.connect');
     btn.addEventListener('click', () => installIntegration(item, btn));
-    actions.appendChild(btn);
+    action.appendChild(btn);
   } else {
     // No registry entry — the agent can wire it up from chat.
     const btn = document.createElement('button');
@@ -272,10 +253,36 @@ function renderIntegrationCard(item) {
       switchTab('chat');
       prefillChatPrompt('Connect ' + item.label + ' for me');
     });
-    actions.appendChild(btn);
+    action.appendChild(btn);
+  }
+  header.appendChild(action);
+
+  card.appendChild(header);
+
+  if (item.blurb) {
+    const desc = document.createElement('div');
+    desc.className = 'integration-desc';
+    desc.textContent = item.blurb;
+    card.appendChild(desc);
   }
 
-  card.appendChild(actions);
+  // Tag list under the description (supports several capability tags).
+  const tags = document.createElement('div');
+  tags.className = 'card-tags';
+  if (item.kind && INTEGRATION_KIND_LABELS[item.kind]) {
+    const kindTag = document.createElement('span');
+    kindTag.className = 'card-tag';
+    kindTag.textContent = INTEGRATION_KIND_LABELS[item.kind];
+    tags.appendChild(kindTag);
+  }
+  (item.tags || []).forEach((t) => {
+    const tag = document.createElement('span');
+    tag.className = 'card-tag';
+    tag.textContent = t;
+    tags.appendChild(tag);
+  });
+  if (tags.children.length > 0) card.appendChild(tags);
+
   return card;
 }
 

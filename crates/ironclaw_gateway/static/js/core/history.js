@@ -933,10 +933,11 @@ function switchTab(tab) {
   });
   applyAriaAttributes();
   updateTopbarTitle(tab);
-  // The Workspace editor owns its own top row (file bar), so the global
-  // topbar is suppressed there — the editor sits flush with the page top.
-  // Mobile keeps the topbar (it carries the sidebar toggle).
-  document.querySelector('.app-main')?.classList.toggle('no-topbar', tab === 'memory');
+  // List/detail surfaces own their headers (view title + description +
+  // sticky toolbar), so the global topbar is suppressed there — no
+  // duplicated title chrome. Mobile keeps the topbar (sidebar toggle).
+  const TOPBARLESS_TABS = ['memory', 'skills', 'integrations', 'discover', 'tasks', 'projects', 'logs'];
+  document.querySelector('.app-main')?.classList.toggle('no-topbar', TOPBARLESS_TABS.indexOf(tab) !== -1);
   if (window.innerWidth <= 768) closeMobileSidebar();
 
   if (tab === 'memory') {
