@@ -174,6 +174,23 @@ function showTokenForm() {
   }
 }
 
+// Mock OAuth sign-in for the self-contained demo: no provider redirect
+// exists, so "Sign in with X" resolves locally after a short beat and
+// drops into the workspace (auth token supplied behind the scenes — the
+// gateway's real token mechanics stay intact, the user just never sees
+// them).
+function demoOAuthSignIn(provider, btn) {
+  var errEl = document.getElementById('auth-error');
+  if (errEl) errEl.textContent = '';
+  var label = btn.querySelector('[data-i18n]');
+  btn.disabled = true;
+  if (label) label.textContent = I18n.t('auth.connecting');
+  setTimeout(function() {
+    document.getElementById('token-input').value = 'demo-oauth-' + provider;
+    authenticate();
+  }, 450);
+}
+
 // Discover enabled providers and show corresponding buttons.
 fetch('/auth/providers', { credentials: 'include' })
   .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
@@ -188,7 +205,9 @@ fetch('/auth/providers', { credentials: 'include' })
       var btn = document.getElementById('auth-' + p + '-btn');
       if (!btn) return;
       btn.style.display = '';
-      if (p === 'near') {
+      if (window.__IRONCLAW_DEMO__) {
+        btn.addEventListener('click', function() { demoOAuthSignIn(p, btn); });
+      } else if (p === 'near') {
         btn.addEventListener('click', authenticateWithNear);
       } else {
         btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
@@ -302,6 +321,19 @@ async function authenticateWithNear() {
   const urlToken = params.get('token');
   if (urlToken) {
     document.getElementById('token-input').value = urlToken;
+    authenticate();
+    return;
+  }
+  // DEMO integration-auth fast path: arriving via the marketing-site intent
+  // handoff (?usecase= / ?prompt= / ?integrations= / ?billing=) means the
+  // user already went through onboarding — their first integration vouches
+  // for them, so skip the sign-in screen and drop straight into the
+  // workspace. Real deployments will exchange the handoff for a session
+  // server-side (implied: POST /auth/handoff { intent... } -> session).
+  if (window.__IRONCLAW_DEMO__
+      && (params.get('usecase') || params.get('prompt')
+        || params.get('integrations') || params.get('billing'))) {
+    document.getElementById('token-input').value = 'demo-handoff';
     authenticate();
     return;
   }

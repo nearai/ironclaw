@@ -793,7 +793,15 @@ window.NUX_BILLING = {
   function handleRoute(path, method, body, authed) {
     seedHandoffIntegrations();
     // ---- auth ----
-    if (path === '/auth/providers') return { providers: [] };
+    // OAuth-style entry: the demo advertises sign-in providers so the token
+    // form never surfaces as the primary path (it stays behind the "or use
+    // a token" divider). Clicking a provider resolves locally (see
+    // demoOAuthSignIn in init-auth.js).
+    // Implied: GET /auth/providers -> { providers: [..], near_network }
+    //          GET /auth/login/<provider> (redirect), POST /auth/near/verify
+    if (path === '/auth/providers') {
+      return { providers: ['google', 'github', 'near'], near_network: 'mainnet' };
+    }
     if (path === '/auth/logout') return {};
 
     // The unauthenticated /api/gateway/status probe in autoAuth() detects
