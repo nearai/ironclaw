@@ -36,15 +36,25 @@ const BASE =
   "focus-visible:ring-offset-[var(--v2-canvas)]";
 
 /* ── Size classes ──────────────────────────────────────────────────── */
-/* Radii come from the --v2-radius-* scale: compact controls md (10px),
-   default/large controls lg (16px — the nux --btn-radius). */
+/* Compact control-density scale (see "Control density" in app.css +
+   DESIGN_SYSTEM.md §4): heights/paddings come from the
+   --v2-control-* tokens so buttons, inputs, and future controls
+   align in mixed rows. sm 28px / md 32px / lg 36px. */
 
 const SIZES = {
-  sm:      "h-9 rounded-[var(--v2-radius-md)] px-3 text-xs",
-  md:      "min-h-[44px] rounded-[var(--v2-radius-lg)] px-3.5 text-[13px] md:min-h-[50px] md:px-4 md:text-sm",
-  lg:      "min-h-[54px] rounded-[var(--v2-radius-lg)] px-6 text-base",
-  icon:    "h-[44px] w-[44px] rounded-[var(--v2-radius-lg)] md:h-[50px] md:w-[50px]",
-  "icon-sm": "h-9 w-9 rounded-[var(--v2-radius-md)]",
+  sm:
+    "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] " +
+    "px-[var(--v2-control-px-sm)] text-xs",
+  md:
+    "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-md)] text-[13px]",
+  lg:
+    "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-lg)] text-sm",
+  icon:
+    "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
+  "icon-sm":
+    "h-[var(--v2-control-h-sm)] w-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */
@@ -53,9 +63,12 @@ const SIZES = {
 // fills solid blue on hover.
 
 const VARIANTS = {
+  // hover text uses --v2-on-accent, NOT the `text-white` utility: the
+  // legacy Tailwind-alias shim in app.css remaps `.text-white` /
+  // `hover:text-white` to --v2-text-strong (dark ink in light mode).
   outline:
     "border-2 border-[var(--v2-btn-secondary-border)] bg-[var(--v2-btn-secondary-bg)] text-[var(--v2-text-strong)] " +
-    "hover:bg-[var(--v2-accent)] hover:border-[var(--v2-accent)] hover:text-white " +
+    "hover:bg-[var(--v2-accent)] hover:border-[var(--v2-accent)] hover:text-[var(--v2-on-accent)] " +
     "active:bg-[var(--v2-accent-strong)]",
 
   secondary:
@@ -98,7 +111,11 @@ export function Button({
           BASE,
           sizeClass,
           fullClass,
-          "relative overflow-hidden text-white group",
+          // text-[var(--v2-on-accent)], not `text-white`: the legacy
+          // alias shim in app.css remaps `.text-white` to the theme
+          // ink color, which rendered dark text on the blue gradient
+          // in light mode.
+          "relative overflow-hidden text-[var(--v2-on-accent)] group",
           "hover:shadow-[var(--v2-shadow-accent-hover)]",
           className
         )}

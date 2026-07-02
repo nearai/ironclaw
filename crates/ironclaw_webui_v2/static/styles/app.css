@@ -171,9 +171,10 @@
    guidance live in crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. */
 :root {
   /* Radii — nux scale (6/8/10/16/24). xs: inline chips; sm: compact
-     controls; md: inputs + small panels; lg: buttons + cards (the
-     nux --btn-radius / --radius-lg); xl: large cards + composer;
-     2xl: modals, sheets (nux --radius-xl); full: pills. */
+     (sm) controls; md: default controls (buttons, inputs) + small
+     panels; lg: cards + large hero CTAs (the nux --radius-lg);
+     xl: large cards + composer; 2xl: modals, sheets (nux
+     --radius-xl); full: pills. */
   --v2-radius-xs:   6px;
   --v2-radius-sm:   8px;
   --v2-radius-md:   10px;
@@ -181,6 +182,27 @@
   --v2-radius-xl:   20px;
   --v2-radius-2xl:  24px;
   --v2-radius-full: 9999px;
+
+  /* Control density — the compact (Linear-density) control scale.
+     Product-wide push: interactive controls (buttons, inputs,
+     selects) share these heights + horizontal paddings so rows of
+     mixed controls always align. Buttons set the precedent; new
+     controls must consume these instead of inventing heights. */
+  /* Absolute px, NOT rem: the app shrinks the root font to 15px on
+     large screens (html { font-size: 15px }), and control chrome
+     must not shrink with it. */
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+
+  /* Text on accent/brand fills — white in BOTH themes. Never use the
+     `text-white` utility for this: the legacy Tailwind-alias compat
+     shim below remaps `.text-white` to --v2-text-strong (dark ink in
+     light mode), which is exactly the wrong color on a blue fill. */
+  --v2-on-accent: #ffffff;
 
   /* Spacing — 4px base grid (matches the Tailwind scale the UI uses).
      Named steps so agents can pick semantically: gap-hairline for

@@ -19,6 +19,7 @@ import {
   StatCard,
   SubLabel,
 } from "../../../design-system/primitives.js";
+import { STATUS_CANON } from "../../../design-system/tokens.js";
 import { SectionTitle } from "./token-sections.js";
 
 /* ── Shared bits ───────────────────────────────────────────────────── */
@@ -62,18 +63,38 @@ export function ButtonSection() {
         )}
       <//>
 
-      <${SectionTitle}>Sizes<//>
-      <${Row}>
-        <${Button} variant="secondary" size="sm">sm<//>
-        <${Button} variant="secondary" size="md">md (default)<//>
-        <${Button} variant="secondary" size="lg">lg<//>
-        <${Button} variant="secondary" size="icon" aria-label="Icon button">
-          <${Icon} name="plus" className="h-4 w-4" />
-        <//>
-        <${Button} variant="secondary" size="icon-sm" aria-label="Small icon button">
-          <${Icon} name="plus" className="h-4 w-4" />
-        <//>
+      <${SectionTitle}>Sizes — compact control scale<//>
+      <${Row} className="items-end">
+        ${[
+          ["sm", "sm · 28px", "New chat"],
+          ["md", "md (default) · 32px", "New chat"],
+          ["lg", "lg · 36px", "New chat"],
+        ].map(
+          ([size, caption, label]) => html`
+            <div key=${size} className="flex flex-col items-center gap-1.5">
+              <${Button} variant="secondary" size=${size}>${label}<//>
+              <${Caption}>${caption}<//>
+            </div>
+          `
+        )}
+        <div className="flex flex-col items-center gap-1.5">
+          <${Button} variant="secondary" size="icon" aria-label="Add">
+            <${Icon} name="plus" className="h-4 w-4" />
+          <//>
+          <${Caption}>icon · 32px sq<//>
+        </div>
+        <div className="flex flex-col items-center gap-1.5">
+          <${Button} variant="secondary" size="icon-sm" aria-label="Add">
+            <${Icon} name="plus" className="h-4 w-4" />
+          <//>
+          <${Caption}>icon-sm · 28px sq<//>
+        </div>
       <//>
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        Heights and paddings come from the shared ${" "}
+        <code className="font-mono text-[0.75rem]">--v2-control-h-* / --v2-control-px-*</code>${" "}
+        density tokens, so buttons and inputs align in mixed rows.
+      </p>
 
       <${SectionTitle}>States<//>
       <${Row}>
@@ -102,6 +123,35 @@ export function BadgeSection() {
           (tone) => html`<${Badge} key=${tone} tone=${tone} label=${tone} />`
         )}
       <//>
+
+      <${SectionTitle}>Status canon<//>
+      <p className="mb-3 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        The one mapping from product status words to tokens. Text, dots,
+        and progress fills for a status must all come from the same pair
+        (STATUS_CANON in design-system/tokens.js) — never a second hue.
+      </p>
+      <div className="flex flex-col gap-2">
+        ${STATUS_CANON.map(
+          (entry) => html`
+            <div key=${entry.tone} className="flex flex-wrap items-center gap-3">
+              <span className="w-64 shrink-0 text-[0.8125rem] text-[var(--v2-text)]">
+                ${entry.status}
+              </span>
+              <${Badge} tone=${entry.tone} label=${entry.tone} />
+              <span
+                className="h-2 w-24 shrink-0 overflow-hidden rounded-full"
+                style=${{ background: `var(${entry.fill})` }}
+              >
+                <span
+                  className="block h-full w-2/3 rounded-full"
+                  style=${{ background: `var(${entry.text})` }}
+                />
+              </span>
+              <${Caption}>${entry.text} / ${entry.fill}<//>
+            </div>
+          `
+        )}
+      </div>
 
       <${SectionTitle}>Sizes + no dot<//>
       <${Row}>

@@ -45,7 +45,8 @@ export const COLOR_TOKENS = [
       { var: "--v2-text-strong", note: "Headings, values, emphasized text" },
       { var: "--v2-text-muted", note: "Secondary text, descriptions" },
       { var: "--v2-text-faint", note: "Placeholders, eyebrow labels" },
-      { var: "--v2-inverse", note: "Text on accent/inverse fills" },
+      { var: "--v2-inverse", note: "Text on inverse fills" },
+      { var: "--v2-on-accent", note: "Text on accent/brand fills (white, both themes)" },
       { var: "--v2-ink", note: "Brand ink (logo, marks)" },
     ],
   },
@@ -84,6 +85,32 @@ export const COLOR_TOKENS = [
       { var: "--v2-scrim-soft", note: "Side sheet / task panel scrim" },
     ],
   },
+];
+
+/**
+ * Status color canon — THE one unambiguous mapping from product
+ * status words to semantic tokens (and Badge tones). Every surface
+ * that renders a run/job/automation status must draw text, dots, and
+ * progress fills from the same pair; never mix (e.g.) info text with
+ * a cyan progress bar.
+ */
+export const STATUS_CANON = [
+  { status: "ok / success / completed", tone: "success", text: "--v2-positive-text", fill: "--v2-positive-soft" },
+  { status: "running / in progress / active", tone: "info", text: "--v2-info-text", fill: "--v2-info-soft" },
+  { status: "warning / degraded / attention", tone: "warning", text: "--v2-warning-text", fill: "--v2-warning-soft" },
+  { status: "failure / error / cancelled", tone: "danger", text: "--v2-danger-text", fill: "--v2-danger-soft" },
+  { status: "paused / idle / disabled", tone: "muted", text: "--v2-text-muted", fill: "--v2-surface-soft" },
+];
+
+/** Control-density scale — shared heights/paddings for interactive
+ * controls (Button, Input, Select, …) so mixed rows align. */
+export const CONTROL_TOKENS = [
+  { var: "--v2-control-h-sm", note: "28px — toolbars, table rows, chips" },
+  { var: "--v2-control-h-md", note: "32px — default controls" },
+  { var: "--v2-control-h-lg", note: "36px — prominent CTAs, hero forms" },
+  { var: "--v2-control-px-sm", note: "Horizontal padding, sm controls" },
+  { var: "--v2-control-px-md", note: "Horizontal padding, md controls" },
+  { var: "--v2-control-px-lg", note: "Horizontal padding, lg controls" },
 ];
 
 /** Radius scale — nux 6/8/10/16/20/24. */

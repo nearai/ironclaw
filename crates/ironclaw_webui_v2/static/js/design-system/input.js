@@ -27,11 +27,12 @@ const INPUT_BASE =
   "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
-/* Sizes mirroring reference AppInput; radii from the --v2-radius-* scale */
+/* Compact control-density scale — same --v2-control-* tokens as
+   Button so mixed control rows align (see DESIGN_SYSTEM.md §4). */
 const INPUT_SIZES = {
-  sm: "h-9 rounded-[var(--v2-radius-md)] px-3 text-[12px]",
-  md: "h-[44px] rounded-[var(--v2-radius-md)] px-3.5 text-[13px] md:h-[50px] md:rounded-[var(--v2-radius-lg)] md:px-4 md:text-sm",
-  lg: "h-[54px] rounded-[var(--v2-radius-lg)] px-4 text-base",
+  sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-[12px]",
+  md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-[13px]",
+  lg: "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-lg)] text-sm",
 };
 
 /* ─── Input ───────────────────────────────────────────────────────── */
@@ -68,8 +69,8 @@ export function Textarea({
       rows=${rows}
       className=${cn(
         INPUT_BASE,
-        "rounded-[var(--v2-radius-md)] px-3.5 py-3 text-[13px] md:rounded-[var(--v2-radius-lg)] md:px-4 md:text-sm",
-        "resize-y min-h-[80px]",
+        "rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] py-2 text-[13px]",
+        "resize-y min-h-[72px]",
         error && "border-[var(--v2-danger-text)] focus:ring-[color-mix(in_srgb,var(--v2-danger-text)_28%,transparent)]",
         className
       )}

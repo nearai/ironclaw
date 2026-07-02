@@ -7,6 +7,7 @@
 import { React, html } from "../../../lib/html.js";
 import {
   COLOR_TOKENS,
+  CONTROL_TOKENS,
   MOTION_TOKENS,
   RADIUS_TOKENS,
   SHADOW_TOKENS,
@@ -177,6 +178,26 @@ export function TypographySection({ theme }) {
 export function SpacingSection({ theme }) {
   return html`
     <div>
+      <${SectionTitle}>Control density — shared control heights<//>
+      <div className="mb-2 flex flex-col gap-3">
+        ${CONTROL_TOKENS.map((token) => {
+          const value = readToken(token.var);
+          const isHeight = token.var.includes("-h-");
+          return html`
+            <div key=${token.var + theme} className="flex items-center gap-4">
+              <span className="w-44 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
+                ${token.var}
+              </span>
+              <span
+                className="w-24 shrink-0 rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]"
+                style=${isHeight ? { height: `var(${token.var})` } : { height: "1rem", width: `var(${token.var})` }}
+              />
+              <${TokenValue}>${value} — ${token.note}<//>
+            </div>
+          `;
+        })}
+      </div>
+
       <${SectionTitle}>Spacing scale — 4px base grid<//>
       <div className="flex flex-col gap-3">
         ${SPACE_TOKENS.map((token) => {

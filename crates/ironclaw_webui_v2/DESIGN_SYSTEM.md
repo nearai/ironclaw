@@ -106,9 +106,24 @@ add a token first — do not inline the raw value.
     eyebrows). Don't skip levels for contrast tricks.
   - Borders: `--v2-panel-border` everywhere unless you're inside
     `Card`.
-  - Actions: `--v2-accent*`. Status: `--v2-positive/warning/danger/
-    info` pairs — always the `-soft` fill with the `-text` foreground,
-    never `-text` on `-text`.
+  - Actions: `--v2-accent*`. Text sitting ON an accent/brand fill is
+    `--v2-on-accent` (white in both themes) — never the `text-white`
+    utility, which the legacy alias shim remaps to theme ink and
+    renders dark-on-blue in light mode.
+  - Status: `--v2-positive/warning/danger/info` pairs — always the
+    `-soft` fill with the `-text` foreground, never `-text` on
+    `-text`.
+- **Status canon** (one hue per status, everywhere — text, dot, and
+  progress fill all from the same pair; `STATUS_CANON` in
+  `design-system/tokens.js` is the machine-readable copy):
+
+  | Status words | Badge tone | Text/stroke | Fill |
+  |---|---|---|---|
+  | ok / success / completed | `success` | `--v2-positive-text` | `--v2-positive-soft` |
+  | running / in progress / active | `info` | `--v2-info-text` | `--v2-info-soft` |
+  | warning / degraded / attention | `warning` | `--v2-warning-text` | `--v2-warning-soft` |
+  | failure / error / cancelled | `danger` | `--v2-danger-text` | `--v2-danger-soft` |
+  | paused / idle / disabled | `muted` | `--v2-text-muted` | `--v2-surface-soft` |
 - The legacy `iron-*` / `signal` / `copper` Tailwind aliases in
   `index.html` are compat shims for old pages. Do not use them in new
   code.
@@ -150,8 +165,18 @@ add a token first — do not inline the raw value.
   nux heading language. Numbers that align in columns get
   `tabular-nums`.
 
-## 4. Spacing & layout
+## 4. Spacing, layout & control density
 
+- **Density principle:** the product is deliberately compact
+  (Linear-density). Interactive controls draw their heights and
+  horizontal paddings from the shared control tokens —
+  `--v2-control-h-sm/md/lg` (28 / 32 / 36px) and
+  `--v2-control-px-sm/md/lg` (10 / 12 / 16px) — so buttons, inputs,
+  and selects align in mixed rows. New controls must consume these
+  tokens; never invent a control height. When in doubt, pick the
+  smaller size. (Buttons set this precedent; large marketing/hero
+  CTAs on brand surfaces are the only place taller chrome is
+  acceptable, and that's a design-review decision.)
 - Everything sits on the 4px grid (`--v2-space-*`, equivalently the
   Tailwind default scale). No arbitrary `p-[13px]`-style one-offs.
 - Relationships, not values: hairline gaps inside chips (4px),
@@ -166,9 +191,11 @@ add a token first — do not inline the raw value.
 
 - Radii come from `--v2-radius-*` (nux scale). Rule of thumb: the
   bigger and more container-like the element, the bigger the radius.
-  Inline chips 6–8px, compact controls/inputs 10px, buttons and
-  cards 16px (the nux button/card radius), large cards 20px, modals
-  and hero surfaces 24px, pills `full`. Never a new radius value.
+  Inline chips 6px, sm controls 8px, default controls (buttons,
+  inputs) 10px, cards 16px, large cards 20px, modals and hero
+  surfaces 24px, pills `full`. Never a new radius value. (The nux
+  landing's 16px button radius is reserved for hero CTAs — at the
+  compact control heights, 8–10px is the correct proportion.)
 - Shadows come from the nux layered scale: `--v2-shadow-sm/md/lg`
   for lifts (themed — the light scale is much softer, so never
   hardcode a shadow that "looks right" in one theme), the themed
