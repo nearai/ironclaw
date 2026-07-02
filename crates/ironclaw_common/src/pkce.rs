@@ -6,8 +6,7 @@
 //! verifier itself — so nothing here logs or retains secret material.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng as _;
-use rand::rngs::OsRng;
+use rand::RngExt as _;
 use sha2::{Digest, Sha256};
 
 /// RFC 7636 §4.1 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~".
@@ -20,15 +19,14 @@ const VERIFIER_LEN: usize = 64;
 
 /// Generate a 64-character URL-safe PKCE code verifier (RFC 7636 §4.1).
 ///
-/// Draws directly from `OsRng` so the verifier's randomness is independent of
-/// thread-local state — the canonical source for security-critical secrets.
+/// Draws from the thread-local CSPRNG (`rand::rng()`, OS-seeded). Each
+/// character is selected with `random_range`, which rejection-samples to
+/// avoid the modulo bias of `byte % CHARSET.len()` (the 66-char unreserved
+/// set does not divide 256).
 pub fn generate_code_verifier() -> String {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     (0..VERIFIER_LEN)
-        .map(|_| {
-            let idx = rng.gen_range(0..VERIFIER_CHARSET.len());
-            VERIFIER_CHARSET[idx] as char
-        })
+        .map(|_| VERIFIER_CHARSET[rng.random_range(0..VERIFIER_CHARSET.len())] as char)
         .collect()
 }
 

@@ -33,6 +33,44 @@ async fn webui_event_stream_projects_iteration_limit_failure_summary() {
     .await;
 }
 
+#[tokio::test]
+async fn webui_event_stream_projects_scheduler_heartbeat_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-scheduler-heartbeat-thread",
+        "scheduler_heartbeat_failed",
+        "The run failed after the runner heartbeat could not be recorded.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-scheduler-panic-thread",
+        "scheduler_executor_panic",
+        "The agent runtime stopped unexpectedly.",
+    )
+    .await;
+}
+
+// Regression: a terminal capability failure reaches the projection as the
+// `capability_protocol_error` category (from `LoopFailureKind::as_str()`).
+// Before the fix it was unmapped in
+// `reborn_failure_summary_for_category`, so the fallback degraded to the
+// generic "The run failed before producing a reply." and the LLM explainer
+// paraphrased it into a vague "driver protocol error" that hid the real tool
+// failure. With no explainer wired, the projection must now carry the specific
+// fallback summary end-to-end.
+#[tokio::test]
+async fn webui_event_stream_projects_capability_protocol_error_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-capability-protocol-thread",
+        "capability_protocol_error",
+        "The run stopped because a tool returned a response it could not process.",
+    )
+    .await;
+}
+
 async fn assert_failed_run_status_summary(
     thread_id: &str,
     failure_category: &str,
@@ -340,6 +378,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
                 status: TurnStatus::RecoveryRequired,
+                blocked_activity_id: None,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
@@ -367,7 +406,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
                 } if *run_id == turn_run
                     && status == "recovery_required"
                     && category.category() == "driver_failed"
-                    && summary == "The run failed because the execution driver reported an error."
+                    && summary == "The agent runtime reported an internal error before producing a reply."
             )
         }),
         _ => false,
@@ -404,12 +443,13 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                 status: TurnStatus::Failed,
                 kind: TurnEventKind::Failed,
                 blocked_gate: None,
-                sanitized_reason: Some("driver_panic".to_string()),
+                sanitized_reason: Some("scheduler_executor_panic".to_string()),
             }],
         }),
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
                 status: TurnStatus::Failed,
+                blocked_activity_id: None,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
@@ -437,7 +477,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                     failure_summary: Some(summary),
                     ..
                 } if *run_id == turn_run
-                    && summary == "The run failed because the execution driver stopped unexpectedly."
+                    && summary == "The agent runtime stopped unexpectedly."
             )
         }),
         _ => false,
@@ -476,7 +516,7 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
     let explanation = explainer
         .explain_failure(FailureExplanationInput {
             failure_category: "driver_invalid_request".to_string(),
-            fallback_summary: "The run failed because the execution driver rejected the request."
+            fallback_summary: "The agent runtime rejected the request before producing a reply."
                 .to_string(),
         })
         .await;
@@ -507,8 +547,7 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
     let explanation = explainer
         .explain_failure(FailureExplanationInput {
             failure_category: "driver_unavailable".to_string(),
-            fallback_summary: "The run failed because the execution driver was unavailable."
-                .to_string(),
+            fallback_summary: "The run could not start the agent runtime.".to_string(),
         })
         .await;
 

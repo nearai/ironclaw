@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     ExternalSubjectId, LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-    ProviderKind, RebornIdentityResolver, RebornLibSqlLocalTriggerAccessStore,
-    ResolveExternalIdentity, SurfaceKind,
+    LocalTriggerAccessStore, ProviderKind, RebornIdentityResolver, ResolveExternalIdentity,
+    SurfaceKind,
 };
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
@@ -102,7 +102,7 @@ impl WebuiUserDirectory {
 
 /// Local-dev trigger access seed configuration for users admitted through SSO.
 pub(crate) struct LocalTriggerAccessBootstrap {
-    store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+    store: Arc<dyn LocalTriggerAccessStore>,
     tenant_id: TenantId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -110,7 +110,7 @@ pub(crate) struct LocalTriggerAccessBootstrap {
 
 impl LocalTriggerAccessBootstrap {
     pub(crate) fn new(
-        store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+        store: Arc<dyn LocalTriggerAccessStore>,
         tenant_id: TenantId,
         agent_id: AgentId,
         project_id: Option<ProjectId>,

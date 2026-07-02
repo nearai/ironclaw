@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -21,33 +22,49 @@ use ironclaw_product_adapters::{
     ProductProjectionState, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
     ProjectionStream, ProjectionSubscriptionRequest,
 };
+use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     StaticProductInstallationResolver,
 };
-use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_product_workflow::{
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
+};
+use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
-    OpenAiChatProjectionStreamRequest, OpenAiCompatErrorKind, OpenAiCompatHttpError,
-    OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer, OpenAiCompatRefStore,
-    OpenAiCompatResourceBinding, OpenAiCompatRouterState, OpenAiResponseErrorObject,
-    OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
+    OpenAiCompatHttpError, OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer,
+    OpenAiCompatRefStore, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
+    OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
     OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
     OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
 };
-use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
+use ironclaw_reborn_openai_compat::{
+    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
+    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
+};
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope,
 };
+use ironclaw_turns::{
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
+    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus,
+};
+use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
@@ -59,6 +76,9 @@ mod tests;
 const OPENAI_COMPAT_LEDGER_USER_ID: &str = "openai-compat";
 const OPENAI_COMPAT_LEDGER_ENGINE_ROOT: &str = "/engine";
 const OPENAI_COMPAT_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY: Duration = Duration::from_secs(10);
+const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
@@ -159,10 +179,19 @@ pub async fn build_openai_compat_route_mount(
         runtime.webui_thread_service(),
     ));
     let projection_stream = runtime.webui_event_stream();
-    let responses_projection_reader = Arc::new(OpenAiResponsesThreadProjectionReader::new(
-        runtime.webui_thread_service(),
-        projection_stream.clone(),
-    ));
+    // The external-tool catalog is the run-scoped seam shared with the loop
+    // host: the host records parked calls + completes them from submitted
+    // outputs; the Responses surface registers specs, submits outputs, and reads
+    // parked calls back here.
+    let external_tool_catalog = local_runtime.external_tool_catalog.clone();
+    let responses_projection_reader = Arc::new(
+        OpenAiResponsesThreadProjectionReader::new(
+            runtime.webui_thread_service(),
+            projection_stream.clone(),
+            external_tool_catalog.clone(),
+        )
+        .with_turn_coordinator(runtime.webui_turn_coordinator()),
+    );
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
         projection_stream,
     ));
@@ -175,17 +204,120 @@ pub async fn build_openai_compat_route_mount(
         .with_projection_streamer(projection_streamer.clone())
         .with_attachment_submit(attachment_submit),
     );
+    let external_tool_store: Arc<dyn OpenAiCompatExternalToolStore> =
+        Arc::new(OpenAiCompatRuntimeExternalToolStore {
+            catalog: external_tool_catalog,
+        });
+    let external_tool_resume: Arc<dyn OpenAiCompatExternalToolResume> =
+        Arc::new(OpenAiCompatRuntimeExternalToolResume {
+            coordinator: runtime.webui_turn_coordinator(),
+        });
     let responses_workflow = Arc::new(
         OpenAiResponsesWorkflow::new(product_workflow, ref_store, responses_projection_reader)
-            .with_projection_streamer(projection_streamer),
+            .with_projection_streamer(projection_streamer)
+            .with_external_tools(external_tool_store, external_tool_resume),
     );
+    let router_state = OpenAiCompatRouterState::with_chat_completions(chat_workflow)
+        .with_responses_workflow(responses_workflow);
+    // `GET /v1/models` lists the deployment's configured models from the same
+    // LLM-config source the operator WebUI uses. Wired only when the root LLM
+    // provider is compiled in; otherwise the route stays fail-closed (501).
+    #[cfg(feature = "root-llm-provider")]
+    let router_state = match crate::webui::build_llm_config_service(runtime) {
+        Some(llm_config) => {
+            let catalog: Arc<dyn OpenAiCompatModelCatalog> =
+                Arc::new(LlmConfigModelCatalog::new(llm_config));
+            router_state.with_models_catalog(catalog)
+        }
+        None => router_state,
+    };
     Ok(ProtectedRouteMount::new(
-        openai_compat_router_with_state(
-            OpenAiCompatRouterState::with_chat_completions(chat_workflow)
-                .with_responses_workflow(responses_workflow),
-        ),
+        openai_compat_router_with_state(router_state),
         openai_compat_routes(),
     ))
+}
+
+/// Maps an [`LlmConfigSnapshot`] to the OpenAI-compatible `/v1/models` listing.
+///
+/// The active selection (if any) is listed first, then every configured
+/// provider's active or default model, de-duplicated by model id while
+/// preserving order. Each entry's `owned_by` is the provider id.
+#[cfg(feature = "root-llm-provider")]
+fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    if let Some(active) = &snapshot.active
+        && let Some(model) = &active.model
+    {
+        candidates.push((model.clone(), active.provider_id.clone()));
+    }
+    for provider in &snapshot.providers {
+        let model = provider
+            .active_model
+            .clone()
+            .unwrap_or_else(|| provider.default_model.clone());
+        candidates.push((model, provider.id.clone()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|(id, _)| !id.is_empty() && seen.insert(id.clone()))
+        .map(|(id, owner)| OpenAiCompatModelEntry::new(id).with_owner(owner))
+        .collect()
+}
+
+/// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
+/// service. Lists the deployment's configured models for `GET /v1/models`.
+#[cfg(feature = "root-llm-provider")]
+struct LlmConfigModelCatalog {
+    llm_config: Arc<dyn LlmConfigService>,
+}
+
+#[cfg(feature = "root-llm-provider")]
+impl LlmConfigModelCatalog {
+    fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
+        Self { llm_config }
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[async_trait]
+impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
+    async fn list_models(
+        &self,
+        caller: &ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller,
+    ) -> Result<Vec<OpenAiCompatModelEntry>, OpenAiCompatHttpError> {
+        // The route authenticated the caller; carry its tenant/user scope into
+        // the LLM-config read so the snapshot is scoped to the same identity.
+        let webui_caller = WebUiAuthenticatedCaller::new(
+            caller.scope().tenant_id().clone(),
+            caller.scope().user_id().clone(),
+            caller.scope().agent_id().cloned(),
+            caller.scope().project_id().cloned(),
+        );
+        let snapshot = self
+            .llm_config
+            .snapshot(webui_caller)
+            .await
+            .map_err(map_llm_config_error_to_openai)?;
+        Ok(model_entries_from_snapshot(&snapshot))
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
+    match error {
+        LlmConfigServiceError::InvalidRequest { .. } => {
+            OpenAiCompatHttpError::invalid_request(None)
+        }
+        LlmConfigServiceError::NotFound => OpenAiCompatHttpError::not_found(None),
+        LlmConfigServiceError::Unavailable => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        LlmConfigServiceError::Internal => OpenAiCompatHttpError::internal(),
+    }
 }
 
 /// Bridges the route crate's [`OpenAiCompatInboundAttachmentSubmit`] door to the
@@ -341,6 +473,10 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
 struct OpenAiResponsesThreadProjectionReader {
     thread_service: Arc<dyn SessionThreadService>,
     projection_stream: Arc<dyn ProjectionStream>,
+    turn_coordinator: Option<Arc<dyn TurnCoordinator>>,
+    /// Shared run-scoped catalog. Read to render a parked `BlockedExternalTool`
+    /// run's pending calls as `function_call` output items.
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     poll_interval: Duration,
 }
 
@@ -348,11 +484,84 @@ impl OpenAiResponsesThreadProjectionReader {
     fn new(
         thread_service: Arc<dyn SessionThreadService>,
         projection_stream: Arc<dyn ProjectionStream>,
+        external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     ) -> Self {
         Self {
             thread_service,
             projection_stream,
+            turn_coordinator: None,
+            external_tool_catalog,
             poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
+        }
+    }
+
+    fn with_turn_coordinator(mut self, turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
+        self.turn_coordinator = Some(turn_coordinator);
+        self
+    }
+
+    /// The parked external tool calls for a run, rendered as `function_call`
+    /// output items. Empty when the run has no recorded pending calls.
+    async fn pending_external_tool_items(
+        &self,
+        submitted_run_id: &str,
+    ) -> Result<Vec<OpenAiResponseOutputItem>, OpenAiCompatHttpError> {
+        let run_id = parse_turn_run_id(submitted_run_id)?;
+        let pending = self
+            .external_tool_catalog
+            .pending_calls(run_id)
+            .await
+            .map_err(map_catalog_error)?;
+        Ok(pending
+            .into_iter()
+            .map(|call| OpenAiResponseOutputItem::FunctionCall {
+                id: format!("fc_{}", call.call_id()),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id: call.call_id().to_string(),
+                name: call.name().to_string(),
+                arguments: serde_json::to_string(call.arguments())
+                    .unwrap_or_else(|_| "{}".to_string()),
+            })
+            .collect())
+    }
+
+    async fn has_pending_external_tool_calls(
+        &self,
+        submitted_run_id: &str,
+    ) -> Result<bool, OpenAiCompatHttpError> {
+        let run_id = parse_turn_run_id(submitted_run_id)?;
+        let pending = self
+            .external_tool_catalog
+            .pending_calls(run_id)
+            .await
+            .map_err(map_catalog_error)?;
+        Ok(!pending.is_empty())
+    }
+
+    async fn can_surface_pending_external_tool_fallback(
+        &self,
+        request: &ProjectionReadRequest,
+        actor_scope: &OpenAiCompatActorScope,
+        submitted_run_id: &str,
+    ) -> Result<bool, OpenAiCompatHttpError> {
+        let Some(coordinator) = self.turn_coordinator.as_ref() else {
+            return Ok(true);
+        };
+        let run_id = TurnRunId::parse(submitted_run_id)
+            .map_err(|_| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))?;
+        match coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: openai_compat_resume_turn_scope(
+                    actor_scope,
+                    request.scope.thread_id.clone(),
+                ),
+                run_id,
+            })
+            .await
+        {
+            Ok(state) => Ok(state.status == TurnStatus::BlockedExternalTool),
+            Err(error) if error.category() == TurnErrorCategory::ScopeNotFound => Ok(false),
+            Err(error) => Err(map_resume_turn_error(error)),
         }
     }
 
@@ -503,6 +712,7 @@ impl OpenAiResponsesThreadProjectionReader {
     async fn read_projected_response_status(
         &self,
         request: &ProjectionReadRequest,
+        actor_scope: &OpenAiCompatActorScope,
         submitted_run_id: &str,
         after_cursor: Option<ProjectionCursor>,
     ) -> Result<ProjectedResponseStatusRead, OpenAiCompatHttpError> {
@@ -515,10 +725,44 @@ impl OpenAiResponsesThreadProjectionReader {
             })
             .await?;
         let next_cursor = events.last().map(|event| event.projection_cursor().clone());
+        let blocked_external_tool = if self.turn_coordinator.is_some() {
+            self.run_blocked_external_tool_from_state(request, actor_scope, submitted_run_id)
+                .await?
+        } else {
+            run_blocked_external_tool_from_projection_events(&events, submitted_run_id)
+        };
         Ok(ProjectedResponseStatusRead {
             status: response_status_from_projection_events(&events, submitted_run_id),
+            blocked_external_tool,
             next_cursor,
         })
+    }
+
+    async fn run_blocked_external_tool_from_state(
+        &self,
+        request: &ProjectionReadRequest,
+        actor_scope: &OpenAiCompatActorScope,
+        submitted_run_id: &str,
+    ) -> Result<bool, OpenAiCompatHttpError> {
+        let Some(coordinator) = self.turn_coordinator.as_ref() else {
+            return Ok(false);
+        };
+        let run_id = TurnRunId::parse(submitted_run_id)
+            .map_err(|_| OpenAiCompatHttpError::not_found(Some("response_id".to_string())))?;
+        match coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: openai_compat_resume_turn_scope(
+                    actor_scope,
+                    request.scope.thread_id.clone(),
+                ),
+                run_id,
+            })
+            .await
+        {
+            Ok(state) => Ok(state.status == TurnStatus::BlockedExternalTool),
+            Err(error) if error.category() == TurnErrorCategory::ScopeNotFound => Ok(false),
+            Err(error) => Err(map_resume_turn_error(error)),
+        }
     }
 }
 
@@ -548,7 +792,7 @@ fn push_tool_output_items(
                 id: format!("fc_{call_id}"),
                 status: Some(OpenAiResponseOutputItemStatus::Completed),
                 call_id: call_id.clone(),
-                name: provider_call.provider_tool_name.clone(),
+                name: provider_call.provider_tool_name.as_str().to_string(),
                 arguments,
             });
             items.push(OpenAiResponseOutputItem::FunctionCallOutput {
@@ -623,13 +867,13 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         &self,
         request: OpenAiResponseWaitRequest,
     ) -> Result<OpenAiResponseProjection, OpenAiCompatHttpError> {
-        let submitted_run_id = match &request.accepted_ack {
-            ProductInboundAck::Accepted {
-                submitted_run_id, ..
-            } => submitted_run_id.to_string(),
-            _ => return Err(OpenAiCompatHttpError::internal()),
-        };
+        // The run id is read from the response's bound refs (the mapping is
+        // bound before the wait). A create carries the accepted ack too, but an
+        // external-tool resume reuses the parked run with no new ack.
+        let submitted_run_id = turn_run_ref_from_binding(&request.mapping)?;
         let mut projection_after_cursor = request.projection_read.after_cursor.clone();
+        let pending_external_tool_fallback_at =
+            tokio::time::Instant::now() + OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY;
         loop {
             // Cheap completion gate first; only read the full transcript
             // projection (tool calls/outputs + assistant message) once the run
@@ -656,12 +900,66 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             let projected = self
                 .read_projected_response_status(
                     &request.projection_read,
+                    &request.actor_scope,
                     &submitted_run_id,
                     projection_after_cursor.clone(),
                 )
                 .await?;
             if let Some(next_cursor) = projected.next_cursor {
                 projection_after_cursor = Some(next_cursor);
+            }
+            // A run parked on a client tool is "complete" from the API client's
+            // view: surface the parked call(s) as `function_call` items (plus any
+            // already-completed tool output for the run) and stop waiting. The
+            // client resolves them with a `function_call_output` continuation.
+            if projected.blocked_external_tool {
+                let mut projection = self
+                    .read_run_output(
+                        &request.projection_read,
+                        submitted_run_id.clone(),
+                        &request.public_id,
+                    )
+                    .await?;
+                projection
+                    .items
+                    .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+                return Ok(OpenAiResponseProjection::new(response_object(
+                    request.public_id,
+                    request.mapping.created_at,
+                    request.requested_model,
+                    OpenAiResponseStatus::Completed,
+                    projection.items,
+                )));
+            }
+            if self
+                .has_pending_external_tool_calls(&submitted_run_id)
+                .await?
+                && tokio::time::Instant::now() >= pending_external_tool_fallback_at
+                && self
+                    .can_surface_pending_external_tool_fallback(
+                        &request.projection_read,
+                        &request.actor_scope,
+                        &submitted_run_id,
+                    )
+                    .await?
+            {
+                let mut projection = self
+                    .read_run_output(
+                        &request.projection_read,
+                        submitted_run_id.clone(),
+                        &request.public_id,
+                    )
+                    .await?;
+                projection
+                    .items
+                    .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+                return Ok(OpenAiResponseProjection::new(response_object(
+                    request.public_id,
+                    request.mapping.created_at,
+                    request.requested_model,
+                    OpenAiResponseStatus::Completed,
+                    projection.items,
+                )));
             }
             if let Some(status) = projected.status
                 && matches!(
@@ -685,26 +983,51 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         &self,
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
-        let submitted_run_id = response_turn_run_ref_from_mapping(&request)?;
-        let projection = self
+        let submitted_run_id = turn_run_ref_from_binding(&request.mapping)?;
+        let mut projection = self
             .read_run_output(
                 &request.projection_read,
                 submitted_run_id.clone(),
                 &request.public_id,
             )
             .await?;
-        let projected_status = if projection.assistant_finalized {
+        let projected = if projection.assistant_finalized {
             None
         } else {
-            self.read_projected_response_status(
-                &request.projection_read,
-                &submitted_run_id,
-                request.projection_read.after_cursor.clone(),
+            Some(
+                self.read_projected_response_status(
+                    &request.projection_read,
+                    &request.actor_scope,
+                    &submitted_run_id,
+                    request.projection_read.after_cursor.clone(),
+                )
+                .await?,
             )
-            .await?
-            .status
         };
-        let status = match (projection.assistant_finalized, projected_status) {
+        // A retrieve on a run still parked on a client tool surfaces the pending
+        // `function_call` item(s) with a completed status, mirroring the create
+        // path so a client polling `GET /responses/{id}` sees the same shape.
+        if projected
+            .as_ref()
+            .is_some_and(|projected| projected.blocked_external_tool)
+        {
+            projection
+                .items
+                .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+            return Ok(response_object(
+                request.public_id,
+                request.mapping.created_at,
+                request
+                    .requested_model
+                    .unwrap_or_else(|| "reborn".to_string()),
+                OpenAiResponseStatus::Completed,
+                projection.items,
+            ));
+        }
+        let status = match (
+            projection.assistant_finalized,
+            projected.and_then(|p| p.status),
+        ) {
             (true, _) => OpenAiResponseStatus::Completed,
             (false, Some(OpenAiResponseStatus::Completed | OpenAiResponseStatus::InProgress)) => {
                 OpenAiResponseStatus::InProgress
@@ -726,13 +1049,18 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
 
 struct ProjectedResponseStatusRead {
     status: Option<OpenAiResponseStatus>,
+    /// Whether the run's latest projected status is `blocked_external_tool`.
+    /// Surfaced separately because that wire status has no `OpenAiResponseStatus`
+    /// — the Responses surface renders it as a completed turn with pending
+    /// `function_call` items.
+    blocked_external_tool: bool,
     next_cursor: Option<ProjectionCursor>,
 }
 
-fn response_turn_run_ref_from_mapping(
-    request: &OpenAiResponseReadRequest,
+fn turn_run_ref_from_binding(
+    mapping: &OpenAiCompatResourceMapping,
 ) -> Result<String, OpenAiCompatHttpError> {
-    let OpenAiCompatResourceBinding::Bound { internal_refs } = &request.mapping.binding else {
+    let OpenAiCompatResourceBinding::Bound { internal_refs } = &mapping.binding else {
         return Err(OpenAiCompatHttpError::conflict(Some(
             "response_id".to_string(),
         )));
@@ -792,6 +1120,265 @@ fn response_status_from_projection_run_status(status: &str) -> Option<OpenAiResp
         "cancelled" => Some(OpenAiResponseStatus::Cancelled),
         _ => None,
     }
+}
+
+/// Whether the run's most recent projected status is `blocked_external_tool` —
+/// the wire status of a run parked on a client-supplied tool call. Has no
+/// `OpenAiResponseStatus` mapping, so it is surfaced as a separate signal.
+fn run_blocked_external_tool_from_projection_events(
+    events: &[ProductOutboundEnvelope],
+    submitted_run_id: &str,
+) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionSnapshot { state }
+            | ProductOutboundPayload::ProjectionUpdate { state } => {
+                run_status_wire_from_projection_state(state, submitted_run_id)
+            }
+            _ => None,
+        })
+        .is_some_and(|status| status == "blocked_external_tool")
+}
+
+fn run_status_wire_from_projection_state(
+    state: &ProductProjectionState,
+    submitted_run_id: &str,
+) -> Option<String> {
+    state.items.iter().rev().find_map(|item| match item {
+        ProductProjectionItem::RunStatus { run_id, status, .. }
+            if run_id.to_string() == submitted_run_id =>
+        {
+            Some(status.clone())
+        }
+        _ => None,
+    })
+}
+
+fn parse_turn_run_id(raw: &str) -> Result<TurnRunId, OpenAiCompatHttpError> {
+    TurnRunId::parse(raw).map_err(|_| OpenAiCompatHttpError::internal())
+}
+
+fn map_catalog_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {
+    match error {
+        ExternalToolCatalogError::InvalidRegistration { .. } => {
+            OpenAiCompatHttpError::invalid_request(Some("tools".to_string()))
+        }
+        ExternalToolCatalogError::CallNotPending => {
+            OpenAiCompatHttpError::invalid_request(Some("input.call_id".to_string()))
+        }
+        ExternalToolCatalogError::OutputAlreadySubmitted => {
+            OpenAiCompatHttpError::conflict(Some("input.call_id".to_string()))
+        }
+        ExternalToolCatalogError::Unavailable => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+    }
+}
+
+fn map_catalog_submit_output_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {
+    match error {
+        ExternalToolCatalogError::CallNotPending => {
+            OpenAiCompatHttpError::invalid_request(Some("input.call_id".to_string()))
+        }
+        ExternalToolCatalogError::OutputAlreadySubmitted => {
+            OpenAiCompatHttpError::conflict(Some("input.call_id".to_string()))
+        }
+        other => map_catalog_error(other),
+    }
+}
+
+fn map_resume_turn_error(error: TurnError) -> OpenAiCompatHttpError {
+    match error.category() {
+        TurnErrorCategory::ScopeNotFound => {
+            OpenAiCompatHttpError::not_found(Some("previous_response_id".to_string()))
+        }
+        _ => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+    }
+}
+
+/// [`OpenAiCompatExternalToolStore`] backed by the runtime's shared external-tool
+/// catalog. Registers the run's client tool specs and stores client-submitted
+/// outputs so the loop host can complete a parked call from the catalog.
+struct OpenAiCompatRuntimeExternalToolStore {
+    catalog: Arc<dyn ExternalToolCatalog>,
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolStore for OpenAiCompatRuntimeExternalToolStore {
+    async fn register_tools(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        specs: Vec<OpenAiCompatExternalToolSpec>,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let run_id = parse_turn_run_id(run_ref.as_str())?;
+        let engine_specs = specs
+            .into_iter()
+            .map(|spec| {
+                ExternalToolSpec::new(spec.name, spec.description, spec.parameters_schema)
+                    .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("tools".to_string())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.catalog
+            .register(run_id, engine_specs)
+            .await
+            .map_err(map_catalog_error)
+    }
+
+    async fn submit_tool_output(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        call_id: String,
+        output: serde_json::Value,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let run_id = parse_turn_run_id(run_ref.as_str())?;
+        self.catalog
+            .submit_output_for_pending_call(run_id, call_id, output)
+            .await
+            .map_err(map_catalog_submit_output_error)
+    }
+}
+
+/// [`OpenAiCompatExternalToolResume`] backed by the turn coordinator. Reads the
+/// parked run's current gate and binding refs, then resumes it under the
+/// `BlockedExternalToolGate` precondition so the loop re-dispatches the parked
+/// call and consumes the client output.
+struct OpenAiCompatRuntimeExternalToolResume {
+    coordinator: Arc<dyn TurnCoordinator>,
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
+    async fn resume_external_tool_run(
+        &self,
+        request: OpenAiCompatExternalToolResumeRequest,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let OpenAiCompatExternalToolResumeRequest {
+            actor_scope,
+            run_ref,
+            thread_id,
+        } = request;
+        let run_id = parse_turn_run_id(run_ref.as_str())?;
+        let thread_id = ThreadId::new(thread_id).map_err(|_| OpenAiCompatHttpError::internal())?;
+        let scope = openai_compat_resume_turn_scope(&actor_scope, thread_id);
+        let deadline =
+            tokio::time::Instant::now() + OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT;
+        let state = loop {
+            let state = match self
+                .coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+            {
+                Ok(state) => state,
+                Err(error) if error.category() == TurnErrorCategory::ScopeNotFound => {
+                    return Err(OpenAiCompatHttpError::not_found(Some(
+                        "previous_response_id".to_string(),
+                    )));
+                }
+                Err(error) => return Err(map_resume_turn_error(error)),
+            };
+            if state.status == TurnStatus::BlockedExternalTool
+                || state.status.is_terminal()
+                || tokio::time::Instant::now() >= deadline
+            {
+                break state;
+            }
+            tokio::time::sleep(OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL).await;
+        };
+        // Only resume a run actually parked on an external-tool gate. Completed
+        // runs are accepted as idempotent replay; every other state fails closed
+        // so unrelated or still-running responses cannot silently accept output.
+        if state.status != TurnStatus::BlockedExternalTool {
+            if state.status == TurnStatus::Completed {
+                return Ok(());
+            }
+            return Err(OpenAiCompatHttpError::conflict(Some(
+                "previous_response_id".to_string(),
+            )));
+        }
+        let Some(gate_ref) = state.gate_ref.clone() else {
+            tracing::error!(
+                turn_run_id = %run_id,
+                "openai compat external-tool resume found blocked run without gate ref"
+            );
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let Some(actor) = state.actor.clone() else {
+            tracing::error!(
+                turn_run_id = %run_id,
+                "openai compat external-tool resume found blocked run without actor"
+            );
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let idempotency_key = openai_compat_external_tool_resume_idempotency_key(&gate_ref)?;
+        self.coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: state.scope.clone(),
+                actor,
+                run_id,
+                gate_resolution_ref: gate_ref,
+                source_binding_ref: state.source_binding_ref.clone(),
+                reply_target_binding_ref: state.reply_target_binding_ref.clone(),
+                idempotency_key,
+                precondition: ResumeTurnPrecondition::BlockedExternalToolGate,
+                resume_disposition: None,
+            })
+            .await
+            .map(|_| ())
+            .map_err(map_resume_turn_error)
+    }
+}
+
+fn openai_compat_resume_turn_scope(
+    actor_scope: &OpenAiCompatActorScope,
+    thread_id: ThreadId,
+) -> TurnScope {
+    // Mirror the inbound submit's scope (owner = caller user) so the
+    // coordinator's exact-scope run-state lookup resolves.
+    TurnScope::new_with_owner(
+        actor_scope.tenant_id().clone(),
+        actor_scope.agent_id().cloned(),
+        actor_scope.project_id().cloned(),
+        thread_id,
+        Some(actor_scope.user_id().clone()),
+    )
+}
+
+fn openai_compat_external_tool_resume_idempotency_key(
+    gate_ref: &GateRef,
+) -> Result<IdempotencyKey, OpenAiCompatHttpError> {
+    const PREFIX: &str = "openai-compat-ext-resume-v1";
+
+    // Key by structured, length-framed fields rather than raw concatenation so
+    // later field additions cannot collide with an existing gate string.
+    let digest = digest_idempotency_parts(&[
+        b"openai-compat",
+        b"external-tool-resume",
+        b"v1",
+        gate_ref.as_str().as_bytes(),
+    ]);
+    IdempotencyKey::new(format!("{PREFIX}-{digest}")).map_err(|_| OpenAiCompatHttpError::internal())
+}
+
+fn digest_idempotency_parts(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 fn response_object(

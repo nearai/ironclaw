@@ -14,6 +14,11 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+// `io`/`Read` are used only by the `#[cfg(unix)]` permission-check helpers
+// (`identity_matches`, `read_file_bytes_limited`); gate the import to match so
+// the non-unix build doesn't see them as unused (`std::io::ErrorKind` elsewhere
+// uses the full path and needs no import).
+#[cfg(unix)]
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -60,7 +65,7 @@ fn parse_error_for_install(error_label: &str, error: SkillParseError) -> SkillRe
 /// Rewrite the `name` field in raw YAML frontmatter while preserving every
 /// other key and value in the original mapping.
 ///
-/// We deliberately operate on `serde_yml::Value` instead of the typed
+/// We deliberately operate on `serde_norway::Value` instead of the typed
 /// `SkillManifest`: re-serializing through the typed struct silently drops
 /// any unknown frontmatter fields published upstream (custom metadata, future
 /// fields, vendor extensions). The recovery path must be lossless except for
@@ -70,8 +75,8 @@ fn rewrite_frontmatter_name(
     new_name: &str,
     error_label: &str,
 ) -> Result<String, SkillRegistryError> {
-    let mut value: serde_yml::Value =
-        serde_yml::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
+    let mut value: serde_norway::Value =
+        serde_norway::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
             name: error_label.to_string(),
             reason: format!("Failed to parse SKILL.md frontmatter for rewrite: {}", e),
         })?;
@@ -84,11 +89,11 @@ fn rewrite_frontmatter_name(
         })?;
 
     mapping.insert(
-        serde_yml::Value::String("name".to_string()),
-        serde_yml::Value::String(new_name.to_string()),
+        serde_norway::Value::String("name".to_string()),
+        serde_norway::Value::String(new_name.to_string()),
     );
 
-    let yaml = serde_yml::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
+    let yaml = serde_norway::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
         name: error_label.to_string(),
         reason: format!("Failed to rewrite normalized SKILL.md: {}", e),
     })?;
@@ -335,7 +340,7 @@ impl SkillRegistry {
         hasher.update(tenant_id.as_bytes());
         hasher.update([0]);
         hasher.update(user_id.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Discover and load skills from all configured directories.
@@ -1134,10 +1139,13 @@ async fn checked_file_content_hash(
 fn compute_hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+// All call sites read file handles inside `#[cfg(unix)]` permission-check
+// paths, so the helper is genuinely unix-only; gate it to match and keep the
+// non-unix build free of a dead-code error under `-D warnings`.
+#[cfg(unix)]
 fn read_file_bytes_limited<R: io::Read>(
     reader: R,
     path: &str,

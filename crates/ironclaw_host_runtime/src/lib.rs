@@ -37,12 +37,14 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod document_output;
 mod egress;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 mod http_body;
 mod invocation_services;
+mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;

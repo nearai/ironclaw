@@ -162,6 +162,10 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
         dockerfile.contains("config.hosted-single-tenant.toml"),
         "image must include the hosted single-tenant seed config"
     );
+    assert!(
+        dockerfile.contains("config.hosted-single-tenant-volume.toml"),
+        "image must include the hosted single-tenant volume seed config"
+    );
 }
 
 #[test]
@@ -187,11 +191,28 @@ fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
 }
 
 #[test]
+fn reborn_hosted_single_tenant_volume_seed_config_uses_volume_storage() {
+    let config = read_repo_file("docker/reborn/config.hosted-single-tenant-volume.toml");
+
+    assert!(
+        config.contains("profile = \"hosted-single-tenant-volume\""),
+        "hosted volume seed config must select the hosted volume profile"
+    );
+    assert!(
+        !config.contains("[storage]") && !config.contains("backend = \"postgres\""),
+        "hosted volume seed config must not require Postgres storage"
+    );
+    assert!(
+        !config.contains("[policy]"),
+        "hosted volume seed config must not include production-only [policy]"
+    );
+}
+
+#[test]
 fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
-    let parsed = config
-        .parse::<toml::Value>()
-        .expect("hosted seed config should be valid TOML");
+    let parsed =
+        toml::from_str::<toml::Value>(&config).expect("hosted seed config should be valid TOML");
     let slack = parsed
         .get("slack")
         .and_then(toml::Value::as_table)
@@ -323,6 +344,32 @@ fn reborn_entrypoint_selects_hosted_single_tenant_seed_config() {
 
 #[test]
 #[cfg(unix)]
+fn reborn_entrypoint_selects_hosted_single_tenant_volume_seed_config() {
+    let fake = setup_fake_entrypoint_recording_cp();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("copied config"),
+        "/opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml\n[storage]\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn reborn_entrypoint_passes_explicit_args_through() {
     let fake = setup_fake_entrypoint();
     let output = Command::new("sh")
@@ -411,6 +458,54 @@ fn reborn_entrypoint_preserves_existing_config() {
     assert_eq!(
         std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("preserved config"),
         "api_version = \"custom.local/v1\"\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_migrates_disabled_legacy_slack_fields() {
+    let fake = setup_fake_entrypoint();
+    std::fs::create_dir_all(&fake.home_dir).expect("home dir");
+    std::fs::write(
+        fake.home_dir.join("config.toml"),
+        r#"api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "hosted-single-tenant-volume"
+
+[slack]
+enabled = false
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+"#,
+    )
+    .expect("existing config");
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config =
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("migrated config");
+    assert!(config.contains("[slack]"));
+    assert!(config.contains("enabled = false"));
+    assert!(!config.contains("signing_secret_env"));
+    assert!(!config.contains("bot_token_env"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Removed disabled legacy Slack setup fields")
     );
 }
 

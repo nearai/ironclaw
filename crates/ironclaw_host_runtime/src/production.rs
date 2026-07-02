@@ -13,7 +13,7 @@
 //! claims. The default fail-closed policy denies authority until composition
 //! supplies a concrete host policy.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -35,6 +35,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -48,6 +49,52 @@ use ironclaw_run_state::{
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 use ironclaw_turns::run_profile::LoopSafeSummary;
+
+fn trace_capability_latency_ok(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "host_runtime",
+        operation,
+        started_at,
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation completed",
+    );
+}
+
+fn trace_capability_latency_error<E: ?Sized>(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "host_runtime",
+        operation,
+        started_at,
+        "error",
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation failed",
+    );
+}
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -377,6 +424,7 @@ impl HostRuntime for DefaultHostRuntime {
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
+        let total_started_at = live_latency_started_at();
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
@@ -395,6 +443,12 @@ impl HostRuntime for DefaultHostRuntime {
                 runtime_policy_error_kind = error.kind(),
                 "capability runtime policy rejected invocation before dispatch"
             );
+            trace_capability_latency_ok(
+                "invoke_capability_policy_rejected",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
@@ -405,6 +459,12 @@ impl HostRuntime for DefaultHostRuntime {
                     capability_id = %capability_id,
                     trust_error_kind = error.kind(),
                     "capability trust evaluation failed before dispatch"
+                );
+                trace_capability_latency_ok(
+                    "invoke_capability_trust_rejected",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
                 );
                 return Ok(trust_evaluation_failure(capability_id, error));
             }
@@ -429,13 +489,33 @@ impl HostRuntime for DefaultHostRuntime {
         // before the authorizer and trust/authorization checks. The dispatch-time
         // obligation check (which runs after those checks) is the enforcing layer.
         // The pre-flight provides ordering only (credentials before approval gate).
+        let credential_preflight_started_at = live_latency_started_at();
         if let Some(auth_required) = self
             .credential_preflight_check(&capability_id, &scope, &registry)
             .await
         {
+            trace_capability_latency_ok(
+                "credential_preflight_check",
+                &capability_id,
+                &scope,
+                credential_preflight_started_at,
+            );
+            trace_capability_latency_ok(
+                "invoke_capability_auth_required",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
             return Ok(auth_required);
         }
+        trace_capability_latency_ok(
+            "credential_preflight_check",
+            &capability_id,
+            &scope,
+            credential_preflight_started_at,
+        );
 
+        let approval_started_at = live_latency_started_at();
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -445,6 +525,12 @@ impl HostRuntime for DefaultHostRuntime {
             &trust_decision,
         )
         .await;
+        trace_capability_latency_ok(
+            "persistent_approval_policy",
+            &capability_id,
+            &scope,
+            approval_started_at,
+        );
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -455,19 +541,63 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision,
         };
 
+        let dispatch_started_at = live_latency_started_at();
         match host.invoke_json(invocation).await {
-            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                completed_outcome_from(result, capability_id),
-            ))),
+            Ok(result) => {
+                trace_capability_latency_ok(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                );
+                trace_capability_latency_ok(
+                    "invoke_capability",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
+                );
+                Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                    completed_outcome_from(result, capability_id),
+                )))
+            }
             Err(error) => {
+                trace_capability_latency_error(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                    &error,
+                );
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability invocation failed"
                 );
-                self.translate_invocation_error(error, capability_id, scope, invocation_id)
-                    .await
+                let translated = self
+                    .translate_invocation_error(
+                        error,
+                        capability_id.clone(),
+                        scope.clone(),
+                        invocation_id,
+                    )
+                    .await;
+                match &translated {
+                    Ok(_) => trace_capability_latency_ok(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                    ),
+                    Err(error) => trace_capability_latency_error(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                        error,
+                    ),
+                }
+                translated
             }
         }
     }
@@ -1188,19 +1318,28 @@ impl DefaultHostRuntime {
             );
             return;
         }
-        let scope = PersistentApprovalScope::from_resource_scope(&context.resource_scope);
-        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
-            |grantee| {
-                let policies = Arc::clone(policies);
-                let key = PersistentApprovalPolicyKey {
-                    scope: scope.clone(),
-                    action,
-                    capability_id: capability_id.clone(),
-                    grantee,
-                };
-                async move { policies.lookup(&key).await }
-            },
-        ))
+        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
+        let lookup_results = join_all(
+            scopes
+                .into_iter()
+                .flat_map(|scope| {
+                    grantees
+                        .iter()
+                        .cloned()
+                        .map(move |grantee| (scope.clone(), grantee))
+                })
+                .map(|(scope, grantee)| {
+                    let policies = Arc::clone(policies);
+                    let key = PersistentApprovalPolicyKey {
+                        scope,
+                        action,
+                        capability_id: capability_id.clone(),
+                        grantee,
+                    };
+                    async move { policies.lookup(&key).await }
+                }),
+        )
         .await;
         for policy in lookup_results {
             let policy = match policy {
@@ -1954,6 +2093,23 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     grantees
 }
 
+fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApprovalScope> {
+    let user_scope = PersistentApprovalScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+    };
+    let legacy_scope = PersistentApprovalScope::from_resource_scope(scope);
+    if legacy_scope == user_scope {
+        vec![user_scope]
+    } else {
+        // User-scope settings-page policies intentionally win lookup order over
+        // legacy agent/project-scoped prompt policies.
+        vec![user_scope, legacy_scope]
+    }
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
@@ -2019,9 +2175,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
         | ResumeContextMismatch { .. } => Some(error.to_string()),
-        Dispatch { safe_summary, .. } => {
-            Some(dispatch_failure_message(safe_summary.as_deref(), error))
-        }
+        Dispatch {
+            safe_summary, kind, ..
+        } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
@@ -2031,12 +2187,16 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    error: &CapabilityInvocationError,
+    kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
+    // Prefer a host-authored safe summary; otherwise fall back to a plain
+    // human sentence for the failure category rather than the stable category
+    // token (e.g. "the tool input could not be encoded" instead of
+    // "dispatch failed: InputEncode").
     safe_summary
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
-        .unwrap_or_else(|| error.to_string())
+        .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -2452,12 +2612,10 @@ output_schema_ref = "schemas/test.output.json"
             RuntimeDispatchErrorKind::NetworkDenied,
         ));
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // Stable form: relies only on the redacted kind token, never on raw
-        // backend strings.
-        assert!(
-            message.contains("NetworkDenied"),
-            "sanitized dispatch message should expose the redacted kind, got {message:?}"
-        );
+        // With no host-authored safe_summary, the message is the fixed
+        // human-readable summary for the redacted kind — derived only from the
+        // category, never from raw backend strings.
+        assert_eq!(message, "the tool was denied network access");
     }
 
     #[test]
@@ -2486,7 +2644,9 @@ output_schema_ref = "schemas/test.output.json"
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert_eq!(message, "dispatch failed: OperationFailed");
+        // The unsafe safe_summary is rejected, so the message falls back to the
+        // host-authored human summary for the kind (not the raw category token).
+        assert_eq!(message, "the tool operation failed");
         assert!(!message.contains("api_key"));
     }
 

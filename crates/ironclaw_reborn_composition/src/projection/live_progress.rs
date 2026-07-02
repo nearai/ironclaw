@@ -13,7 +13,7 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
     ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
@@ -212,6 +212,7 @@ pub(super) fn product_items_for_live_update(
                 runtime,
                 output_bytes,
                 error_kind,
+                error_detail,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -225,6 +226,7 @@ pub(super) fn product_items_for_live_update(
                     process_id: None,
                     output_bytes: *output_bytes,
                     error_kind: error_kind.clone(),
+                    error_detail: error_detail.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                     input_summary: running.and_then(|input| input.input_summary),
                     updated_at: Utc::now(),
@@ -323,6 +325,7 @@ impl LiveProgressMilestoneSink {
                 runtime: terminal.runtime,
                 output_bytes: terminal.output_bytes,
                 error_kind: terminal.error_kind,
+                error_detail: terminal.error_detail,
             },
         );
     }
@@ -444,6 +447,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: Some(*runtime),
                         output_bytes: Some(*output_bytes),
                         error_kind: None,
+                        error_detail: None,
                     },
                 );
             }
@@ -453,6 +457,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 self.publish_capability_activity(
                     &milestone,
@@ -464,6 +469,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: *runtime,
                         output_bytes: None,
                         error_kind: Some(reason_kind.as_str().to_string()),
+                        error_detail: sanitized_capability_error_detail(
+                            safe_summary.as_ref().map(LoopSafeSummary::as_str),
+                        ),
                     },
                 );
             }
@@ -476,12 +484,22 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     }
 }
 
+/// Sanitize and bound a host-authored capability failure summary for the live
+/// activity card. Returns `None` for absent/empty input so the card falls back
+/// to the bare error kind. The product-adapter boundary re-validates length and
+/// control chars.
+fn sanitized_capability_error_detail(safe_summary: Option<&str>) -> Option<String> {
+    let summary = safe_summary?;
+    sanitize_error_summary(summary)
+}
+
 #[derive(Default)]
 struct TerminalCapabilityActivity {
     provider: Option<ExtensionId>,
     runtime: Option<RuntimeKind>,
     output_bytes: Option<u64>,
     error_kind: Option<String>,
+    error_detail: Option<String>,
 }
 
 fn live_capability_activity_status(

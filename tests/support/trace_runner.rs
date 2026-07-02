@@ -203,7 +203,7 @@ async fn run_one(
     (result, start.elapsed())
 }
 
-fn evaluate_expectation(
+pub(crate) fn evaluate_expectation(
     index: usize,
     op: &TraceOperation,
     result: &Result<ToolOutput, ToolError>,
@@ -249,7 +249,7 @@ fn evaluate_expectation(
 }
 
 /// Walk the assertion DSL and return `Some(reason)` on mismatch.
-fn check_success_assertions(
+pub(crate) fn check_success_assertions(
     output: &serde_json::Value,
     assertions: &serde_json::Value,
 ) -> Option<String> {
@@ -305,7 +305,10 @@ fn check_success_assertions(
 
 /// Resolve a dot-separated path in a JSON value. `a.b.c` walks objects;
 /// numeric segments index arrays.
-fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+pub(crate) fn json_path<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
     let mut cur = value;
     for seg in path.split('.') {
         cur = match cur {
@@ -318,103 +321,4 @@ fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_j
         };
     }
     Some(cur)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_path_walks_nested_objects() {
-        let v = serde_json::json!({"a": {"b": {"c": 42}}});
-        assert_eq!(json_path(&v, "a.b.c"), Some(&serde_json::Value::from(42)));
-        assert_eq!(json_path(&v, "a.b.missing"), None);
-    }
-
-    #[test]
-    fn json_path_indexes_arrays() {
-        let v = serde_json::json!({"items": ["x", "y", "z"]});
-        assert_eq!(
-            json_path(&v, "items.1"),
-            Some(&serde_json::Value::from("y"))
-        );
-        assert_eq!(json_path(&v, "items.99"), None);
-    }
-
-    #[test]
-    fn check_assertions_eq_matches() {
-        let out = serde_json::json!({"foo": 1});
-        let asserts = serde_json::json!({"eq": {"foo": 1}});
-        assert!(check_success_assertions(&out, &asserts).is_none());
-    }
-
-    #[test]
-    fn check_assertions_eq_reports_mismatch() {
-        let out = serde_json::json!({"foo": 1});
-        let asserts = serde_json::json!({"eq": {"foo": 2}});
-        let reason = check_success_assertions(&out, &asserts).expect("should fail");
-        assert!(reason.contains("eq mismatch"));
-    }
-
-    #[test]
-    fn check_assertions_contains_text() {
-        let out = serde_json::json!("hello world");
-        let asserts = serde_json::json!({"contains_text": "world"});
-        assert!(check_success_assertions(&out, &asserts).is_none());
-
-        let asserts_bad = serde_json::json!({"contains_text": "nope"});
-        assert!(check_success_assertions(&out, &asserts_bad).is_some());
-    }
-
-    #[test]
-    fn check_assertions_fields_paths() {
-        let out = serde_json::json!({"data": {"items": [{"id": 7}]}});
-        let asserts = serde_json::json!({
-            "fields": {
-                "data.items.0.id": 7,
-            }
-        });
-        assert!(check_success_assertions(&out, &asserts).is_none());
-    }
-
-    #[test]
-    fn failure_expectation_rejects_empty_error_contains() {
-        let op = TraceOperation {
-            tool_name: "missing".into(),
-            params: serde_json::Value::Null,
-            expected: TraceExpectation::Failure {
-                error_contains: " ".into(),
-            },
-        };
-        let failure = evaluate_expectation(0, &op, &Err(ToolError::ExecutionFailed("boom".into())))
-            .expect("empty error_contains must be rejected");
-        assert!(failure.reason.contains("non-empty error_contains"));
-    }
-
-    #[test]
-    fn trace_roundtrips_json() {
-        let trace = Trace {
-            name: "demo".into(),
-            operations: vec![
-                TraceOperation {
-                    tool_name: "echo".into(),
-                    params: serde_json::json!({"message": "hi"}),
-                    expected: TraceExpectation::Success {
-                        assertions: serde_json::json!({"contains_text": "hi"}),
-                    },
-                },
-                TraceOperation {
-                    tool_name: "missing".into(),
-                    params: serde_json::Value::Null,
-                    expected: TraceExpectation::Failure {
-                        error_contains: "not found".into(),
-                    },
-                },
-            ],
-        };
-        let j = serde_json::to_value(&trace).unwrap();
-        let back: Trace = serde_json::from_value(j).unwrap();
-        assert_eq!(back.name, "demo");
-        assert_eq!(back.operations.len(), 2);
-    }
 }

@@ -37,6 +37,12 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+// Durable filesystem-backed idempotency ledger (folded in from the former
+// `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
+// facade surface stays free of the `ironclaw_filesystem` dependency unless a
+// consumer opts into a durable backend.
+#[cfg(feature = "storage")]
+mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
@@ -58,9 +64,10 @@ pub use approval_interaction::{
     ApprovalInteractionScope, ApprovalInteractionService, ApprovalLeaseTermsProvider,
     ApprovalResolutionPort, ApprovalResolverPort, ApprovalTurnRunLocator,
     DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
-    approval_request_id_from_gate_ref, is_approval_gate_ref,
+    PendingApprovalInteractionView, PersistentApprovalGranteeResolver,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RunStateApprovalInteractionReadModel, approval_gate_ref, approval_request_id_from_gate_ref,
+    is_approval_gate_ref,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
@@ -102,6 +109,12 @@ pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, rejecting_reborn_services_error,
 };
+#[cfg(feature = "storage")]
+pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
+#[cfg(feature = "libsql")]
+pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
+#[cfg(feature = "postgres")]
+pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
@@ -177,16 +190,16 @@ pub use reborn_services::{
     RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
     RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetChannel, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetDisplayName, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
+    RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,

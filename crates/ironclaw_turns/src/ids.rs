@@ -267,7 +267,23 @@ impl PartialEq<GateRef> for LoopGateRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{GateRef, LoopGateRef, TurnRunId};
+    use super::{GateRef, LoopGateRef, RunProfileId, TurnRunId};
+
+    #[test]
+    fn scheduled_trigger_run_profile_id_is_stable_and_distinct() {
+        // Sibling assoc ctor to interactive_default()/long_running_mission():
+        // trigger fires request this profile id (ironclaw_conversations) and
+        // ironclaw_reborn registers a profile definition under the same id.
+        // Both sides must derive from this single source of truth.
+        assert_eq!(
+            RunProfileId::scheduled_trigger().as_str(),
+            "scheduled_trigger"
+        );
+        assert_ne!(
+            RunProfileId::scheduled_trigger(),
+            RunProfileId::interactive_default()
+        );
+    }
 
     #[test]
     fn gate_ref_eq_loop_gate_ref_matches_exact_gate_string() {
@@ -302,6 +318,15 @@ impl RunProfileId {
 
     pub fn long_running_mission() -> Self {
         Self::from_trusted_static("long_running_mission")
+    }
+
+    /// Dedicated run profile for scheduled-trigger fires (issue #5505). Its
+    /// `capability_surface_profile_id` selects the capability surface that the
+    /// Reborn runtime composition (`ironclaw_reborn::runtime`) narrows to deny
+    /// the trigger-mutator capabilities — this crate only owns the stable,
+    /// distinct id; the deny policy itself is defined and enforced in Reborn.
+    pub fn scheduled_trigger() -> Self {
+        Self::from_trusted_static("scheduled_trigger")
     }
 
     pub fn is_interactive_default(&self) -> bool {

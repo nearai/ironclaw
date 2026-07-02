@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-#[cfg(test)]
-use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
-    CapabilityActivityStatus, EventProjectionService, ProjectionCursor as EventProjectionCursor,
-    ProjectionReplay, ProjectionScope as EventProjectionScope, ProjectionSnapshot,
-    ReplayEventProjectionService, RunProjectionStatus, RunStatusProjection,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionCursor as EventProjectionCursor, ProjectionReplay,
+    ProjectionScope as EventProjectionScope, ProjectionSnapshot, ReplayEventProjectionService,
+    RunProjectionStatus, RunStatusProjection,
 };
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
@@ -939,6 +938,8 @@ async fn runtime_payload_from_candidate(
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             let activity_order = activity.activity_order_cursor().as_u64();
+            let error_detail =
+                capability_activity_runtime_error_detail(&activity, display_previews);
             // Surface the staged input on the still-running activity frame so
             // the row shows `tool   <arg>` (and a populated Parameters tab)
             // live, instead of a bare tool name until the result lands.
@@ -956,6 +957,12 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                // Runtime activity transitions can reach the browser before
+                // the separate display-preview payload is delivered. Prefer
+                // the durable event summary, then fall back to a staged
+                // failure preview so the live card shows the same
+                // host-authored copy as the refresh path.
+                error_detail,
                 subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                 input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,
@@ -1090,11 +1097,13 @@ fn run_status_projection_state(
 }
 
 fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
-    // Runtime replay categories intentionally use the event-projection namespace
-    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
-    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
-    // Both are sanitized product categories; clients must treat the field as an
-    // opaque category and prefer failure_summary for user-facing copy.
+    // `error_kind` is a sanitized product category sourced from the runtime
+    // event log (see `ironclaw_event_projections::apply_run_event`). At
+    // `Failed`/`Killed` status its concrete values are the dispatcher error
+    // codes (`missing_runtime_backend`, `unknown_capability`, ...), the
+    // `LoopFailureKind` codes (`model_error`, `iteration_limit`, ...), or the
+    // process fallback `unknown`. Clients must treat the field as an opaque
+    // category and prefer `failure_summary` for user-facing copy.
     matches!(
         run.status,
         RunProjectionStatus::Failed | RunProjectionStatus::Killed
@@ -1113,15 +1122,31 @@ fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
 }
 
 fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    // `category` comes from `RunStatusProjection.error_kind` (see
+    // `run_failure_category`). The only sanitized value that resolves to a
+    // dedicated message is the process fallback `unknown`; every other
+    // produced value (dispatcher codes, `LoopFailureKind` codes) intentionally
+    // falls through to the generic summary.
     match category {
-        "model_failed" => "The run failed while waiting for the model.",
-        "dispatch_failed" => "The run failed while executing a capability.",
-        "process_failed" => "The run failed while executing a runtime process.",
-        "process_killed" => "The run stopped because its runtime process was killed.",
-        "hook_failed" => "The run failed while evaluating a runtime hook.",
-        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        "unknown" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
+}
+
+fn capability_activity_runtime_error_detail(
+    activity: &CapabilityActivityProjection,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Option<String> {
+    if !matches!(
+        activity.status,
+        CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
+    ) {
+        return None;
+    }
+    activity
+        .error_detail
+        .clone()
+        .or_else(|| display_previews.failure_error_detail(activity))
 }
 
 fn capability_activity_status_wire(

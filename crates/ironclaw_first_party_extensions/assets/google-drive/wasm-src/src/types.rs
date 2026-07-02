@@ -50,9 +50,9 @@ pub enum GoogleDriveAction {
         file_id: String,
     },
 
-    /// Download file content as text.
-    /// Only works for text-based files. For Google Docs/Sheets/Slides,
-    /// exports as plain text / CSV / plain text respectively.
+    /// Download a file's content as text, including binary documents
+    /// (PDF, PPTX, DOCX, XLSX) which the host converts to extracted text.
+    /// Google Docs/Sheets/Slides are exported as plain text / CSV / plain text.
     DownloadFile {
         /// The file ID.
         file_id: String,
@@ -246,12 +246,22 @@ pub struct FileResult {
 }
 
 /// Result from download_file.
+///
+/// Text files (and exported Google Workspace files) are returned inline as
+/// UTF-8 `content`. Binary files (PDF, PPTX, DOCX, ...) cannot be represented
+/// as text in the guest, so their raw bytes are returned base64-encoded in
+/// `content_base64`; the host runtime decodes them, runs the document text
+/// extractor, and replaces the field with extracted `content` before the
+/// result reaches the model. Exactly one of the two fields is set.
 #[derive(Debug, Serialize)]
 pub struct DownloadResult {
     pub file_id: String,
     pub name: String,
     pub mime_type: String,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
 }
 
 /// Result from delete/trash.
@@ -293,10 +303,7 @@ mod tests {
     #[test]
     fn get_file_requires_file_id_at_serde_layer() {
         let bad: Result<GoogleDriveAction, _> = serde_json::from_str(r#"{"action":"get_file"}"#);
-        assert!(
-            bad.is_err(),
-            "serde must reject get_file without file_id"
-        );
+        assert!(bad.is_err(), "serde must reject get_file without file_id");
         let good: Result<GoogleDriveAction, _> =
             serde_json::from_str(r#"{"action":"get_file","file_id":"abc123"}"#);
         assert!(good.is_ok(), "serde must accept get_file with file_id");
@@ -382,7 +389,8 @@ mod tests {
             "list_files must not require file_id (it has none)"
         );
         assert_eq!(
-            required, ["action"],
+            required,
+            ["action"],
             "list_files should require only the discriminator"
         );
     }

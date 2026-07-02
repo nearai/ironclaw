@@ -12,9 +12,17 @@
 //! read-modify-write transaction through
 //! [`crate::cas_snapshot::CasSnapshotStore`], which provides:
 //!
-//! - In-process per-path async lock so same-process writers serialize.
-//! - `CasExpectation::Version` precondition for cross-process safety,
-//!   with `CasExpectation::Any` fallback for byte-only backends.
+//! - The shared, lock-free
+//!   [`cas_update`](ironclaw_filesystem::cas_update) helper: an optimistic
+//!   CAS-retry loop (`CasExpectation::Version` precondition) with bounded
+//!   retries, jittered backoff, and an overall timeout. No per-record
+//!   `tokio::sync::Mutex` is held across the backend awaits, so cross-process
+//!   contention on one scope's snapshot is resolved lock-free rather than
+//!   convoyed. Same-process writers sharing a cloned store handle still
+//!   serialize one job at a time on the dedicated `AsyncStorageWorker`
+//!   below — #5470 tracks making the store async so they can overlap too.
+//!   The helper fails closed on a non-CAS backend rather than
+//!   blind-overwriting.
 //! - A dedicated current-thread tokio worker bridging the sync trait
 //!   surface to the async [`ScopedFilesystem`] API.
 //!
@@ -95,10 +103,19 @@ where
     fn update<T, U>(&self, update: U) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        U: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+        U: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         self.store
             .update::<ResourceGovernorSnapshot, T, ResourceError, _>(update)
+    }
+
+    fn inspect<T, U>(&self, inspect: U) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        U: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.store
+            .inspect::<ResourceGovernorSnapshot, T, ResourceError, _>(inspect)
     }
 }
 
@@ -177,15 +194,22 @@ where
         self
     }
 
-    fn with_snapshot<T, U>(&self, scope: &ResourceScope, update: U) -> Result<T, BudgetGateError>
+    fn with_snapshot<T, U>(
+        &self,
+        scope: &ResourceScope,
+        mut update: U,
+    ) -> Result<T, BudgetGateError>
     where
         T: Send + 'static,
-        U: FnOnce(&mut BudgetGateSnapshot) -> Result<T, BudgetGateError> + Send + 'static,
+        U: FnMut(&mut BudgetGateSnapshot) -> Result<T, BudgetGateError> + Send + 'static,
     {
         let retention = self.terminal_retention;
-        // The outer caller's `update` runs first, then we apply
-        // retention pruning so the result of the user's update is
-        // never re-pruned (`get` should return what was just written).
+        // The outer caller's `update` runs first, then we apply retention
+        // pruning so the result of the user's update is never re-pruned
+        // (`get` should return what was just written). The closure is
+        // re-runnable: `cas_update` re-invokes it against a freshly read
+        // snapshot on every CAS retry, so it must not consume captured
+        // state by move (leaf closures clone any captured value per call).
         let wrapped = move |snapshot: &mut BudgetGateSnapshot| -> Result<T, BudgetGateError> {
             snapshot.ensure_current()?;
             let value = update(snapshot)?;
@@ -205,7 +229,10 @@ where
     F: RootFilesystem + 'static,
 {
     fn open(&self, scope: &ResourceScope, gate: BudgetApprovalGate) -> Result<(), BudgetGateError> {
+        // Clone per invocation: `with_snapshot` may re-run this closure on a
+        // CAS retry, so it must not move `gate` out of its capture.
         self.with_snapshot(scope, move |snapshot| {
+            let gate = gate.clone();
             snapshot.gates.insert(gate.id, gate);
             Ok(())
         })
@@ -218,6 +245,8 @@ where
         outcome: BudgetGateOutcome,
         at: DateTime<Utc>,
     ) -> Result<BudgetApprovalGate, BudgetGateError> {
+        // Clone per invocation: this closure may be re-run on a CAS retry,
+        // so match on a fresh clone of `outcome` rather than moving it out.
         self.with_snapshot(scope, move |snapshot| {
             let gate = snapshot
                 .gates
@@ -226,7 +255,7 @@ where
             if gate.status.is_terminal() {
                 return Err(BudgetGateError::AlreadyResolved { id });
             }
-            gate.status = match outcome {
+            gate.status = match outcome.clone() {
                 BudgetGateOutcome::Approve {
                     increased_limit,
                     by,
@@ -281,7 +310,7 @@ where
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BudgetGateSnapshot {
     /// Schema version. Bump when the on-disk shape changes; today
@@ -315,6 +344,8 @@ impl BudgetGateSnapshot {
 }
 
 impl Snapshot for BudgetGateSnapshot {
+    const RECORD_KIND: &'static str = "budget_gate_snapshot";
+
     fn fresh() -> Self {
         Self {
             schema_version: Self::CURRENT_SCHEMA,

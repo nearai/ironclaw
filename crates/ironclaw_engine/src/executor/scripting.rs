@@ -55,7 +55,8 @@ fn take_pending_gate_stash() -> Option<crate::runtime::messaging::ThreadOutcome>
 
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyDate, MontyDateTime, MontyException,
-    MontyObject, MontyRun, NameLookupResult, OsFunction, PrintWriter, ResourceLimits, RunProgress,
+    MontyObject, MontyRun, NameLookupResult, OsFunctionCall, PrintWriter, ResourceLimits,
+    RunProgress,
 };
 use tracing::debug;
 
@@ -1424,19 +1425,24 @@ async fn execute_code_with_skills_inner(
             RunProgress::OsCall(os_call) => {
                 // Clock reads (`datetime.now()`, `date.today()`) are not a
                 // security concern — they don't touch the network, filesystem,
-                // or environment. Monty surfaces them as dedicated OsFunction
+                // or environment. Monty surfaces them as dedicated OsFunctionCall
                 // variants rather than opaque syscalls, so we can answer them
                 // directly instead of returning the blanket OSError. Anything
                 // else still gets denied.
-                let clock_reply: Option<ExtFunctionResult> = match os_call.function {
-                    OsFunction::DateTimeNow => {
-                        Some(ExtFunctionResult::Return(build_datetime_now(&os_call.args)))
+                let clock_reply: Option<ExtFunctionResult> = match &os_call.function_call {
+                    OsFunctionCall::DateTimeNow(tz) => Some(ExtFunctionResult::Return(
+                        build_datetime_now(std::slice::from_ref(tz)),
+                    )),
+                    OsFunctionCall::DateToday => {
+                        Some(ExtFunctionResult::Return(build_date_today()))
                     }
-                    OsFunction::DateToday => Some(ExtFunctionResult::Return(build_date_today())),
                     _ => None,
                 };
                 let reply = clock_reply.unwrap_or_else(|| {
-                    debug!(function = ?os_call.function, "Monty: OS call denied");
+                    debug!(
+                        function = os_call.function_call.name(),
+                        "Monty: OS call denied"
+                    );
                     ExtFunctionResult::Error(MontyException::new(
                         ExcType::OSError,
                         Some("OS operations are not permitted in CodeAct scripts".into()),

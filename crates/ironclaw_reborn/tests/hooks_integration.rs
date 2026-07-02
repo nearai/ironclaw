@@ -198,6 +198,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         // factory's startup-time `visible_capabilities()` probe sees a valid
         // (non-empty) surface and registers the version.
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: vec![descriptor("cap.blocked"), descriptor("cap.allowed")],
         })
@@ -271,6 +272,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: self.descriptors.clone(),
         })
@@ -1076,6 +1078,7 @@ impl Fixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1180,6 +1183,7 @@ fn invocation(
     capability_id: &str,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version.clone(),
         capability_id: CapabilityId::new(capability_id).expect("capability id literal is valid"),
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))

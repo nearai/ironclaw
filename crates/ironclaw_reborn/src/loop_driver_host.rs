@@ -69,11 +69,12 @@ use ironclaw_turns::{
         LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
         LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -190,6 +191,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::ProviderToolCallCapabilityIds, AgentLoopHostError>
+    {
+        // MUST delegate to inner. The LoopCapabilityPort default resolves a call by
+        // searching `self.tool_definitions()` (the disclosed/advertised surface),
+        // which rejects every deferred tool with "outside the visible capability
+        // surface" before the inner tool-disclosure forgiving path can resolve it.
+        // This is the model gateway's resolvability pre-check, so it must reach
+        // inner — same reason validate/register below already delegate.
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -199,9 +214,9 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -1059,11 +1074,24 @@ where
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        // Two arms (not a shared `Arc<dyn _>` helper) because the host's
+        // `model_gateway: Arc<G>` is `G: ?Sized`: the resolved test gateway is
+        // `Arc<dyn HostManagedModelGateway>` while the production fallback keeps
+        // the host's own `Arc<G>`, and `Arc<G>` cannot be coerced to
+        // `Arc<dyn _>` for a `?Sized` G (E0277). Unifying would require dropping
+        // the gateway generic (the S1 seam the plan deliberately rejected).
         let direct_system_inference: Arc<dyn SystemInferencePort> =
-            Arc::new(ModelGatewayBackedSystemInferencePort::new(
-                Arc::clone(&self.model_gateway),
-                run_context.clone(),
-            ));
+            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
+                Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                    gw,
+                    run_context.clone(),
+                ))
+            } else {
+                Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                    Arc::clone(&self.model_gateway),
+                    run_context.clone(),
+                ))
+            };
         let system_inference: Arc<dyn SystemInferencePort> =
             Arc::new(GuardedSystemInferencePort::new(
                 direct_system_inference,
@@ -1632,19 +1660,47 @@ where
             )),
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
-        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
-            thread_service: Arc::clone(&self.thread_service),
-            thread_scope: effective_scope.clone(),
-            host_gateway: Arc::clone(&self.model_gateway),
-            max_messages,
-            skill_context_source: self.skill_context_source.clone(),
-            identity_context_source: self.identity_context_source.clone(),
-            instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
-            capabilities: Some(Arc::clone(&capabilities)),
-            prompt_authority,
-            context_window_cache: Some(context_window_cache),
-            attachment_read_port: self.attachment_read_port.clone(),
-        });
+        // Resolve a scope-specific gateway when available (test harnesses override
+        // resolve_for_scope to route per-thread scripted gateways). Production
+        // gateways inherit the default-None impl → falls to Arc::clone, byte-identical.
+        // Two arms (rather than one literal over a shared gateway binding) because
+        // `host_gateway` is the resolved `Arc<dyn _>` in the Some arm but the host's
+        // own `Arc<G>` (G: ?Sized, not coercible to `Arc<dyn _>`) in the fallback —
+        // see `build_compaction_ports` above. Each arm moves its owned fields.
+        let model_gateway: Arc<dyn LoopModelGateway> =
+            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
+                Arc::new(ThreadResolvingLoopModelGateway {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: gw,
+                    max_messages,
+                    skill_context_source: self.skill_context_source.clone(),
+                    identity_context_source: self.identity_context_source.clone(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                })
+            } else {
+                Arc::new(ThreadResolvingLoopModelGateway {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: Arc::clone(&self.model_gateway),
+                    max_messages,
+                    skill_context_source: self.skill_context_source.clone(),
+                    identity_context_source: self.identity_context_source.clone(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                })
+            };
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
             model_gateway,
@@ -1869,11 +1925,9 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities
-            .register_provider_tool_call(tool_call)
-            .await
+        self.capabilities.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -2394,6 +2448,7 @@ mod hook_resolver_adapter_tests {
 
     fn invocation(input_ref: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
@@ -2507,6 +2562,10 @@ mod hook_resolver_adapter_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/tests.rs"]
 mod port_adapter_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/compaction_tests.rs"]
+mod compaction_tests;
 
 #[cfg(test)]
 mod tests {

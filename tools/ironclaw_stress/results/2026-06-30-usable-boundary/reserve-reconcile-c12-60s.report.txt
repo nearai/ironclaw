@@ -1,0 +1,89 @@
+    Finished `release` profile [optimized] target(s) in 0.22s
+     Running `target/release/ironclaw_stress --backend libsql --scenario reserve-reconcile --concurrency 12 --operations 20 --duration-seconds 60 --users 1000 --progress-interval-seconds 10 --trace-jsonl tools/ironclaw_stress/results/2026-06-30-usable-boundary/reserve-reconcile-c12-60s.trace.jsonl --human-read --bottleneck-report`
+[ironclaw-stress] preparing backend=libsql scenario=reserve-reconcile run_id=8845e6ed400d441bbdc54a84563d2134
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=12 operations_per_thread=20 duration_seconds=60 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=10
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=714 succeeded=714 failed=0 elapsed_ms=10003 recent_ops_sec=71.4
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=1008 succeeded=1008 failed=0 elapsed_ms=20009 recent_ops_sec=29.4
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=1240 succeeded=1240 failed=0 elapsed_ms=30010 recent_ops_sec=23.2
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=1456 succeeded=1456 failed=0 elapsed_ms=40019 recent_ops_sec=21.6
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=1656 succeeded=1656 failed=0 elapsed_ms=50029 recent_ops_sec=20.0
+[ironclaw-stress] progress backend=libsql scenario=reserve-reconcile attempted=1848 succeeded=1848 failed=0 elapsed_ms=60037 recent_ops_sec=19.2
+[ironclaw-stress] finished attempted=1860 succeeded=1860 failed=0 duration_ms=60554 throughput_ops_sec=30.7
+
+Run summary
+field                    value
+------------------------ --------------------------------
+backend                  libsql
+preset                   -
+scenario                 reserve-reconcile
+run_id                   8845e6ed400d441bbdc54a84563d2134
+target                   libsql://<redacted-local-path>
+processes                1
+concurrency              12
+operations_per_thread    20
+duration_seconds         60
+warmup_seconds           0
+trace_jsonl_enabled      true
+trace_interval_seconds   1
+users                    1000
+active_thread_count      per-user (1000)
+tenants                  1
+prefill_threads          0
+prefill_turns_per_thread 0
+prefill_concurrency      4
+model_latency_ms         0
+model_latency_profile    fixed
+model_latency_jitter_ms  0
+model_latency_spike_every 0
+model_latency_spike_ms   0
+user_message_bytes       0
+assistant_message_bytes  0
+context_max_messages     20
+context_growth_turns_per_op 4
+tool_calls_per_turn      2
+tool_latency_ms          0
+tool_output_bytes        1024
+tool_failure_every       0
+attempted                1860
+succeeded                1860
+failed                   0
+duration                 60.55s
+throughput_ops_sec       30.72
+
+Operation latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+operation                    1860    453.9ms    636.7ms    666.3ms    693.5ms
+
+Process metrics
+metric                          value
+------------------------ ------------
+cpu_total                      55.49s
+cpu_user                       37.41s
+cpu_system                     18.07s
+peak_rss                      376.1MB
+peak_threads                        -
+peak_open_fds                      16
+
+DB probe
+metric                                     before        after        delta
+------------------------------------ ------------ ------------ ------------
+libsql_file                                32.0KB       13.1MB      +13.1MB
+libsql_wal                                     0B           0B          +0B
+libsql_shm                                     0B           0B          +0B
+
+Bottleneck analysis
+signal                 level   evidence
+---------------------- ------- --------------------------------------------------------
+trace_worst_p95        high    tools/ironclaw_stress/results/2026-06-30-usable-boundary/reserve-reconcile-c12-60s.trace.jsonl seq=59 phase=final p95=693.4ms recent_ops_sec=23.38
+cpu_pressure           medium  cpu=55.49s wall=60.55s effective_cores=0.92
+memory_growth          medium  rss_start=11.0MiB peak=376.1MiB delta=365.1MiB
+throughput_drop        medium  trace_recent_ops_sec min=12.94 max=210.83
+libsql_growth          info    database_file_delta=13.1MiB
+
+Next probes
+- Use the trace sequence and elapsed_ms to correlate latency spikes with DB growth, RSS growth, and stderr spans.
+- Run cpu-burn and the target scenario at the same concurrency; if both flatten together, host CPU is the ceiling.
+- Run memory-churn as a control, then rerun the target with --duration-seconds to see if RSS keeps climbing.
+- Inspect the trace interval with lowest recent_ops_sec and compare process RSS/CPU and DB delta at that timestamp.
+- Compare growth across chat-turn, context-growth, and tool-session to find write amplification.

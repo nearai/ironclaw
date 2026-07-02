@@ -15,6 +15,8 @@ use ironclaw_host_api::ingress::{
 pub(crate) const MAX_CHAT_BODY_BYTES: usize = 14 * 1024 * 1024;
 
 pub const OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS: &str = "openai.compat.chat_completions";
+pub const OPENAI_COMPAT_ROUTE_MODELS_LIST: &str = "openai.compat.models.list";
+pub const OPENAI_COMPAT_ROUTE_MODELS_API_LIST: &str = "openai.compat.models_api.list";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE: &str = "openai.compat.responses_api.create";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE: &str = "openai.compat.responses_v1.create";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_RETRIEVE: &str = "openai.compat.responses_api.retrieve";
@@ -23,6 +25,8 @@ pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL: &str = "openai.compat.respon
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_V1_CANCEL: &str = "openai.compat.responses_v1.cancel";
 
 pub const OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS: &str = "/v1/chat/completions";
+pub const OPENAI_COMPAT_PATTERN_MODELS_LIST: &str = "/v1/models";
+pub const OPENAI_COMPAT_PATTERN_MODELS_API_LIST: &str = "/api/v1/models";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE: &str = "/api/v1/responses";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE: &str = "/v1/responses";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM: &str = "/api/v1/responses/{response_id}";
@@ -35,6 +39,8 @@ pub const OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM_CANCEL: &str =
 pub fn openai_compat_routes() -> Vec<IngressRouteDescriptor> {
     vec![
         chat_completions_descriptor(),
+        models_list_descriptor(),
+        models_api_list_descriptor(),
         responses_api_create_descriptor(),
         responses_v1_create_descriptor(),
         responses_api_retrieve_descriptor(),
@@ -54,6 +60,26 @@ fn chat_completions_descriptor() -> IngressRouteDescriptor {
         // in-workflow body check read the single `MAX_CHAT_BODY_BYTES` source of
         // truth so they can't drift apart.
         create_policy(body_limit_kib((MAX_CHAT_BODY_BYTES / 1024) as u64)),
+    )
+}
+
+fn models_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        OPENAI_COMPAT_ROUTE_MODELS_LIST,
+        NetworkMethod::Get,
+        OPENAI_COMPAT_PATTERN_MODELS_LIST,
+        // Read-only model listing: same host-owned ingress shape as a Responses
+        // retrieve (no body, bearer required, projection-only effect).
+        retrieve_policy(),
+    )
+}
+
+fn models_api_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        OPENAI_COMPAT_ROUTE_MODELS_API_LIST,
+        NetworkMethod::Get,
+        OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
+        retrieve_policy(),
     )
 }
 

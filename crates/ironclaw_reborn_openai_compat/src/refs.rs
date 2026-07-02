@@ -330,6 +330,8 @@ pub struct OpenAiCompatResourceMapping {
     pub idempotency_key: Option<OpenAiCompatIdempotencyKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_ack: Option<ProductInboundAck>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub external_tool_resume_completed: bool,
     pub binding: OpenAiCompatResourceBinding,
 }
 
@@ -345,6 +347,8 @@ struct OpenAiCompatResourceMappingFields {
     idempotency_key: Option<OpenAiCompatIdempotencyKey>,
     #[serde(default)]
     accepted_ack: Option<ProductInboundAck>,
+    #[serde(default)]
+    external_tool_resume_completed: bool,
     binding: OpenAiCompatResourceBinding,
 }
 
@@ -362,6 +366,7 @@ impl<'de> Deserialize<'de> for OpenAiCompatResourceMapping {
             created_at: fields.created_at.unwrap_or_else(unix_timestamp_now),
             idempotency_key: fields.idempotency_key,
             accepted_ack: fields.accepted_ack,
+            external_tool_resume_completed: fields.external_tool_resume_completed,
             binding: fields.binding,
         };
         mapping.validate().map_err(serde::de::Error::custom)?;
@@ -503,6 +508,18 @@ impl OpenAiCompatRecordAcceptedAck {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatMarkExternalToolResumeCompleted {
+    pub owner: OpenAiCompatActorScope,
+    pub public_id: OpenAiCompatPublicId,
+}
+
+impl OpenAiCompatMarkExternalToolResumeCompleted {
+    pub fn new(owner: OpenAiCompatActorScope, public_id: OpenAiCompatPublicId) -> Self {
+        Self { owner, public_id }
+    }
+}
+
 #[async_trait]
 pub trait OpenAiCompatRefStore: Send + Sync {
     async fn reserve(
@@ -518,6 +535,11 @@ pub trait OpenAiCompatRefStore: Send + Sync {
     async fn record_accepted_ack(
         &self,
         request: OpenAiCompatRecordAcceptedAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError>;
+
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
     ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError>;
 
     async fn lookup_authorized(
@@ -650,6 +672,22 @@ impl OpenAiCompatRefStore for InMemoryOpenAiCompatRefStore {
         Ok(Some(mapping.clone()))
     }
 
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        let mut state = self.lock_state().await;
+        let Some(mapping) = state.by_public_id.get_mut(&request.public_id) else {
+            return Ok(None);
+        };
+        mapping.validate()?;
+        if !mapping.is_authorized_for(&request.owner) {
+            return Ok(None);
+        }
+        mapping.external_tool_resume_completed = true;
+        Ok(Some(mapping.clone()))
+    }
+
     async fn lookup_authorized(
         &self,
         request: OpenAiCompatRefLookup,
@@ -675,6 +713,7 @@ fn new_pending_mapping(request: OpenAiCompatRefReservation) -> OpenAiCompatResou
         created_at: unix_timestamp_now(),
         idempotency_key: request.idempotency_key,
         accepted_ack: None,
+        external_tool_resume_completed: false,
         binding: OpenAiCompatResourceBinding::Pending,
     };
     debug_assert!(mapping.validate().is_ok());
@@ -683,6 +722,10 @@ fn new_pending_mapping(request: OpenAiCompatRefReservation) -> OpenAiCompatResou
 
 pub fn unix_timestamp_now() -> u64 {
     Utc::now().timestamp().try_into().unwrap_or(0)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn evict_oldest_if_needed(state: &mut InMemoryOpenAiCompatRefState, max_mappings: usize) {

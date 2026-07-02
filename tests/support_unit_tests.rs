@@ -623,7 +623,7 @@ mod reborn_support_tests {
             },
             expected_tool_results: vec![ExpectedToolResult {
                 tool_call_id: "call-1".to_string(),
-                name: "test.echo".to_string(),
+                name: "test__echo".to_string(),
                 content: "tool output".to_string(),
             }],
         };
@@ -656,6 +656,7 @@ mod reborn_support_tests {
             substring
                 .stream_model(model_request(vec![tool_result_message(
                     "call-1",
+                    "test__echo",
                     "test.echo",
                     "tool output with suffix",
                 )]))
@@ -674,6 +675,7 @@ mod reborn_support_tests {
         matched
             .stream_model(model_request(vec![tool_result_message(
                 "call-1",
+                "test__echo",
                 "test.echo",
                 "tool output",
             )]))
@@ -689,7 +691,7 @@ mod reborn_support_tests {
                 response: HostManagedModelResponse::assistant_reply("after tool"),
                 expected_tool_results: vec![ExpectedToolResult {
                     tool_call_id: "call-scripted".to_string(),
-                    name: "builtin.write_file".to_string(),
+                    name: "builtin__write_file".to_string(),
                     content: "result:ref-123".to_string(),
                 }],
             }]);
@@ -707,6 +709,7 @@ mod reborn_support_tests {
         gateway
             .stream_model(model_request(vec![tool_result_message(
                 "call-scripted",
+                "builtin__write_file",
                 "builtin.write_file",
                 "result:ref-123",
             )]))
@@ -866,7 +869,7 @@ mod reborn_support_tests {
         };
         let replay = calls[0].provider_replay.as_ref().expect("provider replay");
         assert_eq!(replay.provider_call_id, "provider-call-9");
-        assert_eq!(replay.provider_tool_name, "test.search");
+        assert_eq!(replay.provider_tool_name.as_str(), "test__search");
         assert_eq!(replay.arguments, serde_json::json!({"q": "near"}));
     }
 
@@ -1146,6 +1149,7 @@ mod reborn_support_tests {
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version.clone(),
                         capability_id: capability_id.clone(),
                         input_ref: CapabilityInputRef::new("input:first").expect("first input"),
@@ -1153,6 +1157,7 @@ mod reborn_support_tests {
                         auth_resume: None,
                     },
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version,
                         capability_id,
                         input_ref: CapabilityInputRef::new("input:second").expect("second input"),
@@ -2121,12 +2126,13 @@ mod reborn_support_tests {
     fn tool_result_message(
         provider_call_id: &str,
         provider_tool_name: &str,
+        capability_id: &str,
         content: &str,
     ) -> HostManagedModelMessage {
         tool_result_message_with_capability_id(
             provider_call_id,
             provider_tool_name,
-            provider_tool_name,
+            capability_id,
             content,
         )
     }
@@ -2146,7 +2152,8 @@ mod reborn_support_tests {
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: provider_call_id.to_string(),
-                provider_tool_name: provider_tool_name.to_string(),
+                provider_tool_name: ironclaw_host_api::ProviderToolName::new(provider_tool_name)
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new(capability_id).expect("capability id"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,
@@ -2936,5 +2943,149 @@ mod test_rig_tests {
         );
 
         rig.shutdown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// live_mission_helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "libsql")]
+mod live_mission_helpers_tests {
+    use crate::support::live_mission_helpers::{looks_like_routine_notification, tool_is};
+
+    #[test]
+    fn looks_like_routine_notification_accepts_marker() {
+        assert!(looks_like_routine_notification(
+            "**[bitcoin_price_checker]** Some output\nbody body body"
+        ));
+    }
+
+    #[test]
+    fn looks_like_routine_notification_rejects_foreground_reply() {
+        // Foreground replies have no marker.
+        assert!(!looks_like_routine_notification(
+            "## Bitcoin Price Checker Routine Created ✅\nSchedule: */5 * * * *"
+        ));
+    }
+
+    #[test]
+    fn looks_like_routine_notification_rejects_empty_marker() {
+        assert!(!looks_like_routine_notification("**[]** empty name"));
+    }
+
+    #[test]
+    fn tool_is_matches_bare_and_parenthesised() {
+        assert!(tool_is("mission_fire", "mission_fire"));
+        assert!(tool_is("mission_fire(abc)", "mission_fire"));
+        assert!(!tool_is("mission_fired", "mission_fire"));
+        assert!(!tool_is("other_mission_fire", "mission_fire"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// trace_runner
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "libsql")]
+mod trace_runner_tests {
+    use crate::support::trace_runner::{
+        Trace, TraceExpectation, TraceOperation, check_success_assertions, evaluate_expectation,
+        json_path,
+    };
+    use ironclaw::tools::ToolError;
+
+    #[test]
+    fn json_path_walks_nested_objects() {
+        let v = serde_json::json!({"a": {"b": {"c": 42}}});
+        assert_eq!(json_path(&v, "a.b.c"), Some(&serde_json::Value::from(42)));
+        assert_eq!(json_path(&v, "a.b.missing"), None);
+    }
+
+    #[test]
+    fn json_path_indexes_arrays() {
+        let v = serde_json::json!({"items": ["x", "y", "z"]});
+        assert_eq!(
+            json_path(&v, "items.1"),
+            Some(&serde_json::Value::from("y"))
+        );
+        assert_eq!(json_path(&v, "items.99"), None);
+    }
+
+    #[test]
+    fn check_assertions_eq_matches() {
+        let out = serde_json::json!({"foo": 1});
+        let asserts = serde_json::json!({"eq": {"foo": 1}});
+        assert!(check_success_assertions(&out, &asserts).is_none());
+    }
+
+    #[test]
+    fn check_assertions_eq_reports_mismatch() {
+        let out = serde_json::json!({"foo": 1});
+        let asserts = serde_json::json!({"eq": {"foo": 2}});
+        let reason = check_success_assertions(&out, &asserts).expect("should fail");
+        assert!(reason.contains("eq mismatch"));
+    }
+
+    #[test]
+    fn check_assertions_contains_text() {
+        let out = serde_json::json!("hello world");
+        let asserts = serde_json::json!({"contains_text": "world"});
+        assert!(check_success_assertions(&out, &asserts).is_none());
+
+        let asserts_bad = serde_json::json!({"contains_text": "nope"});
+        assert!(check_success_assertions(&out, &asserts_bad).is_some());
+    }
+
+    #[test]
+    fn check_assertions_fields_paths() {
+        let out = serde_json::json!({"data": {"items": [{"id": 7}]}});
+        let asserts = serde_json::json!({
+            "fields": {
+                "data.items.0.id": 7,
+            }
+        });
+        assert!(check_success_assertions(&out, &asserts).is_none());
+    }
+
+    #[test]
+    fn failure_expectation_rejects_empty_error_contains() {
+        let op = TraceOperation {
+            tool_name: "missing".into(),
+            params: serde_json::Value::Null,
+            expected: TraceExpectation::Failure {
+                error_contains: " ".into(),
+            },
+        };
+        let failure = evaluate_expectation(0, &op, &Err(ToolError::ExecutionFailed("boom".into())))
+            .expect("empty error_contains must be rejected");
+        assert!(failure.reason.contains("non-empty error_contains"));
+    }
+
+    #[test]
+    fn trace_roundtrips_json() {
+        let trace = Trace {
+            name: "demo".into(),
+            operations: vec![
+                TraceOperation {
+                    tool_name: "echo".into(),
+                    params: serde_json::json!({"message": "hi"}),
+                    expected: TraceExpectation::Success {
+                        assertions: serde_json::json!({"contains_text": "hi"}),
+                    },
+                },
+                TraceOperation {
+                    tool_name: "missing".into(),
+                    params: serde_json::Value::Null,
+                    expected: TraceExpectation::Failure {
+                        error_contains: "not found".into(),
+                    },
+                },
+            ],
+        };
+        let j = serde_json::to_value(&trace).unwrap();
+        let back: Trace = serde_json::from_value(j).unwrap();
+        assert_eq!(back.name, "demo");
+        assert_eq!(back.operations.len(), 2);
     }
 }

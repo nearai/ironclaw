@@ -169,7 +169,12 @@ impl NearAiChatProvider {
     /// rejected those messages can still be exercised in tests via
     /// `new_with_options(..., true, ...)`.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_options(config, session, false, 120)
+        Self::new_with_options(
+            config,
+            session,
+            false,
+            crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+        )
     }
 
     /// Create a new provider with a custom request timeout.
@@ -189,8 +194,7 @@ impl NearAiChatProvider {
         flatten_tool_messages: bool,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
@@ -581,6 +585,8 @@ impl LlmProvider for NearAiChatProvider {
         };
 
         let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+        let cached_tokens = parse_cached_tokens(response.usage.as_ref());
+        emit_context_shadow_usage(input_tokens, output_tokens, cached_tokens);
 
         Ok(CompletionResponse {
             content,
@@ -588,7 +594,7 @@ impl LlmProvider for NearAiChatProvider {
             input_tokens,
             output_tokens,
             reasoning: provider_reasoning,
-            cache_read_input_tokens: 0,
+            cache_read_input_tokens: cached_tokens.unwrap_or(0).min(input_tokens),
             cache_creation_input_tokens: 0,
         })
     }
@@ -692,6 +698,8 @@ impl LlmProvider for NearAiChatProvider {
         };
 
         let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+        let cached_tokens = parse_cached_tokens(response.usage.as_ref());
+        emit_context_shadow_usage(input_tokens, output_tokens, cached_tokens);
 
         Ok(ToolCompletionResponse {
             content,
@@ -699,9 +707,10 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
-            cache_read_input_tokens: 0,
+            cache_read_input_tokens: cached_tokens.unwrap_or(0).min(input_tokens),
             cache_creation_input_tokens: 0,
             reasoning: provider_reasoning,
+            reasoning_details: None,
         })
     }
 
@@ -1139,6 +1148,16 @@ struct ChatCompletionUsage {
     completion_tokens: Option<u64>,
     #[serde(default)]
     total_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 fn saturate_u32(val: u64) -> u32 {
@@ -1161,6 +1180,33 @@ fn emit_reasoning_trace(reasoning: Option<&str>) {
     }
 }
 
+fn emit_context_shadow_usage(
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cached_tokens: Option<u32>,
+) {
+    const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
+    let cached_tokens_field = cached_tokens.map(i64::from).unwrap_or(-1);
+    if let Some(cached_tokens) = cached_tokens.filter(|_| prompt_tokens > 0) {
+        tracing::debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens = cached_tokens_field,
+            cache_hit_ratio = cached_tokens as f64 / prompt_tokens as f64,
+            "nearai chat usage shadow measurement"
+        );
+    } else {
+        tracing::debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens = cached_tokens_field,
+            "nearai chat usage shadow measurement"
+        );
+    }
+}
+
 fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
     let Some(u) = usage else {
         return (0, 0);
@@ -1175,6 +1221,16 @@ fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
         }
     });
     (input, output)
+}
+
+fn parse_cached_tokens(usage: Option<&ChatCompletionUsage>) -> Option<u32> {
+    let usage = usage?;
+    usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        .or(usage.cached_tokens)
+        .map(saturate_u32)
 }
 
 #[cfg(test)]
@@ -2740,6 +2796,8 @@ mod tests {
             prompt_tokens: Some(100),
             completion_tokens: Some(50),
             total_tokens: Some(150),
+            prompt_tokens_details: None,
+            cached_tokens: None,
         };
         assert_eq!(parse_usage(Some(&usage)), (100, 50));
     }
@@ -2755,6 +2813,8 @@ mod tests {
             prompt_tokens: Some(100),
             completion_tokens: None,
             total_tokens: Some(180),
+            prompt_tokens_details: None,
+            cached_tokens: None,
         };
         // output = total - prompt = 80
         assert_eq!(parse_usage(Some(&usage)), (100, 80));
@@ -2766,6 +2826,8 @@ mod tests {
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: Some(200),
+            prompt_tokens_details: None,
+            cached_tokens: None,
         };
         // input = 0 (no prompt), output = total = 200
         assert_eq!(parse_usage(Some(&usage)), (0, 200));
@@ -2777,6 +2839,8 @@ mod tests {
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: None,
+            prompt_tokens_details: None,
+            cached_tokens: None,
         };
         assert_eq!(parse_usage(Some(&usage)), (0, 0));
     }
@@ -2932,12 +2996,79 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_deserialize_nested_cached_tokens() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+            "prompt_tokens_details": {
+                "cached_tokens": 80
+            }
+        }"#;
+        let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_usage(Some(&usage)), (100, 25));
+        assert_eq!(parse_cached_tokens(Some(&usage)), Some(80));
+    }
+
+    #[test]
+    fn test_usage_deserialize_top_level_cached_tokens() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+            "cached_tokens": 40
+        }"#;
+        let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_cached_tokens(Some(&usage)), Some(40));
+    }
+
+    #[test]
+    fn test_usage_deserialize_prefers_nested_cached_tokens() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+            "prompt_tokens_details": {
+                "cached_tokens": 80
+            },
+            "cached_tokens": 40
+        }"#;
+        let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_cached_tokens(Some(&usage)), Some(80));
+    }
+
+    #[test]
+    fn test_usage_deserialize_cached_tokens_absent() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125
+        }"#;
+        let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_cached_tokens(Some(&usage)), None);
+    }
+
+    #[test]
+    fn test_usage_without_details_still_parses_token_counts() {
+        let json = r#"{
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        }"#;
+        let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_usage(Some(&usage)), (10, 5));
+        assert_eq!(parse_cached_tokens(Some(&usage)), None);
+    }
+
+    #[test]
     fn test_usage_deserialize_empty_object() {
         let json = "{}";
         let usage: ChatCompletionUsage = serde_json::from_str(json).unwrap();
         assert!(usage.prompt_tokens.is_none());
         assert!(usage.completion_tokens.is_none());
         assert!(usage.total_tokens.is_none());
+        assert!(usage.prompt_tokens_details.is_none());
+        assert!(usage.cached_tokens.is_none());
     }
 
     // -- ChatCompletionToolCall serde roundtrip --------------------------------
@@ -2983,6 +3114,39 @@ mod tests {
         assert_eq!(
             provider.api_url("chat/completions"),
             "http://example.com/api/proxy/v1/chat/completions"
+        );
+    }
+
+    /// Verify the default request timeout sits below the Reborn runner lease
+    /// (90 s) so the HTTP layer fails a hung request before the lease
+    /// reclaims the runner.
+    #[test]
+    fn default_request_timeout_below_runner_lease() {
+        // Runner lease is 90 s (DEFAULT_RUNNER_LEASE_TTL_SECONDS in ironclaw_turns).
+        // ironclaw_llm must not depend on ironclaw_turns, so the bound is
+        // tested here by constant; the turns crate owns the invariant test on
+        // its own side.
+        const {
+            assert!(
+                crate::config::DEFAULT_REQUEST_TIMEOUT_SECS < 90,
+                "DEFAULT_REQUEST_TIMEOUT_SECS must be below the Reborn runner lease \
+                 (90 s) so the HTTP layer times out first",
+            );
+        }
+    }
+
+    /// Builder-config smoke test: provider constructs successfully with the
+    /// default timeout and the hardened client options (connect timeout,
+    /// keepalive) applied. reqwest does not expose builder values for readback,
+    /// so this asserts a successful build rather than the individual settings.
+    #[test]
+    fn nearai_provider_builds_with_default_timeout() {
+        let cfg = test_nearai_config("http://example.com/v1");
+        let result = NearAiChatProvider::new(cfg, test_session());
+        assert!(
+            result.is_ok(),
+            "NearAiChatProvider::new should succeed with default timeout: {:?}",
+            result.err()
         );
     }
 }

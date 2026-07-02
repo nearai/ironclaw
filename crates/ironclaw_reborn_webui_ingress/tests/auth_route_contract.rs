@@ -763,7 +763,7 @@ const OIDC_KID: &str = "route-test-key";
 
 /// Fresh RSA keypair: PKCS#8 PEM (for signing) + public key (for the JWK).
 fn generate_oidc_key() -> (String, RsaPublicKey) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand_core::OsRng;
     // 2048-bit is required, not just preferred: `jsonwebtoken` rejects
     // smaller RSA keys at sign time with `InvalidRsaKey("TooSmall")`, so
     // a faster 1024-bit test key is not an option here.

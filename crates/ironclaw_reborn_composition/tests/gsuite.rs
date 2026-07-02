@@ -146,6 +146,9 @@ fn asset_schema(path: &str) -> serde_json::Value {
         "gmail/list_messages.input.v1.json" => include_str!(
             "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
         ),
+        "gmail/send_message.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
+        ),
         other => panic!("unknown GSuite asset schema {other}"),
     };
     serde_json::from_str(schema_json).unwrap()
@@ -187,13 +190,87 @@ async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
     let list_events = asset_schema("google-calendar/list_events.input.v1.json");
     assert_eq!(
         list_events["properties"]["max_results"]["oneOf"][1]["pattern"],
-        "^(?:[1-9][0-9]{0,2}|[12][0-9]{3}|2[0-4][0-9]{2}|2500)$"
+        "^(?:[1-9][0-9]{0,2}|1[0-9]{3}|2[0-4][0-9]{2}|2500)$"
     );
+    assert!(list_events["properties"].get("calendar_ids").is_some());
+    assert!(
+        list_events["properties"]
+            .get("include_all_calendars")
+            .is_some()
+    );
+    assert!(list_events["properties"].get("page_tokens").is_some());
+    assert_eq!(
+        list_events["properties"]["page_tokens"]["propertyNames"]["minLength"],
+        json!(1)
+    );
+    assert!(list_events["properties"].get("query").is_some());
+    let list_events_schema_rules = list_events["allOf"]
+        .as_array()
+        .expect("list_events schema should reject incompatible selector and paging modes");
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["calendar_id", "calendar_ids"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["calendar_id", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["calendar_ids", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["page_token", "calendar_ids"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["page_token", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["page_token", "page_tokens"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        let Some(any_of) = rule["anyOf"].as_array() else {
+            return false;
+        };
+        any_of
+            .iter()
+            .any(|branch| branch["not"]["required"] == json!(["page_tokens"]))
+            && any_of
+                .iter()
+                .any(|branch| branch["required"] == json!(["calendar_ids"]))
+            && any_of.iter().any(|branch| {
+                branch["required"] == json!(["include_all_calendars"])
+                    && branch["properties"]["include_all_calendars"]["const"] == json!(true)
+            })
+    }));
 
     let list_messages = asset_schema("gmail/list_messages.input.v1.json");
     assert_eq!(
         list_messages["properties"]["max_results"]["oneOf"][1]["pattern"],
         "^(?:[1-9][0-9]{0,1}|[1-4][0-9]{2}|500)$"
+    );
+
+    let send_message = asset_schema("gmail/send_message.input.v1.json");
+    let send_message_properties = send_message["properties"]["message"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(send_message_properties.contains_key("raw"));
+    assert!(send_message_properties.contains_key("to"));
+    assert!(send_message_properties.contains_key("subject"));
+    assert!(send_message_properties.contains_key("body"));
+    assert!(
+        send_message["properties"]["message"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|shape| shape["required"] == serde_json::json!(["to", "body"])),
+        "send_message schema must advertise structured email input"
     );
 }
 

@@ -1,19 +1,21 @@
 use chrono::Utc;
 use futures::future::join_all;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
-    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, ListThreadsForScopeRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    FinalizedAssistantMessageByRunRequest, InMemorySessionThreadService,
+    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
+    ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -36,7 +38,7 @@ fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
         provider_model_id: "test-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider response reasoning".to_string()),
@@ -420,7 +422,8 @@ async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
         .unwrap();
     let mut provider_call = provider_call_reference();
     provider_call.capability_id = CapabilityId::new("builtin.skill_install").unwrap();
-    provider_call.provider_tool_name = "builtin__skill_install".to_string();
+    provider_call.provider_tool_name =
+        ProviderToolName::new("builtin__skill_install").expect("provider tool name");
     provider_call.arguments = serde_json::json!({
         "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
     });
@@ -503,7 +506,8 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
             .tool_result_provider_call
             .as_ref()
             .expect("model context preserves backfilled metadata")
-            .provider_tool_name,
+            .provider_tool_name
+            .as_str(),
         "demo__echo"
     );
 }
@@ -1394,7 +1398,8 @@ async fn redaction_removes_tool_result_provider_metadata() {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"secret":"raw-provider-argument"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1464,7 +1469,8 @@ async fn thread_message_serialization_omits_provider_replay_metadata() {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"secret":"raw-provider-argument"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1508,7 +1514,8 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1544,7 +1551,7 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
     assert_eq!(provider_call.provider_id, "test-provider");
     assert_eq!(provider_call.provider_model_id, "test-model");
     assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
 }
 
 #[tokio::test]
@@ -2122,6 +2129,105 @@ async fn duplicate_assistant_draft_for_same_turn_run_is_idempotent() {
         .unwrap();
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].status, MessageStatus::Redacted);
+}
+
+#[tokio::test]
+async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_run() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+            content: MessageContent::text("retry answer ignored"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(duplicate.kind, MessageKind::Assistant);
+    assert_eq!(duplicate.status, MessageStatus::Finalized);
+    assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+
+    let by_run = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message should be lookupable by run");
+    assert_eq!(by_run.message_id, first.message_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, first.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+}
+
+#[tokio::test]
+async fn append_finalized_assistant_message_finalizes_existing_draft_by_turn_run() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-existing-draft".into(),
+            content: MessageContent::text("draft answer"),
+        })
+        .await
+        .unwrap();
+    let finalized = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-existing-draft".into(),
+            content: MessageContent::text("final answer"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final answer"));
 }
 
 #[tokio::test]

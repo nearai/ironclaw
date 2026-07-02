@@ -14,6 +14,10 @@
 
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
 
+// arch-exempt: large_file, Reborn binary-E2E + host-runtime capability harness; the
+// mock-MCP scaffolding has been split into `harness_mcp.rs`, further focused splits
+// (auth, hooks) are tracked in `tests/support/reborn/CLAUDE.md`.
+
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -25,7 +29,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -37,13 +41,14 @@ use ironclaw_filesystem::{
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
     ScopedFilesystem, StorageClass,
 };
+use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
     MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    Obligations, PackageId, Principal, ProjectId, ResourceEstimate, ResourceScope,
-    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    Obligations, PackageId, Principal, ProjectId, ProviderToolName, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
 };
@@ -57,13 +62,14 @@ use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeProcessPort,
+    RuntimeStatusRequest, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -86,8 +92,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ProjectService,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
@@ -103,6 +109,7 @@ use ironclaw_reborn::{
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
 };
+use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
     RebornLocalDevApprovalTestParts, build_reborn_services, visible_capability_request_for_run,
@@ -145,6 +152,11 @@ use super::{
     },
     filesystem::{BlockingTurnStatePutFilesystem, local_filesystem},
     github as github_support,
+    harness_mcp::{
+        build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
+        mcp_loopback_network_policy, mock_mcp_extension_package,
+    },
+    harness_web_access,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
     session_thread::RebornThreadHarness,
@@ -158,15 +170,15 @@ const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type HarnessCapabilityParts = (
+pub(crate) type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
     Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
-type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
-type HarnessTurnBackend = CompositeRootFilesystem;
+pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -200,8 +212,7 @@ pub struct SubmittedTurn {
 pub struct RebornHarnessSharedStorage {
     product_backend: Arc<LocalFilesystem>,
     product_root: Arc<tempfile::TempDir>,
-    thread_backend: Arc<LocalFilesystem>,
-    thread_root: Arc<tempfile::TempDir>,
+    thread_backend: Arc<InMemoryBackend>,
     turn_backend: Arc<HarnessTurnStorageBackend>,
     turn_root: Arc<tempfile::TempDir>,
 }
@@ -209,13 +220,11 @@ pub struct RebornHarnessSharedStorage {
 impl RebornHarnessSharedStorage {
     pub fn new() -> HarnessResult<Self> {
         let product_root = Arc::new(tempfile::tempdir()?);
-        let thread_root = Arc::new(tempfile::tempdir()?);
         let turn_root = Arc::new(tempfile::tempdir()?);
         Ok(Self {
             product_backend: Arc::new(local_filesystem(product_root.path())?),
             product_root,
-            thread_backend: Arc::new(local_filesystem(thread_root.path())?),
-            thread_root,
+            thread_backend: Arc::new(InMemoryBackend::new()),
             turn_backend: Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
             turn_root,
         })
@@ -240,59 +249,126 @@ pub struct RecordedCapabilityResult {
     pub output: serde_json::Value,
 }
 
-enum HarnessCapabilityMode {
+pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 #[derive(Clone)]
-enum HarnessCapabilityRecorder {
+pub(crate) enum HarnessCapabilityRecorder {
     Recording(Arc<RecordingTestCapabilityPort>),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 impl HarnessCapabilityRecorder {
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
         match self {
             Self::Recording(port) => port.invocations(),
             Self::HostRuntime(harness) => harness.invocations(),
         }
     }
 
-    fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
+    pub(crate) fn workspace_file_path(&self, relative: &str) -> Option<PathBuf> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => Some(harness.workspace_file_path(relative)),
         }
     }
 
-    fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+    pub(crate) fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.capability_results(),
         }
     }
 
-    fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+    /// E-PROFILE: the local-dev memory filesystem backing the user-profile
+    /// source for this backend, if any. `None` for the Echo backend and for
+    /// HostRuntime harnesses without a profile filesystem.
+    pub(crate) fn profile_filesystem(&self) -> Option<Arc<dyn RootFilesystem>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.profile_filesystem_for_test(),
+        }
+    }
+
+    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
+    /// `skill_context_source` for this backend, if any. `None` for the Echo
+    /// backend and for HostRuntime harnesses without skill activation.
+    pub(crate) fn skill_context_source(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.skill_context_source_for_test(),
+        }
+    }
+
+    pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.runtime_http_requests(),
         }
     }
 
-    fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty on the echo recording backend or the live-shell path.
+    pub(crate) fn recorded_process_commands(&self) -> Vec<String> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.process_commands(),
+        }
+    }
+
+    pub(crate) fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
         }
     }
 
-    async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())
             }
             Self::HostRuntime(harness) => harness.approve_local_dev_gate(gate_ref).await,
+        }
+    }
+
+    pub(crate) async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev approvals".into())
+            }
+            Self::HostRuntime(harness) => harness.deny_local_dev_gate(gate_ref).await,
+        }
+    }
+
+    pub(crate) async fn disable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev auto-approve settings".into())
+            }
+            Self::HostRuntime(harness) => harness.disable_global_auto_approve(scope).await,
+        }
+    }
+
+    pub(crate) async fn enable_auto_approve_for(&self, scope: ResourceScope) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no local-dev auto-approve settings".into())
+            }
+            Self::HostRuntime(harness) => harness.enable_global_auto_approve(scope).await,
+        }
+    }
+
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.approval_requests_store(),
         }
     }
 }
@@ -813,7 +889,6 @@ impl RebornBinaryE2EHarness {
             RebornThreadHarness::filesystem_shared_backend(
                 thread_scope.clone(),
                 Arc::clone(&storage.thread_backend),
-                Arc::clone(&storage.thread_root),
             )?
         } else {
             RebornThreadHarness::filesystem_temp(thread_scope.clone())?
@@ -1231,6 +1306,19 @@ impl RebornBinaryE2EHarness {
             if state.status == expected {
                 return Ok(state);
             }
+            // A terminal status (Completed/Failed/Cancelled/RecoveryRequired) is
+            // never left, so once we observe one that is not the target the run
+            // can never reach `expected`. Fail fast instead of polling to the
+            // deadline — otherwise a run that fails early (e.g. a spawn capability
+            // returning a terminal `driver_unavailable`) burns the whole timeout
+            // and buries the real failure category.
+            if state.status.is_terminal() {
+                return Err(format!(
+                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
+                    state.status, state.failure
+                )
+                .into());
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for {expected:?}; last status={:?} failure={:?}",
@@ -1360,7 +1448,7 @@ impl Drop for RebornBinaryE2EHarness {
 }
 
 struct HarnessLoopExitEvidencePort {
-    inner: ThreadCheckpointLoopExitEvidencePort<FilesystemSessionThreadService<LocalFilesystem>>,
+    inner: ThreadCheckpointLoopExitEvidencePort<FilesystemSessionThreadService<InMemoryBackend>>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     accept_harness_blocked_evidence: bool,
 }
@@ -1446,7 +1534,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
 }
 
 impl HarnessCapabilityMode {
-    fn into_parts(
+    pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
     ) -> HarnessResult<HarnessCapabilityParts> {
@@ -1479,9 +1567,10 @@ impl HarnessCapabilityMode {
     }
 }
 
-struct HostRuntimeCapabilityHarness {
+pub(crate) struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
@@ -1500,12 +1589,47 @@ struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// Inert recording process port (slice 5). `Some` when the harness injected
+    /// a `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// used (`.with_live_shell()` path) or the harness predates slice 5.
+    process_port: Option<Arc<super::process::RecordingProcessPort>>,
+    /// Raw local-dev memory filesystem backing the user-profile source
+    /// (E-PROFILE seam). `Some` only for `new_with_options`-built harnesses (which
+    /// flow through `RebornServices`); `None` for the lower-level constructors and
+    /// the Echo backend. Read back via `profile_filesystem_for_test`.
+    profile_filesystem: Option<Arc<dyn RootFilesystem>>,
+    /// Project service for the local-dev synthetic `project_create` capability
+    /// (E-PROJ seam). `Some` for every `new_with_options`-built local-dev harness;
+    /// `None` for the lower-level constructors and the Echo backend.
+    /// `create_capability_port` wraps the port with the synthetic project-create
+    /// capability ONLY when `PROJECT_CREATE_CAPABILITY_ID` is also in
+    /// `capability_ids` (i.e. only `project_tools()` surfaces it), so other
+    /// local-dev groups are unaffected. Tests read projects back via `project_service`.
+    project_service: Option<Arc<dyn ProjectService>>,
+    /// Local-dev skill context source for the synthetic `skill_activate`
+    /// capability and runtime prompt injection (E-SKILL seam). `Some` only for
+    /// `skill_activation_tools()`; `None` otherwise. `create_capability_port`
+    /// wraps the port with the synthetic `skill_activate` capability ONLY when
+    /// `SKILL_ACTIVATE_CAPABILITY_ID` is also in `capability_ids`, and its
+    /// `context_source()` is wired as the runtime's `skill_context_source` in
+    /// `into_group`. Held as the opaque test-support handle so this crate never
+    /// names the crate-private source type.
+    skill_activation_source: Option<SkillActivationTestSource>,
 }
 
 struct HostRuntimeHarnessOptions {
     mounts: MountView,
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     seed_extension_credentials: bool,
+    /// Tenant the E-SKILL skill context source is constructed under, when this
+    /// harness surfaces the synthetic `skill_activate` capability. Only
+    /// `skill_activation_tools()` sets this (via
+    /// `with_skill_activation_tenant`), passing the SAME tenant the caller's
+    /// group run scope resolved (`group.rs` `build_base`'s
+    /// `canonical_binding.tenant_id`) — never a separately hardcoded literal —
+    /// so `skill_activate` resolves the seeded user skill against the same
+    /// tenant the turn runs under. `None` for every other harness variant.
+    skill_activation_tenant: Option<TenantId>,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1517,6 +1641,7 @@ impl HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
             seed_extension_credentials: false,
+            skill_activation_tenant: None,
         }
     }
 
@@ -1524,18 +1649,33 @@ impl HostRuntimeHarnessOptions {
         self.seed_extension_credentials = true;
         self
     }
+
+    fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
+        self.skill_activation_tenant = Some(tenant);
+        self
+    }
 }
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(Some(
+        let harness = Self::file_tools_with_runtime_policy(Some(
             ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
         ))
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
-    async fn file_tools_requiring_approval() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(None).await
+    pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<Self> {
+        let harness = Self::file_tools_with_runtime_policy(None).await?;
+        // Global auto-approve now defaults ON, so disable it explicitly to keep
+        // this constructor's per-tool approval gate behavior.
+        harness
+            .disable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn file_tools_with_runtime_policy(
@@ -1570,7 +1710,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn coding_read_tools() -> HarnessResult<Self> {
-        Self::new(
+        let harness = Self::new(
             "reborn-e2e-coding-read-tools",
             vec![
                 CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
@@ -1583,11 +1723,15 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-coding-read-user")?,
             None,
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn process_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-process-tools",
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
@@ -1607,7 +1751,11 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-process-user")?,
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn qa_smoke_tools() -> HarnessResult<Self> {
@@ -1619,6 +1767,9 @@ impl HostRuntimeCapabilityHarness {
             Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
             )),
+            // qa_smoke_tools exercises real process execution (SpawnProcess effect);
+            // leave the default LocalHostProcessPort in place.
+            None,
         )?;
         let mounts = qa_smoke_mounts()?;
         let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
@@ -1631,6 +1782,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1688,10 +1840,14 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
         })
     }
 
-    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+    pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<Self> {
         let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
         capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
         let mut harness = Self::new_with_options(
@@ -1712,6 +1868,75 @@ impl HostRuntimeCapabilityHarness {
         .await?;
         harness.network_policy = wildcard_test_policy();
         harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    /// E-PROJ: harness surfacing the local-dev synthetic `project_create`
+    /// capability. `create_capability_port` injects the synthetic capability via
+    /// `apply_synthetic_capability_wrappers` because `PROJECT_CREATE_CAPABILITY_ID`
+    /// is in the allowlist. Auto-approve is enabled so the capability dispatches
+    /// without a gate.
+    pub(crate) async fn project_tools() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
+            "reborn-e2e-project-tools",
+            vec![CapabilityId::new(
+                ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
+            )?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-project-tools-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Uses `new_with_options` (not `core_builtin_tools_from_runtime`), so
+    /// `profile_filesystem` is populated from `services.local_dev_profile_filesystem_for_test()`
+    /// — the read-back half of the round trip a `RebornIntegrationGroup::profile_tools()`
+    /// scenario needs. Base mounts are `/memory` directly (this harness's only
+    /// capability needs it; no per-capability mount override required, unlike
+    /// `core_builtin_tools_from_runtime`'s multi-capability surface).
+    pub(crate) async fn profile_tools() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
+            "reborn-e2e-profile-tools",
+            vec![CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-profile-tools-user")?,
+            HostRuntimeHarnessOptions::new(
+                memory_mounts(MountPermissions::read_write_list_delete())?,
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1742,11 +1967,54 @@ impl HostRuntimeCapabilityHarness {
         )
         .await?;
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
-    async fn trigger_management_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+    /// Harness surfacing the local-dev synthetic `skill_activate` capability
+    /// (E-SKILL seam). `new_with_options` builds the `skill_activation_source`
+    /// (because `SKILL_ACTIVATE_CAPABILITY_ID` is in the allowlist) under
+    /// `tenant` — the caller's ACTUAL group run-scope tenant, passed through
+    /// rather than re-hardcoded here — which `create_capability_port` wraps
+    /// onto the port and `into_group` wires as the runtime's
+    /// `skill_context_source`. The skill file the model activates is seeded as
+    /// a system-scoped skill by `RebornIntegrationGroup::skill_activation_tools`.
+    /// Mirrors `skill_management_tools`/`project_tools`.
+    pub(crate) async fn skill_activation_tools(tenant: &TenantId) -> HarnessResult<Self> {
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-skill-activation-tools",
+            vec![CapabilityId::new(
+                ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
+            )?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-skill-activation-user")?,
+            HostRuntimeHarnessOptions::new(
+                skill_mounts()?,
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_skill_activation_tenant(tenant.clone()),
+        )
+        .await?;
+        harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    pub(crate) async fn trigger_management_tools() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
@@ -1766,7 +2034,72 @@ impl HostRuntimeCapabilityHarness {
                 )?),
             ),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.enable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.enable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn enable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Global auto-approve now defaults ON. A test that needs to exercise the
+    /// per-tool approval gate must flip it OFF for the product and harness-user
+    /// scopes the run authorizes against, as an explicit precondition.
+    pub async fn disable_global_auto_approve_for_product_and_harness_users(
+        &self,
+    ) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.disable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.disable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn disable_global_auto_approve(
+        &self,
+        scope: ResourceScope,
+    ) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: false,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn trace_commons_tools() -> HarnessResult<Self> {
@@ -1795,8 +2128,8 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-trace-commons-user")?,
             // The Trace Commons write/network capabilities are
             // PermissionMode::Ask (onboard, profile_token, profile_set) — like
-            // the skill/trigger harnesses, the yolo runtime policy
-            // auto-approves them so the scripted run is not gated.
+            // the skill/trigger harnesses, the scripted run enables global
+            // auto-approve so it is not gated.
             HostRuntimeHarnessOptions::new(
                 MountView::default(),
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -1809,6 +2142,9 @@ impl HostRuntimeCapabilityHarness {
         // non-empty network policy or the obligation check rejects dispatch
         // before the consent gate runs.
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1849,6 +2185,7 @@ impl HostRuntimeCapabilityHarness {
             mounts,
             runtime_policy,
             seed_extension_credentials,
+            skill_activation_tenant,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1879,6 +2216,29 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
         let approval_parts = services.local_dev_approval_test_parts();
+        let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
+        // Capture the profile filesystem + project service before
+        // `services.host_runtime` is moved out below (E-PROFILE / E-PROJ seams).
+        let profile_filesystem = services.local_dev_profile_filesystem_for_test();
+        let project_service = services.local_dev_project_service_for_test();
+        // E-SKILL: build the local-dev skill context source only when this
+        // harness surfaces the synthetic `skill_activate` capability (i.e.
+        // `skill_activation_tools`). Built with the caller-supplied tenant
+        // (`HostRuntimeHarnessOptions::with_skill_activation_tenant`, sourced
+        // from the group's actual run-scope tenant) so activation visibility
+        // matches the turn's scope. Must precede the `services.host_runtime`
+        // move (it borrows `&services`).
+        let skill_activation_source = if capability_ids.iter().any(|id| {
+            id.as_str() == ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID
+        }) {
+            let tenant = skill_activation_tenant
+                .ok_or("skill_activation_tools harness requires with_skill_activation_tenant")?;
+            ironclaw_reborn_composition::test_support::build_local_dev_skill_context_source_for_test(
+                &services, &tenant, true,
+            )
+        } else {
+            None
+        };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -1890,6 +2250,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts,
+            auto_approve_settings,
             pending_approval_scopes,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1908,23 +2269,55 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
+            profile_filesystem,
+            project_service,
+            skill_activation_source,
         })
     }
 
-    async fn core_builtin_tools() -> HarnessResult<Self> {
+    pub(crate) async fn core_builtin_tools() -> HarnessResult<Self> {
         Self::core_builtin_tools_with_network_policy(http_test_policy()).await
     }
 
     async fn core_builtin_tools_with_network_policy(
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(network_policy, true).await
+    }
+
+    /// Variant used by `.with_live_shell()`: same as `core_builtin_tools_with_network_policy`
+    /// but opts out of the recording process port so the real `LocalHostProcessPort`
+    /// executes shell commands on the host.
+    pub(crate) async fn core_builtin_tools_with_live_shell() -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(http_test_policy(), false)
+            .await
+    }
+
+    async fn core_builtin_tools_with_network_policy_and_process_port(
+        network_policy: NetworkPolicy,
+        recording_process: bool,
+    ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
             br#"{"accepted":true}"#.to_vec(),
         ));
+        // Slice 5: inject the inert recording port by default so `builtin.shell`
+        // invocations in tests never spawn a real OS process. The `.with_live_shell()`
+        // opt-in passes `recording_process = false`, which skips injection and lets
+        // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+        let recording_process_port = if recording_process {
+            Some(Arc::new(super::process::RecordingProcessPort::new()))
+        } else {
+            None
+        };
+        let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
+            .as_ref()
+            .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
             Arc::clone(&runtime_http_egress),
+            process_port_dyn,
         )?;
         let mut harness = Self::core_builtin_tools_from_runtime(
             root,
@@ -1934,6 +2327,7 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-core-builtins-user")?,
         )?;
         harness.http_egress = Some(runtime_http_egress);
+        harness.process_port = recording_process_port;
         Ok(harness)
     }
 
@@ -1973,6 +2367,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1995,6 +2390,10 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                // slice 5: `builtin.shell` on the surface so scripted shell calls
+                // route through the process port (recording by default, live via
+                // `.with_live_shell()`).
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
             effect_kinds: vec![
@@ -2002,6 +2401,11 @@ impl HostRuntimeCapabilityHarness {
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                // slice 5: `builtin.shell` declares ExecuteCode; the grant's
+                // allowed_effects must include it or the authorizer denies the
+                // capability before it reaches the process port.
+                EffectKind::ExecuteCode,
             ],
             network_policy,
             secrets: Vec::new(),
@@ -2012,10 +2416,59 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
         })
     }
 
-    async fn github_issue_tools() -> HarnessResult<Self> {
+    /// Wires the GitHub first-party WASM capabilities behind `GithubHarnessAuthorizer`.
+    /// See `github_issue_tools_with_credential_result` for the credential-injection
+    /// coupling this relies on (T0-SECRET-INJECT).
+    pub(crate) async fn github_issue_tools() -> HarnessResult<Self> {
+        // Credential account resolves to a real handle → capability dispatches.
+        Self::github_issue_tools_with_credential_result(Ok(SecretHandle::new(
+            "github_manual_access",
+        )?))
+    }
+
+    /// E-AUTHGATE: the GitHub extension wired so its credential account resolver
+    /// returns `AuthRequired`, raising a `TurnStatus::BlockedAuth` gate when a
+    /// `github.*` capability is dispatched. Used by `RebornIntegrationGroup::live_auth_gate`.
+    pub(crate) async fn github_issue_tools_auth_required() -> HarnessResult<Self> {
+        Self::github_issue_tools_with_credential_result(Err(CredentialStageError::AuthRequired))
+    }
+
+    /// Shared GitHub-extension constructor (E-AUTHGATE): the only difference
+    /// between the happy-path and auth-blocked variants is the credential account
+    /// resolver result, so the full `Self {..}` literal lives here once.
+    ///
+    /// **Credential injection runs through two mechanisms here, not one — worth
+    /// knowing before you change either.** The authorizer's
+    /// `InjectCredentialAccountOnce` obligation is one path. The
+    /// `local_dev_host_runtime_with_registry_and_egress` helper this calls into
+    /// separately auto-wires `SharedHostWasmRuntimeCredentials` with product-auth
+    /// restaging via `try_with_wasm_runtime` (since both `.with_secret_store` and
+    /// `.with_runtime_credential_account_resolver` are always set on that path),
+    /// which independently resolves the GitHub manifest's declared
+    /// `runtime_credentials` and stages the same secret. That staging path runs
+    /// unconditionally on every WASM HTTP call (`WasmRuntimeHttpAdapter::request`)
+    /// — it is not gated on the authorizer's `Decision`. So a test asserting on the
+    /// injected header proves the *end-to-end* wire outcome, not that the
+    /// authorizer's obligation specifically is the sole producer of the header.
+    ///
+    /// As currently wired (manually verified once, not re-checked by CI — treat as
+    /// current-harness observation, not a guaranteed contract): removing the
+    /// obligation does not make the call fall back to an unauthenticated request;
+    /// the run instead hangs and never reaches `Completed`. That's why the
+    /// mutation-verify in `reborn_integration_secret_injection.rs` proves the
+    /// obligation's secret reaches the wire by flipping the secret *value* (a fast,
+    /// specific assertion failure) rather than by removing the obligation (which
+    /// would only yield a slow, ambiguous timeout — a poor mutation-test signal).
+    fn github_issue_tools_with_credential_result(
+        credential_account_result: Result<SecretHandle, CredentialStageError>,
+    ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
@@ -2033,11 +2486,13 @@ impl HostRuntimeCapabilityHarness {
             github_support::extension_registry()?,
             runtime_http_egress.clone(),
             network_egress.clone(),
+            credential_account_result,
         )?;
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2056,6 +2511,144 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: Some(runtime_http_egress),
             network_egress: Some(network_egress),
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
+        })
+    }
+
+    /// Slice 6: wire a single MCP capability backed by the loopback mock server.
+    ///
+    /// `mcp_url`  — the mock server's MCP endpoint (e.g. `"http://127.0.0.1:PORT/mcp"`).
+    /// `provider_id`   — extension id used in the registry (e.g. `"mock-mcp"`).
+    /// `capability_id` — capability id surfaced to the model (e.g. `"mock-mcp.search"`).
+    ///
+    /// The harness (via the `harness_mcp` scaffolding) builds a loopback MCP
+    /// egress that makes REAL HTTP connections to the mock server, injecting a
+    /// fake Bearer token to satisfy the mock's auth gate. Production egress
+    /// policy, network policy, and credential stores are bypassed — this path is
+    /// test-only.
+    pub(crate) async fn mock_mcp_tools(
+        mcp_url: &str,
+        provider_id: &str,
+        capability_id: &str,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        // Recording egress for any first-party tool paths (unused in MCP tests,
+        // but HostRuntimeServices requires it when first_party_capabilities are wired).
+        let first_party_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        // Real loopback egress + MCP runtime for the mock MCP server; the
+        // scaffolding (egress, adapter chain, runtime) lives in `harness_mcp`.
+        let mcp_runtime = build_loopback_mcp_runtime(mcp_url)?;
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(mock_mcp_extension_package(
+            provider_id,
+            mcp_url,
+            capability_id,
+        )?)?;
+        let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
+            storage_root,
+            registry,
+            Arc::clone(&first_party_egress),
+            mcp_runtime,
+            provider_id,
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![CapabilityId::new(capability_id)?],
+            runtime_kind: RuntimeKind::Mcp,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            // The MCP capability declares `EffectKind::Network`, so authorization
+            // attaches an `ApplyNetworkPolicy` obligation that the host runtime
+            // rejects when `allowed_targets` is empty (a default `NetworkPolicy`).
+            // The mock server lives at `http://127.0.0.1:<port>/mcp`, so permit the
+            // loopback host (and disable the private-IP denial that would otherwise
+            // block 127.0.0.1) so the MCP egress reaches the loopback server.
+            network_policy: mcp_loopback_network_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(provider_id)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-mcp-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
+        })
+    }
+
+    /// C-WEBACCESS: wires the real first-party `web-access.search` /
+    /// `web-access.get_content` capabilities via the production
+    /// `register_bundled_web_access_first_party_handlers` registration
+    /// (`harness_web_access.rs`), which dispatches through the same
+    /// `WebAccessExecutor` production composition uses. Unlike
+    /// `github_issue_tools`, no credential-injecting authorizer is needed —
+    /// web-access declares zero `runtime_credentials` — so this wires the
+    /// plain default `GrantAuthorizer`.
+    ///
+    /// The three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`) all target the same URL, so script it via
+    /// `RecordingRuntimeHttpEgress::push_response_body` (FIFO), not the keyed
+    /// matcher — see [`install_web_access_responses`](Self::install_web_access_responses),
+    /// called from `RebornIntegrationHarnessBuilder::build` before the harness
+    /// is returned.
+    pub(crate) async fn web_access_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(harness_web_access::web_access_extension_package()?)?;
+        let runtime = harness_web_access::local_dev_host_runtime_with_web_access(
+            storage_root,
+            registry,
+            Arc::clone(&http_egress),
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![
+                CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            network_policy: harness_web_access::exa_mcp_test_network_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(harness_web_access::WEB_ACCESS_PROVIDER_ID)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-web-access-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: Some(http_egress),
+            network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
         })
     }
 
@@ -2091,6 +2684,68 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_default()
     }
 
+    /// Install FIFO response bodies (C-WEBACCESS) onto the recording runtime
+    /// HTTP egress, consumed in call order ahead of the default body. Mirrors
+    /// [`install_http_responses`](Self::install_http_responses)'s shape but for
+    /// the web-access backend's `push_response_body` FIFO queue rather than the
+    /// keyed matcher — the three-leg Exa MCP handshake (`initialize` →
+    /// `notifications/initialized` → `tools/call`) all target the same
+    /// URL/method/capability, so only the FIFO queue can script them
+    /// independently. Errors if this harness wired no recording egress. Called
+    /// from `RebornIntegrationHarnessBuilder::build` (build-time only — no
+    /// post-build mutation).
+    pub(crate) fn install_web_access_responses(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let egress = self
+            .http_egress
+            .as_ref()
+            .ok_or("web-access host runtime has no recording egress wired")?;
+        for body in bodies {
+            egress.push_response_body(body);
+        }
+        Ok(())
+    }
+
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty when the harness uses the live `LocalHostProcessPort`
+    /// (`.with_live_shell()` path) or predates slice 5.
+    fn process_commands(&self) -> Vec<String> {
+        self.process_port
+            .as_ref()
+            .map(|port| port.commands())
+            .unwrap_or_default()
+    }
+
+    /// Install URL/method/capability-keyed scripted responses into the recording
+    /// HTTP egress (§3.6 P1 ergonomics). Errors if this harness wired no
+    /// recording egress (e.g. the live-HTTP variant).
+    pub(crate) fn install_http_responses(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) -> HarnessResult<()> {
+        self.http_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording http egress to script")?
+            .install_scripted(responses);
+        Ok(())
+    }
+
+    /// Install a sticky scripted `builtin.shell` process result on the inert
+    /// recording process port (mirrors `install_http_responses`). Errors if the
+    /// harness has no recording port (e.g. the `.with_live_shell()` path).
+    pub(crate) fn install_process_script(
+        &self,
+        result: super::process::ScriptedProcessResult,
+    ) -> HarnessResult<()> {
+        self.process_port
+            .as_ref()
+            .ok_or("host runtime harness has no recording process port to script")?
+            .set_scripted(result);
+        Ok(())
+    }
+
     fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         self.network_egress
             .as_ref()
@@ -2111,7 +2766,7 @@ impl HostRuntimeCapabilityHarness {
         let scope = self
             .pending_approval_scopes
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&request_id)
             .cloned()
             .ok_or("approval gate was not recorded by the host runtime harness")?;
@@ -2143,6 +2798,203 @@ impl HostRuntimeCapabilityHarness {
             other => return Err(format!("unsupported approval action: {other:?}").into()),
         }
         Ok(())
+    }
+
+    /// Deny a pending local-dev approval gate (the model-declined path). Mirrors
+    /// [`approve_local_dev_gate`](Self::approve_local_dev_gate) but resolves the
+    /// persisted request to `Denied` (no lease issued) via `ApprovalResolver::deny`.
+    /// The caller then resumes the run with `GateResumeDisposition::Denied` so the
+    /// executor surfaces a non-retryable authorization failure to the model.
+    async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+        let approval_parts = self
+            .approval_parts
+            .as_ref()
+            .ok_or("host runtime harness has no local-dev approval stores")?;
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let scope = self
+            .pending_approval_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&request_id)
+            .cloned()
+            .ok_or("approval gate was not recorded by the host runtime harness")?;
+        let resolver = ApprovalResolver::new(
+            approval_parts.approval_requests.as_ref(),
+            approval_parts.capability_leases.as_ref(),
+        );
+        resolver
+            .deny(
+                &scope,
+                request_id,
+                DenyApproval {
+                    denied_by: Principal::User(scope.user_id.clone()),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The persisted approval-request store, when this harness wires the real
+    /// local-dev approval stores (`file_tools_requiring_approval`). The
+    /// integration runtime builds an [`ApprovalGateEvidenceStore`] over it so a
+    /// `BlockedApproval` run is verified at loop exit (mirrors production
+    /// `runtime.rs:2799`) and genuinely pauses instead of failing.
+    pub(crate) fn approval_requests_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+        self.approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.approval_requests))
+    }
+
+    /// The user id this capability harness's first-party tools execute under.
+    /// The dispatch-time auto-approve check is keyed `(tenant, user)` on THIS
+    /// user (not the run's binding owner), so the group derives the auto-approve
+    /// scope from it — see `GroupSharedStorage::auto_approve_scope`.
+    pub(crate) fn user_id(&self) -> &UserId {
+        &self.user_id
+    }
+
+    /// E-PROFILE: the raw local-dev memory filesystem backing the user-profile
+    /// source, for write→read-back assertions on `context/profile.json`. `Some`
+    /// only for `new_with_options`-built harnesses. Consumed by the E-PROFILE
+    /// `profile_tools()` constructor and the `reborn_integration_profile` test.
+    pub(crate) fn profile_filesystem_for_test(&self) -> Option<Arc<dyn RootFilesystem>> {
+        self.profile_filesystem.clone()
+    }
+
+    /// E-PROJ: the project service backing the synthetic `project_create`
+    /// capability, for write→read-back assertions — mirrors
+    /// `profile_filesystem_for_test`'s role for E-PROFILE. `Some` only for
+    /// `project_tools()`-built harnesses. Lets a test read a created project
+    /// back through the SAME `Arc<dyn ProjectService>` instance
+    /// `apply_synthetic_capability_wrappers` dispatches writes through, rather
+    /// than reconstructing an equivalent (and possibly unwritten) one.
+    pub(crate) fn project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
+        self.project_service.clone()
+    }
+
+    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
+    /// `skill_context_source` in `into_group`, so activated-skill instructions
+    /// inject into the model request. `Some` only for `skill_activation_tools()`.
+    pub(crate) fn skill_context_source_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+        self.skill_activation_source
+            .as_ref()
+            .map(|source| source.context_source())
+    }
+
+    /// E-DURABLE: the on-disk local-dev storage root this harness's capability
+    /// stores persist under (`<tempdir>/local-dev`). Mirrors the `storage_root`
+    /// computed inline in `new_with_options`. A durability test reopens a fresh,
+    /// independent store at this path (see
+    /// `open_local_dev_extension_installation_store_for_test`) to prove capability
+    /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
+    /// Tests only.
+    pub(crate) fn storage_root_for_test(&self) -> PathBuf {
+        self.root.path().join("local-dev")
+    }
+
+    /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill
+    /// filesystem so the model can activate it (`skill_activate`/`$name`). Writes
+    /// `<storage_root>/system/skills/<name>/SKILL.md` — the system bundle root is
+    /// always present in the skills extension's roots regardless of the run's
+    /// tenant/user (`FirstPartySkillsExtensionHandles::bundle_roots`), so both
+    /// `activate_skills_for_run` (the `skill_activate` capability) and the
+    /// runtime's `skill_context_source` resolve it deterministically without
+    /// depending on the harness's run-scope owner resolution. User-scoped skill
+    /// filesystem resolution is already covered by the runtime.rs suite; this
+    /// seam only needs the skill to exist so the capability + context wiring can
+    /// be driven. Mirrors the runtime-test system-skill layout
+    /// (runtime.rs `system/skills/<name>/SKILL.md`). Tests only.
+    pub(crate) fn seed_system_skill_for_test(
+        &self,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        let dir = self
+            .storage_root_for_test()
+            .join("system")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir)?;
+        let body = format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        );
+        std::fs::write(dir.join("SKILL.md"), body)?;
+        Ok(())
+    }
+
+    /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness
+    /// surfaces, in one linear step (keeps the capability-specific knowledge out
+    /// of `create_capability_port`'s main assembly chain).
+    ///
+    /// Partial synthetic wrap: `project_create` (E-PROJ) and `skill_activate`
+    /// (E-SKILL), each layered independently when this harness both holds the
+    /// backing handle and surfaces the capability in its allowlist, so other
+    /// local-dev groups are unaffected. The `outbound_delivery_*` synthetic
+    /// capabilities are wired by their own coverage PRs. See
+    /// `LocalDevCapabilityPortFactory::build_inner()` for the full production set.
+    fn apply_synthetic_capability_wrappers(
+        &self,
+        port: Arc<dyn LoopCapabilityPort>,
+        run_context: &LoopRunContext,
+        input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = port;
+        // project_create (E-PROJ): wrapped only for `project_tools`.
+        if let Some(project_service) = &self.project_service
+            && self.capability_ids.iter().any(|id| {
+                id.as_str()
+                    == ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID
+            })
+        {
+            port =
+                ironclaw_reborn_composition::test_support::wrap_project_create_capability_for_test(
+                    port,
+                    Arc::clone(project_service),
+                    self.user_id.clone(),
+                    run_context.clone(),
+                    input_resolver.clone(),
+                    result_writer.clone(),
+                )?;
+        }
+        // skill_activate (E-SKILL): wrapped only for `skill_activation_tools`.
+        if let Some(skill_source) = &self.skill_activation_source
+            && self.capability_ids.iter().any(|id| {
+                id.as_str()
+                    == ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID
+            })
+        {
+            port =
+                ironclaw_reborn_composition::test_support::wrap_skill_activation_capability_for_test(
+                    port,
+                    skill_source,
+                    run_context.clone(),
+                    input_resolver,
+                    result_writer,
+                )?;
+        }
+        Ok(port)
+    }
+
+    /// Override the user this capability harness executes first-party tools under.
+    /// The dispatch ResourceScope, approval-request persistence, auto-approve
+    /// keying, and the approval-gate-evidence lookup are ALL keyed on this user
+    /// (`HostRuntimeHarnessCapabilityPortFactory` builds the authority from
+    /// `self.user_id`). The integration harness sets it to the run's binding owner
+    /// so capability dispatch and the turn run under the SAME `(tenant, user)` —
+    /// matching production (where the run owner *is* the capability user) instead
+    /// of the constructor's fixed test user. Without this, a `BlockedApproval`
+    /// run's request persists under the capability user but the gate-evidence
+    /// lookup uses the turn owner, so the gate is never verified and the run goes
+    /// terminal `Failed`.
+    pub(crate) fn with_user_id(mut self, user_id: UserId) -> Self {
+        self.user_id = user_id;
+        self
     }
 
     fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
@@ -2296,7 +3148,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)
@@ -2311,7 +3163,7 @@ impl HostRuntime for RecordingHostRuntime {
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(gate.approval_request_id, scope);
         }
         Ok(outcome)
@@ -2409,7 +3261,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             Arc::clone(&self.harness.runtime),
             visible_request,
             self.harness.io.clone(),
-            result_writer,
+            result_writer.clone(),
             milestone_sink,
         )
         .with_execution_mounts(execution_mounts);
@@ -2418,6 +3270,15 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
                 factory.with_capability_execution_mount(capability_id.clone(), mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
+        // E-PROJ: inject the local-dev synthetic `project_create` capability when
+        // this harness surfaces it (project_tools). One linear step — no
+        // capability-specific branching inline in the assembly chain above.
+        let port = self.harness.apply_synthetic_capability_wrappers(
+            port,
+            run_context,
+            self.harness.io.clone(),
+            result_writer,
+        )?;
         Ok(Arc::new(RecordingDelegatingCapabilityPort {
             inner: port,
             invocations: Arc::clone(&self.harness.invocations),
@@ -2445,9 +3306,9 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -2480,10 +3341,16 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
-    local_dev_host_runtime_with_registry_and_runtime_http_egress(storage_root, registry, egress)
+    local_dev_host_runtime_with_registry_and_runtime_http_egress(
+        storage_root,
+        registry,
+        egress,
+        process_port,
+    )
 }
 
 fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
@@ -2498,8 +3365,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(registry),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
@@ -2519,6 +3387,11 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     ))?))
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    // Inject the recording process port when provided (slice 5). When `None`,
+    // `HostRuntimeServices` defaults to `LocalHostProcessPort` (real execution).
+    if let Some(port) = process_port {
+        services = services.with_runtime_process_port_dyn(port);
+    }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
@@ -2528,6 +3401,9 @@ fn local_dev_host_runtime_with_registry_and_egress(
     registry: ExtensionRegistry,
     runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
     network_egress: Arc<RecordingNetworkHttpEgress>,
+    // E-AUTHGATE: `Ok(handle)` resolves the credential account (capability
+    // dispatches); `Err(AuthRequired)` raises a `BlockedAuth` gate at dispatch.
+    credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -2542,7 +3418,7 @@ fn local_dev_host_runtime_with_registry_and_egress(
         SecretMaterial::from("ghp_fake_fixture_token"),
     )))
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
-        result: Ok(SecretHandle::new("github_manual_access")?),
+        result: credential_account_result,
     }))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
@@ -2588,7 +3464,7 @@ fn local_dev_host_runtime_with_live_http_egress(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
-fn local_dev_root_filesystem(
+pub(crate) fn local_dev_root_filesystem(
     storage_root: PathBuf,
     mounts: LocalDevRootMounts,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
@@ -2601,6 +3477,12 @@ fn local_dev_root_filesystem(
         local.mount_local(
             VirtualPath::new("/system/extensions/github")?,
             HostPath::from_path_buf(github_support::asset_root()),
+        )?;
+    }
+    if mounts.web_access_assets {
+        local.mount_local(
+            VirtualPath::new("/system/extensions/web-access")?,
+            HostPath::from_path_buf(harness_web_access::asset_root()),
         )?;
     }
 
@@ -2632,6 +3514,20 @@ fn local_dev_root_filesystem(
             Arc::clone(&local),
         )?;
     }
+    if mounts.web_access_assets {
+        root.mount(
+            local_dev_mount_descriptor(
+                "/system/extensions/web-access",
+                "local-dev-web-access-assets",
+                BackendKind::LocalFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ExtensionPackage,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            Arc::clone(&local),
+        )?;
+    }
     if mounts.memory {
         let memory = Arc::new(InMemoryBackend::new());
         root.mount(
@@ -2651,15 +3547,17 @@ fn local_dev_root_filesystem(
 }
 
 #[derive(Clone, Copy)]
-struct LocalDevRootMounts {
+pub(crate) struct LocalDevRootMounts {
     github_assets: bool,
+    web_access_assets: bool,
     memory: bool,
 }
 
 impl LocalDevRootMounts {
-    fn core_builtins() -> Self {
+    pub(crate) fn core_builtins() -> Self {
         Self {
             github_assets: false,
+            web_access_assets: false,
             memory: true,
         }
     }
@@ -2667,6 +3565,15 @@ impl LocalDevRootMounts {
     fn github_assets() -> Self {
         Self {
             github_assets: true,
+            web_access_assets: false,
+            memory: false,
+        }
+    }
+
+    pub(crate) fn web_access_assets() -> Self {
+        Self {
+            github_assets: false,
+            web_access_assets: true,
             memory: false,
         }
     }
@@ -2962,8 +3869,11 @@ impl TrustAwareCapabilityDispatchAuthorizer for GithubHarnessAuthorizer {
 }
 
 #[derive(Debug, Clone)]
-struct RecordingRuntimeHttpEgress {
+pub(crate) struct RecordingRuntimeHttpEgress {
     default_body: Vec<u8>,
+    /// URL/method/capability-keyed scripted responses (§3.6 P1 ergonomics).
+    /// Consulted before the FIFO queue; first match wins.
+    scripted: Arc<Mutex<Vec<super::http_matcher::ScriptedHttpResponse>>>,
     response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
     requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
 }
@@ -2972,6 +3882,7 @@ impl RecordingRuntimeHttpEgress {
     fn with_body(body: Vec<u8>) -> Self {
         Self {
             default_body: body,
+            scripted: Arc::new(Mutex::new(Vec::new())),
             response_bodies: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -2979,6 +3890,24 @@ impl RecordingRuntimeHttpEgress {
 
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Append keyed scripted responses (the canonical keyed-matcher install).
+    fn install_scripted(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) {
+        self.scripted.lock().unwrap().extend(responses);
+    }
+
+    /// Enqueue one FIFO response body (C-WEBACCESS), consumed in call order
+    /// ahead of `default_body`. Mirrors `install_scripted`'s shape but for the
+    /// plain FIFO queue rather than keyed matchers — used to script the
+    /// three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`), which all target the same URL/method/capability and so
+    /// cannot be told apart by the keyed matcher.
+    pub(crate) fn push_response_body(&self, body: Vec<u8>) {
+        self.response_bodies.lock().unwrap().push_back(body);
     }
 }
 
@@ -2989,15 +3918,38 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let request_bytes = request.body.len() as u64;
+        // Resolve the keyed outcome BEFORE recording the request: `push(request)`
+        // moves `request` by value into the log, so any code reading its fields
+        // (the `.matches()` lookup) must run first. (`RuntimeHttpEgressRequest`
+        // does implement `Drop`/`ZeroizeOnDrop` to scrub its URL/headers, but that
+        // fires later when the logged entry is actually dropped, not on push.)
+        let keyed_outcome = {
+            let scripted = self.scripted.lock().unwrap();
+            scripted
+                .iter()
+                .find(|response| response.matches(&request))
+                .map(|response| response.outcome())
+        };
         self.requests.lock().unwrap().push(request);
-        let body = self
-            .response_bodies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| self.default_body.clone());
+        // A scripted egress error short-circuits with `Err`, driving the tool's
+        // error mapping. A body outcome (or the FIFO/default fallback) returns
+        // `Ok` with the scripted status/body.
+        let (status, body) = match keyed_outcome {
+            Some(super::http_matcher::ScriptedHttpOutcome::Error(error)) => return Err(error),
+            Some(super::http_matcher::ScriptedHttpOutcome::Body { status, bytes }) => {
+                (status, bytes)
+            }
+            None => (
+                200,
+                self.response_bodies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| self.default_body.clone()),
+            ),
+        };
         Ok(RuntimeHttpEgressResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
             saved_body: None,
@@ -3319,7 +4271,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
-            name: self.primary_tool_name().to_string(),
+            name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
             parameters: json!({
                 "type": "object",
@@ -3333,10 +4285,12 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let call = request.tool_call;
         let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: capability_id.clone(),
@@ -3374,6 +4328,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             descriptors,
+            callable_capability_ids: None,
         })
     }
 
@@ -3430,8 +4385,8 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     }
 }
 
-struct HarnessCapabilityPortFactory {
-    port: Arc<RecordingTestCapabilityPort>,
+pub(crate) struct HarnessCapabilityPortFactory {
+    pub(crate) port: Arc<RecordingTestCapabilityPort>,
 }
 
 #[async_trait]
@@ -3444,8 +4399,8 @@ impl LoopCapabilityPortFactory for HarnessCapabilityPortFactory {
     }
 }
 
-struct StaticCapabilitySurfaceProfileResolver {
-    allow_set: CapabilityAllowSet,
+pub(crate) struct StaticCapabilitySurfaceProfileResolver {
+    pub(crate) allow_set: CapabilityAllowSet,
 }
 
 #[async_trait]
@@ -3458,7 +4413,7 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver
     }
 }
 
-struct EmptyIdentityContextSource;
+pub(crate) struct EmptyIdentityContextSource;
 
 #[async_trait]
 impl HostIdentityContextSource for EmptyIdentityContextSource {
@@ -3570,36 +4525,18 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs(
+pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
-    let owner_user_id = binding
-        .subject_user_id
-        .as_ref()
-        .unwrap_or(&binding.actor_user_id);
     // Include agent_id and project_id in the path when present so that
     // distinct agents or projects stored under the same tenant/user
     // (e.g. shared-storage multi-harness tests) get isolated turn state
     // files and cannot cross-claim each other's queued runs.
-    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
-        (Some(agent_id), Some(project_id)) => format!(
-            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, agent_id, project_id, owner_user_id
-        ),
-        (Some(agent_id), None) => format!(
-            "/engine/tenants/{}/agents/{}/users/{}/turns",
-            binding.tenant_id, agent_id, owner_user_id
-        ),
-        (None, Some(project_id)) => format!(
-            "/engine/tenants/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, project_id, owner_user_id
-        ),
-        (None, None) => format!(
-            "/engine/tenants/{}/users/{}/turns",
-            binding.tenant_id, owner_user_id
-        ),
-    };
+    // The 4-arm match lives in `super::filesystem::turns_scope_path`; the
+    // integration tier reuses it with a different prefix via
+    // `scoped_turns_fs_composite` in builder.rs.
+    let target = super::filesystem::turns_scope_path("/engine", binding);
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),
@@ -3636,6 +4573,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
@@ -3648,7 +4586,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: "call-1".to_string(),
-                provider_tool_name: "test_echo".to_string(),
+                provider_tool_name: ProviderToolName::new("test_echo").expect("provider tool name"),
                 arguments: json!({"message": "hi"}),
                 response_reasoning: None,
                 reasoning: None,

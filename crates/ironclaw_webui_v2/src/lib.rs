@@ -53,6 +53,11 @@ mod router;
 mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
+// Browser SPA asset bundle folded in from the former `ironclaw_webui_v2_static`
+// crate: the JSON route surface and the static bytes it drives now ship from one
+// crate behind the single `webui-v2-beta` feature.
+#[cfg(feature = "webui-v2-beta")]
+pub mod static_assets;
 
 #[allow(deprecated)]
 pub use descriptors::is_webui_v2_llm_config_route_id;
@@ -72,8 +77,9 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
     WEBUI_V2_ROUTE_LIST_FS_MOUNTS, WEBUI_V2_ROUTE_LIST_LLM_MODELS,
     WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_ROUTE_LIST_PROJECT_FILES,
-    WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS, WEBUI_V2_ROUTE_LIST_PROJECTS, WEBUI_V2_ROUTE_LIST_SKILLS,
-    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS, WEBUI_V2_ROUTE_LIST_PROJECTS,
+    WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS, WEBUI_V2_ROUTE_LIST_SKILLS, WEBUI_V2_ROUTE_LIST_THREADS,
+    WEBUI_V2_ROUTE_LOGS, WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
     WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_GET_SETUP,
     WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG, WEBUI_V2_ROUTE_OPERATOR_LOGS,
     WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP, WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE,
@@ -83,7 +89,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SEND_MESSAGE,
     WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
-    WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
+    WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
+    WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE, WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_START_CODEX_LOGIN,
     WEBUI_V2_ROUTE_START_NEARAI_LOGIN, WEBUI_V2_ROUTE_STAT_FS_PATH,
     WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
@@ -103,13 +110,14 @@ pub use handlers::{
     get_operator_status, get_outbound_preferences, get_session, get_skill_content, get_timeline,
     install_extension, install_skill, list_automations, list_connectable_channels,
     list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
-    list_operator_config, list_outbound_delivery_targets, list_skills, list_threads,
-    pause_automation, query_operator_logs, read_fs_file, remove_extension, remove_skill,
-    resolve_gate, resume_automation, run_operator_service_lifecycle, run_operator_setup,
-    search_skills, send_message, set_active_llm, set_auto_activate_learned,
-    set_operator_config_key, set_outbound_preferences, set_skill_auto_activate, setup_extension,
-    start_codex_login, start_nearai_login, stat_fs_path, stream_events, stream_events_ws,
-    test_llm_connection, trace_credits, update_skill, upsert_llm_provider,
+    list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
+    list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
+    remove_extension, remove_skill, resolve_gate, resume_automation,
+    run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
+    set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
+    set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,
+    setup_extension, start_codex_login, start_nearai_login, stat_fs_path, stream_events,
+    stream_events_ws, test_llm_connection, trace_credits, update_skill, upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{
@@ -118,5 +126,10 @@ pub use router::{
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
+// Re-export the static-bundle router factory at the crate root so host
+// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)` (formerly
+// `ironclaw_webui_v2_static::mount_at_prefix`).
 #[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
+#[cfg(feature = "webui-v2-beta")]
+pub use static_assets::{mount_at_prefix, serve_root, serve_wildcard, static_router};
