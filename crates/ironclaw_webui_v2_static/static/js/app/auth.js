@@ -94,6 +94,9 @@ function consumeLoginTicketFromUrl() {
   if (!ticket) return "";
   url.searchParams.delete("login_ticket");
   window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  // A callback ticket is an intentional login attempt. Do not let a failed
+  // exchange silently fall back to a stale bearer for another identity.
+  storeToken("");
   return ticket;
 }
 
@@ -125,17 +128,17 @@ function consumeLoginErrorFromUrl() {
 }
 
 export function useAuthSession() {
+  const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
   const [token, setToken] = React.useState(
-    () => consumeTokenFromUrl() || readStoredToken(),
+    () => loginTicket ? "" : consumeTokenFromUrl() || readStoredToken(),
   );
   const [error, setError] = React.useState(() => consumeLoginErrorFromUrl());
-  const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
   const [session, setSession] = React.useState(null);
   const [isExchanging, setIsExchanging] = React.useState(
     () => Boolean(loginTicket),
   );
   const [isSessionChecking, setIsSessionChecking] = React.useState(
-    () => Boolean(readStoredToken()),
+    () => Boolean(!loginTicket && readStoredToken()),
   );
 
   React.useEffect(() => {
