@@ -4512,6 +4512,7 @@ dependencies = [
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
  "regex",
@@ -4810,6 +4811,7 @@ dependencies = [
 name = "ironclaw_observability"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tracing",
 ]
 
