@@ -5665,6 +5665,7 @@ dependencies = [
 name = "ironclaw_wasm_sandbox_core"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_wasm_limiter",
  "thiserror 2.0.18",
  "tracing",
  "wasmtime",

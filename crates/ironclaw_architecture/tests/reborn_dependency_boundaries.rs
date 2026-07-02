@@ -986,9 +986,30 @@ fn wasm_sandbox_core_is_standalone_v1_parity_kernel() {
     let workspace_deps = workspace_dependency_names(package)
         .filter_map(|dependency| dependency["name"].as_str())
         .collect::<Vec<_>>();
+    let allowed_workspace_deps = ["ironclaw_wasm_limiter"];
+    let forbidden_workspace_deps = workspace_deps
+        .iter()
+        .copied()
+        .filter(|dependency| !allowed_workspace_deps.contains(dependency))
+        .collect::<Vec<_>>();
     assert!(
-        workspace_deps.is_empty(),
-        "WASM sandbox core should stay independent of IronClaw domain crates; got {workspace_deps:?}"
+        forbidden_workspace_deps.is_empty(),
+        "WASM sandbox core should stay independent of IronClaw product/runtime crates; \
+         only the low-level shared limiter workspace crate is allowed. Got forbidden deps: \
+         {forbidden_workspace_deps:?}; all workspace deps: {workspace_deps:?}"
+    );
+
+    let limiter_package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wasm_limiter")
+        .expect("ironclaw_wasm_limiter must be a workspace package");
+    let limiter_workspace_deps = workspace_dependency_names(limiter_package)
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        limiter_workspace_deps.is_empty(),
+        "ironclaw_wasm_limiter is allowed only as low-level WASM accounting; \
+         got workspace deps: {limiter_workspace_deps:?}"
     );
 }
 

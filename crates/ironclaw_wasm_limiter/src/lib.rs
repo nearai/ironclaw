@@ -31,6 +31,14 @@ impl WasmResourceLimiter {
             max_memories: 10,
         }
     }
+
+    pub fn memory_used(&self) -> u64 {
+        self.memory_used
+    }
+
+    pub fn memory_limit(&self) -> u64 {
+        self.memory_limit
+    }
 }
 
 impl ResourceLimiter for WasmResourceLimiter {
