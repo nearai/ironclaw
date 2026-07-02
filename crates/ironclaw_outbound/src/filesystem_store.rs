@@ -893,6 +893,13 @@ fn communication_preference_path(
     let mut hasher = Sha256::new();
     hasher.update(b"v2:");
     hash_delivery_default_scope(&mut hasher, &key.scope);
+    // Per-trigger override rows hash the trigger origin into the path so they
+    // never collide with the scoped default row. Default rows (`None`) keep
+    // the pre-override digest, so existing stored preferences stay readable.
+    if let Some(trigger_origin_ref) = &key.trigger_origin_ref {
+        update_hash_part(&mut hasher, "trigger");
+        update_hash_part(&mut hasher, trigger_origin_ref.as_str());
+    }
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
         .map_err(|_| OutboundError::Backend)

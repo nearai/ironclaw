@@ -703,6 +703,7 @@ fn seed_preference(repo: &FakePreferenceRepository, scope: &TurnScope) {
 fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), actor().user_id.clone()),
+        trigger_origin_ref: None,
         final_reply_target: Some(validated_reply_target()),
         progress_target: None,
         approval_prompt_target: None,
@@ -754,7 +755,9 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
     };
     assert_eq!(attempt.scope, scope);
     assert_eq!(validator.calls(), 1);
-    assert_eq!(preferences.load_calls(), 1);
+    // Two loads for triggered origins: the per-trigger override probe first,
+    // then the scoped default row.
+    assert_eq!(preferences.load_calls(), 2);
     assert_eq!(resolver.calls(), 1);
     assert_eq!(resolver.called_targets(), vec![validated_reply_target()]);
     assert_eq!(egress.calls().len(), 1);
@@ -868,7 +871,9 @@ async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_ef
     };
     assert!(matches!(render_outcome, ProductRenderOutcome::Deferred));
     assert_eq!(validator.calls(), 1);
-    assert_eq!(preferences.load_calls(), 1);
+    // Two loads for triggered origins: the per-trigger override probe first,
+    // then the scoped default row.
+    assert_eq!(preferences.load_calls(), 2);
     assert_eq!(resolver.calls(), 1);
     assert!(egress.calls().is_empty());
     assert!(sink.statuses().is_empty());
@@ -1055,7 +1060,9 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
             ..
         }
     ));
-    assert_eq!(preferences.load_calls(), 1);
+    // Two loads for triggered origins: the per-trigger override probe first,
+    // then the scoped default row.
+    assert_eq!(preferences.load_calls(), 2);
     assert_eq!(validator.calls(), 1);
     assert_eq!(resolver.calls(), 0);
     assert!(egress.calls().is_empty());
@@ -1652,7 +1659,9 @@ async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
         Some(ironclaw_outbound::DeliveryFailureKind::AuthorizationRevoked)
     );
     assert_eq!(validator.calls(), 1);
-    assert_eq!(preferences.load_calls(), 1);
+    // Two loads for triggered origins: the per-trigger override probe first,
+    // then the scoped default row.
+    assert_eq!(preferences.load_calls(), 2);
     assert_eq!(resolver.calls(), 0);
     assert!(egress.calls().is_empty());
     assert!(sink.statuses().is_empty());

@@ -3136,6 +3136,19 @@ pub async fn build_reborn_runtime(
     }
     let outbound_delivery_target_registry =
         local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+    if let Some(registry) = &outbound_delivery_target_registry {
+        // The WebUI default thread is an always-available internal delivery
+        // target; register it ahead of product providers (Slack, Telegram)
+        // so it is selectable even before any external product is paired.
+        registry
+            .register_provider(
+                "webui",
+                Arc::new(crate::webui_outbound_targets::WebUiOutboundDeliveryTargetProvider),
+            )
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("webui outbound target provider registration failed: {error:?}"),
+            })?;
+    }
     let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
@@ -3629,6 +3642,26 @@ pub async fn build_reborn_runtime(
         {
             runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
         }
+        // WebUI default-thread notifier: watches every accepted trigger fire
+        // and posts failures / WebUI-owned results into the discoverable
+        // "Agent messages" thread instead of leaving them buried in run
+        // history. Internal transcript writes only — external delivery stays
+        // with the product delivery drivers and outbound policy.
+        let webui_run_notifier: Arc<dyn ironclaw_triggers::TriggerFireSettlementObserver> =
+            Arc::new(crate::webui_agent_messages::WebUiTriggeredRunNotifier::new(
+                Arc::new(crate::webui_agent_messages::WebUiAgentMessenger::new(
+                    Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+                    validated_identity.agent_id.clone(),
+                )),
+                Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+                Arc::new(
+                    crate::webui_agent_messages::TurnCoordinatorRunOutcomeSource::new(Arc::clone(
+                        &planned_turn_coordinator,
+                    )),
+                ),
+                Arc::clone(&local_runtime.outbound_preferences),
+                crate::webui_agent_messages::WebUiTriggeredRunNotifierSettings::default(),
+            ));
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -3636,6 +3669,7 @@ pub async fn build_reborn_runtime(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                extra_fire_settlement_observers: vec![webui_run_notifier],
                 #[cfg(feature = "slack-v2-host-beta")]
                 post_submit_hook_slot: hook_slot,
             },
@@ -8762,7 +8796,17 @@ output_schema_ref = "schemas/write.output.json"
             .list_outbound_delivery_targets(caller)
             .await
             .expect("outbound target listing uses composed facade");
-        assert!(targets.targets.is_empty());
+        // The composed registry always offers the internal WebUI
+        // default-thread target; no product (Slack/Telegram) targets exist in
+        // this local-dev runtime.
+        assert_eq!(
+            targets
+                .targets
+                .iter()
+                .map(|option| option.target.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["webui:default-thread"]
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

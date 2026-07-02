@@ -7,16 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-#[cfg(feature = "slack-v2-host-beta")]
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_triggers::{
-    ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
-    TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
-    TrustedTriggerFireSubmitter,
+    ScheduleTriggerSourceProvider, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
+    TriggerError, TriggerFireSettlementObserver, TriggerPollerWorker, TriggerPollerWorkerDeps,
+    TriggerPromptMaterializer, TriggerRepository, TrustedTriggerFireSubmitter,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_triggers::{TriggerAcceptedFireSettlement, TriggerFireSettlementObserver};
 use rand::RngExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -76,6 +73,11 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    /// Composition-owned settlement observers invoked (in order) for every
+    /// accepted fire, alongside the feature-gated Slack post-submit hook.
+    /// Used for host-internal notification surfaces such as the WebUI
+    /// default-thread notifier.
+    pub(crate) extra_fire_settlement_observers: Vec<Arc<dyn TriggerFireSettlementObserver>>,
     /// Late-binding slot for the post-submit delivery hook.
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
@@ -90,16 +92,18 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
+    let mut observers: Vec<Arc<dyn TriggerFireSettlementObserver>> =
+        deps.extra_fire_settlement_observers;
     #[cfg(feature = "slack-v2-host-beta")]
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
-        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
-    );
-    #[cfg(feature = "slack-v2-host-beta")]
-    let trusted_submitter = deps.trusted_submitter;
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    let fire_settlement_observer: Arc<dyn ironclaw_triggers::TriggerFireSettlementObserver> =
-        Arc::new(ironclaw_triggers::NoopTriggerFireSettlementObserver);
-    #[cfg(not(feature = "slack-v2-host-beta"))]
+    observers.push(Arc::new(PostSubmitHookObserver::new(
+        deps.post_submit_hook_slot,
+        cancel.clone(),
+    )));
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = match observers.len() {
+        0 => Arc::new(ironclaw_triggers::NoopTriggerFireSettlementObserver),
+        1 => observers.remove(0),
+        _ => Arc::new(FanOutTriggerFireSettlementObserver { observers }),
+    };
     let trusted_submitter = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -117,6 +121,23 @@ pub(crate) fn spawn_trigger_poller(
         run_trigger_poller(worker, settings, task_cancel).await;
     });
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
+}
+
+/// Fans one accepted-fire settlement out to several composition-owned
+/// observers, in registration order. Each observer is awaited in turn;
+/// observers that need long-running work must spawn their own tasks (both the
+/// Slack post-submit observer and the WebUI notifier already do).
+struct FanOutTriggerFireSettlementObserver {
+    observers: Vec<Arc<dyn TriggerFireSettlementObserver>>,
+}
+
+#[async_trait]
+impl TriggerFireSettlementObserver for FanOutTriggerFireSettlementObserver {
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+        for observer in &self.observers {
+            observer.on_accepted_fire_settled(event.clone()).await;
+        }
+    }
 }
 
 #[cfg(feature = "slack-v2-host-beta")]

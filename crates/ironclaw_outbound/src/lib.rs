@@ -42,6 +42,7 @@ pub use ids::{
     TriggerOriginRef,
 };
 pub use memory::InMemoryOutboundStateStore;
+pub use resolution_engine::resolve_triggered_final_reply_candidate;
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };

@@ -442,6 +442,7 @@ mod tests {
     ) -> CommunicationPreferenceRecord {
         CommunicationPreferenceRecord {
             scope: crate::DeliveryDefaultScope::personal(scope.tenant_id.clone(), user_id("alice")),
+            trigger_origin_ref: None,
             final_reply_target: final_reply_target.map(reply_ref),
             progress_target: progress_target.map(reply_ref),
             approval_prompt_target: approval_prompt_target.map(reply_ref),

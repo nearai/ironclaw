@@ -3,7 +3,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
-use crate::{CommunicationModality, OutboundError};
+use crate::{CommunicationModality, OutboundError, TriggerOriginRef};
 
 /// Owner scope for default outbound delivery preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,9 +46,19 @@ impl DeliveryDefaultScope {
 }
 
 /// Scoped lookup key for outbound-owned communication preferences.
+///
+/// `trigger_origin_ref: None` addresses the scoped *default* preference row.
+/// `trigger_origin_ref: Some(_)` addresses a per-trigger (routine/automation)
+/// delivery *override* row for the same owner scope: the resolver consults it
+/// before falling back to the scoped default, so different triggers can
+/// deliver results through different channels. Trigger identity itself never
+/// embeds delivery targets (see `docs/reborn/contracts/triggers.md` §9); the
+/// override lives here, under outbound-policy ownership.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommunicationPreferenceKey {
     pub scope: DeliveryDefaultScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_origin_ref: Option<TriggerOriginRef>,
 }
 
 impl CommunicationPreferenceKey {
@@ -59,6 +69,7 @@ impl CommunicationPreferenceKey {
     pub fn personal(tenant_id: TenantId, user_id: UserId) -> Self {
         Self {
             scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+            trigger_origin_ref: None,
         }
     }
 
@@ -69,6 +80,15 @@ impl CommunicationPreferenceKey {
     ) -> Self {
         Self {
             scope: DeliveryDefaultScope::shared_agent(tenant_id, agent_id, project_id),
+            trigger_origin_ref: None,
+        }
+    }
+
+    /// Rescope this key to the per-trigger delivery override row.
+    pub fn for_trigger(self, trigger_origin_ref: TriggerOriginRef) -> Self {
+        Self {
+            scope: self.scope,
+            trigger_origin_ref: Some(trigger_origin_ref),
         }
     }
 }
@@ -99,6 +119,10 @@ impl CommunicationPreferenceVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommunicationPreferenceRecord {
     pub scope: DeliveryDefaultScope,
+    /// `Some` marks this row as a per-trigger delivery override rather than
+    /// the scoped default. See [`CommunicationPreferenceKey`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_origin_ref: Option<TriggerOriginRef>,
     pub final_reply_target: Option<ReplyTargetBindingRef>,
     pub progress_target: Option<ReplyTargetBindingRef>,
     pub approval_prompt_target: Option<ReplyTargetBindingRef>,
@@ -112,6 +136,7 @@ impl CommunicationPreferenceRecord {
     pub fn key(&self) -> CommunicationPreferenceKey {
         CommunicationPreferenceKey {
             scope: self.scope.clone(),
+            trigger_origin_ref: self.trigger_origin_ref.clone(),
         }
     }
 }
@@ -129,6 +154,8 @@ impl<'de> Deserialize<'de> for CommunicationPreferenceRecord {
             tenant_id: Option<TenantId>,
             #[serde(default)]
             user_id: Option<UserId>,
+            #[serde(default)]
+            trigger_origin_ref: Option<TriggerOriginRef>,
             final_reply_target: Option<ReplyTargetBindingRef>,
             progress_target: Option<ReplyTargetBindingRef>,
             approval_prompt_target: Option<ReplyTargetBindingRef>,
@@ -152,6 +179,7 @@ impl<'de> Deserialize<'de> for CommunicationPreferenceRecord {
         };
         Ok(Self {
             scope,
+            trigger_origin_ref: wire.trigger_origin_ref,
             final_reply_target: wire.final_reply_target,
             progress_target: wire.progress_target,
             approval_prompt_target: wire.approval_prompt_target,
@@ -242,6 +270,7 @@ mod tests {
                 AgentId::new("agent-pref-json").unwrap(),
                 Some(ProjectId::new("project-pref-json").unwrap()),
             ),
+            trigger_origin_ref: None,
             final_reply_target: None,
             progress_target: None,
             approval_prompt_target: None,
@@ -286,5 +315,58 @@ mod tests {
             "updated_by": "user-pref-missing-updater"
         });
         assert!(serde_json::from_value::<CommunicationPreferenceRecord>(missing_scope).is_err());
+    }
+
+    #[test]
+    fn per_trigger_override_record_round_trips_and_defaults_to_scoped_default() {
+        let updated_at = Utc::now();
+        let override_record = CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::personal(
+                TenantId::new("tenant-pref-trigger").unwrap(),
+                UserId::new("user-pref-trigger").unwrap(),
+            ),
+            trigger_origin_ref: Some(crate::TriggerOriginRef::new("trigger:pref-json").unwrap()),
+            final_reply_target: None,
+            progress_target: None,
+            approval_prompt_target: None,
+            auth_prompt_target: None,
+            default_modality: None,
+            updated_at,
+            updated_by: UserId::new("user-pref-trigger").unwrap(),
+        };
+        let serialized =
+            serde_json::to_string(&override_record).expect("serialize override record");
+        let decoded: CommunicationPreferenceRecord =
+            serde_json::from_str(&serialized).expect("deserialize override record");
+        assert_eq!(decoded, override_record);
+        assert_eq!(decoded.key(), override_record.key());
+        assert_ne!(
+            decoded.key(),
+            CommunicationPreferenceKey::personal(
+                TenantId::new("tenant-pref-trigger").unwrap(),
+                UserId::new("user-pref-trigger").unwrap(),
+            ),
+            "override key must not collide with the scoped default key"
+        );
+
+        // Records written before per-trigger overrides existed carry no
+        // trigger_origin_ref field and must decode as scoped defaults.
+        let legacy = serde_json::json!({
+            "scope": {
+                "kind": "personal",
+                "tenant_id": "tenant-pref-trigger",
+                "user_id": "user-pref-trigger"
+            },
+            "final_reply_target": null,
+            "progress_target": null,
+            "approval_prompt_target": null,
+            "auth_prompt_target": null,
+            "default_modality": null,
+            "updated_at": updated_at,
+            "updated_by": "user-pref-trigger"
+        });
+        let decoded: CommunicationPreferenceRecord =
+            serde_json::from_value(legacy).expect("deserialize legacy record");
+        assert_eq!(decoded.trigger_origin_ref, None);
     }
 }

@@ -3267,6 +3267,7 @@ mod tests {
         let updated_by = user.clone();
         let record = CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant, user),
+            trigger_origin_ref: None,
             final_reply_target: Some(binding_ref.clone()),
             progress_target: None,
             approval_prompt_target: Some(binding_ref),
@@ -3302,6 +3303,7 @@ mod tests {
         let updated_by = user.clone();
         let record = CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant, user),
+            trigger_origin_ref: None,
             final_reply_target: Some(final_reply_target),
             progress_target: None,
             approval_prompt_target: None,

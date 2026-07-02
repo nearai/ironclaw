@@ -454,6 +454,28 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+
+    /// Persist a per-automation (trigger) outbound delivery override for the
+    /// authenticated caller.
+    ///
+    /// `automation_id` is the automation/trigger id string exposed by the
+    /// automations product surface. The override is stored under the caller's
+    /// delivery-default scope, so different automations can deliver results
+    /// through different channels while the scoped default stays the fallback.
+    /// Passing a request with `final_reply_target_id: None` clears the
+    /// override's final-reply slot, restoring the scoped default.
+    ///
+    /// The default implementation fails closed for facades that do not
+    /// support per-automation overrides.
+    async fn set_automation_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: &str,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let _ = (caller, automation_id, request);
+        Err(outbound_preferences_unavailable())
+    }
 }
 
 #[derive(Debug)]

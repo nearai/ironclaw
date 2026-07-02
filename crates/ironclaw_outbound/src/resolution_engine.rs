@@ -5,6 +5,7 @@ use crate::{
     CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest,
     CommunicationPreferenceKey, CommunicationPreferenceRepository, OutboundError,
     RequestedOutboundContext, RunNotificationContext, RunNotificationOrigin,
+    TriggerCommunicationContext,
 };
 
 /// Deterministic host-owned outbound target selection.
@@ -72,15 +73,20 @@ impl<'a> OutboundResolutionEngine<'a> {
             RunNotificationOrigin::LiveSourceRoute { source_route } => {
                 source_route.reply_target_binding_ref.clone()
             }
-            RunNotificationOrigin::Triggered { .. } => {
-                self.resolve_triggered_target(scope, actor, kind).await?
+            RunNotificationOrigin::Triggered { trigger } => {
+                self.resolve_triggered_target(scope, actor, kind, trigger)
+                    .await?
             }
-            RunNotificationOrigin::TriggeredFromSourceRoute { source_route, .. } => {
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger,
+                source_route,
+            } => {
                 self.resolve_triggered_from_source_route_target(
                     kind,
                     &source_route.reply_target_binding_ref,
                     scope,
                     actor,
+                    trigger,
                 )
                 .await?
             }
@@ -100,15 +106,26 @@ impl<'a> OutboundResolutionEngine<'a> {
         source_route_target: &ReplyTargetBindingRef,
         scope: &ironclaw_turns::TurnScope,
         actor: &ironclaw_turns::TurnActor,
+        trigger: &TriggerCommunicationContext,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         match kind {
             CommunicationDeliveryKind::ApprovalPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
-                    .await
+                self.load_preference_target(
+                    scope,
+                    actor,
+                    PreferenceTargetKind::ApprovalPrompt,
+                    Some(trigger),
+                )
+                .await
             }
             CommunicationDeliveryKind::AuthPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::AuthPrompt)
-                    .await
+                self.load_preference_target(
+                    scope,
+                    actor,
+                    PreferenceTargetKind::AuthPrompt,
+                    Some(trigger),
+                )
+                .await
             }
             CommunicationDeliveryKind::FinalReply
             | CommunicationDeliveryKind::ProgressUpdate
@@ -121,26 +138,17 @@ impl<'a> OutboundResolutionEngine<'a> {
         scope: &ironclaw_turns::TurnScope,
         actor: &ironclaw_turns::TurnActor,
         kind: CommunicationDeliveryKind,
+        trigger: &TriggerCommunicationContext,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
-        match kind {
-            CommunicationDeliveryKind::FinalReply => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::FinalReply)
-                    .await
-            }
+        let kind = match kind {
+            CommunicationDeliveryKind::FinalReply => PreferenceTargetKind::FinalReply,
             CommunicationDeliveryKind::ProgressUpdate
-            | CommunicationDeliveryKind::DeliveryStatus => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::Progress)
-                    .await
-            }
-            CommunicationDeliveryKind::ApprovalPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
-                    .await
-            }
-            CommunicationDeliveryKind::AuthPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::AuthPrompt)
-                    .await
-            }
-        }
+            | CommunicationDeliveryKind::DeliveryStatus => PreferenceTargetKind::Progress,
+            CommunicationDeliveryKind::ApprovalPrompt => PreferenceTargetKind::ApprovalPrompt,
+            CommunicationDeliveryKind::AuthPrompt => PreferenceTargetKind::AuthPrompt,
+        };
+        self.load_preference_target(scope, actor, kind, Some(trigger))
+            .await
     }
 
     async fn load_preference_target(
@@ -148,7 +156,26 @@ impl<'a> OutboundResolutionEngine<'a> {
         scope: &ironclaw_turns::TurnScope,
         actor: &ironclaw_turns::TurnActor,
         kind: PreferenceTargetKind,
+        trigger: Option<&TriggerCommunicationContext>,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
+        // Per-trigger delivery override first: a stored override row for this
+        // trigger (routine/automation) wins over the scoped default, which is
+        // what lets different triggers deliver through different channels. A
+        // missing override row — or an override row without the requested
+        // slot — falls back to the scoped default row.
+        if let Some(trigger) = trigger {
+            let key = default_preference_key(scope, actor)
+                .for_trigger(trigger.trigger_origin_ref.clone());
+            if let Some(record) = self
+                .communication_preferences
+                .load_communication_preference(key)
+                .await?
+                && let Some(target) = preference_slot_target(&record.record, kind)
+            {
+                return Ok(target);
+            }
+        }
+
         let key = default_preference_key(scope, actor);
         let Some(record) = self
             .communication_preferences
@@ -157,25 +184,59 @@ impl<'a> OutboundResolutionEngine<'a> {
         else {
             return Err(missing_preference_error(kind));
         };
-        let record = record.record;
 
-        // Gate prompts (approval/auth) fall back to the final-reply target
-        // when no explicit slot is configured: the delivery-defaults surface
-        // sets a single default, and a triggered run blocked on a gate must
-        // reach the same place its final reply would. An explicit slot, when
-        // present, always wins (see `communication-delivery-resolution.md`).
-        let target = match kind {
-            PreferenceTargetKind::FinalReply => record.final_reply_target,
-            PreferenceTargetKind::Progress => record.progress_target,
-            PreferenceTargetKind::ApprovalPrompt => {
-                record.approval_prompt_target.or(record.final_reply_target)
-            }
-            PreferenceTargetKind::AuthPrompt => {
-                record.auth_prompt_target.or(record.final_reply_target)
-            }
-        };
+        preference_slot_target(&record.record, kind).ok_or_else(|| missing_preference_error(kind))
+    }
+}
 
-        target.ok_or_else(|| missing_preference_error(kind))
+/// Resolve the delivery *candidate* target for a triggered run's final reply.
+///
+/// This is the same per-trigger-override-then-scoped-default selection the
+/// [`OutboundResolutionEngine`] performs for
+/// [`RunNotificationOrigin::Triggered`] final replies, exposed for host-owned
+/// notification surfaces (e.g. the WebUI default-thread notifier) that need to
+/// know *where* a triggered run would deliver without preparing a delivery
+/// attempt. The returned target is a candidate only: any external transport
+/// must still pass it through `OutboundPolicyService` validation before
+/// rendering or sending.
+///
+/// # Errors
+///
+/// Fails closed with [`OutboundError::PreferenceTargetMissing`] when neither a
+/// per-trigger override nor a scoped default provides a final-reply target.
+pub async fn resolve_triggered_final_reply_candidate(
+    communication_preferences: &dyn CommunicationPreferenceRepository,
+    scope: &ironclaw_turns::TurnScope,
+    actor: &ironclaw_turns::TurnActor,
+    trigger: &TriggerCommunicationContext,
+) -> Result<ReplyTargetBindingRef, OutboundError> {
+    OutboundResolutionEngine::new(communication_preferences)
+        .resolve_triggered_target(scope, actor, CommunicationDeliveryKind::FinalReply, trigger)
+        .await
+}
+
+/// Select the requested slot from a preference record.
+///
+/// Gate prompts (approval/auth) fall back to the final-reply target when no
+/// explicit slot is configured: the delivery-defaults surface sets a single
+/// default, and a triggered run blocked on a gate must reach the same place
+/// its final reply would. An explicit slot, when present, always wins (see
+/// `communication-delivery-resolution.md`).
+fn preference_slot_target(
+    record: &crate::CommunicationPreferenceRecord,
+    kind: PreferenceTargetKind,
+) -> Option<ReplyTargetBindingRef> {
+    match kind {
+        PreferenceTargetKind::FinalReply => record.final_reply_target.clone(),
+        PreferenceTargetKind::Progress => record.progress_target.clone(),
+        PreferenceTargetKind::ApprovalPrompt => record
+            .approval_prompt_target
+            .clone()
+            .or_else(|| record.final_reply_target.clone()),
+        PreferenceTargetKind::AuthPrompt => record
+            .auth_prompt_target
+            .clone()
+            .or_else(|| record.final_reply_target.clone()),
     }
 }
 
@@ -458,6 +519,7 @@ mod tests {
                     AgentId::new("agent-a").expect("valid agent"),
                     Some(ProjectId::new("project-a").expect("valid project")),
                 ),
+                trigger_origin_ref: None,
                 final_reply_target: Some(reply_ref("reply:shared-default")),
                 progress_target: Some(reply_ref("reply:shared-progress")),
                 approval_prompt_target: Some(reply_ref("reply:shared-approval")),
@@ -545,6 +607,7 @@ mod tests {
                     AgentId::new("agent-a").expect("valid agent"),
                     Some(ProjectId::new("project-a").expect("valid project")),
                 ),
+                trigger_origin_ref: None,
                 final_reply_target: Some(reply_ref("reply:shared-default")),
                 progress_target: Some(reply_ref("reply:shared-progress")),
                 approval_prompt_target: Some(reply_ref("reply:shared-approval")),
@@ -621,6 +684,212 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triggered_final_reply_prefers_the_per_trigger_override_over_the_scoped_default() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:scoped-default"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("seed scoped default");
+        store
+            .put_communication_preference(trigger_override_record(
+                "trigger:daily",
+                Some("reply:trigger-override"),
+            ))
+            .await
+            .expect("seed per-trigger override");
+
+        let candidate = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect("triggered final reply resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:trigger-override"));
+        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
+    async fn triggered_final_reply_ignores_overrides_stored_for_other_triggers() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:scoped-default"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("seed scoped default");
+        store
+            .put_communication_preference(trigger_override_record(
+                "trigger:weekly",
+                Some("reply:other-trigger-override"),
+            ))
+            .await
+            .expect("seed unrelated per-trigger override");
+
+        let candidate = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect("triggered final reply resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:scoped-default"));
+    }
+
+    #[tokio::test]
+    async fn triggered_final_reply_falls_back_to_scoped_default_when_override_slot_is_unset() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:scoped-default"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("seed scoped default");
+        store
+            .put_communication_preference(trigger_override_record("trigger:daily", None))
+            .await
+            .expect("seed empty per-trigger override");
+
+        let candidate = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect("triggered final reply resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:scoped-default"));
+    }
+
+    #[tokio::test]
+    async fn triggered_final_reply_with_only_an_override_fails_closed_for_other_triggers() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(trigger_override_record(
+                "trigger:weekly",
+                Some("reply:other-trigger-override"),
+            ))
+            .await
+            .expect("seed unrelated per-trigger override");
+
+        let error = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect_err("missing default must fail closed");
+
+        assert!(matches!(
+            error,
+            OutboundError::PreferenceTargetMissing { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn triggered_gate_prompt_uses_the_per_trigger_override_final_reply_fallback() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:scoped-default"),
+                None,
+                Some("reply:scoped-approval"),
+                None,
+            ))
+            .await
+            .expect("seed scoped default");
+        store
+            .put_communication_preference(trigger_override_record(
+                "trigger:daily",
+                Some("reply:trigger-override"),
+            ))
+            .await
+            .expect("seed per-trigger override");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:trigger-override",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_gate_prompt_prefers_the_per_trigger_override() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                Some("reply:approval"),
+                None,
+            ))
+            .await
+            .expect("seed scoped default");
+        store
+            .put_communication_preference(trigger_override_record(
+                "trigger:daily",
+                Some("reply:trigger-override"),
+            ))
+            .await
+            .expect("seed per-trigger override");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:trigger-override",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn triggered_default_target_uses_explicit_owner_preferences_when_actor_differs() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
@@ -632,6 +901,7 @@ mod tests {
                     TenantId::new("tenant-a").expect("valid tenant"),
                     owner.clone(),
                 ),
+                trigger_origin_ref: None,
                 final_reply_target: Some(reply_ref("reply:owner-default")),
                 progress_target: None,
                 approval_prompt_target: None,
@@ -648,6 +918,7 @@ mod tests {
                     TenantId::new("tenant-a").expect("valid tenant"),
                     UserId::new("user-actor").expect("valid actor"),
                 ),
+                trigger_origin_ref: None,
                 final_reply_target: Some(reply_ref("reply:actor-default")),
                 progress_target: None,
                 approval_prompt_target: None,
@@ -1031,6 +1302,7 @@ mod tests {
                 TenantId::new("tenant-a").expect("valid tenant"),
                 UserId::new("user-a").expect("valid user"),
             ),
+            trigger_origin_ref: None,
             final_reply_target: final_reply_target.map(reply_ref),
             progress_target: progress_target.map(reply_ref),
             approval_prompt_target: approval_prompt_target.map(reply_ref),
@@ -1038,6 +1310,18 @@ mod tests {
             default_modality: Some(CommunicationModality::Text),
             updated_at: now(),
             updated_by: UserId::new("user-a").expect("valid user"),
+        }
+    }
+
+    fn trigger_override_record(
+        trigger_origin_ref: &str,
+        final_reply_target: Option<&str>,
+    ) -> CommunicationPreferenceRecord {
+        CommunicationPreferenceRecord {
+            trigger_origin_ref: Some(
+                crate::TriggerOriginRef::new(trigger_origin_ref).expect("valid trigger origin"),
+            ),
+            ..preference_record(final_reply_target, None, None, None)
         }
     }
 

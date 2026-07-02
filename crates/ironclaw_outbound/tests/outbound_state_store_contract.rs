@@ -143,6 +143,7 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-final")),
         progress_target: Some(reply_ref("reply-pref-progress")),
         approval_prompt_target: Some(reply_ref("reply-pref-approval")),
@@ -190,6 +191,7 @@ where
     );
 
     let updated = CommunicationPreferenceRecord {
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-final-updated")),
         progress_target: None,
         approval_prompt_target: Some(reply_ref("reply-pref-approval")),
@@ -231,6 +233,7 @@ where
             agent_id.clone(),
             Some(project_id.clone()),
         ),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-shared-project")),
         progress_target: None,
         approval_prompt_target: None,
@@ -253,6 +256,7 @@ where
         CommunicationPreferenceKey::shared_agent(tenant_id.clone(), agent_id.clone(), None);
     let projectless_record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::shared_agent(tenant_id.clone(), agent_id.clone(), None),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-shared-projectless")),
         progress_target: None,
         approval_prompt_target: None,
@@ -303,6 +307,7 @@ where
             TenantId::new("tenant-outbound-validation").unwrap(),
             UserId::new("user-outbound-validation").unwrap(),
         ),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-validation")),
         progress_target: None,
         approval_prompt_target: None,
@@ -344,6 +349,7 @@ where
             AgentId::new("agent-outbound-shared-validation").unwrap(),
             None,
         ),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-shared-validation")),
         progress_target: None,
         approval_prompt_target: None,
@@ -390,6 +396,7 @@ where
     let key = CommunicationPreferenceKey::personal(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-duplicate")),
         progress_target: None,
         approval_prompt_target: None,
@@ -404,6 +411,7 @@ where
         .unwrap();
 
     let duplicate = CommunicationPreferenceRecord {
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-duplicate-replacement")),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-duplicate-2").unwrap(),
@@ -423,6 +431,7 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-atomic-final")),
         progress_target: Some(reply_ref("reply-pref-atomic-progress")),
         approval_prompt_target: Some(reply_ref("reply-pref-atomic-approval")),
@@ -444,6 +453,7 @@ where
     let updated = write_preference_record(
         store,
         CommunicationPreferenceRecord {
+            trigger_origin_ref: None,
             final_reply_target: Some(reply_ref("reply-pref-atomic-final-updated")),
             updated_at: now(),
             updated_by: UserId::new("user-outbound-atomic-updater-2").unwrap(),
@@ -477,6 +487,7 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-absent-final")),
         progress_target: Some(reply_ref("reply-pref-update-absent-progress")),
         approval_prompt_target: None,
@@ -502,6 +513,7 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-error-final")),
         progress_target: Some(reply_ref("reply-pref-update-error-progress")),
         approval_prompt_target: None,
@@ -521,6 +533,7 @@ where
         .unwrap()
         .expect("existing communication preference");
     let first_update = CommunicationPreferenceRecord {
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-error-race")),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-error-racer").unwrap(),
@@ -528,6 +541,7 @@ where
     };
     write_preference_record(store, first_update, Some(existing.version)).await;
     let stale_update = CommunicationPreferenceRecord {
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-error-stale")),
         updated_at: now(),
         updated_by: UserId::new("user-outbound-update-error-stale").unwrap(),
@@ -552,6 +566,7 @@ where
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-invalid-final")),
         progress_target: None,
         approval_prompt_target: None,
@@ -606,6 +621,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
     let user_id = UserId::new("user-outbound-corrupt").unwrap();
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-corrupt")),
         progress_target: None,
         approval_prompt_target: None,
@@ -638,6 +654,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
             tenant_mismatch_tenant_id,
             tenant_mismatch_user_id.clone(),
         ),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant-seed")),
         progress_target: None,
         approval_prompt_target: None,
@@ -653,6 +670,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
             TenantId::new("tenant-outbound-corrupt-other").unwrap(),
             tenant_mismatch_user_id,
         ),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant")),
         progress_target: None,
         approval_prompt_target: None,
@@ -688,6 +706,7 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
         CommunicationPreferenceKey::personal(tenant_id.clone(), UserId::new(shared_id).unwrap());
     let personal_record = CommunicationPreferenceRecord {
         scope: personal_key.scope.clone(),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-hash-personal")),
         progress_target: None,
         approval_prompt_target: None,
@@ -703,6 +722,7 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
         CommunicationPreferenceKey::shared_agent(tenant_id, AgentId::new(shared_id).unwrap(), None);
     let shared_record = CommunicationPreferenceRecord {
         scope: shared_key.scope.clone(),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-hash-shared")),
         progress_target: None,
         approval_prompt_target: None,
@@ -732,6 +752,51 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
     );
 }
 
+#[tokio::test]
+async fn filesystem_store_keeps_per_trigger_override_distinct_from_scoped_default() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let tenant_id = TenantId::new("tenant-outbound-trigger-override").unwrap();
+    let user_id = UserId::new("user-outbound-trigger-override").unwrap();
+
+    let default_record = CommunicationPreferenceRecord {
+        scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
+        trigger_origin_ref: None,
+        final_reply_target: Some(reply_ref("reply-pref-default")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: user_id.clone(),
+    };
+    let (default_key, default_path) =
+        put_preference_and_find_virtual_path(&backend, &store, default_record.clone()).await;
+
+    let override_record = CommunicationPreferenceRecord {
+        trigger_origin_ref: Some(
+            ironclaw_outbound::TriggerOriginRef::new("trigger-outbound-override").unwrap(),
+        ),
+        final_reply_target: Some(reply_ref("reply-pref-override")),
+        ..default_record.clone()
+    };
+    let (override_key, override_path) =
+        put_preference_and_find_virtual_path(&backend, &store, override_record.clone()).await;
+
+    assert_ne!(
+        default_path, override_path,
+        "per-trigger override rows must not share a hash path with the scoped default row",
+    );
+    assert_eq!(
+        load_preference_record(&store, default_key).await,
+        Some(default_record)
+    );
+    assert_eq!(
+        load_preference_record(&store, override_key).await,
+        Some(override_record)
+    );
+}
+
 async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
     backend: &Arc<InMemoryBackend>,
 ) {
@@ -749,6 +814,7 @@ async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
 
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id.clone(), user_id.clone()),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-cas")),
         progress_target: Some(reply_ref("reply-pref-cas-progress")),
         approval_prompt_target: None,
@@ -777,6 +843,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-cas")),
         progress_target: Some(reply_ref("reply-pref-update-cas-progress")),
         approval_prompt_target: Some(reply_ref("reply-pref-update-cas-approval")),
@@ -802,6 +869,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
         .unwrap()
         .expect("existing communication preference");
     let updated = CommunicationPreferenceRecord {
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-update-cas-final-updated")),
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-update-cas-2").unwrap(),
@@ -832,6 +900,7 @@ async fn filesystem_store_rejects_communication_preference_write_on_unsupported_
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
     let record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(tenant_id, user_id),
+        trigger_origin_ref: None,
         final_reply_target: Some(reply_ref("reply-pref-unsupported-cas")),
         progress_target: Some(reply_ref("reply-pref-unsupported-cas-progress")),
         approval_prompt_target: None,

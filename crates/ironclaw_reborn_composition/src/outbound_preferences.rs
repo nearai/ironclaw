@@ -123,7 +123,6 @@ impl Default for MutableOutboundDeliveryTargetRegistry {
 }
 
 impl MutableOutboundDeliveryTargetRegistry {
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
     pub(crate) fn register_provider(
         &self,
         provider_key: impl Into<String>,
@@ -357,30 +356,17 @@ impl RebornOutboundPreferencesFacade {
     fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
         CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
     }
-}
 
-#[async_trait]
-impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
-    async fn get_outbound_preferences(
+    /// Validate the requested target and write the preference row addressed by
+    /// `key` (the scoped default row or a per-trigger override row).
+    async fn write_preference_row(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let record = self
-            .preferences
-            .load_communication_preference(Self::key(&caller))
-            .await
-            .map_err(map_outbound_repository_error)?;
-        self.response_for_record(&caller, record.as_ref().map(|record| &record.record))
-            .await
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
+        key: CommunicationPreferenceKey,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let key = Self::key(&caller);
         let scope = key.scope.clone();
+        let trigger_origin_ref = key.trigger_origin_ref.clone();
         let resolved_final_reply_target = match request.final_reply_target_id.as_ref() {
             Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
             None => None,
@@ -400,6 +386,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
                 expected_version: existing.as_ref().map(|existing| existing.version),
                 record: CommunicationPreferenceRecord {
                     scope,
+                    trigger_origin_ref,
                     final_reply_target,
                     progress_target: existing
                         .as_ref()
@@ -423,6 +410,55 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             resolved_final_reply_target.as_ref(),
         ))
     }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let record = self
+            .preferences
+            .load_communication_preference(Self::key(&caller))
+            .await
+            .map_err(map_outbound_repository_error)?;
+        self.response_for_record(&caller, record.as_ref().map(|record| &record.record))
+            .await
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let key = Self::key(&caller);
+        self.write_preference_row(caller, key, request).await
+    }
+
+    async fn set_automation_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: &str,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        // Validate the id shape so the stored override key matches the
+        // trigger-origin ref the outbound resolver derives from a fired
+        // trigger (`TriggerId` canonical string form).
+        let trigger_id = ironclaw_triggers::TriggerId::parse(automation_id).map_err(|error| {
+            tracing::debug!(
+                target = "ironclaw::reborn::outbound_preferences",
+                automation_id,
+                %error,
+                "rejecting automation outbound preference write: invalid automation id"
+            );
+            invalid_automation_id_error()
+        })?;
+        let trigger_origin_ref = ironclaw_outbound::TriggerOriginRef::new(trigger_id.to_string())
+            .map_err(|_| invalid_automation_id_error())?;
+        let key = Self::key(&caller).for_trigger(trigger_origin_ref);
+        self.write_preference_row(caller, key, request).await
+    }
 
     async fn list_outbound_delivery_targets(
         &self,
@@ -443,6 +479,17 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             targets,
             next_cursor: None,
         })
+    }
+}
+
+fn invalid_automation_id_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("automation_id".to_string()),
+        validation_code: None,
     }
 }
 
@@ -740,6 +787,7 @@ mod tests {
                         tenant("tenant-alpha"),
                         user("user-alpha"),
                     ),
+                    trigger_origin_ref: None,
                     final_reply_target: None,
                     progress_target: None,
                     approval_prompt_target: None,
@@ -1125,6 +1173,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_automation_preferences_writes_a_per_trigger_override_row() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(FakeTargetProvider::default());
+        provider.insert(
+            "user-alpha",
+            target_entry("slack-alpha", "reply:slack-alpha", true),
+        );
+        provider.insert(
+            "user-alpha",
+            target_entry("telegram-alpha", "reply:telegram-alpha", true),
+        );
+        seed_record(
+            store.as_ref(),
+            "tenant-alpha",
+            "user-alpha",
+            Some(reply_ref("reply:slack-alpha")),
+        )
+        .await;
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let automation_id = ironclaw_triggers::TriggerId::new().to_string();
+
+        let response = facade
+            .set_automation_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                &automation_id,
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("telegram-alpha")),
+                },
+            )
+            .await
+            .expect("set automation override");
+        assert_eq!(
+            response
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.target_id.as_str()),
+            Some("telegram-alpha")
+        );
+
+        // The scoped default row is untouched.
+        let default_row = store
+            .load_communication_preference(CommunicationPreferenceKey::new(
+                tenant("tenant-alpha"),
+                user("user-alpha"),
+            ))
+            .await
+            .expect("load default row")
+            .expect("default row present");
+        assert_eq!(
+            default_row
+                .record
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.as_str()),
+            Some("reply:slack-alpha")
+        );
+
+        // The override row is stored under the per-trigger key.
+        let override_key =
+            CommunicationPreferenceKey::new(tenant("tenant-alpha"), user("user-alpha"))
+                .for_trigger(
+                    ironclaw_outbound::TriggerOriginRef::new(automation_id.clone())
+                        .expect("valid trigger origin"),
+                );
+        let override_row = store
+            .load_communication_preference(override_key)
+            .await
+            .expect("load override row")
+            .expect("override row present");
+        assert_eq!(
+            override_row
+                .record
+                .final_reply_target
+                .as_ref()
+                .map(|target| target.as_str()),
+            Some("reply:telegram-alpha")
+        );
+        assert_eq!(
+            override_row
+                .record
+                .trigger_origin_ref
+                .as_ref()
+                .map(|origin| origin.as_str()),
+            Some(automation_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn set_automation_preferences_rejects_malformed_automation_ids() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(FakeTargetProvider::default());
+        provider.insert(
+            "user-alpha",
+            target_entry("slack-alpha", "reply:slack-alpha", true),
+        );
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+
+        let error = facade
+            .set_automation_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                "not-a-trigger-id",
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect_err("malformed automation id must be rejected");
+
+        assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("automation_id"));
+        assert!(
+            store
+                .load_communication_preference(CommunicationPreferenceKey::new(
+                    tenant("tenant-alpha"),
+                    user("user-alpha"),
+                ))
+                .await
+                .expect("load preference")
+                .is_none(),
+            "no row may be written for a rejected automation id"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_automation_preferences_validates_the_target_before_writing() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(FakeTargetProvider::default());
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let automation_id = ironclaw_triggers::TriggerId::new().to_string();
+
+        let error = facade
+            .set_automation_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                &automation_id,
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-missing")),
+                },
+            )
+            .await
+            .expect_err("unknown target must be rejected");
+
+        assert_eq!(error.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(error.field.as_deref(), Some("final_reply_target_id"));
+    }
+
+    #[tokio::test]
+    async fn set_automation_preferences_with_none_target_clears_the_override_slot() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(FakeTargetProvider::default());
+        provider.insert(
+            "user-alpha",
+            target_entry("slack-alpha", "reply:slack-alpha", true),
+        );
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let automation_id = ironclaw_triggers::TriggerId::new().to_string();
+
+        facade
+            .set_automation_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                &automation_id,
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect("set automation override");
+        let response = facade
+            .set_automation_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                &automation_id,
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect("clear automation override");
+
+        assert!(response.final_reply_target.is_none());
+        let override_key =
+            CommunicationPreferenceKey::new(tenant("tenant-alpha"), user("user-alpha"))
+                .for_trigger(
+                    ironclaw_outbound::TriggerOriginRef::new(automation_id)
+                        .expect("valid trigger origin"),
+                );
+        let override_row = store
+            .load_communication_preference(override_key)
+            .await
+            .expect("load override row")
+            .expect("override row present");
+        assert!(override_row.record.final_reply_target.is_none());
+    }
+
+    #[tokio::test]
     async fn list_targets_is_scoped_to_caller_and_final_reply_capability() {
         let store = Arc::new(InMemoryOutboundStateStore::default());
         let provider = Arc::new(FakeTargetProvider::default());
@@ -1486,6 +1727,7 @@ mod tests {
         store
             .put_communication_preference(CommunicationPreferenceRecord {
                 scope: DeliveryDefaultScope::personal(tenant(tenant_id), user(user_id)),
+                trigger_origin_ref: None,
                 final_reply_target,
                 progress_target: Some(reply_ref("reply:progress")),
                 approval_prompt_target: Some(reply_ref("reply:approval")),

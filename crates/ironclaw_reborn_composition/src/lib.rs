@@ -152,11 +152,13 @@ mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
 mod webui;
+mod webui_agent_messages;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
 mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_operator_auth;
+mod webui_outbound_targets;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]

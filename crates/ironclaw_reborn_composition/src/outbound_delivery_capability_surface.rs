@@ -20,7 +20,7 @@ pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_target_set";
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
-pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel, to an id returned by builtin__outbound_delivery_targets_list. Use after the user asks to send replies or routine/trigger results through that product or channel, and before creating the routine or trigger. Approval may be required before the preference is changed.";
+pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM, Slack channel, or the WebUI default thread, to an id returned by builtin__outbound_delivery_targets_list. Use after the user asks to send replies or routine/trigger results through that product or channel, and before creating the routine or trigger. Pass automation_id to override the delivery target for one specific automation/trigger instead of changing the user's default; different automations can deliver through different channels. Approval may be required before the preference is changed.";
 
 pub(crate) fn outbound_delivery_synthetic_provider() -> Result<ExtensionId, HostApiError> {
     ExtensionId::new(OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID)
@@ -48,11 +48,18 @@ pub(crate) struct OutboundDeliveryTargetsListInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OutboundDeliveryTargetSetInput {
     target_id: RebornOutboundDeliveryTargetId,
+    /// `Some` writes a per-automation delivery override instead of the
+    /// user's scoped default target.
+    automation_id: Option<String>,
 }
 
 impl OutboundDeliveryTargetSetInput {
     pub(crate) fn target_id(&self) -> &RebornOutboundDeliveryTargetId {
         &self.target_id
+    }
+
+    pub(crate) fn automation_id(&self) -> Option<&str> {
+        self.automation_id.as_deref()
     }
 }
 
@@ -93,14 +100,17 @@ pub(crate) async fn set_outbound_delivery_target_for_model(
     caller: WebUiAuthenticatedCaller,
     input: OutboundDeliveryTargetSetInput,
 ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-    facade
-        .set_outbound_preferences(
-            caller,
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: Some(input.target_id),
-            },
-        )
-        .await
+    let request = RebornSetOutboundPreferencesRequest {
+        final_reply_target_id: Some(input.target_id),
+    };
+    match input.automation_id {
+        Some(automation_id) => {
+            facade
+                .set_automation_outbound_preferences(caller, &automation_id, request)
+                .await
+        }
+        None => facade.set_outbound_preferences(caller, request).await,
+    }
 }
 
 pub(crate) fn outbound_delivery_targets_list_input_schema() -> serde_json::Value {
@@ -123,6 +133,10 @@ pub(crate) fn outbound_delivery_target_set_input_schema() -> serde_json::Value {
             "target_id": {
                 "type": "string",
                 "description": "Target id returned by builtin__outbound_delivery_targets_list."
+            },
+            "automation_id": {
+                "type": "string",
+                "description": "Optional automation/trigger id. When set, the target becomes a delivery override for that one automation instead of the user's default outbound channel."
             }
         },
         "required": ["target_id"],
@@ -155,7 +169,11 @@ pub(crate) fn parse_outbound_delivery_targets_list_input(
 pub(crate) fn parse_outbound_delivery_target_set_input(
     input: &serde_json::Value,
 ) -> Result<OutboundDeliveryTargetSetInput, OutboundDeliveryCapabilityInputError> {
-    let input = input_object(input, "outbound delivery target set", &["target_id"])?;
+    let input = input_object(
+        input,
+        "outbound delivery target set",
+        &["target_id", "automation_id"],
+    )?;
     let value = input
         .get("target_id")
         .and_then(serde_json::Value::as_str)
@@ -169,7 +187,25 @@ pub(crate) fn parse_outbound_delivery_target_set_input(
             "outbound delivery target set target_id is invalid: {reason}"
         ))
     })?;
-    Ok(OutboundDeliveryTargetSetInput { target_id })
+    let automation_id = match input.get("automation_id") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    OutboundDeliveryCapabilityInputError::new(
+                        "outbound delivery target set automation_id must be a non-empty string",
+                    )
+                })?,
+        ),
+    };
+    Ok(OutboundDeliveryTargetSetInput {
+        target_id,
+        automation_id,
+    })
 }
 
 fn input_object<'a>(
@@ -216,5 +252,37 @@ mod tests {
         .expect_err("invalid target id should fail");
 
         assert!(err.to_string().contains("target_id is invalid"));
+    }
+
+    #[test]
+    fn set_input_accepts_an_optional_automation_id() {
+        let input = parse_outbound_delivery_target_set_input(&serde_json::json!({
+            "target_id": "webui:default-thread",
+            "automation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        }))
+        .expect("automation-scoped input parses");
+
+        assert_eq!(input.target_id().as_str(), "webui:default-thread");
+        assert_eq!(input.automation_id(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+
+        let input = parse_outbound_delivery_target_set_input(&serde_json::json!({
+            "target_id": "webui:default-thread"
+        }))
+        .expect("default-scoped input parses");
+        assert_eq!(input.automation_id(), None);
+    }
+
+    #[test]
+    fn set_input_rejects_empty_automation_ids() {
+        let err = parse_outbound_delivery_target_set_input(&serde_json::json!({
+            "target_id": "webui:default-thread",
+            "automation_id": "   "
+        }))
+        .expect_err("empty automation id should fail");
+
+        assert!(
+            err.to_string()
+                .contains("automation_id must be a non-empty string")
+        );
     }
 }

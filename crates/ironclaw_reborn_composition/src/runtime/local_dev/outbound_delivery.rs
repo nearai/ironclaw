@@ -9,8 +9,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
-    RebornServicesErrorCode, WebUiAuthenticatedCaller,
+    OutboundPreferencesProductFacade, RebornServicesError, RebornServicesErrorCode,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
@@ -26,10 +26,11 @@ use crate::outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
     OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
     OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
-    OutboundDeliveryCapabilityInputError, list_outbound_delivery_targets_for_model,
-    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
+    list_outbound_delivery_targets_for_model, outbound_delivery_synthetic_provider,
+    outbound_delivery_target_set_input_schema, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model,
 };
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::local_dev::synthetic_capability::{
@@ -177,7 +178,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                     OutboundDeliveryApprovalSettingsDecision::Allow => None,
                     OutboundDeliveryApprovalSettingsDecision::Ask => {
                         return self
-                            .request_approval(&invocation, &input, target_input.target_id())
+                            .request_approval(&invocation, &input, &target_input)
                             .await;
                     }
                     OutboundDeliveryApprovalSettingsDecision::Deny => {
@@ -199,7 +200,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
             None
         };
 
-        let target_summary = target_input.target_id().as_str().to_string();
+        let target_summary = target_set_summary(&target_input);
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response = match set_outbound_delivery_target_for_model(
             self.facade.as_ref(),
@@ -275,7 +276,7 @@ impl OutboundDeliveryTargetSetHandler {
         &self,
         invocation: &LocalDevSyntheticCapabilityInvocation,
         input: &serde_json::Value,
-        target_id: &RebornOutboundDeliveryTargetId,
+        target_input: &OutboundDeliveryTargetSetInput,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let capability_id = outbound_delivery_target_set_capability_id()?;
         let approval_request_id = ApprovalRequestId::new();
@@ -300,10 +301,16 @@ impl OutboundDeliveryTargetSetHandler {
                         estimated_resources: estimate.clone(),
                     }),
                     invocation_fingerprint: Some(fingerprint),
-                    reason: format!(
-                        "Change final reply delivery target to `{}`",
-                        target_id.as_str()
-                    ),
+                    reason: match target_input.automation_id() {
+                        Some(automation_id) => format!(
+                            "Change automation `{automation_id}` delivery target to `{}`",
+                            target_input.target_id().as_str()
+                        ),
+                        None => format!(
+                            "Change final reply delivery target to `{}`",
+                            target_input.target_id().as_str()
+                        ),
+                    },
                     reusable_scope: None,
                 },
             )
@@ -579,6 +586,16 @@ fn invocation_id_from_resume_token(
             format!("outbound delivery target approval resume token is invalid: {error}"),
         )
     })
+}
+
+fn target_set_summary(input: &OutboundDeliveryTargetSetInput) -> String {
+    match input.automation_id() {
+        Some(automation_id) => format!(
+            "{} (automation {automation_id})",
+            input.target_id().as_str()
+        ),
+        None => input.target_id().as_str().to_string(),
+    }
 }
 
 fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostError {

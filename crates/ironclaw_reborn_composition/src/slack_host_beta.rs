@@ -2254,7 +2254,7 @@ mod tests {
             .await
             .expect("operator target list");
         assert!(
-            operator_targets.targets.is_empty(),
+            slack_target_ids(&operator_targets).is_empty(),
             "Slack shared-channel target list must be scoped to the route subject"
         );
 
@@ -2263,17 +2263,18 @@ mod tests {
             .list_outbound_delivery_targets(shared_subject.clone())
             .await
             .expect("shared subject target list");
-        assert_eq!(targets.targets.len(), 1);
-        let target = &targets.targets[0];
+        assert_eq!(slack_target_ids(&targets).len(), 1);
+        let target = first_slack_target(&targets);
         assert_eq!(target.target.channel.as_str(), "slack");
         assert_eq!(target.target.display_name.as_str(), "Slack channel C0HOST");
         assert!(target.capabilities.final_replies);
-        let runtime_targets = runtime
+        let mut runtime_targets = runtime
             .outbound_delivery_target_provider()
             .expect("Slack mounts should register runtime outbound target provider")
             .list_outbound_delivery_targets(&shared_subject)
             .await
             .expect("runtime target list");
+        runtime_targets.retain(|entry| entry.summary.channel.as_str() == "slack");
         assert_eq!(runtime_targets.len(), 1);
         assert_eq!(
             runtime_targets[0].summary.target_id.as_str(),
@@ -2378,11 +2379,7 @@ mod tests {
             .list_outbound_delivery_targets(shared_subject_caller())
             .await
             .expect("combined route target list");
-        let target_ids = targets
-            .targets
-            .iter()
-            .map(|target| target.target.target_id.as_str())
-            .collect::<Vec<_>>();
+        let target_ids = slack_target_ids(&targets);
 
         assert_eq!(
             target_ids,
@@ -2481,7 +2478,7 @@ mod tests {
             .expect("target list");
 
         assert!(
-            targets.targets.is_empty(),
+            slack_target_ids(&targets).is_empty(),
             "identity-only Slack state must not synthesize a personal DM target"
         );
         runtime.shutdown().await.expect("runtime shuts down");
@@ -2517,12 +2514,16 @@ mod tests {
             .await
             .expect("target list");
 
-        assert_eq!(targets.targets.len(), 1);
         assert_eq!(
-            targets.targets[0].target.target_id.as_str(),
-            "slack:personal-dm:T0HOST:user:slack-host"
+            slack_target_ids(&targets),
+            vec!["slack:personal-dm:T0HOST:user:slack-host"]
         );
-        assert!(targets.targets[0].capabilities.final_replies);
+        let dm_target = targets
+            .targets
+            .iter()
+            .find(|option| option.target.channel.as_str() == "slack")
+            .expect("personal DM target");
+        assert!(dm_target.capabilities.final_replies);
         assert_eq!(
             egress
                 .requests()
@@ -2563,7 +2564,11 @@ mod tests {
             .list_outbound_delivery_targets(caller.clone())
             .await
             .expect("target list");
-        let target = targets.targets.first().expect("personal DM target");
+        let target = targets
+            .targets
+            .iter()
+            .find(|option| option.target.channel.as_str() == "slack")
+            .expect("personal DM target");
 
         let selected = bundle
             .api
@@ -2721,7 +2726,7 @@ mod tests {
             .expect("target list");
 
         assert!(
-            targets.targets.is_empty(),
+            slack_target_ids(&targets).is_empty(),
             "failed Slack DM provisioning must not persist a target authority"
         );
         runtime.shutdown().await.expect("runtime shuts down");
@@ -2799,6 +2804,7 @@ mod tests {
                     .await
                     .expect("target list")
                     .targets;
+                listed.retain(|option| option.target.channel.as_str() == "slack");
                 if !listed.is_empty() {
                     break;
                 }
@@ -2879,6 +2885,7 @@ mod tests {
                 .list_outbound_delivery_targets(&operator_caller())
                 .await
                 .expect("runtime target list");
+            runtime_targets.retain(|entry| entry.summary.channel.as_str() == "slack");
             if !runtime_targets.is_empty() {
                 break;
             }
@@ -2961,7 +2968,7 @@ mod tests {
             .await
             .expect("target list");
         assert_eq!(
-            targets.targets.len(),
+            slack_target_ids(&targets).len(),
             1,
             "idempotent re-provisioning must not duplicate the DM target"
         );
@@ -3049,7 +3056,7 @@ mod tests {
             .await
             .expect("target list");
         assert!(
-            targets.targets.is_empty(),
+            slack_target_ids(&targets).is_empty(),
             "failed DM provisioning must not persist a stale target"
         );
 
@@ -3091,7 +3098,10 @@ mod tests {
             .list_outbound_delivery_targets(shared_subject)
             .await
             .expect("same tenant target list")
-            .targets[0]
+            .targets
+            .iter()
+            .find(|option| option.target.channel.as_str() == "slack")
+            .expect("slack shared-channel target")
             .target
             .target_id
             .clone();
@@ -3108,7 +3118,7 @@ mod tests {
             .await
             .expect("other tenant target list");
         assert!(
-            other_targets.targets.is_empty(),
+            slack_target_ids(&other_targets).is_empty(),
             "Slack targets must not leak across tenant boundaries"
         );
         let write = bundle
@@ -3208,8 +3218,15 @@ mod tests {
             .list_outbound_delivery_targets(shared_subject.clone())
             .await
             .expect("shared subject target list");
-        assert_eq!(targets.targets.len(), 1);
-        let target_id = targets.targets[0].target.target_id.clone();
+        assert_eq!(slack_target_ids(&targets).len(), 1);
+        let target_id = targets
+            .targets
+            .iter()
+            .find(|option| option.target.channel.as_str() == "slack")
+            .expect("slack shared-channel target")
+            .target
+            .target_id
+            .clone();
 
         bundle
             .api
@@ -3264,26 +3281,28 @@ mod tests {
         .expect("webui bundle");
         let shared_subject = shared_subject_caller();
         let operator = operator_caller();
-        let target_id = bundle
-            .api
-            .list_outbound_delivery_targets(shared_subject.clone())
-            .await
-            .expect("static target list")
-            .targets[0]
-            .target
-            .target_id
-            .clone();
+        let target_id = first_slack_target(
+            &bundle
+                .api
+                .list_outbound_delivery_targets(shared_subject.clone())
+                .await
+                .expect("static target list"),
+        )
+        .target
+        .target_id
+        .clone();
 
         upsert_slack_channel_route(&route_mount, "C0HOST", USER).await;
 
         assert!(
-            bundle
-                .api
-                .list_outbound_delivery_targets(shared_subject.clone())
-                .await
-                .expect("old owner target list")
-                .targets
-                .is_empty(),
+            slack_target_ids(
+                &bundle
+                    .api
+                    .list_outbound_delivery_targets(shared_subject.clone())
+                    .await
+                    .expect("old owner target list"),
+            )
+            .is_empty(),
             "durable admin route must override static route owner"
         );
         let stale_write = bundle
@@ -3302,9 +3321,12 @@ mod tests {
             .list_outbound_delivery_targets(operator)
             .await
             .expect("new owner target list");
-        assert_eq!(operator_targets.targets.len(), 1);
+        assert_eq!(slack_target_ids(&operator_targets).len(), 1);
         assert_eq!(
-            operator_targets.targets[0].target.display_name.as_str(),
+            first_slack_target(&operator_targets)
+                .target
+                .display_name
+                .as_str(),
             "Slack channel C0HOST"
         );
 
@@ -3329,35 +3351,38 @@ mod tests {
         let shared_subject = shared_subject_caller();
         let operator = operator_caller();
         assert_eq!(
-            bundle
-                .api
-                .list_outbound_delivery_targets(shared_subject.clone())
-                .await
-                .expect("shared target list")
-                .targets
-                .len(),
+            slack_target_ids(
+                &bundle
+                    .api
+                    .list_outbound_delivery_targets(shared_subject.clone())
+                    .await
+                    .expect("shared target list"),
+            )
+            .len(),
             1
         );
         assert!(
-            bundle
-                .api
-                .list_outbound_delivery_targets(operator.clone())
-                .await
-                .expect("operator target list")
-                .targets
-                .is_empty()
+            slack_target_ids(
+                &bundle
+                    .api
+                    .list_outbound_delivery_targets(operator.clone())
+                    .await
+                    .expect("operator target list"),
+            )
+            .is_empty()
         );
 
         upsert_slack_channel_route(&route_mount, "C0HOST", USER).await;
 
         assert!(
-            bundle
-                .api
-                .list_outbound_delivery_targets(shared_subject)
-                .await
-                .expect("old owner target list")
-                .targets
-                .is_empty(),
+            slack_target_ids(
+                &bundle
+                    .api
+                    .list_outbound_delivery_targets(shared_subject)
+                    .await
+                    .expect("old owner target list"),
+            )
+            .is_empty(),
             "old route subject must lose Slack target authority"
         );
         let operator_targets = bundle
@@ -3365,9 +3390,12 @@ mod tests {
             .list_outbound_delivery_targets(operator)
             .await
             .expect("new owner target list");
-        assert_eq!(operator_targets.targets.len(), 1);
+        assert_eq!(slack_target_ids(&operator_targets).len(), 1);
         assert_eq!(
-            operator_targets.targets[0].target.display_name.as_str(),
+            first_slack_target(&operator_targets)
+                .target
+                .display_name
+                .as_str(),
             "Slack channel C0HOST"
         );
 
@@ -3432,13 +3460,12 @@ mod tests {
             .await
             .expect("dynamic route target list");
 
-        assert_eq!(targets.targets.len(), 1);
         assert_eq!(
-            targets.targets[0].target.target_id.as_str(),
-            "slack:shared-channel:T0HOST:C0DYNAMIC"
+            slack_target_ids(&targets),
+            vec!["slack:shared-channel:T0HOST:C0DYNAMIC"]
         );
         assert_eq!(
-            targets.targets[0].target.display_name.as_str(),
+            first_slack_target(&targets).target.display_name.as_str(),
             "Slack channel C0DYNAMIC"
         );
 
@@ -3685,6 +3712,33 @@ mod tests {
             channel_route_store,
             Arc::new(InMemorySlackPersonalDmTargetStore::new()),
         )
+    }
+
+    /// Project a runtime-composed target listing down to its Slack targets.
+    ///
+    /// The runtime registry now always contains the WebUI default-thread
+    /// target for every caller (`webui_outbound_targets`); Slack inventory
+    /// assertions must not depend on that channel-neutral entry.
+    fn slack_target_ids(
+        response: &ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse,
+    ) -> Vec<&str> {
+        response
+            .targets
+            .iter()
+            .filter(|option| option.target.channel.as_str() == "slack")
+            .map(|option| option.target.target_id.as_str())
+            .collect()
+    }
+
+    /// First Slack target in a runtime-composed listing (panics when absent).
+    fn first_slack_target(
+        response: &ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse,
+    ) -> &ironclaw_product_workflow::RebornOutboundDeliveryTargetOption {
+        response
+            .targets
+            .iter()
+            .find(|option| option.target.channel.as_str() == "slack")
+            .expect("slack target present")
     }
 
     fn operator_caller() -> WebUiAuthenticatedCaller {
