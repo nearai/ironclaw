@@ -162,7 +162,6 @@ export function useChat(threadId) {
 
   const {
     messages,
-    messagesThreadId,
     hasMore,
     nextCursor,
     isLoading: historyLoading,
