@@ -37,8 +37,9 @@ pub(super) enum RebornCapabilityBackend {
     GithubIssueTools,
     /// Real first-party `web-access.search` / `web-access.get_content`
     /// capabilities (C-WEBACCESS), dispatched through the real
-    /// `WebAccessExecutor` behind `WebAccessTestHandler`. web-access declares
-    /// no `runtime_credentials`, so this wires the plain default
+    /// `WebAccessExecutor` via the production
+    /// `register_bundled_web_access_first_party_handlers` registration.
+    /// web-access declares no `runtime_credentials`, so this wires the plain default
     /// `GrantAuthorizer` — no credential-injecting authorizer is needed.
     WebAccessTools,
 }

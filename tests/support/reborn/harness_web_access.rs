@@ -62,7 +62,8 @@ use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_r
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Extension id (== manifest `service`) for the test-only web-access package.
+/// Extension id (== manifest `service`) for the real production web-access
+/// package (its manifest/schema assets are loaded from disk, not test-only).
 pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
 
 /// Build the `ExtensionPackage` for the real `web-access` provider by parsing

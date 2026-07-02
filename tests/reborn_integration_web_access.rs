@@ -249,10 +249,10 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
 /// response reports as failed to fetch. `WebAccessExecutor::fetch_content`
 /// treats an `"Error fetching <requested url>"` line in the MCP tool-call
 /// text as a hard failure (`parse_fetch_results` -> `operation_error()` ->
-/// `RuntimeDispatchErrorKind::OperationFailed`), proving
-/// `WebAccessTestHandler`'s error-mapping path (`dispatch` ->
-/// `web_access_test_error` -> `FirstPartyCapabilityError`) surfaces a real
-/// `WebAccessDispatchError` as a model-visible `Failed` tool error — the run
+/// `RuntimeDispatchErrorKind::OperationFailed`), proving the production
+/// `register_bundled_web_access_first_party_handlers` error-mapping path
+/// surfaces a real `WebAccessDispatchError` as a model-visible `Failed`
+/// tool error — the run
 /// is expected to reach `Completed` rather than a terminal `driver_unavailable`
 /// (implied here by the presence of a final reply) — rather than a dropped
 /// `Err` or a mis-mapped error class.
