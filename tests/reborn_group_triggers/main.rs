@@ -38,17 +38,26 @@ async fn triggers_group_e2e() {
     // pause → resume → remove it by id in thread B over the shared repo.
     report.record("verbs_lifecycle", scenario_verbs_lifecycle::run(&g).await);
 
-    // TODO(triggered-turn follow-ups): coverage intentionally left OUT of this
-    // binary because it needs a harness seam that does not exist yet — a way to
-    // submit a turn carrying `TurnOriginKind::ScheduledTrigger` (the
-    // `TrustedTriggerFireSubmitter` path), not the direct-chat submit this group
-    // uses. Add these only once that seam lands; do not hand-roll a weaker
-    // stand-in:
-    //   - a triggered turn that raises a real `BlockedApproval` gate mid-fire →
-    //     approve/deny → resume;
-    //   - assert a triggered fire propagates `TurnOriginKind::ScheduledTrigger`
-    //     end to end;
-    //   - triggered run → outbound delivery sink got the payload + reply target.
+    // Triggered-turn follow-ups status (E-TRIGGERED-SUBMIT seam has since landed,
+    // #5516 — `RebornIntegrationHarness::submit_triggered_turn`):
+    //   - DONE (C-TRIGGERED-ORIGIN): a triggered fire propagates
+    //     `TurnOriginKind::ScheduledTrigger` end to end, with a discriminating
+    //     interactive-origin (`Inbound`) contrast arm, is covered in
+    //     `tests/reborn_integration_triggered_submit.rs`. It lives as a flat
+    //     single-thread test (submit + read run state), so it does NOT belong in
+    //     this multi-thread group binary — do not duplicate it here.
+    //   - STILL OUT — a triggered turn that raises a real `BlockedApproval` gate
+    //     mid-fire → approve/deny → resume: authorable now the seam exists; add
+    //     when C-TRIGGERED coverage is extended.
+    //   - BLOCKED (C-TRIGGERED-DELIVERY) — triggered run → outbound delivery sink:
+    //     the delivery leg (`deliver_triggered_run`) is a PRIVATE fn in the
+    //     Slack services-shell (`slack_delivery.rs`), reachable only via a
+    //     detached-`tokio::spawn` public entry (`PostSubmitDeliveryHook`), and is
+    //     not wired into any harness turn lifecycle by construction. Its branch
+    //     logic is already densely pinned by `slack_delivery.rs`'s own
+    //     `#[cfg(test)]` module + `product_workflow/tests/outbound_delivery_contract.rs`.
+    //     Int-tier coverage requires a services-shell disposition (roadmap Risks),
+    //     not an authorable harness seam. Do not reconstruct it here.
     // What is ALREADY covered elsewhere (do NOT duplicate here): the one-shot
     // Once fire → `Completed` derivation lives in
     // `crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs` +

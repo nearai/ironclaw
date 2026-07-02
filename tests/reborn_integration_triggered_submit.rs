@@ -26,6 +26,7 @@ mod reborn_support;
 mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::reply::RebornScriptedReply;
 
 #[tokio::test]
 async fn triggered_submit_carries_scheduled_trigger_origin() {
@@ -54,5 +55,53 @@ async fn triggered_submit_carries_scheduled_trigger_origin() {
         "a turn submitted through the trusted-trigger submitter must carry \
          TurnOriginKind::ScheduledTrigger, proving the real trusted-trigger \
          origin wire is exercised end to end",
+    );
+}
+
+/// C-TRIGGERED-ORIGIN contrast arm: a normal interactive user turn (through the
+/// same `submit_turn` → `accept_inbound` → coordinator wire this harness always
+/// uses) must record `TurnOriginKind::Inbound`, NOT `ScheduledTrigger`.
+///
+/// This is what makes the `triggered_submit_carries_scheduled_trigger_origin`
+/// assertion above *discriminating*: without a contrasting turn on the same wire,
+/// a `ScheduledTrigger` assertion could pass even if the origin were hardcoded to
+/// that value everywhere. Proving the interactive turn lands on a DIFFERENT origin
+/// pins that the origin is genuinely propagated from the submission path, not a
+/// constant. Both origins are read through the identical
+/// `coordinator.get_run_state(...).product_context.origin` boundary — the same
+/// accessor the roadmap's C-TRIGGERED-ORIGIN row specifies (no new seam).
+///
+/// (`TurnOriginKind` has no distinct "interactive" variant — the enum is
+/// `WebUi | Inbound | ScheduledTrigger`, `crates/ironclaw_turns/src/origin.rs`.
+/// The harness's `submit_turn` classifies as `ProductTriggerReason::DirectChat`
+/// on the Untrusted inbound path, which resolves to `Inbound`.)
+#[tokio::test]
+async fn interactive_submit_carries_inbound_origin_not_scheduled_trigger() {
+    let harness = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("ack")])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn("run this interactively")
+        .await
+        .expect("interactive turn completes");
+
+    let state = harness
+        .coordinator
+        .get_run_state(ironclaw_turns::GetRunStateRequest {
+            scope: harness.turn_scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("run state readable at the coordinator boundary");
+
+    assert_eq!(
+        state.product_context.map(|context| context.origin),
+        Some(ironclaw_turns::TurnOriginKind::Inbound),
+        "a normal interactive user turn must carry TurnOriginKind::Inbound — \
+         proving the ScheduledTrigger origin on the triggered path is really \
+         propagated from the submission path, not a constant",
     );
 }
