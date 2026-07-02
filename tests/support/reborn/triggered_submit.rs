@@ -37,10 +37,7 @@ use super::builder::RebornIntegrationHarness;
 
 // `builder.rs`'s `HarnessResult` is module-private; every sibling file that
 // needs the alias (`assertions.rs`, `harness.rs`, `harness_mcp.rs`) declares
-// its own identical copy rather than reaching across the module boundary —
-// matched here rather than adding a `pub` to `builder.rs` (out of scope for
-// this seam, and `builder.rs` is under file-contention with other in-flight
-// PRs).
+// its own identical copy rather than reaching across the module boundary.
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Far-future, deterministic fire slot — no wall-clock flake, matches the
@@ -78,9 +75,10 @@ impl RebornIntegrationHarness {
     /// scripted model gateway is registered for the trigger's own resolved scope, so it
     /// fails benignly on a scope-miss (`ScopeRegistryGateway`'s `ConfigurationError`
     /// sentinel). `product_context` (carrying the origin) is persisted synchronously at
-    /// submit time and is untouched by that later failure, so it is observable
-    /// regardless. Driving a triggered run to model completion is C-TRIGGERED-DELIVERY,
-    /// not this seam.
+    /// submit time, before that later failure — this seam and its driving test assert
+    /// only on that submit-time state, not on anything after. Driving a triggered run
+    /// to model completion, or asserting behavior across that later failure, is
+    /// C-TRIGGERED-DELIVERY, not this seam.
     pub(crate) async fn submit_triggered_turn(
         &self,
         prompt: &str,
