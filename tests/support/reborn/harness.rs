@@ -304,6 +304,18 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    /// C-ATTACH: the attachment read port + inbound lander for this backend, if
+    /// any. `None` for the Echo backend and for HostRuntime harnesses without a
+    /// local-dev workspace filesystem.
+    pub(crate) fn attachment_test_support(
+        &self,
+    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.attachment_test_support_for_test(),
+        }
+    }
+
     pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
@@ -1615,6 +1627,12 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `into_group`. Held as the opaque test-support handle so this crate never
     /// names the crate-private source type.
     skill_activation_source: Option<SkillActivationTestSource>,
+    /// Attachment read port + inbound lander backing the C-ATTACH seam. `Some`
+    /// only for `new_with_options`-built harnesses (which flow through
+    /// `RebornServices`, and thus have a local-dev workspace filesystem to build
+    /// both over); `None` for the lower-level constructors and the Echo backend.
+    /// Read back via `attachment_test_support_for_test`.
+    attachment_test_support: Option<ironclaw_reborn_composition::AttachmentTestSupport>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1844,6 +1862,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -1938,6 +1957,33 @@ impl HostRuntimeCapabilityHarness {
             .enable_global_auto_approve_for_product_and_harness_users()
             .await?;
         Ok(harness)
+    }
+
+    /// Group with NO first-party capability dispatch — the test drives the
+    /// C-ATTACH seam purely through the attachment read port + inbound lander,
+    /// never a tool call. Uses `new_with_options` (mirrors `profile_tools()`),
+    /// so `attachment_test_support` is populated from
+    /// `services.local_dev_attachment_test_support_for_test()`. No mounts needed:
+    /// attachment landing/reading goes through `local_runtime.workspace_filesystem`
+    /// directly, not the capability-dispatch `MountView` (mirrors
+    /// `trigger_management_tools()`'s `MountView::default()`, which also has no
+    /// filesystem capability to gate).
+    pub(crate) async fn attachment_tools() -> HarnessResult<Self> {
+        Self::new_with_options(
+            "reborn-e2e-attachment-tools",
+            Vec::new(),
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-attachment-tools-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await
     }
 
     /// `pub(crate)`: also used by `RebornIntegrationGroupBuilder::skill_management_tools`
@@ -2221,8 +2267,9 @@ impl HostRuntimeCapabilityHarness {
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
-        // Capture the profile filesystem + project service before
-        // `services.host_runtime` is moved out below (E-PROFILE / E-PROJ seams).
+        // Capture the profile filesystem + project service + attachment support
+        // before `services.host_runtime` is moved out below (E-PROFILE / E-PROJ /
+        // C-ATTACH seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
         let project_service = services.local_dev_project_service_for_test();
         // E-SKILL: build the local-dev skill context source only when this
@@ -2243,6 +2290,7 @@ impl HostRuntimeCapabilityHarness {
         } else {
             None
         };
+        let attachment_test_support = services.local_dev_attachment_test_support_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -2277,6 +2325,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem,
             project_service,
             skill_activation_source,
+            attachment_test_support,
         })
     }
 
@@ -2424,6 +2473,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2519,6 +2569,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2593,6 +2644,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2653,6 +2705,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2951,6 +3004,16 @@ impl HostRuntimeCapabilityHarness {
         );
         std::fs::write(dir.join("SKILL.md"), body)?;
         Ok(())
+    }
+
+    /// C-ATTACH: the attachment read port + inbound lander over this harness's
+    /// local-dev workspace filesystem, for wiring `DefaultPlannedRuntimeParts.attachment_read_port`
+    /// and `DefaultInboundTurnService::with_inbound_attachments` — mirrors
+    /// `profile_filesystem_for_test`'s role for E-PROFILE.
+    pub(crate) fn attachment_test_support_for_test(
+        &self,
+    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+        self.attachment_test_support.clone()
     }
 
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness

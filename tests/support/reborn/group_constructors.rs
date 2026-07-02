@@ -97,6 +97,16 @@ impl RebornIntegrationGroup {
     pub async fn skill_management_tools() -> HarnessResult<Self> {
         Self::builder().skill_management_tools().await
     }
+
+    /// Group with the attachment read port + inbound lander wired (C-ATTACH
+    /// seam), no first-party capability dispatch. Use
+    /// [`RebornThreadBuilder::with_model_override`] to route a thread through a
+    /// vision-capable model id and
+    /// [`RebornIntegrationHarness::submit_turn_with_image_attachment`] to land
+    /// an image and submit it in one turn.
+    pub async fn attachment_tools() -> HarnessResult<Self> {
+        Self::builder().attachment_tools().await
+    }
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -246,6 +256,13 @@ impl RebornIntegrationGroupBuilder {
     /// mounts / policy.
     pub async fn skill_management_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime = HostRuntimeCapabilityHarness::skill_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build an attachment-tools group. See [`RebornIntegrationGroup::attachment_tools`].
+    pub async fn attachment_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = HostRuntimeCapabilityHarness::attachment_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

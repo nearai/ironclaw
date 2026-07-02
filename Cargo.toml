@@ -268,6 +268,8 @@ insta = { version = "1.46.3", features = ["yaml"] }
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
+# C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
+ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }

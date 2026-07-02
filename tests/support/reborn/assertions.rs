@@ -282,6 +282,48 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Assert the in-memory `TurnEventSink` installed via `.with_turn_event_sink()`
+    /// (C-TRACECAP) recorded at least one event of `kind`. Proves
+    /// `subscribe_best_effort` actually fired the sink for a real turn, not just
+    /// that the harness wired the field.
+    pub async fn assert_turn_event_recorded(
+        &self,
+        kind: ironclaw_turns::TurnEventKind,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_turn_events();
+        if events.iter().any(|event| event.kind == kind) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert a captured model request carried a multimodal `data:` image part
+    /// holding exactly `bytes` under `mime_type` (C-ATTACH) — proves the landed
+    /// attachment round-tripped intact (lander → project filesystem →
+    /// `attachment_read_port` → base64) and reached the model as
+    /// `ContentPart::ImageUrl`, not just the textual `<attachments>` pointer.
+    pub async fn assert_model_saw_image_attachment(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> HarnessResult<()> {
+        use base64::Engine;
+        let urls = self.captured_image_data_urls();
+        let expected = format!(
+            "data:{mime_type};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        if urls.iter().any(|url| url == &expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "no captured image data: URL equal to {expected:?}; saw {} image part(s): {urls:?}",
+            urls.len()
+        )
+        .into())
+    }
+
     /// Assert a model-visible tool error of `class` carrying `reason` was
     /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
     /// reads the in-process recorder, populated only on the *Completed* write

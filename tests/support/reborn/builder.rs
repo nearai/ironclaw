@@ -115,6 +115,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
     /// group. See [`RebornThreadBuilder::fail_model`].
     fail_model: bool,
+    /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
+    turn_event_sink: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -159,6 +161,15 @@ impl RebornIntegrationHarnessBuilder {
         self.fail_model = true;
         self
     }
+
+    /// Install an in-memory `TurnEventSink` into the underlying group's planned
+    /// runtime (C-TRACECAP). Read the recorded events back with
+    /// [`RebornIntegrationHarness::recorded_turn_events`].
+    pub fn with_turn_event_sink(mut self) -> Self {
+        self.turn_event_sink = true;
+        self
+    }
+
 
     /// Use the real first-party tool runtime so scripted tool calls execute through
     /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
@@ -303,6 +314,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(ctx) = self.safety_context {
             group_builder = group_builder.safety_context(ctx);
         }
+        if self.turn_event_sink {
+            group_builder = group_builder.with_turn_event_sink();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -403,6 +417,7 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             park_gate: None,
             fail_model: false,
+            turn_event_sink: false,
         }
     }
 
@@ -417,7 +432,68 @@ impl RebornIntegrationHarness {
     /// — the caller drives the wait (`wait_for_status`). Used by approval/auth flows
     /// where the turn blocks on a gate rather than completing.
     pub async fn submit_turn_async(&self, text: &str) -> HarnessResult<TurnRunId> {
-        match self.submit_turn_ack(text).await? {
+        Self::run_id_from_ack(self.submit_turn_ack(text).await?)
+    }
+
+    /// Submit a user turn carrying one inline image attachment, and wait for it
+    /// to complete (C-ATTACH). Lands `bytes` through the harness's real
+    /// `InboundAttachmentLander` (production `ProjectScopedAttachmentLander` over
+    /// the local-dev workspace filesystem — wired only by `.attachment_tools()`
+    /// groups) via `DefaultProductWorkflow::submit_inbound_with_attachments`, the
+    /// same production entry point a synchronous host surface (e.g. the
+    /// OpenAI-compatible API) uses for inline image bytes. Errors clearly if the
+    /// harness has no lander wired.
+    pub async fn submit_turn_with_image_attachment(
+        &self,
+        text: &str,
+        filename: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+    ) -> HarnessResult<TurnRunId> {
+        if self.capability_recorder.attachment_test_support().is_none() {
+            return Err(
+                "no attachment lander wired — build the harness via RebornIntegrationGroup::attachment_tools()"
+                    .into(),
+            );
+        }
+        let (event_id, envelope) = self.build_user_envelope(text)?;
+        let attachment = ironclaw_attachments::InboundAttachment {
+            id: format!("{event_id}-att-0"),
+            mime_type: mime_type.to_string(),
+            filename: Some(filename.to_string()),
+            bytes,
+        };
+        let ack = self
+            .workflow
+            .submit_inbound_with_attachments(envelope, vec![attachment])
+            .await?;
+        let run_id = Self::run_id_from_ack(ack)?;
+        self.wait_for_status(run_id, TurnStatus::Completed).await?;
+        Ok(run_id)
+    }
+
+    /// Build the synthetic inbound envelope `submit_turn_ack` and
+    /// `submit_turn_with_image_attachment` both submit, plus the `event_id` it
+    /// was minted from (attachment ids derive from it).
+    fn build_user_envelope(
+        &self,
+        text: &str,
+    ) -> HarnessResult<(String, ironclaw_product_adapters::ProductInboundEnvelope)> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_text_envelope_with_trigger(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            text,
+            ProductTriggerReason::DirectChat,
+        )?;
+        Ok((event_id, envelope))
+    }
+
+    /// Extract the submitted run id from an `Accepted` ack, or a descriptive
+    /// error for any other outcome. Shared by every `submit_turn*` entry point.
+    fn run_id_from_ack(ack: ProductInboundAck) -> HarnessResult<TurnRunId> {
+        match ack {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
             } => Ok(submitted_run_id),
@@ -659,6 +735,37 @@ impl RebornIntegrationHarness {
             .flatten()
             .filter(|message| matches!(message.role, Role::System))
             .map(|message| message.content)
+            .collect()
+    }
+
+    /// Turn-lifecycle events recorded by the in-memory `TurnEventSink`
+    /// installed via `.with_turn_event_sink()` (C-TRACECAP). Empty when the
+    /// harness did not opt in — reads the group-shared sink, so a group
+    /// thread sees every thread's events (the sink has no per-thread baseline;
+    /// callers that need thread scoping should match on `TurnLifecycleEvent::run_id`).
+    pub(super) fn recorded_turn_events(&self) -> Vec<ironclaw_turns::TurnLifecycleEvent> {
+        self._shared
+            .turn_event_sink
+            .as_ref()
+            .map(|sink| sink.events())
+            .unwrap_or_default()
+    }
+
+    /// Every `data:` URL from a `ContentPart::ImageUrl` part across all captured
+    /// model requests (C-ATTACH). Empty when no multimodal image part reached
+    /// the model — either no image was attached, the model id wasn't
+    /// vision-capable (see `RebornThreadBuilder::with_model_override`), or the
+    /// attachment read port failed to land/read the bytes.
+    pub(super) fn captured_image_data_urls(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .flat_map(|message| message.content_parts)
+            .filter_map(|part| match part {
+                ironclaw_llm::ContentPart::ImageUrl { image_url } => Some(image_url.url),
+                ironclaw_llm::ContentPart::Text { .. } => None,
+            })
             .collect()
     }
 
