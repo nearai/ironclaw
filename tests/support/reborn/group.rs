@@ -104,7 +104,9 @@ use ironclaw_reborn::subagent::{
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_threads::SessionThreadService;
-use ironclaw_turns::run_profile::{InMemoryLoopHostMilestoneSink, ModelProfileId};
+use ironclaw_turns::run_profile::{
+    InMemoryLoopHostMilestoneSink, InstructionSafetyContext, ModelProfileId,
+};
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, LoopCheckpointStore, TurnCoordinator,
     TurnScope, TurnStateStore,
@@ -325,6 +327,7 @@ impl RebornIntegrationGroup {
     pub fn builder() -> RebornIntegrationGroupBuilder {
         RebornIntegrationGroupBuilder {
             storage: StorageMode::InMemory,
+            safety_context: None,
         }
     }
 
@@ -406,6 +409,7 @@ struct GroupBaseData {
 /// `StorageMode::InMemory`.
 pub struct RebornIntegrationGroupBuilder {
     storage: StorageMode,
+    safety_context: Option<InstructionSafetyContext>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -414,6 +418,17 @@ impl RebornIntegrationGroupBuilder {
     /// `assert_reply_persists_after_reopen`.
     pub fn storage(mut self, mode: StorageMode) -> Self {
         self.storage = mode;
+        self
+    }
+
+    /// Wire a model-visible instruction-safety banner into the group's ONE
+    /// shared planned runtime (`DefaultPlannedRuntimeParts::safety_context`).
+    /// Rendered verbatim as a `system`-role prompt message ahead of any
+    /// per-turn instructions (`push_safety_context`); the only model-visible
+    /// artifact of instruction-safety scanning on this tier (T0-SYSPROMPT /
+    /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
+    pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
+        self.safety_context = Some(ctx);
         self
     }
 
@@ -579,7 +594,7 @@ impl RebornIntegrationGroupBuilder {
             user_profile_source: Arc::clone(&user_profile_source),
             model_policy_guard: None,
             model_budget_accountant: None,
-            safety_context: None,
+            safety_context: self.safety_context,
             hook_dispatcher_builder_factory: None,
             communication_context_provider: None,
             hook_security_audit_sink: None,

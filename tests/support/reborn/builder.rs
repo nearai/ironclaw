@@ -42,6 +42,7 @@ use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_threads::ThreadScope;
+use ironclaw_turns::run_profile::InstructionSafetyContext;
 use ironclaw_turns::{
     FilesystemTurnStateStore, GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, TurnActor,
@@ -114,6 +115,12 @@ enum RebornCapabilityBackend {
     /// **network** egress (`assert_network_egress_header_contains`); the runtime
     /// egress recorder is inert for this wiring — see that assertion's docs.
     GithubIssueTools,
+    /// Real first-party `web-access.search` / `web-access.get_content`
+    /// capabilities (C-WEBACCESS), dispatched through the real
+    /// `WebAccessExecutor` behind `WebAccessTestHandler`. web-access declares
+    /// no `runtime_credentials`, so this wires the plain default
+    /// `GrantAuthorizer` — no credential-injecting authorizer is needed.
+    WebAccessTools,
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -124,7 +131,9 @@ pub struct RebornIntegrationHarnessBuilder {
     replies: Vec<RebornScriptedReply>,
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
+    web_access_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
+    safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
     /// of a `bool` + `Option` so the modes are mutually exclusive by
     /// construction — the last shell-selecting builder method wins, and a live
@@ -160,6 +169,17 @@ impl RebornIntegrationHarnessBuilder {
     /// test on-disk durability via `assert_reply_persists_after_reopen`.
     pub fn storage(mut self, mode: StorageMode) -> Self {
         self.storage = mode;
+        self
+    }
+
+    /// Wire a model-visible instruction-safety banner (`InstructionSafetyContext`)
+    /// into the harness's underlying group. Rendered verbatim as a `system`-role
+    /// prompt message ahead of any per-turn instructions; read back via
+    /// `assert_system_prompt_contains`. Defaults to `None` (no banner, matching
+    /// today's behavior) — see `tests/support/reborn/group.rs`'s
+    /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
+    pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
+        self.safety_context = Some(ctx);
         self
     }
 
@@ -238,6 +258,24 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire the real first-party `web-access.search` / `web-access.get_content`
+    /// capabilities (C-WEBACCESS). `response_bodies` scripts the three-leg Exa
+    /// MCP handshake (`initialize` → `notifications/initialized` → `tools/call`)
+    /// in call order — all three legs target the same URL/method/capability, so
+    /// they cannot be told apart by the keyed HTTP matcher and are instead
+    /// installed onto the recording egress's FIFO queue at build time. Script
+    /// the model with
+    /// `RebornScriptedReply::tool_call("web-access.search", json!({"query": ...}))`
+    /// followed by a trailing text turn.
+    pub fn with_web_access_tools(
+        mut self,
+        response_bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::WebAccessTools;
+        self.web_access_response_bodies = response_bodies.into_iter().collect();
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
@@ -308,14 +346,24 @@ impl RebornIntegrationHarnessBuilder {
                 let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
+            RebornCapabilityBackend::WebAccessTools => {
+                // C-WEBACCESS: real web-access.* capabilities behind the plain
+                // default GrantAuthorizer (no credentials to inject).
+                let host_runtime = HostRuntimeCapabilityHarness::web_access_tools().await?;
+                host_runtime.install_web_access_responses(self.web_access_response_bodies)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
         };
 
         // Routed through the group/thread builder (one assembly path for both
         // groups and single-shot harnesses). A single-shot harness is a
         // degenerate one-thread group and submits as the default
         // `HARNESS_ACTOR_ID`.
-        let group: RebornIntegrationGroup = RebornIntegrationGroup::builder()
-            .storage(self.storage)
+        let mut group_builder = RebornIntegrationGroup::builder().storage(self.storage);
+        if let Some(ctx) = self.safety_context {
+            group_builder = group_builder.safety_context(ctx);
+        }
+        let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
         group
@@ -381,7 +429,9 @@ impl RebornIntegrationHarness {
             replies: Vec::new(),
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
+            web_access_response_bodies: Vec::new(),
             storage: StorageMode::default(),
+            safety_context: None,
             shell_mode: ShellMode::default(),
         }
     }
