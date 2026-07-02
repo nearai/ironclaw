@@ -25,11 +25,11 @@
 //!    — proves resume dispatch is keyed by `run_id` with zero cross-resume.
 //!    Must run while auto-approve is still OFF (same control window as 1–2).
 //! 4. `failure_category_demasked` — an empty-scripted thread drives a run to a
-//!    genuine `TurnStatus::Failed` and asserts the TRUE failure category
-//!    (`"model_error"`) survives instead of being rewritten to the masking
-//!    `"driver_protocol_violation"` sentinel. Independent of the auto-approve
-//!    toggle (no gate involved); ordered alongside the other independent
-//!    scenarios, before the toggle is flipped.
+//!    genuine `TurnStatus::Failed` and asserts the TRUE safe failure category
+//!    (`"model_unavailable"`) survives instead of being rewritten to the
+//!    masking `"driver_protocol_violation"` sentinel. Independent of the
+//!    auto-approve toggle (no gate involved); ordered alongside the other
+//!    independent scenarios, before the toggle is flipped.
 //! 5. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
 //!    setting persists across thread boundaries. MUST run last (it flips the

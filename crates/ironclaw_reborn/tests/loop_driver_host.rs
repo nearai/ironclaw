@@ -231,6 +231,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
@@ -345,6 +346,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
 
     let error = host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -401,6 +403,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         .unwrap();
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
@@ -1442,6 +1445,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1493,6 +1497,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -2137,7 +2142,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 
     assert_eq!(
         failed.failure.expect("failure").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_checkpoint"
     );
     assert!(
         fixture.gateway.requests().is_empty(),
@@ -2204,7 +2209,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
 
     assert_eq!(
         failed.failure.as_ref().expect("failure").category(),
-        "model_error"
+        "model_unavailable"
     );
     assert_driver_public_outputs_hide_raw_payloads(&failed);
     let model_requests = fixture.gateway.requests();
@@ -2819,6 +2824,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -4055,6 +4061,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -4208,6 +4215,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: host_dyn
                 .build_prompt_bundle(LoopPromptBundleRequest {
                     mode: PromptMode::TextOnly,
@@ -4485,6 +4493,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
@@ -4813,6 +4822,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
@@ -4904,6 +4914,7 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
     // only observable through the rendered model content.
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: bundle.messages,
             surface_version: Some(surface_version),
             model_preference: None,
@@ -5605,6 +5616,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
     assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
@@ -8064,6 +8076,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8188,6 +8201,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8301,6 +8315,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

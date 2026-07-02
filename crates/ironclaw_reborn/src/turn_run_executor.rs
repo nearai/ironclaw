@@ -24,6 +24,7 @@ use tracing::{debug, error};
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
+    failure_categories::host_stage_unavailable_category,
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
 };
@@ -174,8 +175,8 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                         ..
                     }) => sanitized_failure("driver_invalid_request"),
                     DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
-                        ..
-                    }) => sanitized_failure("driver_unavailable"),
+                        reason,
+                    }) => sanitized_failure(host_stage_unavailable_category(reason)),
                 };
                 // `sanitized` is always Some — sanitized_failure /
                 // sanitized_driver_failure fall back to "unknown_failure" before
@@ -1122,10 +1123,10 @@ mod tests {
 
     /// When the driver returns `AgentLoopDriverError::InvalidRequest`, the executor
     /// must return `Err` with category `"driver_invalid_request"`, and when it
-    /// returns `AgentLoopDriverError::Unavailable`, the category must be
-    /// `"driver_unavailable"`. Both are verified here to confirm the two branches
-    /// in the `DriverInvocationError::DriverError` match arm produce distinct,
-    /// correctly-named categories.
+    /// returns `AgentLoopDriverError::Unavailable`, the category must identify
+    /// the unavailable host stage. Both are verified here to confirm the two
+    /// branches in the `DriverInvocationError::DriverError` match arm produce
+    /// distinct, correctly-named categories.
     #[tokio::test]
     async fn driver_invalid_request_and_unavailable_record_distinct_categories() {
         // ── InvalidRequest → driver_invalid_request ───────────────────────────
@@ -1152,9 +1153,9 @@ mod tests {
             "executor must NOT call fail_run; scheduler owns terminal failure recording"
         );
 
-        // ── Unavailable → driver_unavailable ──────────────────────────────────
+        // ── Unavailable → host_stage_unavailable_model ───────────────────────
         let executor = make_executor_with_failing_driver(AgentLoopDriverError::Unavailable {
-            reason: "driver temporarily unavailable in test".to_string(),
+            reason: "model: driver temporarily unavailable in test".to_string(),
         });
         let transitions = Arc::new(RecordingTransitionPort::default());
         let result = executor
@@ -1167,8 +1168,8 @@ mod tests {
         let err = result.expect_err("expected Err for Unavailable driver error");
         assert_eq!(
             err.failure_category(),
-            "driver_unavailable",
-            "Unavailable must map to category driver_unavailable"
+            "host_stage_unavailable_model",
+            "Unavailable must map to the host-stage unavailable category"
         );
         assert_eq!(
             transitions.fail_run_call_count(),

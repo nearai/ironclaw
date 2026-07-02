@@ -186,6 +186,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -240,6 +241,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -280,6 +282,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -317,6 +320,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -2588,6 +2592,7 @@ impl AgentLoopDriver for ReplyDriver {
         assert_eq!(prompt.messages.len(), 1);
         let response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt.messages,
                 surface_version: prompt.surface_version,
                 model_preference: Some(
@@ -2845,6 +2850,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -3443,6 +3449,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
 
 fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
     LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: vec![LoopModelMessage {
             role: "user".to_string(),
             content_ref: LoopMessageRef::new("msg:user-message").unwrap(),

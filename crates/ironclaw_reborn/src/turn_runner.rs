@@ -99,3 +99,16 @@ impl std::fmt::Display for HostFactoryError {
 }
 
 impl std::error::Error for HostFactoryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitized_driver_failure;
+
+    #[test]
+    fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
+        let failure = sanitized_driver_failure("invalid category with spaces")
+            .expect("driver_failed fallback is valid");
+
+        assert_eq!(failure.category(), "driver_failed");
+    }
+}

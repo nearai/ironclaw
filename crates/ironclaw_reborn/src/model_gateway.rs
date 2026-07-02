@@ -272,7 +272,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await
@@ -1557,6 +1557,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
@@ -1570,12 +1571,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
     match error.kind {
-        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
-            HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                error.safe_summary,
-            )
-        }
+        AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            error.safe_summary,
+        ),
         _ => map_capability_host_error(error),
     }
 }

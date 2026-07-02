@@ -7,6 +7,7 @@ use crate::state::{LoopExecutionState, RepeatedCallWarningPhase};
 use crate::strategies::reply_admission::reply_admission_control_message;
 
 pub(crate) const REPEATED_CALL_WARNING_CONTROL_TEXT: &str = "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence";
+pub(crate) const INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT: &str = "loop control previous model response was empty or structurally invalid call an available tool with valid arguments or provide a final answer do not return an empty response";
 
 /// Decides what context the host should materialize for the next model call.
 ///
@@ -123,6 +124,14 @@ pub(crate) fn repeated_call_warning_control_message() -> LoopInlineMessage {
     }
 }
 
+pub(crate) fn invalid_model_output_repair_control_message() -> LoopInlineMessage {
+    LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopSafeSummary::new(INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT)
+            .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
@@ -137,7 +146,9 @@ mod tests {
         },
     };
 
-    use super::{ContextStrategy, DefaultContextStrategy};
+    use super::{
+        ContextStrategy, DefaultContextStrategy, invalid_model_output_repair_control_message,
+    };
     use crate::state::{
         CapabilityCallSignature, LoopExecutionState, RepeatedCallWarningState,
         ReplyAdmissionRejection,
@@ -325,5 +336,19 @@ mod tests {
         assert!(!request.emitted_admission_control);
         assert!(!request.emitted_repeated_call_warning);
         assert!(request.request.inline_messages.is_empty());
+    }
+
+    #[test]
+    fn invalid_model_output_repair_control_message_is_safe_system_inline_message() {
+        let message = invalid_model_output_repair_control_message();
+
+        assert_eq!(
+            message.role,
+            ironclaw_turns::run_profile::LoopInlineMessageRole::System
+        );
+        assert_eq!(
+            message.safe_body.as_str(),
+            super::INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT
+        );
     }
 }
