@@ -1,18 +1,6 @@
-import { sendMessage } from "./api.js";
-
 const CHANNEL_CONNECTION_BROADCAST = "ironclaw-channel-connection";
 const CHANNEL_CONNECTION_STORAGE_KEY = "ironclaw:channel-connection:connected";
 const CHANNEL_CONNECTION_MESSAGE_TYPE = "ironclaw:channel-connection:connected";
-const CHANNEL_CONNECTION_WAITING_KEY = "ironclaw:channel-connection:waiting:v1";
-const CONTINUATION_SUFFIX = " is connected. Continue the previous request.";
-// A waiter records "this chat is blocked on a channel connection, resume it once
-// the channel connects." It is best-effort browser state: the chat may be closed,
-// abandoned, or the connection completed in a context that never fired the event.
-// Bound how long a waiter survives so a never-connected chat can't park a stale
-// entry forever — connecting Slack a week later must not blast a continuation into
-// a conversation the user has long since moved on from, and localStorage must not
-// grow without bound.
-const WAITER_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function normalizeConnectionChannel(channel) {
   return String(channel || "")
@@ -31,16 +19,11 @@ export function channelConnectionDisplayName(channel) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-export function channelConnectionContinuationMessage(channel) {
-  return `${channelConnectionDisplayName(channel)}${CONTINUATION_SUFFIX}`;
-}
-
-export function connectionEventMatchesOnboarding(event, onboarding) {
-  const eventChannel = normalizeConnectionChannel(event?.channel);
-  const onboardingChannel = normalizeConnectionChannel(onboarding?.extensionName);
-  return Boolean(eventChannel && onboardingChannel && eventChannel === onboardingChannel);
-}
-
+// Broadcast that a connectable channel just connected (pairing redeemed here,
+// in another tab, or on the extensions page). The parked turn is resumed
+// backend-side on redeem; this notification exists only so other open surfaces
+// (the extensions/connectable-channels caches, other chat tabs) can invalidate
+// their stale "needs setup" snapshots. It never resumes chats itself.
 export async function notifyChannelConnected({
   channel,
   provider = null,
@@ -81,11 +64,6 @@ export async function notifyChannelConnected({
       // the browser cannot persist a notification.
     }
   }
-
-  return resumeWaitingChannelConnections(payload).catch((error) => {
-    console.error("channel connection waiting-thread resume failed:", error);
-    return [];
-  });
 }
 
 export function subscribeChannelConnected(handler) {
@@ -122,149 +100,6 @@ function parseStoredConnectionEvent(value) {
   try {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-export function rememberChannelConnectionWaiter({
-  channel,
-  threadId,
-  sourceMessageId = null,
-} = {}) {
-  const normalized = normalizeConnectionChannel(channel);
-  const normalizedThreadId = String(threadId || "").trim();
-  if (!normalized || !normalizedThreadId) return;
-  const waiters = readWaitingChannelConnections().filter(
-    (waiter) =>
-      !(
-        waiter.channel === normalized &&
-        waiter.threadId === normalizedThreadId &&
-        waiter.sourceMessageId === (sourceMessageId || null)
-      ),
-  );
-  waiters.push({
-    channel: normalized,
-    threadId: normalizedThreadId,
-    sourceMessageId: sourceMessageId || null,
-    createdAt: Date.now(),
-  });
-  writeWaitingChannelConnections(waiters);
-}
-
-export function forgetChannelConnectionWaiter({
-  channel,
-  threadId,
-  sourceMessageId = null,
-} = {}) {
-  const normalized = normalizeConnectionChannel(channel);
-  const normalizedThreadId = String(threadId || "").trim();
-  if (!normalized || !normalizedThreadId) return;
-  writeWaitingChannelConnections(
-    readWaitingChannelConnections().filter(
-      (waiter) =>
-        !(
-          waiter.channel === normalized &&
-          waiter.threadId === normalizedThreadId &&
-          (!sourceMessageId || waiter.sourceMessageId === sourceMessageId)
-        ),
-    ),
-  );
-}
-
-export async function resumeWaitingChannelConnections(event = {}) {
-  const eventChannel = normalizeConnectionChannel(event.channel);
-  if (!eventChannel) return [];
-  const sourceThreadId = event.sourceThreadId || null;
-  const waiters = readWaitingChannelConnections();
-  const matching = [];
-  const remaining = [];
-  const seenThreads = new Set();
-  for (const waiter of waiters) {
-    if (waiter.channel !== eventChannel) {
-      remaining.push(waiter);
-      continue;
-    }
-    if (sourceThreadId && waiter.threadId === sourceThreadId) {
-      remaining.push(waiter);
-      continue;
-    }
-    if (seenThreads.has(waiter.threadId)) continue;
-    seenThreads.add(waiter.threadId);
-    matching.push(waiter);
-  }
-  if (matching.length === 0) return [];
-  const content = channelConnectionContinuationMessage(eventChannel);
-  const results = [];
-  const resumedThreadIds = new Set();
-  try {
-    for (const waiter of matching) {
-      results.push(
-        await sendMessage({
-          threadId: waiter.threadId,
-          content,
-        }),
-      );
-      resumedThreadIds.add(waiter.threadId);
-    }
-  } catch (error) {
-    const unresumed = matching.filter(
-      (waiter) => !resumedThreadIds.has(waiter.threadId),
-    );
-    writeWaitingChannelConnections([...remaining, ...unresumed]);
-    throw error;
-  }
-  writeWaitingChannelConnections(remaining);
-  return results;
-}
-
-function readWaitingChannelConnections() {
-  const storage = connectionStorage();
-  if (!storage) return [];
-  try {
-    const parsed = JSON.parse(storage.getItem(CHANNEL_CONNECTION_WAITING_KEY) || "[]");
-    if (!Array.isArray(parsed)) return [];
-    const now = Date.now();
-    return parsed
-      .map((item) => ({
-        channel: normalizeConnectionChannel(item?.channel),
-        threadId: String(item?.threadId || "").trim(),
-        sourceMessageId:
-          typeof item?.sourceMessageId === "string" ? item.sourceMessageId : null,
-        createdAt: Number(item?.createdAt || 0),
-      }))
-      .filter(
-        (item) =>
-          item.channel &&
-          item.threadId &&
-          !isExpiredWaiter(item.createdAt, now),
-      );
-  } catch (_) {
-    return [];
-  }
-}
-
-function writeWaitingChannelConnections(waiters) {
-  const storage = connectionStorage();
-  if (!storage) return;
-  try {
-    storage.setItem(CHANNEL_CONNECTION_WAITING_KEY, JSON.stringify(waiters));
-  } catch (_) {
-    // Best-effort waiting-thread registry; connection itself has already succeeded.
-  }
-}
-
-// A waiter with a positive timestamp older than the TTL is stale. Entries with a
-// missing/zero timestamp (legacy or malformed) are kept rather than eagerly
-// evicted — `forgetChannelConnectionWaiter`/resume still clean them up.
-function isExpiredWaiter(createdAt, now) {
-  return createdAt > 0 && now - createdAt > WAITER_TTL_MS;
-}
-
-function connectionStorage() {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage || null;
   } catch (_) {
     return null;
   }

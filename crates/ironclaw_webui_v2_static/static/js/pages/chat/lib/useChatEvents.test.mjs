@@ -45,7 +45,6 @@ function createUseChatEventsHarness({
 } = {}) {
   let messages = [];
   let pendingGate = null;
-  let pendingOnboarding = null;
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
@@ -102,9 +101,6 @@ function createUseChatEventsHarness({
     },
     get pendingGate() {
       return pendingGate;
-    },
-    get pendingOnboarding() {
-      return pendingOnboarding;
     },
     get isProcessing() {
       return isProcessing;
@@ -363,7 +359,7 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].gateActivity, false);
 });
 
-test("useChatEvents: an extension activation preview becomes a tool card (the panel is decided by the derive path)", () => {
+test("useChatEvents: an extension activation preview becomes a tool card (pairing rides the gate rail)", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
@@ -391,10 +387,10 @@ test("useChatEvents: an extension activation preview becomes a tool card (the pa
     },
   });
 
-  // The event stream only materializes the activation tool card; whether to open
-  // the in-chat pairing panel is decided by useChat's structured derive effect,
-  // not here. (Asserting harness.pendingOnboarding would be vacuous — this harness
-  // never wires setPendingOnboarding into useChatEvents.)
+  // The event stream only materializes the activation tool card. A connectable
+  // channel that needs pairing now blocks the turn as a standard auth gate
+  // (paste_secret + connection), so the pairing card is driven by pendingGate —
+  // there is no timeline-derived panel for this preview to open.
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].toolName, "extension_activate");
 });
@@ -641,6 +637,7 @@ test("useChatEvents: gate-only projection rebuilds pending gate from gate identi
     accountLabel: "",
     authorizationUrl: null,
     expiresAt: null,
+    connection: null,
   });
   assert.deepEqual(plain(harness.activeRun), {
     runId,

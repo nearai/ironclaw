@@ -3,9 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events.js";
-import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api.js";
-
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.js", import.meta.url), "utf8");
   const lines = [];
@@ -205,96 +202,6 @@ test("ConfigureModal pairing redeems by channel slug and activates package id", 
     ["connectable-channels"],
     ["pairing", "slack"],
   ]);
-});
-
-test("ConfigureModal pairing through the real API waits for blocked chats to resume", async (t) => {
-  const originalWindow = globalThis.window;
-  const originalFetch = globalThis.fetch;
-  const originalSessionStorage = globalThis.sessionStorage;
-  t.after(() => {
-    globalThis.window = originalWindow;
-    globalThis.fetch = originalFetch;
-    globalThis.sessionStorage = originalSessionStorage;
-  });
-
-  const storage = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
-      setItem: (key, value) => storage.set(key, String(value)),
-      removeItem: (key) => storage.delete(key),
-    },
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  };
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
-  rememberChannelConnectionWaiter({
-    channel: "slack",
-    threadId: "thread-waiting",
-    sourceMessageId: "tool-1",
-  });
-
-  let releaseResume;
-  const resumeGate = new Promise((resolve) => {
-    releaseResume = resolve;
-  });
-  const fetches = [];
-  globalThis.fetch = async (path, options) => {
-    fetches.push({ path, options });
-    if (path === "/api/webchat/v2/extensions/pairing/redeem") {
-      return new Response(
-        JSON.stringify({ provider: "slack", provider_user_id: "install-alpha:U123" }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }
-    if (path === "/api/webchat/v2/threads/thread-waiting/messages") {
-      await resumeGate;
-      return new Response(JSON.stringify({ run_id: "run-1" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    throw new Error(`unexpected fetch: ${path}`);
-  };
-
-  const { mutationConfig } = renderModal({
-    kind: "channel",
-    redeemPairingCode: realRedeemPairingCode,
-  });
-  let settled = false;
-  const mutationPromise = mutationConfig.mutationFn("A1B2C3").then((value) => {
-    settled = true;
-    return value;
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(fetches.length, 2);
-  assert.equal(fetches[0].path, "/api/webchat/v2/extensions/pairing/redeem");
-  assert.equal(fetches[1].path, "/api/webchat/v2/threads/thread-waiting/messages");
-  assert.deepEqual(JSON.parse(fetches[0].options.body), {
-    channel: "slack",
-    code: "A1B2C3",
-  });
-  assert.equal(
-    JSON.parse(fetches[1].options.body).content,
-    "Slack is connected. Continue the previous request.",
-  );
-  assert.equal(settled, false, "the modal mutation must wait for resume to finish");
-
-  releaseResume();
-  assert.deepEqual(await mutationPromise, {
-    success: true,
-    provider: "slack",
-    provider_user_id: "install-alpha:U123",
-  });
-  assert.equal(settled, true);
 });
 
 test("ConfigureModal treats post-redeem activation failure as best-effort", async () => {

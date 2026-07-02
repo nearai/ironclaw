@@ -304,26 +304,48 @@ mod tests {
     }
 
     #[test]
-    fn channel_connection_completion_wakes_waiting_chat_assets() {
+    fn channel_connection_gate_rides_the_auth_rail() {
+        // The channel-connection-events module keeps only its display/notify
+        // half — the connect broadcast used for cross-tab cache invalidation.
+        // The waiter/continuation machinery (the historical-panel bug) is gone:
+        // pairing gates now block/resume on the standard auth-gate rail.
         let events = asset_text("js/lib/channel-connection-events.js");
         assert!(events.contains("notifyChannelConnected"));
         assert!(events.contains("subscribeChannelConnected"));
         assert!(events.contains("BroadcastChannel"));
-        assert!(events.contains("channelConnectionContinuationMessage"));
-        assert!(events.contains("rememberChannelConnectionWaiter"));
-        assert!(events.contains("resumeWaitingChannelConnections"));
-        assert!(events.contains("ironclaw:channel-connection:waiting:v1"));
+        assert!(!events.contains("channelConnectionContinuationMessage"));
+        assert!(!events.contains("rememberChannelConnectionWaiter"));
+        assert!(!events.contains("resumeWaitingChannelConnections"));
+        assert!(!events.contains("ironclaw:channel-connection:waiting:v1"));
 
+        // gates.js recognizes the renamed challenge kinds (paste_secret /
+        // oauth_relay) that ALL auth gates now use, and normalizes the optional
+        // channel `connection` context onto the pending gate.
+        let gates = asset_text("js/pages/chat/lib/gates.js");
+        assert!(gates.contains("paste_secret"));
+        assert!(gates.contains("oauth_relay"));
+        assert!(gates.contains("connectionFromContext"));
+
+        // useChat keeps a cache-invalidation-only channel-connected subscription
+        // and a redeem-only pairing submit that does NOT call resolveGate (the
+        // backend resumes the parked turn). All waiter/derive heuristics are gone.
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(use_chat.contains("subscribeChannelConnected"));
-        assert!(use_chat.contains("connectionEventMatchesOnboarding"));
-        assert!(use_chat.contains("resumeOnboardingAfterChannelConnected"));
-        assert!(use_chat.contains("rememberChannelConnectionWaiter"));
-        assert!(use_chat.contains("forgetChannelConnectionWaiter"));
-        assert!(
-            use_chat.contains("channelConnectionContinuationMessage(onboarding.extensionName)")
-        );
+        assert!(use_chat.contains("submitChannelConnectionPairing"));
+        assert!(!use_chat.contains("connectionEventMatchesOnboarding"));
+        assert!(!use_chat.contains("resumeOnboardingAfterChannelConnected"));
+        assert!(!use_chat.contains("rememberChannelConnectionWaiter"));
+        assert!(!use_chat.contains("forgetChannelConnectionWaiter"));
+        assert!(!use_chat.contains("channelConnectionRequirementFromCard"));
+        assert!(!use_chat.contains("pendingOnboarding"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
+
+        // chat.js renders the pairing card off a paste_secret gate carrying a
+        // connection, on the same auth-gate switch as the token / oauth cards.
+        let chat = asset_text("js/pages/chat/chat.js");
+        assert!(chat.contains("OnboardingPairingCard"));
+        assert!(chat.contains("isChannelPairingGate"));
+        assert!(chat.contains("submitChannelConnectionPairing"));
 
         let slack_pairing = asset_text("js/lib/slack-pairing-api.js");
         assert!(slack_pairing.contains("notifyChannelConnected"));

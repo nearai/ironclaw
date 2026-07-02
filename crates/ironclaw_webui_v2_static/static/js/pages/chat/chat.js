@@ -19,7 +19,6 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
-import { channelConnectionDisplayName } from "../../lib/channel-connection-events.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
@@ -37,10 +36,28 @@ import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
-function pendingOnboardingLabel(onboarding) {
-  // Single source of channel display names (lib/channel-connection-events.js) so
-  // the composer notice and the pairing-card title can't drift in casing.
-  return channelConnectionDisplayName(onboarding?.extensionName);
+// A channel-pairing gate rides the auth rail as a `paste_secret` challenge that
+// also carries a `connection` requirement. The pairing card reads an
+// `onboarding`-shaped object, so map the gate's connection context onto it.
+function onboardingFromGate(gate) {
+  const connection = gate?.connection;
+  if (!connection) return null;
+  return {
+    extensionName: connection.channel,
+    strategy: connection.strategy || null,
+    instructions: connection.instructions || null,
+    inputPlaceholder: connection.inputPlaceholder || null,
+    submitLabel: connection.submitLabel || null,
+    errorMessage: connection.errorMessage || null,
+  };
+}
+
+function isChannelPairingGate(gate) {
+  return (
+    gate?.kind === "auth_required" &&
+    gate?.challengeKind === "paste_secret" &&
+    Boolean(gate?.connection)
+  );
 }
 
 export function Chat({
@@ -58,7 +75,6 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
-    pendingOnboarding,
     busyGateNotice,
     suggestions,
     sseStatus,
@@ -76,8 +92,7 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    submitOnboardingPairing,
-    dismissOnboardingPairing,
+    submitChannelConnectionPairing,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -89,29 +104,23 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
-  const activeThreadHasOnboarding =
-    Boolean(activeThreadId) && Boolean(pendingOnboarding);
+  const activeThreadHasPairingGate =
+    activeThreadHasGate && isChannelPairingGate(pendingGate);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 ||
-    activeThreadIsProcessing ||
-    activeThreadHasGate ||
-    activeThreadHasOnboarding;
+    messages.length > 0 || activeThreadIsProcessing || activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = activeThreadHasGate
-    ? "Resolve the approval request before sending another message."
-    : activeThreadHasOnboarding
-      ? `Finish connecting ${pendingOnboardingLabel(pendingOnboarding)} before sending another message.`
-    : "";
+  const approvalSubmitWarning = activeThreadHasPairingGate
+    ? "Finish connecting the channel before sending another message."
+    : activeThreadHasGate
+      ? "Resolve the approval request before sending another message."
+      : "";
   const composerSendDisabled =
     activeThreadHasGate ||
-    activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
-      !activeThreadHasGate &&
-      !activeThreadHasOnboarding) ||
+    (activeThreadIsProcessing && !activeThreadHasGate) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -127,8 +136,7 @@ export function Chat({
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
       activeThreadIsProcessing &&
-      !activeThreadHasGate &&
-      !activeThreadHasOnboarding
+      !activeThreadHasGate
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
@@ -175,13 +183,12 @@ export function Chat({
   /* Mirror the active thread's lifecycle into the per-thread state store
    * so the sidebar row reflects what's happening on the open thread:
    *
-   *   pendingGate / pendingOnboarding → NEEDS_ATTENTION (amber)
-   *   isProcessing without either     → RUNNING (green)
-   *   neither                       → clear (idle)
+   *   pendingGate (approval, auth, or channel pairing) → NEEDS_ATTENTION (amber)
+   *   isProcessing without a gate                       → RUNNING (green)
+   *   neither                                         → clear (idle)
    *
-   * Priority is user-action-first because a gate or pairing panel logically
-   * subsumes processing — the run is paused waiting on the user, not actively
-   * working.
+   * Priority is user-action-first because a gate logically subsumes processing
+   * — the run is paused waiting on the user, not actively working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
    * fresh value) on threadId change via the thread-reset effect in
@@ -204,7 +211,7 @@ export function Chat({
    * window. Setting NEEDS_ATTENTION / RUNNING stays immediate. */
   React.useEffect(() => {
     if (!activeThreadId) return undefined;
-    if (pendingGate || pendingOnboarding) {
+    if (pendingGate) {
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
@@ -217,7 +224,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, pendingOnboarding, isProcessing]);
+  }, [activeThreadId, pendingGate, isProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -289,19 +296,10 @@ export function Chat({
             `}
             ${activeThreadIsProcessing &&
             !activeThreadHasGate &&
-            !activeThreadHasOnboarding &&
             html`<${TypingIndicator} />`}
-            ${activeThreadHasOnboarding &&
-            html`
-              <${OnboardingPairingCard}
-                onboarding=${pendingOnboarding}
-                onSubmit=${submitOnboardingPairing}
-                onCancel=${dismissOnboardingPairing}
-              />
-            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
-              ? (pendingGate.challengeKind === "oauth_url"
+              ? (pendingGate.challengeKind === "oauth_relay"
                 ? html`
                   <${AuthOauthCard}
                     gate=${pendingGate}
@@ -309,15 +307,23 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 `
-                : pendingGate.challengeKind === "manual_token"
-                  ? html`
+                : pendingGate.challengeKind === "paste_secret"
+                  ? (isChannelPairingGate(pendingGate)
+                    ? html`
+                  <${OnboardingPairingCard}
+                    onboarding=${onboardingFromGate(pendingGate)}
+                    onSubmit=${submitChannelConnectionPairing}
+                    onCancel=${handleCancelRun}
+                  />
+                `
+                    : html`
                   <${AuthTokenCard}
                     gate=${pendingGate}
                     onSubmit=${submitAuthToken}
                     onCancel=${() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
-                `
+                `)
                   : html`
                   <${AuthGenericCard}
                     gate=${pendingGate}

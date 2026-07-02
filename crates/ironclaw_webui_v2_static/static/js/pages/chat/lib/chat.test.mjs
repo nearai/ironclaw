@@ -344,13 +344,26 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
   assert.equal(sentBody.options.attachments.length, 0);
 });
 
-test("Chat renders generic onboarding pairing and blocks composer sends", async () => {
-  const pendingOnboarding = {
-    extensionName: "telegram",
-    state: "pairing_required",
-    instructions: "Message the Telegram bot and paste the code here.",
+test("Chat renders the pairing card from a channel-connection gate and blocks composer sends", async () => {
+  // A connectable channel that needs connection blocks the turn as a standard
+  // auth gate: a `paste_secret` challenge that also carries a `connection`
+  // requirement. Chat renders the pairing card off that gate — no timeline
+  // heuristic — wired to a redeem submit and a run-cancel dismiss.
+  const pendingGate = {
+    kind: "auth_required",
+    challengeKind: "paste_secret",
+    runId: "run-1",
+    gateRef: "gate-1",
+    connection: {
+      channel: "telegram",
+      instructions: "Message the Telegram bot and paste the code here.",
+      inputPlaceholder: "Enter code",
+      submitLabel: "Connect",
+      errorMessage: "Pairing failed.",
+    },
   };
   const submissions = [];
+  const cancelReasons = [];
   const threadStateUpdates = [];
   let sendCount = 0;
   const { tree, components } = renderChat({
@@ -359,50 +372,60 @@ test("Chat renders generic onboarding pairing and blocks composer sends", async 
     hookState: {
       messages: [{ id: "message-1" }],
       isProcessing: false,
-      pendingGate: null,
-      pendingOnboarding,
+      pendingGate,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
       hasMore: false,
       cooldownSeconds: 0,
       recoveryNotice: null,
-      activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "awaiting_gate" },
       send: async () => {
         sendCount += 1;
         return {};
       },
-      cancelRun: async () => {},
+      cancelRun: async (reason) => cancelReasons.push(reason),
       retryMessage: () => {},
       approve: () => {},
       recoverHistory: () => {},
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      submitOnboardingPairing: async (code) => submissions.push(code),
-      dismissOnboardingPairing: () => {},
+      submitChannelConnectionPairing: async (code) => submissions.push(code),
     },
   });
 
   const pairingCard = findComponent(tree, components.OnboardingPairingCard);
-  assert.ok(pairingCard, "pairing card should render");
+  assert.ok(pairingCard, "pairing card should render off the paste_secret+connection gate");
   const pairingProps = componentProps(pairingCard, components.OnboardingPairingCard);
-  assert.equal(pairingProps.onboarding, pendingOnboarding);
+  // The gate's connection context is normalized onto an onboarding-shaped prop.
+  assert.equal(pairingProps.onboarding.extensionName, "telegram");
+  assert.equal(
+    pairingProps.onboarding.instructions,
+    "Message the Telegram bot and paste the code here.",
+  );
   assert.deepEqual(threadStateUpdates, [
     { threadId: "thread-1", state: "needs_attention" },
   ]);
+  // Submit redeems through the pairing handler (no resolveGate here).
   await pairingProps.onSubmit("A1B2C3");
   assert.deepEqual(submissions, ["A1B2C3"]);
+  // Cancel abandons the parked turn via the run-cancel endpoint.
+  await pairingProps.onCancel();
+  assert.deepEqual(cancelReasons, ["user_requested"]);
 
   const chatInput = findComponent(tree, components.ChatInput);
   const inputProps = componentProps(chatInput, components.ChatInput);
   assert.equal(inputProps.sendDisabled, true);
   assert.equal(
     inputProps.statusText,
-    "Finish connecting Telegram before sending another message.",
+    "Finish connecting the channel before sending another message.",
   );
-  const response = await inputProps.onSend("do not send while pairing");
-  assert.equal(response, null);
+  // The pairing gate blocks the composer exactly like any other pending gate.
+  await assert.rejects(
+    inputProps.onSend("do not send while pairing"),
+    /Finish connecting the channel before sending another message/,
+  );
   assert.equal(sendCount, 0);
 });
 
