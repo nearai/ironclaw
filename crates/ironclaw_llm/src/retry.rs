@@ -34,9 +34,12 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
 /// `SessionRenewalFailed`, `Http`, `Io`.
 ///
-/// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `Json`.
+/// Non-retryable: `AuthFailed`, `SessionExpired`, `PaymentRequired`,
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
+/// - `PaymentRequired` — HTTP 402, the account is out of credits; retrying (or
+///   failing over to a sibling provider on the same billing account) only
+///   delays the user-visible "out of credits" message until the user tops up
 /// - `ModelNotAvailable` — the model won't appear between attempts
 /// - `Json` — a serde parse bug, not a transient failure
 ///
@@ -426,6 +429,18 @@ mod tests {
         assert!(!is_retryable(&LlmError::ModelNotAvailable {
             provider: "p".into(),
             model: "m".into(),
+        }));
+    }
+
+    /// HTTP 402 is permanent until the user tops up. Retrying the same key — or
+    /// failing over to a sibling provider that shares the billing account —
+    /// only burns the retry budget and delays the user-visible "out of credits"
+    /// message. `FailoverProvider` shares this classifier, so this assertion
+    /// also pins down "no failover on 402".
+    #[test]
+    fn payment_required_is_not_retryable() {
+        assert!(!is_retryable(&LlmError::PaymentRequired {
+            provider: "nearai_chat".into(),
         }));
     }
 
