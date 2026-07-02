@@ -770,7 +770,7 @@ fn invocation_mount_view_for_segments(
     user_id: &str,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
         grants.push(MountGrant::new(
@@ -783,6 +783,11 @@ fn invocation_mount_view_for_segments(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
         MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        MountAlias::new("/tenant-shared/reborn-projects")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-projects"))?,
+        MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
@@ -1046,6 +1051,30 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_grants_delete_to_reborn_projects_store() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let (resolved, grant) = view
+            .resolve_with_grant(
+                &ScopedPath::new("/tenant-shared/reborn-projects/tenant/records/project.json")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/shared/reborn-projects/tenant/records/project.json",
+                scope.tenant_id.as_str()
+            )
+        );
+        assert_eq!(grant.alias.as_str(), "/tenant-shared/reborn-projects");
+        assert_eq!(
+            grant.permissions,
+            MountPermissions::read_write_list_delete()
         );
     }
 
