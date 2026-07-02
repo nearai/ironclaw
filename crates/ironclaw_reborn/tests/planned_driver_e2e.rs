@@ -252,6 +252,53 @@ async fn planned_default_profile_completes_via_final_answer_nudge() {
 }
 
 #[tokio::test]
+async fn scheduled_trigger_profile_completes_via_final_answer_nudge() {
+    let resolver = default_planned_run_profile_resolver().expect("resolver should build");
+    let resolved = resolver
+        .resolve_run_profile(
+            ironclaw_turns::RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(
+                    ironclaw_turns::RunProfileRequest::new(
+                        ironclaw_turns::RunProfileId::scheduled_trigger().as_str(),
+                    )
+                    .unwrap(),
+                ),
+        )
+        .await
+        .expect("scheduled_trigger profile should resolve");
+    assert_eq!(
+        resolved.profile_id.as_str(),
+        ironclaw_turns::RunProfileId::scheduled_trigger().as_str()
+    );
+    assert!(
+        resolved.steering_policy.allow_driver_specific_nudges,
+        "scheduled_trigger must have driver-specific nudges enabled"
+    );
+
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let base_context = test_run_context("scheduled-trigger-nudge");
+    let context = LoopRunContext::new(
+        base_context.scope,
+        base_context.turn_id,
+        base_context.run_id,
+        resolved.clone(),
+    );
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .run_context(context)
+        .script(no_progress_script())
+        .build();
+    let request = run_request(&driver, &host);
+
+    let exit = driver
+        .run(request, &host)
+        .await
+        .expect("planned driver run should succeed");
+
+    assert_completed_via_nudge(exit, &host);
+}
+
+#[tokio::test]
 async fn planned_driver_executor_error_maps_to_unavailable() {
     let registry = build_loop_family_registry().expect("registry should build");
     let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
