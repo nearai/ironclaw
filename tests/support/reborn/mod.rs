@@ -7,6 +7,7 @@ pub mod delivery;
 pub mod extension_surface;
 pub mod filesystem;
 pub mod github;
+pub mod golden;
 pub mod group;
 pub mod harness;
 pub mod harness_mcp;
