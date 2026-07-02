@@ -8,6 +8,7 @@
 //! the fix, any actor other than the group's canonical default actor failed
 //! deterministically with `driver_unavailable` / "unknown thread".
 
+use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 
@@ -49,24 +50,44 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await
         .map_err(|e| format!("[step B assert] {e}"))?;
 
-    // Isolation negative guards (prove genuine owner separation, not just
-    // "didn't crash" — the banana-99 pattern):
-    // 1. Actor A's own thread must not surface actor B's reply.
-    if a.assert_reply_contains("reply-for-actor-b").await.is_ok() {
-        return Err("isolation failure: actor A's thread surfaced actor B's reply".into());
+    // Isolation negative guards, SYMMETRIC both ways: neither actor's owner
+    // scope may surface the other's reply or read the other's thread history.
+    assert_cannot_read_other_actor(&a, "A", &b, "B", "reply-for-actor-b").await?;
+    assert_cannot_read_other_actor(&b, "B", &a, "A", "reply-for-actor-a").await?;
+
+    Ok(())
+}
+
+/// One direction of the owner-isolation negative guard (prove genuine owner
+/// separation, not just "didn't crash" — the banana-99 pattern):
+/// `reader`'s own thread must not surface `other`'s reply, and `other`'s
+/// thread must not be readable through `reader`'s owner scope at all — each
+/// owner's records live under a separate `owners/<user>` subtree. One helper
+/// called once per direction, so the symmetric check cannot silently de-sync.
+async fn assert_cannot_read_other_actor(
+    reader: &RebornIntegrationHarness,
+    reader_name: &str,
+    other: &RebornIntegrationHarness,
+    other_name: &str,
+    other_reply: &str,
+) -> HarnessResult<()> {
+    if reader.assert_reply_contains(other_reply).await.is_ok() {
+        return Err(format!(
+            "isolation failure: actor {reader_name}'s thread surfaced actor {other_name}'s reply"
+        )
+        .into());
     }
-    // 2. Actor B's thread must not be readable through actor A's owner scope
-    //    at all — B's records live under a separate `owners/<user>` subtree.
-    if a
+    if reader
         .thread_harness
-        .history(b.binding.thread_id.clone())
+        .history(other.binding.thread_id.clone())
         .await
         .is_ok()
     {
-        return Err(
-            "isolation failure: actor B's thread is readable under actor A's owner scope".into(),
-        );
+        return Err(format!(
+            "isolation failure: actor {other_name}'s thread is readable under actor \
+             {reader_name}'s owner scope"
+        )
+        .into());
     }
-
     Ok(())
 }

@@ -857,8 +857,13 @@ impl<'g> RebornThreadBuilder<'g> {
     /// thread's, so the run's `TurnActor` and per-turn owner-scope resolution
     /// (`ThreadScopeResolver::resolve_for_turn`, the same mechanism production
     /// uses for multi-user WebChat) isolate this thread's reads/writes under
-    /// its own `owners/<actor_id>` subtree. Unset (the default) keeps the
-    /// existing `HARNESS_ACTOR_ID` behavior byte-identical.
+    /// their own subtree. The owner axis of that subtree is the resolved
+    /// canonical `UserId` (`binding.subject_user_id` / `ThreadScope.owner_user_id`)
+    /// — NOT the external `actor_id` string passed here — the binding probe
+    /// maps this `actor_id` to that canonical user id once at build time, and
+    /// every subsequent op resolves its mount from the binding, not the raw
+    /// string. Unset (the default) keeps the existing `HARNESS_ACTOR_ID`
+    /// behavior byte-identical.
     pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
         self.actor_id = Some(actor_id.into());
         self

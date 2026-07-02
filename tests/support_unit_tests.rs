@@ -362,7 +362,7 @@ mod reborn_support_tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_filesystem::ScopedFilesystem;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
@@ -1085,6 +1085,49 @@ mod reborn_support_tests {
             .assert_final_reply(ThreadId::new("thread-reopen").unwrap(), "assistant")
             .await
             .expect("reopened final reply");
+    }
+
+    #[tokio::test]
+    async fn filesystem_thread_harness_reopens_distinct_actor_scope() {
+        // Regression pin for E-MULTIUSER (#5479): before the fix, the
+        // `/threads` mount was resolved ONCE at construction
+        // (`ScopedFilesystem::with_fixed_view`), baking in whichever scope
+        // built the service first. Build a harness under a NON-default owner
+        // (distinct from every other test's shared "user-reborn-support"),
+        // write history, reopen a fresh service instance over the SAME
+        // backend under that SAME distinct owner, and confirm history is
+        // still readable — the reopened mount resolves the identical owner
+        // subtree. A sibling harness sharing the SAME backend but a
+        // DIFFERENT owner must not see it (proves subtree separation, not
+        // just "didn't crash" round-tripping).
+        let backend = Arc::new(InMemoryBackend::new());
+        let owner_a = RebornThreadHarness::filesystem_shared_backend(
+            thread_scope_with_owner("distinct-actor-reopen", "user-distinct-actor-a"),
+            Arc::clone(&backend),
+        )
+        .expect("owner-a thread harness");
+        let thread_id = write_thread_history(&owner_a).await;
+
+        let reopened_a = owner_a.reopened().expect("reopened owner-a harness");
+        let history = reopened_a
+            .history(thread_id.clone())
+            .await
+            .expect("reopened history under the same distinct owner");
+        assert_eq!(history.len(), 2);
+        reopened_a
+            .assert_final_reply(thread_id.clone(), "assistant")
+            .await
+            .expect("reopened final reply under the same distinct owner");
+
+        let owner_b = RebornThreadHarness::filesystem_shared_backend(
+            thread_scope_with_owner("distinct-actor-reopen", "user-distinct-actor-b"),
+            backend,
+        )
+        .expect("owner-b thread harness");
+        assert!(
+            owner_b.history(thread_id).await.is_err(),
+            "a distinct owner scope must not see owner-a's history after reopen"
+        );
     }
 
     #[tokio::test]
@@ -2168,11 +2211,17 @@ mod reborn_support_tests {
     }
 
     fn thread_scope(label: &str) -> ThreadScope {
+        thread_scope_with_owner(label, "user-reborn-support")
+    }
+
+    /// Like [`thread_scope`] but with a caller-chosen owner, so tests can pin
+    /// behavior for a non-default owner (E-MULTIUSER reopen coverage).
+    fn thread_scope_with_owner(label: &str, owner: &str) -> ThreadScope {
         ThreadScope {
             tenant_id: TenantId::new("tenant-reborn-support").unwrap(),
             agent_id: AgentId::new("agent-reborn-support").unwrap(),
             project_id: None,
-            owner_user_id: Some(UserId::new("user-reborn-support").unwrap()),
+            owner_user_id: Some(UserId::new(owner).unwrap()),
             mission_id: None,
         }
         .with_thread_label(label)
