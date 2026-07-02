@@ -112,7 +112,8 @@ Optional; schedule when loop work next opens both crates anyway.
 
 ## 3. Composition dissection — 10 internal modules, 11 PRs
 
-Target: `lib.rs` goes from ~120 flat `mod` decls to ~11; `runtime.rs`/`factory.rs`
+Target: `lib.rs` goes from ~120 flat `mod` decls to **≤ 12** (root + the 10 domain
+modules of §3/§6.2, plus the `test_support` top-level mod); `runtime.rs`/`factory.rs`
 dissolve; **one crate throughout — every existing `pub use` re-points, external
 consumers compile unchanged.**
 
@@ -175,7 +176,8 @@ webui_v2_e2e `nearai_provider_save*`, runtime nearai env-var/keychain races) pas
 ### 4.2 Structural gates (assert the refactor is actually happening)
 
 ```bash
-# S1 flat-module count in lib.rs must be ≤ the step's target (final target ≤ 15)
+# S1 flat-module count in lib.rs must be ≤ the step's target
+# (final target ≤ 12: root + 10 domain modules per §3/§6.2, plus test_support)
 grep -cE '^\s*(pub )?mod [a-z_0-9]+;' crates/ironclaw_reborn_composition/src/lib.rs
 # S2 god-file ceiling: no src file (tests excluded) over 4,000 lines by PR #11
 find crates/ironclaw_reborn_composition/src -name '*.rs' ! -name '*tests*' -exec wc -l {} + | sort -rn | head -5
@@ -255,7 +257,7 @@ roadmap features get built against.
 | Metric | Today | Target |
 |---|---:|---:|
 | Workspace crates | 76 | ~69 (6 folds + agent_loop merge; new crates ONLY for new channel/ingress adapters) |
-| composition top-level `mod`s | ~120 | ≤ 15 |
+| composition top-level `mod`s | ~120 | ≤ 12 |
 | Largest non-test src file (reborn crates) | 14.5k (`reborn_traces/contribution.rs`) | ≤ 4k |
 | `RebornServicesApi` | 1 trait, ~70 methods | ~7 domain port traits (§6.4) |
 | Cross-cutting feature footprint | 9–18 crates | 4–8 crates/modules (§7) |
