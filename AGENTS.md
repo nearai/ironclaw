@@ -37,6 +37,9 @@ Use `grep`/read for text, config, and non-code files, and after the graph for co
 
 ## Where to Work
 
+**Build new features Reborn-side, in `crates/` — not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (`reborn_cli`), **not** `src/main.rs`. Start from the `reborn-feature` skill, which maps the layers. `src/` is v1, being retired under "Clean up old architecture" — touch it only to maintain existing v1 behavior, never to add new features.
+
+Existing subsystem locations (mostly v1 `src/`; maintain, don't extend):
 - Agent/runtime behavior: `src/agent/`
 - Web gateway/API/SSE/WebSocket: `src/channels/web/`
 - Persistence and DB abstractions: `src/db/`
