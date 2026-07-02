@@ -62,7 +62,8 @@
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.message[data-streaming="true"]::after {
+.message.user[data-streaming="true"]::after,
+.message.assistant[data-streaming="true"] .message-content::after {
   content: '';
   display: inline-block;
   width: 2px;
@@ -77,26 +78,57 @@
   50% { opacity: 0.3; }
 }
 
-/* User: subtle brand-tinted bubble on the right (ChatGPT-style) */
+/* User: high-contrast bubble on the right (prototype style) */
 .message.user {
   align-self: flex-end;
-  max-width: 80%;
+  max-width: 78%;
   padding: 10px 16px;
   background: var(--accent-soft);
   color: var(--text);
-  border-radius: 20px;
-  border-bottom-right-radius: 6px;
+  border-radius: var(--v2-radius-lg);
+  border-bottom-right-radius: var(--v2-radius-xs);
   white-space: pre-wrap;
 }
 
-/* Assistant: plain text on the page background, no bubble chrome */
+/* Assistant: soft card bubble with the claw avatar chip beside it
+   (mirrors the /start prototype's agent messages). */
 .message.assistant {
-  align-self: stretch;
+  align-self: flex-start;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--v2-space-3);
+  max-width: 92%;
   background: none;
   border: none;
-  padding: 2px 0;
+  padding: 0;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.6;
+}
+
+.message-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  margin-top: 4px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.message-avatar svg {
+  width: 14px;
+  height: 14px;
+}
+
+.message.assistant .message-content {
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-lg);
+  border-top-left-radius: var(--v2-radius-xs);
+  padding: 10px 16px;
 }
 
 .message.has-copy {
@@ -283,13 +315,20 @@
   padding-left: 0;
 }
 
-/* Thinking indicator */
+/* Thinking indicator — a typing bubble IN the thread, styled like an
+   incoming agent message (the reply lands exactly where it sits). */
 
 .activity-thinking {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 6px 8px;
+  align-self: flex-start;
+  margin-left: 38px; /* aligns with agent bubbles (avatar 26px + gap 12px) */
+  padding: 10px 14px;
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-lg);
+  border-top-left-radius: var(--v2-radius-xs);
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
@@ -1069,50 +1108,50 @@
 .chat-input {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  /* Controls (info, clip, mic, send) center against the single-line input. */
+  align-items: center;
   width: min(768px, calc(100% - 32px));
-  margin: 0 auto 10px;
-  padding: 10px 12px;
+  /* 16px bottom margin matches the 16px side gutters. */
+  margin: 0 auto 16px;
+  padding: 8px;
   gap: var(--space-2);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 24px;
+  /* macOS-window radius (radius-md + 2): rounded, not a pill. */
+  border-radius: calc(var(--v2-radius-md) + 2px);
   flex-shrink: 0;
-  min-height: 56px;
-  box-shadow: var(--shadow-md);
+  min-height: 52px;
+  box-shadow: var(--v2-shadow-sm);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.chat-input:focus-within {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md), 0 0 0 3px var(--focus-ring);
-}
-
-/* Status row under the composer (active model, etc.) — centered under the
-   input, ChatGPT-footnote style. */
-.chat-statusbar {
-  display: flex;
+/* Discrete model/runtime info dot (overrides the composer's accent
+   button base). */
+.chat-input button.chat-model-info {
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
-  width: min(768px, calc(100% - 32px));
-  margin: 0 auto 8px;
-  flex-shrink: 0;
-}
-
-.chat-model-chip {
-  background: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  align-self: center;
+  background: transparent;
   border: none;
-  padding: 2px 6px;
-  border-radius: var(--radius);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  border-radius: var(--v2-radius-full);
   color: var(--text-dimmed);
   cursor: pointer;
   transition: color var(--transition-fast), background var(--transition-fast);
 }
 
-.chat-model-chip:hover {
+.chat-input button.chat-model-info:hover {
   color: var(--text-secondary);
-  background: var(--hover-surface);
+  background: var(--hover-subtle);
+  transform: none;
+}
+
+.chat-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md), 0 0 0 3px var(--focus-ring);
 }
 
 .chat-input-wrapper {
@@ -1125,6 +1164,8 @@
    the composer container (.chat-input:focus-within). */
 .chat-input-wrapper textarea {
   width: 100%;
+  /* Single-line height ≈ 37px, centered by the container's align-items —
+     placeholder and caret sit on the control's vertical center. */
   padding: 8px 6px;
   background: none;
   border: none;
@@ -1133,7 +1174,7 @@
   font-size: var(--text-base);
   font-family: inherit;
   resize: none;
-  min-height: 40px;
+  min-height: 24px;
   max-height: 120px;
   transition: height 100ms ease;
 }
@@ -1206,7 +1247,8 @@
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 600;
-  align-self: flex-end;
+  /* Center against the input row — never bottom-hang. */
+  align-self: center;
   transition: background 0.2s, opacity 0.2s, transform 150ms var(--ease-spring);
 }
 
@@ -1223,6 +1265,17 @@
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
+}
+
+/* Send is icon-only: a round accent control on the compact scale. */
+#send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--v2-control-h-md);
+  height: var(--v2-control-h-md);
+  padding: 0;
+  border-radius: var(--v2-radius-full);
 }
 
 /* Send reads as inert until there's text (JS toggles .active on input). */
@@ -1628,4 +1681,328 @@
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* ── Flow cards (in-thread onboarding widgets, prototype parity) ── */
+
+.flow-card {
+  align-self: stretch;
+  max-width: 92%;
+  margin-left: 38px; /* aligned with agent bubbles */
+  animation: slideUp 350ms var(--ease-spring);
+}
+
+/* Connect CTA */
+
+.flow-card-connect {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-3);
+  padding: var(--v2-space-3) var(--v2-space-4);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border-subtle);
+  border-radius: var(--v2-radius-lg);
+  max-width: 480px;
+}
+
+.flow-connect-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+  flex: 0 0 auto;
+}
+
+.flow-connect-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flow-connect-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.flow-connect-caption {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+}
+
+.flow-connect-btn {
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--text-sm);
+  border-radius: var(--v2-radius-full);
+}
+
+.flow-connect-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--success);
+  white-space: nowrap;
+}
+
+/* Cascade chips */
+
+.flow-cascade-label {
+  font-family: var(--font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: var(--v2-space-2);
+}
+
+.flow-cascade-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--v2-space-2);
+}
+
+.flow-cascade-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-full);
+  background: var(--bg);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--text);
+  opacity: 0;
+  animation: flowChipIn 320ms var(--ease-out-expo) forwards;
+}
+
+.flow-cascade-chip img {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.flow-cascade-check {
+  color: var(--success);
+  opacity: 0;
+  animation: flowChipIn 240ms var(--ease-out-expo) forwards;
+}
+
+.flow-cascade-via {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dimmed);
+}
+
+@keyframes flowChipIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Reading stats */
+
+.flow-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--v2-space-3);
+  max-width: 560px;
+}
+
+.flow-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--v2-space-4);
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+}
+
+.flow-stat-value {
+  font-size: var(--v2-font-size-display-sm);
+  font-weight: 700;
+  letter-spacing: var(--v2-tracking-tight);
+  color: var(--text);
+}
+
+.flow-stat-label {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+}
+
+.flow-learned {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--v2-space-2);
+  margin-top: var(--v2-space-3);
+}
+
+.flow-learned-chip {
+  padding: 4px 10px;
+  border-radius: var(--v2-radius-full);
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  opacity: 0;
+  animation: flowChipIn 300ms var(--ease-out-expo) forwards;
+}
+
+/* Proposal cards */
+
+.flow-card-proposal {
+  padding: var(--v2-space-4);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-2);
+}
+
+.flow-card-proposal.approved { border-color: color-mix(in srgb, var(--v2-positive-text) 35%, transparent); }
+
+.flow-card-proposal.dismissed { opacity: 0.55; }
+
+.flow-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+}
+
+.flow-proposal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--v2-radius-xs);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-title {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.flow-proposal-badge {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-full);
+}
+
+.flow-proposal-badge.draft { background: var(--v2-surface-muted); color: var(--text-secondary); }
+.flow-proposal-badge.live { background: var(--v2-positive-soft); color: var(--success); }
+
+.flow-proposal-body {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.flow-proposal-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-sm);
+  overflow: hidden;
+}
+
+.flow-proposal-row {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  padding: 8px var(--v2-space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--v2-surface-soft);
+  font-size: var(--v2-font-size-caption);
+  color: var(--text);
+}
+
+.flow-proposal-row:last-child { border-bottom: none; }
+
+.flow-proposal-row-circle {
+  width: 12px;
+  height: 12px;
+  border: 1.5px dashed var(--text-dimmed);
+  border-radius: var(--v2-radius-full);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-row.done .flow-proposal-row-circle {
+  border-style: solid;
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.flow-proposal-row-icon {
+  display: inline-flex;
+  color: var(--text-dimmed);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--v2-space-3);
+  margin-top: 2px;
+}
+
+.flow-proposal-hint {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-dimmed);
+  flex: 1;
+  min-width: 0;
+}
+
+.flow-proposal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-approve {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-caption);
+}
+
+.flow-proposal-dismiss {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-md);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border-radius: var(--v2-radius-sm);
+}
+
+.flow-proposal-dismiss:hover { background: var(--hover-subtle); color: var(--text); }
+
+.flow-proposal-live-note {
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--success);
 }

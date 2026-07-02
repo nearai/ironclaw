@@ -375,6 +375,13 @@
             <div id="ghost-text" class="ghost-text"></div>
           </div>
           <input type="file" id="image-file-input" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.json,.xml,.rtf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.ogg,.wav,.m4a,.mp4,.aac,.flac,.webm" multiple style="display:none">
+          <!-- Discrete model/runtime info: an (i) with the details in its
+               tooltip; click still pre-fills /model. Replaces the old text
+               statusbar line under the composer. -->
+          <button id="chat-model-chip" class="chat-model-info" type="button" style="display:none"
+            aria-label="Model info">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          </button>
           <button id="attach-btn" class="attach-btn" data-i18n="chat.attachFiles" data-i18n-attr="title" title="Attach files"
             aria-label="Attach files">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -386,11 +393,9 @@
             aria-label="Voice chat coming soon">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
           </button>
-          <button id="send-btn" data-i18n="chat.send">Send</button>
-        </div>
-        <div class="chat-statusbar">
-          <button id="chat-model-chip" class="chat-model-chip" type="button" style="display:none"
-            data-i18n="chat.modelChipTitle" data-i18n-attr="title" title="Active model — click to switch with /model"></button>
+          <button id="send-btn" data-i18n="chat.send" data-i18n-attr="aria-label" aria-label="Send">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+          </button>
         </div>
       </div>
     </div>

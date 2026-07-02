@@ -255,10 +255,24 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
+// Claw mark for the agent avatar chip (matches WELCOME_CLAW_SVG).
+const AGENT_AVATAR_SVG =
+  '<svg viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">'
+  + '<path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z"/></svg>';
+
 function createMessageElement(role, content, options) {
   const opts = options || {};
   const div = document.createElement('div');
   div.className = 'message ' + role;
+
+  // Agent replies carry an avatar chip beside the bubble (prototype style).
+  if (role === 'assistant') {
+    const avatar = document.createElement('span');
+    avatar.className = 'message-avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    avatar.innerHTML = AGENT_AVATAR_SVG;
+    div.appendChild(avatar);
+  }
 
   const ts = document.createElement('span');
   ts.className = 'message-timestamp';
@@ -406,6 +420,9 @@ function loadThreads() {
 
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
+    _threadTitles.clear();
+    threads.forEach((t) => { if (t.title) _threadTitles.set(t.id, t.title); });
+    if (currentTab === 'chat') updateTopbarTitle();
     for (const thread of threads) {
       rememberedThreads.push({
         threadId: thread.id,
@@ -789,14 +806,107 @@ document.querySelectorAll('.tasks-segment').forEach((btn) => {
   btn.addEventListener('click', () => switchTasksSegment(btn.getAttribute('data-tasks-segment')));
 });
 
+// Thread titles by id, kept fresh by loadThreads for the topbar header.
+const _threadTitles = new Map();
+
 function updateTopbarTitle(tab) {
   const el = document.getElementById('main-topbar-title');
   if (!el) return;
+  // On the chat surface the header is the THREAD title (editable);
+  // everywhere else it's the page name.
+  if (currentTab === 'chat' && currentThreadId) {
+    el.textContent = _threadTitles.get(currentThreadId) || I18n.t('thread.untitled');
+    el.classList.add('editable');
+    el.title = I18n.t('thread.renameHint');
+    return;
+  }
+  el.classList.remove('editable');
+  el.removeAttribute('title');
   const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
   const label = activeBtn ? activeBtn.textContent.trim() : '';
   const fallback = typeof getInstanceName === 'function' ? getInstanceName() : 'IronClaw';
   el.textContent = label || fallback;
 }
+
+// --- Inline thread rename (topbar) ---
+//
+// Click the title → input with the current value + two round icon buttons
+// (cancel ×, save ✓). Enter saves, Escape cancels.
+function startThreadTitleEdit() {
+  const el = document.getElementById('main-topbar-title');
+  if (!el || !el.classList.contains('editable') || !currentThreadId) return;
+  if (document.getElementById('thread-title-editor')) return;
+
+  const current = _threadTitles.get(currentThreadId) || '';
+  const wrap = document.createElement('div');
+  wrap.className = 'thread-title-editor';
+  wrap.id = 'thread-title-editor';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-title-input';
+  input.maxLength = 80;
+  input.value = current;
+  input.placeholder = I18n.t('thread.untitled');
+  wrap.appendChild(input);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'thread-title-btn tertiary';
+  cancelBtn.setAttribute('aria-label', I18n.t('btn.cancel'));
+  cancelBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'thread-title-btn primary';
+  saveBtn.setAttribute('aria-label', I18n.t('memory.save'));
+  saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+  wrap.appendChild(cancelBtn);
+  wrap.appendChild(saveBtn);
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    wrap.remove();
+    el.style.display = '';
+  };
+  const save = () => {
+    const value = input.value.trim().slice(0, 80);
+    const threadId = currentThreadId;
+    close();
+    if (!value || !threadId) return;
+    _threadTitles.set(threadId, value);
+    updateTopbarTitle();
+    apiFetch('/api/chat/threads/' + encodeURIComponent(threadId), {
+      method: 'PATCH',
+      body: { title: value },
+    }).then(() => {
+      loadThreads();
+    }).catch((err) => {
+      showToast(I18n.t('thread.renameFailed', { message: err.message }), 'error');
+    });
+  };
+
+  cancelBtn.addEventListener('click', close);
+  saveBtn.addEventListener('click', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  input.addEventListener('blur', (e) => {
+    // Let clicks on the save/cancel buttons land before closing.
+    setTimeout(() => { if (!closed && !wrap.contains(document.activeElement)) close(); }, 150);
+  });
+
+  el.style.display = 'none';
+  el.parentNode.insertBefore(wrap, el);
+  input.focus();
+  input.select();
+}
+
+document.getElementById('main-topbar-title')?.addEventListener('click', () => startThreadTitleEdit());
 
 function switchTab(tab) {
   tab = normalizeTabForEngineMode(tab);

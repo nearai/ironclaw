@@ -47,7 +47,10 @@ function updateChatModelChip(model, backend) {
     chip.style.display = 'none';
     return;
   }
-  chip.textContent = shortModelName(model) + (backend ? ' \u00b7 ' + backend : '');
+  // Discrete (i): the details live in the tooltip, not a text line.
+  var detail = shortModelName(model) + (backend ? ' \u00b7 ' + backend : '');
+  chip.title = I18n.t('chat.modelInfoTooltip', { detail: detail });
+  chip.setAttribute('aria-label', chip.title);
   chip.style.display = '';
   if (!chip.dataset.wired) {
     chip.dataset.wired = 'true';

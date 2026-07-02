@@ -633,6 +633,126 @@ window.NUX_BILLING = {
   }
 
   // --------------------------------------------------------------------
+  // Onboarding flows (ported verbatim from the /start prototype:
+  // private-assistant achal/chat-first — flows.ts + proactive.ts). Each
+  // use-case chip resolves to a flow: connect pitch → connect card →
+  // cascade chips → "reading your world" stats → 3 draft-automation
+  // proposal cards (Approve creates a real mission on the Tasks board).
+  // Implied backend: these are the scripted event sequences the engine v2
+  // agent loop produces; cards ride a `flow_card` SSE event and actions
+  // land on POST /api/flows/action { action, provider|proposal }.
+  // --------------------------------------------------------------------
+
+  var FLOW_PROPOSALS = {
+    'digest': { icon: 'bell', title: 'A morning digest of what you actually care about', body: 'I read your recent threads and grouped everything into one brief \u2014 the launch, hiring, and anything time-sensitive.', details: ['3 new replies that need you today', '2 threads waiting on a decision', '1 invoice to approve before Friday'], suggestLine: "I'll send it every morning at 8:00am once you approve.", mission: { name: 'Morning digest', cadence: 'Every weekday, 8:00', cadenceType: 'cron' } },
+    'triage': { icon: 'inbox', title: 'Inbox triage + drafted replies', body: 'I sorted your unread mail into Action / FYI / Ignore and drafted replies for the ones that matter.', details: ['9 labeled Action, 24 FYI, 41 Ignore', '5 replies drafted in your voice', '2 newsletters auto-archived'], suggestLine: "Approve and I'll keep your inbox triaged automatically.", mission: { name: 'Inbox triage', cadence: 'On new email', cadenceType: 'event' } },
+    'meeting-prep': { icon: 'calendar-check', title: 'Briefs before every meeting', body: 'From your calendar, I prepared a one-pager for each upcoming meeting \u2014 company, attendees, and recent context.', details: ['Prepped your next 4 meetings', 'Flagged 1 conflict to resolve', 'Found a 30-min slot for the Dana sync'], suggestLine: "Approve and I'll deliver each brief 10 minutes ahead.", mission: { name: 'Meeting briefs', cadence: '10 min before meetings', cadenceType: 'event' } },
+    'people': { icon: 'users', title: "Who to talk to \u2014 and I've already held the time", body: "I read your docs and call transcripts. Here's who to sync with this week \u2014 I drafted the invites and blocked the slots \u2014 plus the calls only you can make.", details: ['Priya \u2014 Series A term sheet (today)', 'Marcus \u2014 close out the eng hiring loop', 'Dana \u2014 finalize the launch date & GTM', 'Decision needed: approve the 3 pricing tiers'], suggestLine: '3 invites drafted on your calendar \u2014 approve to send.', mission: { name: 'Weekly sync scheduler', cadence: 'Every Monday, 8:00', cadenceType: 'cron' } },
+    'twitter': { icon: 'trending-up', title: "You're growing on X \u2014 I got a head start", body: "I studied your voice and what's been landing, then put together a week of content and engagement.", details: ['Drafted 3 tweets in your voice', 'Replied to 2 mentions about you', 'Lined up 5 relevant accounts to follow'], suggestLine: 'All drafted \u2014 approve any to go live. Nothing posts without you.', mission: { name: 'X growth drafts', cadence: 'Daily', cadenceType: 'cron' } },
+    'monitor': { icon: 'radar', title: 'Keep an eye on what matters', body: 'I can watch Hacker News, your repos, or your endpoints and ping you the moment something happens.', details: ['Watching mentions of your product', 'Alerting on failed deploys', 'Daily summary of new releases'], suggestLine: "Approve any and I'll start watching.", mission: { name: 'Keyword monitor', cadence: 'Every 10 minutes', cadenceType: 'cron' } },
+    'slack-triage': { icon: 'messages-square', title: 'Mentions + threads, triaged', body: 'I sort your mentions into what needs you now vs. later, and draft replies.', details: ['17 mentions \u2014 5 need you today', '3 threads awaiting a decision', 'Drafted 4 replies in your voice'], suggestLine: "Approve and I'll keep your mentions triaged.", mission: { name: 'Slack mention triage', cadence: 'Continuous', cadenceType: 'event' } },
+    'slack-digest': { icon: 'newspaper', title: 'A daily team digest', body: 'One post each morning summarizing what moved across your channels.', details: ['#launch: GTM doc finalized', '#eng: 2 incidents resolved', '#sales: 3 new deals in'], suggestLine: "Approve and I'll post a daily digest at 9am.", mission: { name: 'Team digest', cadence: 'Every day, 9:00', cadenceType: 'cron' } },
+    'slack-tasks': { icon: 'check-square', title: 'Turn messages into tasks', body: 'When someone says "create task: \u2026" I open a ticket and confirm back with the link.', details: ['6 tasks captured this week', 'Routed to the right project', 'Nudged 2 that went overdue'], suggestLine: "Approve and I'll turn requests into tracked tasks.", mission: { name: 'Task capture', cadence: 'On matching message', cadenceType: 'event' } },
+    'tg-health': { icon: 'activity', title: 'Deployment health watch', body: 'I ping your endpoints and alert you on Telegram the moment anything returns non-200.', details: ['Watching 3 endpoints', 'Checking every 5 minutes', 'Alerts routed to Telegram'], suggestLine: "Approve and I'll watch your endpoints 24/7.", mission: { name: 'Deployment health watch', cadence: 'Every 5 minutes', cadenceType: 'cron' } },
+    'tg-incident': { icon: 'alert-triangle', title: 'Incident first-responder', body: 'When something breaks, I gather the logs and the suspect change and ping you with a one-line summary.', details: ['Hooks into your deploys', 'Pulls logs + recent commits', 'One-line summary to Telegram'], suggestLine: "Approve and I'll be your incident first-responder.", mission: { name: 'Incident first-responder', cadence: 'On deploy failure', cadenceType: 'event' } },
+  };
+
+  var NUX_FLOWS = {
+    gmail: {
+      lead: 'gmail',
+      leadLabel: 'Gmail',
+      cascade: [
+        { id: 'gmail', label: 'Gmail' },
+        { id: 'google_calendar', label: 'Google Calendar' },
+        { id: 'google_drive', label: 'Google Drive' },
+        { id: 'google_docs', label: 'Google Docs' },
+        { id: 'notion', label: 'Notion', via: 'via Google' },
+        { id: 'slack', label: 'Slack', via: 'via Google' },
+      ],
+      cascadeLabel: 'Connecting your stack \u00b7 one sign-in',
+      connectCopy: "Love it \u2014 that's exactly the kind of thing I take off your plate. The fastest way to make it real: connect Gmail. From that one sign-in I can reach the rest of your stack \u2014 Calendar, Drive, Notion, Slack \u2014 and get to work. Your credentials stay in an encrypted vault I never see.",
+      connectedCopy: 'Gmail connected \u2014 and your private agent is live on free credits. Encrypted enclave, credentials sealed in a vault the model never sees.',
+      cascadeCopy: "Here's the trick: that one Google sign-in is all I need. I'm using it to connect the rest of your stack right now \u2014 no other logins, no setup.",
+      readingCopy: "Now I'm reading everything you've just given me access to \u2014",
+      readingStats: [
+        { value: '1,284', label: 'emails' },
+        { value: '37', label: 'Notion docs' },
+        { value: '12', label: 'transcripts' },
+      ],
+      learned: ['Fundraising (Series A)', 'Hiring \u2014 eng loop', 'Launch + GTM', 'Top people: Priya, Marcus, Dana', 'Growing on X'],
+      proposals: ['digest', 'people', 'twitter'],
+    },
+    github: {
+      lead: 'github',
+      leadLabel: 'GitHub',
+      cascade: [
+        { id: 'github', label: 'GitHub' },
+        { id: 'telegram', label: 'Telegram' },
+      ],
+      cascadeLabel: 'Wiring up your repos + where to reach you',
+      connectCopy: "On it \u2014 that's a great first one. Connect GitHub and I'll watch your repos, PRs, and releases and get to work. Read-only where it counts, and your token stays in an encrypted vault the model never sees.",
+      connectedCopy: 'GitHub connected \u2014 your private agent is live on free credits, token sealed in the vault.',
+      cascadeCopy: "Connected. I'm pulling in your repos and wiring up where to reach you \u2014",
+      readingCopy: 'Scanning your repos and recent activity \u2014',
+      readingStats: [
+        { value: '14', label: 'repos' },
+        { value: '23', label: 'open PRs' },
+        { value: '188', label: 'CI runs' },
+      ],
+      learned: ['Active: nearai/ironclaw', 'Release cadence: weekly', 'Hot area: gateway', 'Reviewers: you, Marcus', 'CI flaky on main'],
+      proposals: ['gh-releases', 'gh-reviews', 'gh-ci'],
+    },
+    slack: {
+      lead: 'slack',
+      leadLabel: 'Slack',
+      cascade: [
+        { id: 'slack', label: 'Slack' },
+        { id: 'linear', label: 'Linear' },
+      ],
+      cascadeLabel: 'Plugging into your channels + task tracker',
+      connectCopy: "Love it. Connect Slack and I'll plug into your channels and DMs and run your team ops from there. Your credentials stay sealed in an encrypted vault the model never sees.",
+      connectedCopy: 'Slack connected \u2014 your private agent is live on free credits, credentials sealed in the vault.',
+      cascadeCopy: 'Connected. Plugging into your channels and your task tracker \u2014',
+      readingCopy: 'Reading your channels and recent threads \u2014',
+      readingStats: [
+        { value: '28', label: 'channels' },
+        { value: '1,142', label: 'messages today' },
+        { value: '17', label: 'mentions' },
+      ],
+      learned: ['Busiest: #launch', '17 mentions today', 'Recurring: standup, bugs', 'Collaborators: Priya, Dana', '2 decisions pending'],
+      proposals: ['slack-triage', 'slack-digest', 'slack-tasks'],
+    },
+    telegram: {
+      lead: 'telegram',
+      leadLabel: 'Telegram',
+      cascade: [
+        { id: 'telegram', label: 'Telegram' },
+        { id: 'github', label: 'GitHub' },
+      ],
+      cascadeLabel: 'Setting up your watch + where to reach you',
+      connectCopy: "On it. Connect Telegram and I'll reach you there and keep watch on what you care about \u2014 your credentials stay sealed in an encrypted vault.",
+      connectedCopy: 'Telegram connected \u2014 your private agent is live on free credits.',
+      cascadeCopy: 'Connected. Setting up your watch and where to reach you \u2014',
+      readingCopy: 'Setting up your monitors \u2014',
+      readingStats: [
+        { value: '3', label: 'endpoints' },
+        { value: '288', label: 'checks/day' },
+        { value: '0', label: 'alerts' },
+      ],
+      learned: ['Health endpoint found', 'Alert via Telegram', 'Baseline: 200 OK', 'Check every 5 min', 'On-call: you'],
+      proposals: ['tg-health', 'monitor', 'tg-incident'],
+    },
+  };
+
+  // Map a lead integration id onto a flow bucket (mirrors the prototype).
+  function flowForLead(lead) {
+    if (lead === 'github') return NUX_FLOWS.github;
+    if (lead === 'slack' || lead === 'linear' || lead === 'discord') return NUX_FLOWS.slack;
+    if (lead === 'telegram') return NUX_FLOWS.telegram;
+    return NUX_FLOWS.gmail;
+  }
+
+  // --------------------------------------------------------------------
   // Scripted agent scenarios
   // --------------------------------------------------------------------
   //
@@ -653,6 +773,17 @@ window.NUX_BILLING = {
       return null;
     }
 
+    // Use-case prompts (the suggested chips) run the full onboarding flow
+    // ported from the /start prototype: connect → cascade → reading →
+    // draft-automation proposals.
+    var cases = window.NUX_DATA.useCases || [];
+    for (var uc = 0; uc < cases.length; uc++) {
+      var normalized = cases[uc].prompt.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (text.replace(/\s+/g, ' ').trim() === normalized) {
+        return flowScenario(flowForLead((cases[uc].integrations || [])[0] || 'gmail'));
+      }
+    }
+
     // Slash commands and capability question.
     if (/what can you do|what do you do|help me get started|capabilities/.test(text)) {
       return capabilityScenario();
@@ -663,10 +794,10 @@ window.NUX_BILLING = {
       return connectScenario(connectMatch[1].replace(' ', '_'));
     }
     if (/triage my inbox|label new emails/.test(text)) {
-      return inboxTriageScenario(usedCase('inbox-triage'));
+      return flowScenario(NUX_FLOWS.gmail);
     }
     if (/briefing/.test(text)) {
-      return briefingScenario(usedCase('daily-briefing'));
+      return flowScenario(NUX_FLOWS.gmail);
     }
     if (/hacker news|keyword|appears on/.test(text) && /send|watch|summar/.test(text)) {
       return keywordMonitorScenario(usedCase('keyword-monitor'));
@@ -681,6 +812,58 @@ window.NUX_BILLING = {
       return hnSummaryScenario();
     }
     return genericScenario(content);
+  }
+
+  // The signature prototype flow, expressed as engine steps. `say` posts a
+  // full agent bubble (with a typing beat before it); `card` emits a
+  // flow_card; `pause` stops the script until POST /api/flows/action
+  // resumes it (e.g. the user clicks Connect on the connect card).
+  function flowScenario(flow) {
+    var alreadyConnected = isConnected(flow.lead);
+    var steps = [{ t: 400, thinking: 'Thinking' }];
+
+    if (!alreadyConnected) {
+      steps.push({ t: 900, say: flow.connectCopy });
+      steps.push({ t: 350, card: {
+        kind: 'connect',
+        provider: flow.lead,
+        title: 'Connect ' + flow.leadLabel,
+        caption: 'One sign-in connects your whole stack \u2014 credentials stay encrypted',
+        icon: '/icons/integrations/' + flow.lead + '.png',
+      } });
+      steps.push({ pause: 'connect:' + flow.lead });
+      steps.push({ t: 500, say: flow.connectedCopy });
+    } else {
+      steps.push({ t: 800, say: flow.leadLabel + ' is already connected \u2014 going straight to work.' });
+    }
+
+    steps.push({ t: 600, say: flow.cascadeCopy });
+    steps.push({ t: 300, card: {
+      kind: 'cascade',
+      label: flow.cascadeLabel,
+      chips: flow.cascade.map(function(c) {
+        return { id: c.id, label: c.label, via: c.via || null, icon: '/icons/integrations/' + c.id + '.png' };
+      }),
+    } });
+    steps.push({ t: 1600, connectMany: flow.cascade.map(function(c) { return c.id; }) });
+    steps.push({ t: 700, say: flow.readingCopy });
+    steps.push({ t: 300, card: { kind: 'reading', stats: flow.readingStats, learned: flow.learned } });
+    steps.push({ t: 1800, say: "Done. In your first hour \u2014 off that one " + flow.leadLabel + " connection \u2014 here's what I've drafted for you. Approve each one and I'll make it live." });
+    flow.proposals.forEach(function(pid) {
+      var p = FLOW_PROPOSALS[pid];
+      steps.push({ t: 900, card: {
+        kind: 'proposal',
+        proposal: pid,
+        icon: p.icon,
+        title: p.title,
+        body: p.body,
+        details: p.details,
+        suggestLine: p.suggestLine,
+      } });
+    });
+    steps.push({ t: 900, say: "That's your first hour \u2014 done. You're on free credits, which cover today. Approve any draft above and it becomes a live task under **Tasks**." });
+    steps.push({ t: 300, suggest: ['Show my tasks', 'What else can you take off my plate?'] });
+    return steps;
   }
 
   function capabilityScenario() {
@@ -873,9 +1056,11 @@ window.NUX_BILLING = {
     ];
   }
 
-  // Scenario player: walks the step list on timers, emitting SSE events the
-  // way the real agent loop does (thinking → tools → streamed response →
-  // suggestions → Done).
+  // Scenario player: a sequential step walker emitting SSE events the way
+  // the real agent loop does. Supports pausing (connect gates) and resuming
+  // via POST /api/flows/action.
+  var _pendingFlowResume = null; // { threadId, turn, steps, key }
+
   function runScenario(threadId, content) {
     var steps = scenarioForMessage(content);
     var turn = { user_input: content, response: null, tool_calls: [] };
@@ -887,85 +1072,136 @@ window.NUX_BILLING = {
       thread.updated_at = iso(0);
     }
 
-    var delay = 0;
-    var finalResponse = '';
-    steps.forEach(function(step) {
-      delay += step.t || 500;
+    playSteps(threadId, turn, steps);
+  }
 
-      if (step.thinking) {
-        setTimeout(function() {
-          emit('thinking', { thread_id: threadId, message: step.thinking });
-        }, delay);
+  function playSteps(threadId, turn, steps) {
+    var idx = 0;
+
+    function finishTurn() {
+      emit('status', { thread_id: threadId, message: 'Done' });
+    }
+
+    function next() {
+      if (idx >= steps.length) { finishTurn(); return; }
+      var step = steps[idx++];
+      if (step.pause) {
+        // Stop here; the flow action handler resumes the remainder. Input
+        // re-enables so the user can keep talking while the card waits.
+        _pendingFlowResume = { threadId: threadId, turn: turn, steps: steps.slice(idx), key: step.pause };
+        finishTurn();
+        return;
       }
+      // Typing beat before each agent bubble, like the prototype.
+      if (step.say || step.respond) {
+        emit('thinking', { thread_id: threadId, message: 'Thinking' });
+      }
+      setTimeout(function() { apply(step); }, step.t || 400);
+    }
 
+    function apply(step) {
+      if (step.thinking) {
+        emit('thinking', { thread_id: threadId, message: step.thinking });
+        next();
+        return;
+      }
       if (step.tool) {
         var callId = uid('call');
-        (function(tool, id, at) {
-          setTimeout(function() {
-            emit('tool_started', { thread_id: threadId, name: tool.name, call_id: id });
-          }, at);
-          var toolMs = 600 + Math.random() * 700;
-          setTimeout(function() {
-            emit('tool_completed', {
-              thread_id: threadId, name: tool.name, call_id: id,
-              success: true, duration_ms: Math.round(toolMs),
-            });
-            emit('tool_result', {
-              thread_id: threadId, name: tool.name, call_id: id,
-              preview: tool.preview || '',
-            });
-          }, at + toolMs);
-          turn.tool_calls.push({ name: tool.name, success: true });
-        })(step.tool, callId, delay);
-        delay += 900;
+        emit('tool_started', { thread_id: threadId, name: step.tool.name, call_id: callId });
+        var toolMs = 600 + Math.random() * 700;
+        turn.tool_calls.push({ name: step.tool.name, success: true });
+        setTimeout(function() {
+          emit('tool_completed', {
+            thread_id: threadId, name: step.tool.name, call_id: callId,
+            success: true, duration_ms: Math.round(toolMs),
+          });
+          emit('tool_result', {
+            thread_id: threadId, name: step.tool.name, call_id: callId,
+            preview: step.tool.preview || '',
+          });
+          next();
+        }, toolMs);
+        return;
       }
-
-      if (step.connect) {
-        (function(name, at) {
-          setTimeout(function() { installExtension(name); }, at);
-        })(step.connect, delay);
+      if (step.connect) { installExtension(step.connect); next(); return; }
+      if (step.connectMany) {
+        step.connectMany.forEach(function(id) { installExtension(id); });
+        next();
+        return;
       }
-
-      if (step.mission) {
-        (function(spec, at) {
-          setTimeout(function() { createMission(spec); }, at);
-        })(step.mission, delay);
+      if (step.mission) { createMission(step.mission); next(); return; }
+      if (step.card) {
+        emit('flow_card', { thread_id: threadId, card: step.card });
+        next();
+        return;
       }
-
+      if (step.say) {
+        turn.response = (turn.response ? turn.response + '\n\n' : '') + step.say;
+        emit('response', { thread_id: threadId, content: step.say });
+        next();
+        return;
+      }
       if (step.respond) {
-        (function(text, at) {
-          // Stream in word chunks like the real backend does.
-          var words = text.split(/(\s+)/);
-          var chunkSize = 6;
-          var streamedAt = at;
-          for (var i = 0; i < words.length; i += chunkSize) {
-            var chunk = words.slice(i, i + chunkSize).join('');
-            streamedAt += 40;
-            (function(c, t) {
-              setTimeout(function() {
-                emit('stream_chunk', { thread_id: threadId, content: c });
-              }, t);
-            })(chunk, streamedAt);
-          }
-          setTimeout(function() {
-            turn.response = text;
-            emit('response', { thread_id: threadId, content: text });
-            emit('status', { thread_id: threadId, message: 'Done' });
-          }, streamedAt + 120);
-        })(step.respond, delay);
-        // Advance the step clock past the streaming window so later steps
-        // (e.g. suggestion chips) land after the final response event.
-        delay += 40 * Math.ceil(step.respond.split(/(\s+)/).length / 6) + 300;
+        // Streamed final response (single-bubble scenarios).
+        var text = step.respond;
+        var words = text.split(/(\s+)/);
+        var chunkSize = 6;
+        var at = 0;
+        for (var i = 0; i < words.length; i += chunkSize) {
+          at += 40;
+          (function(c, t) {
+            setTimeout(function() {
+              emit('stream_chunk', { thread_id: threadId, content: c });
+            }, t);
+          })(words.slice(i, i + chunkSize).join(''), at);
+        }
+        setTimeout(function() {
+          turn.response = (turn.response ? turn.response + '\n\n' : '') + text;
+          emit('response', { thread_id: threadId, content: text });
+          next();
+        }, at + 150);
+        return;
       }
-
       if (step.suggest) {
-        (function(suggestions, at) {
-          setTimeout(function() {
-            emit('suggestions', { thread_id: threadId, suggestions: suggestions });
-          }, at);
-        })(step.suggest, delay);
+        emit('suggestions', { thread_id: threadId, suggestions: step.suggest });
+        next();
+        return;
       }
-    });
+      next();
+    }
+
+    next();
+  }
+
+  // Resume a paused flow (connect card clicked) or apply a proposal action.
+  // Implied: POST /api/flows/action { action: 'connect'|'approve'|'dismiss',
+  //          provider?, proposal? } -> { success, mission_id? }
+  function handleFlowAction(body) {
+    var action = (body && body.action) || '';
+    if (action === 'connect' && body.provider) {
+      installExtension(body.provider);
+      if (_pendingFlowResume && _pendingFlowResume.key === 'connect:' + body.provider) {
+        var resume = _pendingFlowResume;
+        _pendingFlowResume = null;
+        setTimeout(function() {
+          playSteps(resume.threadId, resume.turn, resume.steps);
+        }, 500);
+      }
+      return { success: true };
+    }
+    if (action === 'approve' && body.proposal && FLOW_PROPOSALS[body.proposal]) {
+      var p = FLOW_PROPOSALS[body.proposal];
+      var mission = createMission({
+        name: p.mission.name,
+        goal: p.body,
+        cadence: p.mission.cadence,
+        cadenceType: p.mission.cadenceType,
+        firstRunTitle: p.details[0] || (p.mission.name + ' \u2014 first run'),
+      });
+      return { success: true, mission_id: mission.id };
+    }
+    if (action === 'dismiss') return { success: true };
+    return { success: false, message: 'unknown flow action' };
   }
 
   // --------------------------------------------------------------------
@@ -1040,6 +1276,16 @@ window.NUX_BILLING = {
       state.threads.unshift(newThread);
       return { id: newThread.id };
     }
+    // Rename a thread (implied: PATCH /api/chat/threads/{id} { title }).
+    var threadPatch = path.match(/^\/api\/chat\/threads\/([^/?]+)$/);
+    if (threadPatch && (method === 'PATCH' || method === 'POST')) {
+      var renamed = findThread(decodeURIComponent(threadPatch[1]));
+      if (renamed && body && body.title) {
+        renamed.title = String(body.title).slice(0, 80);
+        renamed.updated_at = iso(0);
+      }
+      return { success: true };
+    }
     if (path.indexOf('/api/chat/history') === 0) {
       var params = new URLSearchParams(path.split('?')[1] || '');
       var threadId = params.get('thread_id') || (state.threads[0] && state.threads[0].id);
@@ -1053,6 +1299,11 @@ window.NUX_BILLING = {
     if (path === '/api/chat/auth-token' || path === '/api/chat/gate/resolve'
         || path === '/api/chat/auth-cancel') {
       return { success: true };
+    }
+
+    // ---- onboarding flow-card actions ----
+    if (path === '/api/flows/action') {
+      return handleFlowAction(body);
     }
 
     // ---- extensions / registry ----

@@ -972,3 +972,79 @@
   display: none;
 }
 
+
+/* ── Editable thread title (chat surface) ── */
+
+.main-topbar-title.editable {
+  cursor: text;
+  padding: 3px 8px;
+  margin-left: -8px;
+  border-radius: var(--v2-radius-xs);
+  transition: background var(--transition-fast);
+}
+
+.main-topbar-title.editable:hover {
+  background: var(--hover-subtle);
+}
+
+.thread-title-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+}
+
+.thread-title-input {
+  min-width: 240px;
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  background: var(--v2-input-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--v2-radius-sm);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+
+.thread-title-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.thread-title-input::placeholder {
+  color: var(--text-dimmed);
+  font-weight: 400;
+}
+
+.thread-title-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--v2-radius-full);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.thread-title-btn.tertiary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.thread-title-btn.tertiary:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+
+.thread-title-btn.primary {
+  background: var(--accent);
+  border: none;
+  color: var(--v2-on-accent);
+}
+
+.thread-title-btn.primary:hover {
+  background: var(--accent-hover);
+}

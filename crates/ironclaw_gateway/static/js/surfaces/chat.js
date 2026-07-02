@@ -53,6 +53,159 @@ function clearSuggestionChips() {
   if (wrapper) wrapper.classList.remove('has-ghost');
 }
 
+// --- Flow cards (in-thread onboarding widgets) ---
+//
+// Rendered from the `flow_card` SSE event: connect CTA, stack cascade,
+// "reading your world" stats, and draft-automation proposal cards. Actions
+// post to /api/flows/action (approve creates a real task on the board).
+
+const FLOW_CARD_ICONS = {
+  'bell': '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
+  'inbox': '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  'calendar-check': '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>',
+  'users': '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  'trending-up': '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+  'radar': '<path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66a6 6 0 0 1-2.22 4.75"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/>',
+  'git-branch': '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  'git-pull-request': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
+  'bug': '<path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>',
+  'messages-square': '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>',
+  'newspaper': '<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/>',
+  'check-square': '<path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+  'activity': '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  'alert-triangle': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+};
+
+function flowIconSvg(name, size) {
+  const path = FLOW_CARD_ICONS[name] || FLOW_CARD_ICONS['bell'];
+  return '<svg width="' + (size || 15) + '" height="' + (size || 15) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + '</svg>';
+}
+
+function renderFlowCard(card) {
+  if (!card || !card.kind) return;
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  finalizeActivityGroup();
+
+  const el = document.createElement('div');
+  el.className = 'flow-card flow-card-' + card.kind;
+
+  if (card.kind === 'connect') {
+    el.innerHTML =
+      '<img class="flow-connect-icon" src="' + escapeHtml(card.icon || '') + '" alt="" aria-hidden="true">'
+      + '<span class="flow-connect-body">'
+      + '<span class="flow-connect-title">' + escapeHtml(card.title) + '</span>'
+      + '<span class="flow-connect-caption">' + escapeHtml(card.caption || '') + '</span>'
+      + '</span>'
+      + '<button type="button" class="btn-primary flow-connect-btn">' + escapeHtml(I18n.t('flow.connect')) + '</button>';
+    const btn = el.querySelector('.flow-connect-btn');
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      btn.textContent = I18n.t('flow.connecting');
+      apiFetch('/api/flows/action', {
+        method: 'POST',
+        body: { action: 'connect', provider: card.provider },
+      }).then(() => {
+        el.classList.add('connected');
+        btn.outerHTML = '<span class="flow-connect-done">'
+          + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> '
+          + escapeHtml(I18n.t('flow.connected')) + '</span>';
+      }).catch(() => {
+        btn.disabled = false;
+        btn.textContent = I18n.t('flow.connect');
+      });
+    });
+  }
+
+  if (card.kind === 'cascade') {
+    let chips = '';
+    (card.chips || []).forEach((chip, i) => {
+      chips += '<span class="flow-cascade-chip" style="animation-delay:' + (i * 380) + 'ms">'
+        + (chip.icon ? '<img src="' + escapeHtml(chip.icon) + '" alt="" aria-hidden="true">' : '')
+        + escapeHtml(chip.label)
+        + '<svg class="flow-cascade-check" style="animation-delay:' + (i * 380 + 240) + 'ms" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+        + (chip.via ? '<span class="flow-cascade-via">' + escapeHtml(chip.via) + '</span>' : '')
+        + '</span>';
+    });
+    el.innerHTML =
+      '<div class="flow-cascade-label">' + escapeHtml(card.label || '') + '</div>'
+      + '<div class="flow-cascade-chips">' + chips + '</div>';
+  }
+
+  if (card.kind === 'reading') {
+    let stats = '';
+    (card.stats || []).forEach((s) => {
+      stats += '<div class="flow-stat"><span class="flow-stat-value">' + escapeHtml(String(s.value)) + '</span>'
+        + '<span class="flow-stat-label">' + escapeHtml(s.label) + '</span></div>';
+    });
+    let learned = '';
+    (card.learned || []).forEach((l, i) => {
+      learned += '<span class="flow-learned-chip" style="animation-delay:' + (i * 140) + 'ms">' + escapeHtml(l) + '</span>';
+    });
+    el.innerHTML =
+      '<div class="flow-stats">' + stats + '</div>'
+      + '<div class="flow-learned">' + learned + '</div>';
+  }
+
+  if (card.kind === 'proposal') {
+    let rows = '';
+    (card.details || []).forEach((d) => {
+      rows += '<div class="flow-proposal-row">'
+        + '<span class="flow-proposal-row-circle" aria-hidden="true"></span>'
+        + '<span class="flow-proposal-row-icon" aria-hidden="true">' + flowIconSvg(card.icon, 12) + '</span>'
+        + '<span class="flow-proposal-row-text">' + escapeHtml(d) + '</span>'
+        + '</div>';
+    });
+    el.innerHTML =
+      '<div class="flow-proposal-head">'
+      + '<span class="flow-proposal-icon" aria-hidden="true">' + flowIconSvg(card.icon, 15) + '</span>'
+      + '<span class="flow-proposal-title">' + escapeHtml(card.title) + '</span>'
+      + '<span class="flow-proposal-badge draft">' + escapeHtml(I18n.t('flow.draft')) + '</span>'
+      + '</div>'
+      + '<div class="flow-proposal-body">' + escapeHtml(card.body || '') + '</div>'
+      + '<div class="flow-proposal-rows">' + rows + '</div>'
+      + '<div class="flow-proposal-footer">'
+      + '<span class="flow-proposal-hint">' + escapeHtml(card.suggestLine || '') + '</span>'
+      + '<span class="flow-proposal-actions">'
+      + '<button type="button" class="flow-proposal-dismiss">' + escapeHtml(I18n.t('flow.dismiss')) + '</button>'
+      + '<button type="button" class="btn-primary flow-proposal-approve">' + escapeHtml(I18n.t('flow.approve')) + '</button>'
+      + '</span>'
+      + '</div>';
+    const badge = el.querySelector('.flow-proposal-badge');
+    const approve = el.querySelector('.flow-proposal-approve');
+    const dismiss = el.querySelector('.flow-proposal-dismiss');
+    approve.addEventListener('click', () => {
+      approve.disabled = true;
+      dismiss.disabled = true;
+      apiFetch('/api/flows/action', {
+        method: 'POST',
+        body: { action: 'approve', proposal: card.proposal },
+      }).then(() => {
+        el.classList.add('approved');
+        badge.textContent = I18n.t('flow.live');
+        badge.classList.remove('draft');
+        badge.classList.add('live');
+        el.querySelectorAll('.flow-proposal-row').forEach((row) => row.classList.add('done'));
+        el.querySelector('.flow-proposal-actions').innerHTML =
+          '<span class="flow-proposal-live-note">' + escapeHtml(I18n.t('flow.approvedNote')) + '</span>';
+        showToast(I18n.t('flow.automationCreated'), 'success');
+      }).catch(() => {
+        approve.disabled = false;
+        dismiss.disabled = false;
+      });
+    });
+    dismiss.addEventListener('click', () => {
+      apiFetch('/api/flows/action', { method: 'POST', body: { action: 'dismiss', proposal: card.proposal } }).catch(() => {});
+      el.classList.add('dismissed');
+      badge.textContent = I18n.t('flow.dismissed');
+      el.querySelector('.flow-proposal-actions').innerHTML = '';
+    });
+  }
+
+  container.appendChild(el);
+  container.scrollTop = container.scrollHeight;
+}
+
 // --- Chat ---
 
 async function sendMessage() {
