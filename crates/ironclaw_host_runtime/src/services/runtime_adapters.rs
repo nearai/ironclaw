@@ -22,7 +22,7 @@ use super::{
 use crate::{
     FirstPartyCapabilityError,
     latency::{
-        RuntimeLatencyFields, RuntimeLatencyMetrics, json_bytes, started_at as latency_started_at,
+        RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
         trace_runtime_error, trace_runtime_ok,
     },
 };
@@ -36,11 +36,11 @@ where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
-    RuntimeLatencyFields::from_scope(
+    RuntimeLatencyFields::from_json_input(
         request.capability_id,
         &request.scope,
-        format!("{:?}", request.descriptor.runtime),
-        json_bytes(&request.input),
+        request.descriptor.runtime.as_str(),
+        &request.input,
     )
 }
 
@@ -444,6 +444,15 @@ where
             None => request
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
+                .inspect(|_| {
+                    trace_first_party_latency_ok(
+                        "reserve_resources",
+                        latency_fields.as_ref(),
+                        reserve_started_at,
+                        0,
+                        used_prepared_reservation,
+                    );
+                })
                 .map_err(|_| {
                     tracing::debug!("first-party runtime adapter resource reservation failed");
                     trace_first_party_latency_error(

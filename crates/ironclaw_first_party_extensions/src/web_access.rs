@@ -96,7 +96,7 @@ fn web_access_latency_started_at() -> Option<std::time::Instant> {
 
 fn trace_web_access_latency_ok(
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<std::time::Instant>,
     request_bytes: u64,
     output_bytes: u64,
@@ -116,7 +116,7 @@ fn trace_web_access_latency_ok(
 
 fn trace_web_access_latency_error(
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<std::time::Instant>,
     error_kind: &str,
     request_bytes: u64,
@@ -600,8 +600,7 @@ async fn call_exa_mcp_tool(
     tool_name: &str,
     arguments: Value,
 ) -> Result<EgressText, EgressCallError> {
-    let latency_fields =
-        FirstPartyToolLatencyFields::from_input_bytes(capability_id, scope, json_bytes(&arguments));
+    let latency_fields = FirstPartyToolLatencyFields::from_input(capability_id, scope, &arguments);
     let mut prior_bytes = 0_u64;
 
     // 1. initialize — required before tools/call on compliant MCP servers.
@@ -655,6 +654,7 @@ async fn call_exa_mcp_tool(
         .map(|(_, v)| v.clone());
 
     // Check initialize response for MCP-level error.
+    let init_parse_started_at = web_access_latency_started_at();
     if serde_json::from_slice::<Value>(&init_resp.body)
         .ok()
         .and_then(|v| v.get("error").cloned())
@@ -668,7 +668,7 @@ async fn call_exa_mcp_tool(
         trace_web_access_latency_error(
             "exa_initialize_parse",
             latency_fields.as_ref(),
-            web_access_latency_started_at(),
+            init_parse_started_at,
             error.stable_runtime_reason(),
             error.request_bytes(),
             error.response_bytes(),

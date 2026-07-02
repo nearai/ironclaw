@@ -3,15 +3,9 @@ use std::time::Instant;
 use ironclaw_host_api::{CapabilityId, ResourceScope};
 use serde_json::Value;
 
-pub(crate) struct FirstPartyToolLatencyFields {
-    capability_id: String,
-    tenant_id: String,
-    user_id: String,
-    agent_id: String,
-    project_id: String,
-    mission_id: String,
-    thread_id: String,
-    invocation_id: String,
+pub(crate) struct FirstPartyToolLatencyFields<'a> {
+    capability_id: &'a CapabilityId,
+    scope: &'a ResourceScope,
     input_bytes: u64,
 }
 
@@ -22,53 +16,26 @@ pub(crate) struct FirstPartyToolLatencyMetrics {
     pub(crate) output_bytes: u64,
 }
 
-impl FirstPartyToolLatencyFields {
+impl<'a> FirstPartyToolLatencyFields<'a> {
     pub(crate) fn from_input(
-        capability_id: &CapabilityId,
-        scope: &ResourceScope,
+        capability_id: &'a CapabilityId,
+        scope: &'a ResourceScope,
         input: &Value,
     ) -> Option<Self> {
+        if !ironclaw_observability::live_latency_enabled() {
+            return None;
+        }
         Self::from_input_bytes(capability_id, scope, json_bytes(input))
     }
 
     pub(crate) fn from_input_bytes(
-        capability_id: &CapabilityId,
-        scope: &ResourceScope,
+        capability_id: &'a CapabilityId,
+        scope: &'a ResourceScope,
         input_bytes: u64,
     ) -> Option<Self> {
-        Self::from_input_bytes_name(capability_id.to_string(), scope, input_bytes)
-    }
-
-    pub(crate) fn from_input_bytes_name(
-        capability_id: impl Into<String>,
-        scope: &ResourceScope,
-        input_bytes: u64,
-    ) -> Option<Self> {
-        ironclaw_observability::live_latency_enabled().then(|| Self {
-            capability_id: capability_id.into(),
-            tenant_id: scope.tenant_id.as_str().to_string(),
-            user_id: scope.user_id.as_str().to_string(),
-            agent_id: scope
-                .agent_id
-                .as_ref()
-                .map(|id| id.as_str().to_string())
-                .unwrap_or_default(),
-            project_id: scope
-                .project_id
-                .as_ref()
-                .map(|id| id.as_str().to_string())
-                .unwrap_or_default(),
-            mission_id: scope
-                .mission_id
-                .as_ref()
-                .map(|id| id.as_str().to_string())
-                .unwrap_or_default(),
-            thread_id: scope
-                .thread_id
-                .as_ref()
-                .map(|id| id.as_str().to_string())
-                .unwrap_or_default(),
-            invocation_id: scope.invocation_id.to_string(),
+        ironclaw_observability::live_latency_enabled().then_some(Self {
+            capability_id,
+            scope,
             input_bytes,
         })
     }
@@ -79,15 +46,29 @@ pub(crate) fn started_at() -> Option<Instant> {
 }
 
 pub(crate) fn json_bytes(value: &Value) -> u64 {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len() as u64)
+    struct ByteCounter(u64);
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buffer.len() as u64);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
         .unwrap_or(0)
 }
 
 pub(crate) fn trace_tool_ok(
     component: &'static str,
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<Instant>,
     metrics: FirstPartyToolLatencyMetrics,
 ) {
@@ -99,14 +80,14 @@ pub(crate) fn trace_tool_ok(
         component,
         operation,
         started_at,
-        capability_id = fields.capability_id.as_str(),
-        tenant_id = fields.tenant_id.as_str(),
-        user_id = fields.user_id.as_str(),
-        agent_id = fields.agent_id.as_str(),
-        project_id = fields.project_id.as_str(),
-        mission_id = fields.mission_id.as_str(),
-        thread_id = fields.thread_id.as_str(),
-        invocation_id = fields.invocation_id.as_str(),
+        capability_id = %fields.capability_id,
+        tenant_id = %fields.scope.tenant_id,
+        user_id = %fields.scope.user_id,
+        agent_id = fields.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = fields.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = fields.scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = fields.scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %fields.scope.invocation_id,
         input_bytes = fields.input_bytes,
         request_bytes = metrics.request_bytes,
         network_egress_bytes = metrics.network_egress_bytes,
@@ -118,7 +99,7 @@ pub(crate) fn trace_tool_ok(
 pub(crate) fn trace_tool_error(
     component: &'static str,
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<Instant>,
     error_kind: &str,
     metrics: FirstPartyToolLatencyMetrics,
@@ -132,14 +113,14 @@ pub(crate) fn trace_tool_error(
         operation,
         started_at,
         error_kind,
-        capability_id = fields.capability_id.as_str(),
-        tenant_id = fields.tenant_id.as_str(),
-        user_id = fields.user_id.as_str(),
-        agent_id = fields.agent_id.as_str(),
-        project_id = fields.project_id.as_str(),
-        mission_id = fields.mission_id.as_str(),
-        thread_id = fields.thread_id.as_str(),
-        invocation_id = fields.invocation_id.as_str(),
+        capability_id = %fields.capability_id,
+        tenant_id = %fields.scope.tenant_id,
+        user_id = %fields.scope.user_id,
+        agent_id = fields.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = fields.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = fields.scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = fields.scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %fields.scope.invocation_id,
         input_bytes = fields.input_bytes,
         request_bytes = metrics.request_bytes,
         network_egress_bytes = metrics.network_egress_bytes,

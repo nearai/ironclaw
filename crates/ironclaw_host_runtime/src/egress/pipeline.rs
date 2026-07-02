@@ -23,15 +23,19 @@ fn http_egress_latency_fields(
     request: &RuntimeHttpEgressRequest,
     allow_partial_response_body: bool,
 ) -> Option<HttpEgressLatencyFields> {
+    if !ironclaw_observability::live_latency_enabled() {
+        return None;
+    }
+
     RuntimeLatencyFields::from_scope(
         &request.capability_id,
         &request.scope,
-        format!("{:?}", request.runtime),
+        request.runtime.as_str(),
         0,
     )
     .map(|fields| {
         fields.with_http_details(
-            format!("{:?}", request.method),
+            request.method.to_string(),
             request.body.len() as u64,
             request.response_body_limit.unwrap_or(0),
             request.credential_injections.len(),

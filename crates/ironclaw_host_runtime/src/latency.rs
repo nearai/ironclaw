@@ -30,13 +30,25 @@ pub(crate) struct RuntimeLatencyMetrics {
 }
 
 impl RuntimeLatencyFields {
+    pub(crate) fn from_json_input(
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+        runtime: impl Into<String>,
+        input: &serde_json::Value,
+    ) -> Option<Self> {
+        if !ironclaw_observability::live_latency_enabled() {
+            return None;
+        }
+        Self::from_scope(capability_id, scope, runtime, json_bytes(input))
+    }
+
     pub(crate) fn from_scope(
         capability_id: &CapabilityId,
         scope: &ResourceScope,
         runtime: impl Into<String>,
         input_bytes: u64,
     ) -> Option<Self> {
-        ironclaw_observability::live_latency_enabled().then(|| Self {
+        ironclaw_observability::live_latency_enabled().then_some(Self {
             capability_id: capability_id.to_string(),
             runtime: runtime.into(),
             tenant_id: scope.tenant_id.as_str().to_string(),
@@ -92,8 +104,22 @@ impl RuntimeLatencyFields {
 }
 
 pub(crate) fn json_bytes(value: &serde_json::Value) -> u64 {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len() as u64)
+    struct ByteCounter(u64);
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buffer.len() as u64);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
         .unwrap_or(0)
 }
 

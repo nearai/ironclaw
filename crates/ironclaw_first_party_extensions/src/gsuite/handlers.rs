@@ -72,7 +72,7 @@ fn gsuite_latency_started_at() -> Option<std::time::Instant> {
 
 fn trace_gsuite_latency_ok(
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<std::time::Instant>,
     network_egress_bytes: u64,
     output_bytes: u64,
@@ -92,7 +92,7 @@ fn trace_gsuite_latency_ok(
 
 fn trace_gsuite_latency_error(
     operation: &'static str,
-    fields: Option<&FirstPartyToolLatencyFields>,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
     started_at: Option<std::time::Instant>,
     error_kind: &str,
     network_egress_bytes: u64,
@@ -134,13 +134,42 @@ impl GsuiteExecutor {
             request.input,
         );
         let started = Instant::now();
-        let (package, capability) = find_gsuite_capability(request.capability_id.as_str())
-            .ok_or_else(|| {
-                GsuiteDispatchError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
-            })?;
-        let extension = ExtensionId::new(package.extension_id)
-            .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?;
-        let scopes = required_provider_scopes(capability)?;
+        let prepare_started_at = gsuite_latency_started_at();
+        let (capability, extension, scopes) = match (|| {
+            let (package, capability) = find_gsuite_capability(request.capability_id.as_str())
+                .ok_or_else(|| {
+                    GsuiteDispatchError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
+                })?;
+            let extension = ExtensionId::new(package.extension_id)
+                .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?;
+            let scopes = required_provider_scopes(capability)?;
+            Ok::<_, GsuiteDispatchError>((capability, extension, scopes))
+        })() {
+            Ok(prepared) => {
+                trace_gsuite_latency_ok(
+                    "prepare_capability",
+                    latency_fields.as_ref(),
+                    prepare_started_at,
+                    0,
+                    0,
+                );
+                prepared
+            }
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "prepare_capability",
+                    latency_fields.as_ref(),
+                    prepare_started_at,
+                    error.kind().as_str(),
+                    error
+                        .usage()
+                        .map(|usage| usage.network_egress_bytes)
+                        .unwrap_or(0),
+                    0,
+                );
+                return Err(error);
+            }
+        };
         let resolve_credential_started_at = gsuite_latency_started_at();
         let credential = match self
             .resolver
@@ -458,7 +487,20 @@ impl GsuiteExecutor {
             }
         };
         let shape_output_started_at = gsuite_latency_started_at();
-        let output = response_output(&response)?;
+        let output = match response_output(&response) {
+            Ok(output) => output,
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "shape_output",
+                    latency_fields.as_ref(),
+                    shape_output_started_at,
+                    error.kind().as_str(),
+                    network_egress_bytes,
+                    0,
+                );
+                return Err(error);
+            }
+        };
         let output_bytes = json_bytes(&output);
         trace_gsuite_latency_ok(
             "shape_output",
