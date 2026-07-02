@@ -572,30 +572,46 @@
       </div>
     </div>
 
-    <!-- Logs Tab -->
+    <!-- Logs Tab — search-first toolbar, level filter, quiet stream
+         controls on the right (Linear view-toolbar pattern). -->
     <div class="tab-panel" id="tab-logs">
       <div class="logs-container">
         <div class="logs-toolbar">
-          <select id="logs-server-level" title="Server-side log level (changes what the server emits)">
-            <option value="error">Server: ERROR</option>
-            <option value="warn">Server: WARN</option>
-            <option value="info" selected>Server: INFO</option>
-            <option value="debug">Server: DEBUG</option>
-          </select>
-          <select id="logs-level-filter">
-            <option value="all" data-i18n="logs.allLevels">All Levels</option>
-            <option value="ERROR" data-i18n="logs.error">Error</option>
-            <option value="WARN" data-i18n="logs.warn">Warn</option>
-            <option value="INFO" data-i18n="logs.info">Info</option>
-            <option value="DEBUG" data-i18n="logs.debug">Debug</option>
-          </select>
-          <input type="text" id="logs-target-filter" placeholder="Filter by target...">
-          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoScroll">Auto-scroll</span></label>
-          <button id="logs-pause-btn" data-i18n="logs.pause">Pause</button>
-          <button id="logs-download-btn" data-i18n="logs.download">Download</button>
-          <button id="logs-clear-btn" data-i18n="logs.clear">Clear</button>
+          <div class="logs-search">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="logs-target-filter" data-i18n="logs.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search messages and targets...">
+          </div>
+          <div class="ui-select-wrap">
+            <select id="logs-level-filter" class="ui-select">
+              <option value="all" data-i18n="logs.allLevels">All levels</option>
+              <option value="ERROR" data-i18n="logs.error">Error</option>
+              <option value="WARN" data-i18n="logs.warn">Warn</option>
+              <option value="INFO" data-i18n="logs.info">Info</option>
+              <option value="DEBUG" data-i18n="logs.debug">Debug</option>
+            </select>
+          </div>
+          <div class="ui-select-wrap" title="Server-side log level (changes what the server emits)">
+            <select id="logs-server-level" class="ui-select">
+              <option value="error">Server: error</option>
+              <option value="warn">Server: warn</option>
+              <option value="info" selected>Server: info</option>
+              <option value="debug">Server: debug</option>
+            </select>
+          </div>
+          <div class="logs-toolbar-spacer"></div>
+          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoScroll">Follow</span></label>
+          <!-- Stream actions read as ONE segmented control. -->
+          <div class="logs-actions" role="group" aria-label="Log stream actions">
+            <button class="logs-tool-btn" id="logs-pause-btn" data-i18n="logs.pause">Pause</button>
+            <button class="logs-tool-btn" id="logs-download-btn" data-i18n="logs.download">Download</button>
+            <button class="logs-tool-btn" id="logs-clear-btn" data-i18n="logs.clear">Clear</button>
+          </div>
         </div>
         <div class="logs-output" id="logs-output"></div>
+        <div class="logs-empty" id="logs-empty" style="display:none">
+          <div class="logs-empty-title" data-i18n="logs.emptyTitle">No matching log lines</div>
+          <div class="logs-empty-hint" data-i18n="logs.emptyHint">Try a different search, or lower the level filter.</div>
+        </div>
       </div>
     </div>
 

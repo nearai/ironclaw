@@ -133,6 +133,15 @@
   --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
   --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
 
+  /* Compact control scale (design-system reconciliation) */
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+  --v2-on-accent: #ffffff;
+
   /* Motion */
   --v2-duration-instant: 100ms;
   --v2-duration-fast: 150ms;
@@ -182,7 +191,7 @@
   --text-tertiary: var(--v2-text);
   --text-muted: var(--v2-text-faint);
   --text-dimmed: #666;
-  --text-on-accent: #ffffff;
+  --text-on-accent: var(--v2-on-accent);
   --accent-brand: var(--v2-accent);
   --accent-brand-hover: var(--v2-accent-strong);
   --warning-bg: #1e1400;

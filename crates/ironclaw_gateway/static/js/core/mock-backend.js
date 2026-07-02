@@ -511,6 +511,72 @@ window.NUX_BILLING = {
   var chatEventSource = null;
   var sseEventCounter = 0;
 
+  // Seeded gateway log stream (implied: GET /api/logs/events, `log` SSE
+  // events shaped { timestamp, level, target, message }). A believable
+  // backlog plays immediately; a slow trickle keeps the view alive.
+  var LOG_SEED = [
+    ['INFO',  'gateway::server',      'listening on 0.0.0.0:3000 (tls off, behind proxy)'],
+    ['INFO',  'gateway::auth',        'session established for user demo-user (oauth: google)'],
+    ['DEBUG', 'engine::scheduler',    'cron tick — 1 mission due within the next hour'],
+    ['INFO',  'engine::mission',      'mission daily-briefing: run started (trigger: cron 0 9 * * *)'],
+    ['DEBUG', 'tools::gmail',         'list_messages: 12 new since 2026-07-01T18:00:00Z'],
+    ['INFO',  'tools::gmail',         'apply_labels: 3x Action, 5x FYI, 4x Ignore'],
+    ['DEBUG', 'llm::router',          'claw-demo-1 selected (ctx 12.4k tokens, est $0.0042)'],
+    ['INFO',  'engine::mission',      'mission daily-briefing: run finished in 18.2s ($0.03)'],
+    ['WARN',  'tools::http',          'GET https://example.com/health took 2140ms (budget 2000ms)'],
+    ['INFO',  'gateway::sse',         'client connected (1 active stream)'],
+    ['DEBUG', 'workspace::memory',    'read profile.md (412 bytes) for turn context'],
+    ['INFO',  'channels::telegram',   'pairing code issued for @demo_user'],
+    ['ERROR', 'tools::http',          'GET https://api.example.com/v2/usage -> 503 Service Unavailable (retry 1/3 in 2s)'],
+    ['INFO',  'tools::http',          'GET https://api.example.com/v2/usage -> 200 on retry (312ms)'],
+    ['DEBUG', 'engine::gate',         'no approval gates pending for thread thread-demo-1'],
+    ['INFO',  'skills::registry',     'refreshed ClawHub index (6 entries, 210ms)'],
+    ['WARN',  'llm::costs',           'daily spend $0.42 approaching soft cap $0.50'],
+    ['DEBUG', 'gateway::static',      'served app.js (etag hit, 0ms)'],
+    ['INFO',  'engine::monitor',      'keyword-monitor: scan complete, 0 new mentions'],
+    ['DEBUG', 'db::libsql',           'checkpoint: wal 128kb -> main (4ms)'],
+  ];
+  var LOG_TRICKLE = [
+    ['DEBUG', 'engine::scheduler',    'cron tick — nothing due'],
+    ['INFO',  'engine::monitor',      'keyword-monitor: scan complete, 0 new mentions'],
+    ['DEBUG', 'gateway::sse',         'keepalive ping (stream healthy)'],
+    ['INFO',  'tools::http',          'GET https://example.com/health -> 200 OK (134ms)'],
+    ['DEBUG', 'workspace::memory',    'context assembled in 6ms (3 files, 2.1kb)'],
+  ];
+  var logEventSourceMock = null;
+  var logTrickleTimer = null;
+  // The SPA reconnects the log stream on tab switches; the DOM keeps the
+  // already-rendered rows, so replay the backlog only once per page load.
+  var logSeedPlayed = false;
+
+  function emitLogEntry(target, level, message, msAgo) {
+    if (!logEventSourceMock || logEventSourceMock.readyState === 2) return;
+    logEventSourceMock._emit('log', {
+      timestamp: iso(msAgo || 0),
+      level: level,
+      target: target,
+      message: message,
+    });
+  }
+
+  function startLogStream(source) {
+    logEventSourceMock = source;
+    // Backlog: oldest first so the newest lands on top of the view.
+    if (!logSeedPlayed) {
+      logSeedPlayed = true;
+      var span = 30 * 60000;
+      LOG_SEED.forEach(function(row, i) {
+        var age = span - Math.round((i / LOG_SEED.length) * span);
+        setTimeout(function() { emitLogEntry(row[1], row[0], row[2], age); }, 40 + i * 12);
+      });
+    }
+    if (logTrickleTimer) clearInterval(logTrickleTimer);
+    logTrickleTimer = setInterval(function() {
+      var row = LOG_TRICKLE[Math.floor(Math.random() * LOG_TRICKLE.length)];
+      emitLogEntry(row[1], row[0], row[2], 0);
+    }, 4000 + Math.random() * 4000);
+  }
+
   function MockEventSource(url) {
     this.url = String(url || '');
     this.readyState = 0;
@@ -521,6 +587,9 @@ window.NUX_BILLING = {
     var self = this;
     if (this.url.indexOf('/api/chat/events') === 0) {
       chatEventSource = this;
+    }
+    if (this.url.indexOf('/api/logs/events') === 0) {
+      setTimeout(function() { startLogStream(self); }, 60);
     }
     setTimeout(function() {
       if (self.readyState === 2) return;
@@ -540,6 +609,10 @@ window.NUX_BILLING = {
   MockEventSource.prototype.close = function() {
     this.readyState = 2;
     if (chatEventSource === this) chatEventSource = null;
+    if (logEventSourceMock === this) {
+      logEventSourceMock = null;
+      if (logTrickleTimer) { clearInterval(logTrickleTimer); logTrickleTimer = null; }
+    }
   };
   MockEventSource.prototype._emit = function(type, data) {
     var event = {
