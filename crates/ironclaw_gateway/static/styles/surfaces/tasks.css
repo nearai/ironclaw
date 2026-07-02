@@ -158,7 +158,7 @@
 #task-sheet-root .task-sheet-scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--v2-scrim-soft);
   z-index: 700;
 }
 

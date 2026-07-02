@@ -118,7 +118,15 @@
   --v2-tracking-tight: -0.02em;
   --v2-tracking-display: -0.04em;
 
-  /* Shadows */
+  /* Code surfaces (themed — reconciled with the design system) */
+  --v2-code-bg: #111113;
+
+  /* Scrims (design-system reconciliation: scrim for full overlays,
+     scrim-soft for side sheets where the page should stay visible) */
+  --v2-scrim: rgba(0, 0, 0, 0.55);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.3);
+
+  /* Shadows — THEMED per the design-system reconciliation */
   --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
   --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
   --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
@@ -160,14 +168,14 @@
   --info: var(--v2-info-text);
   --warning: var(--v2-warning-text);
   --danger: var(--v2-danger-text);
-  --code-bg: var(--v2-input-bg);
+  --code-bg: var(--v2-code-bg);
   --radius: var(--v2-radius-sm);
   --radius-lg: var(--v2-radius-lg);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
   --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'Geist Mono', 'SF Mono', Consolas, monospace;
   --font-pixel: var(--v2-font-pixel);
-  --bg-overlay: rgba(0, 0, 0, 0.5);
+  --bg-overlay: var(--v2-scrim);
   --bg-modal: #1a1a1a;
   --border-modal: #333;
   --border-soft: #2a2a2a;
@@ -203,7 +211,7 @@
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
   --danger-error-border: rgba(230, 76, 76, 0.2);
   --note-bg: var(--v2-surface-soft);
-  --overlay-heavy: rgba(0, 0, 0, 0.6);
+  --overlay-heavy: var(--v2-scrim);
   --highlight-bg: rgba(76, 167, 230, 0.3);
   --hover-subtle: rgba(255, 255, 255, 0.06);
   --transition-fast: var(--v2-duration-fast) var(--v2-ease-standard);
@@ -303,9 +311,10 @@
   /* Glass */
   --v2-glass-bg: rgba(255, 255, 255, 0.85);
 
-  /* Shadows — lighter than the system's single (dark-weight) scale on
-     purpose; flagged to the design system as a needed light-theme
-     override (see PR notes). */
+  /* Code surfaces (themed) */
+  --v2-code-bg: #f0f0f2;
+
+  /* Shadows — themed light scale (now canonical in the design system). */
   --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
   --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
   --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
@@ -321,12 +330,8 @@
   --text-muted: #777777;
   --text-dimmed: var(--v2-text-faint);
 
-  /* Legacy tokens with no v2 role yet (light values). Note: --code-bg
-     intentionally diverges from --v2-input-bg in light (grey code chips
-     on white surfaces) — flagged to the design system. */
-  --code-bg: #f0f0f2;
+  /* Legacy tokens with no v2 role yet (light values). */
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.3);
   --bg-modal: #ffffff;
   --border-modal: #e0e0e0;
   --border-soft: #e5e5e5;
@@ -352,7 +357,6 @@
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
   --danger-error-border: rgba(220, 38, 38, 0.15);
   --note-bg: rgba(0, 0, 0, 0.02);
-  --overlay-heavy: rgba(0, 0, 0, 0.4);
   --highlight-bg: rgba(40, 130, 200, 0.2);
   --hover-subtle: rgba(0, 0, 0, 0.04);
   --glow-accent: 0 0 20px rgba(40, 130, 200, 0.08);
