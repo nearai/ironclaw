@@ -9,7 +9,7 @@ Trace the flow of `$ARGUMENTS` through the IronClaw codebase. Map every file and
 
 ## Step 0 — pick the stack
 
-New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If unsure: `grep -rn "<symptom>" crates/ --include='*.rs' -l | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
+New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If unsure: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
 
 Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph is FRESH and the codebase-memory MCP is connected, use `trace_path(mode="cross_service"|"data_flow")`; otherwise fall back to the anchors + recipes below without stalling.
 
@@ -20,8 +20,8 @@ Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph i
 | Browser JS | `crates/ironclaw_webui_v2_static/static/js/lib/api.js` (`apiFetch`) + `static/js/pages/*/lib/*-api.js` | `grep -rn "apiFetch(" crates/ironclaw_webui_v2_static/static/js/pages` |
 | Route + policy | `crates/ironclaw_webui_v2/src/descriptors.rs`, `router.rs`, `handlers.rs` | `grep -n "WEBUI_V2_PATTERN_\|_descriptor" crates/ironclaw_webui_v2/src/descriptors.rs` |
 | Facade | `RebornServicesApi` in `crates/ironclaw_product_workflow/src/reborn_services.rs` | `grep -n "async fn <name>" crates/ironclaw_product_workflow/src/reborn_services.rs` |
-| Port impl | `crates/ironclaw_reborn_composition/src/<feature>*.rs` | `grep -rln "impl <PortTrait>" crates/ironclaw_reborn_composition/src` |
-| Turn accept | `SessionThreadService::accept_inbound_message` (`crates/ironclaw_threads`) → `TurnCoordinator::submit_turn` (`crates/ironclaw_turns/src/coordinator.rs`) | `grep -rn "submit_turn(" crates/ --include='*.rs' -l` |
+| Port impl | `crates/ironclaw_reborn_composition/src/<feature>*.rs` | `grep -rn "impl <PortTrait>" crates/ironclaw_reborn_composition/src` |
+| Turn accept | `SessionThreadService::accept_inbound_message` (`crates/ironclaw_threads`) → `TurnCoordinator::submit_turn` (`crates/ironclaw_turns/src/coordinator.rs`) | `grep -rn --include='*.rs' "submit_turn(" crates/` |
 | Claim + execute | `TurnRunScheduler` (`crates/ironclaw_host_runtime/src/turn_scheduler.rs`) → `RebornTurnRunExecutor` (`crates/ironclaw_reborn/src/turn_run_executor.rs`) | `grep -n "claim_next_run\|invoke_driver" crates/ironclaw_host_runtime/src/turn_scheduler.rs crates/ironclaw_reborn/src/turn_run_executor.rs` |
 | Loop | `PlannedDriver` (`crates/ironclaw_reborn/src/planned_driver.rs`) → `CanonicalAgentLoopExecutor` (`crates/ironclaw_agent_loop/src/executor.rs`) → host ports (`crates/ironclaw_loop_support`) | `grep -rn "invoke_capability\|stream_model" crates/ironclaw_agent_loop/src/executor` |
 | Model call | `crates/ironclaw_reborn/src/model_gateway.rs` → `ironclaw_llm` provider chain | `grep -n "complete_model_request\|CompletionRequest" crates/ironclaw_reborn/src/model_gateway.rs` |

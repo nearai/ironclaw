@@ -27,11 +27,12 @@ gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 10
 
 ## Step 2: Classify each PR by module
 
-For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant `src/` subdirectory:
+For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant directory:
 
 | Category | Directories |
 |----------|------------|
-| **Reborn stack (most current work)** | `crates/` (product_workflow, composition, webui_v2, turns, agent_loop, host_runtime, …) |
+| **Reborn stack (most current work)** | `crates/ironclaw_reborn*/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui_v2*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_support/`, `crates/ironclaw_capabilities/` |
+| **Legacy v1 crates** | `crates/ironclaw_engine/`, `crates/ironclaw_gateway/`, `crates/ironclaw_oauth/`, `crates/ironclaw_embeddings/`, `crates/ironclaw_tui/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `src/agent/`, `src/skills/` |
 | **Tools** | `src/tools/`, `tools-src/` |
