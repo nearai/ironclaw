@@ -557,7 +557,7 @@ fn redact_data_url(url: &str) -> String {
     let Some((mime, b64)) = rest.split_once(";base64,") else {
         return format!(
             "data:{}...<unparseable, redacted>",
-            &rest.chars().take(40).collect::<String>()
+            rest.chars().take(40).collect::<String>()
         );
     };
     match base64::engine::general_purpose::STANDARD.decode(b64) {
