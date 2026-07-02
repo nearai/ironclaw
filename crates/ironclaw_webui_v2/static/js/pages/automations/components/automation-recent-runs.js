@@ -1,6 +1,5 @@
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
-import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
@@ -156,6 +155,21 @@ export function RunHistorySummary({ runs = [], className = "" }) {
   `;
 }
 
+// Status rendered as a plain dot + text (no pill chrome) so the run list
+// reads as data, not as a wall of badges. Tone maps to the semantic ramp.
+const RUN_STATUS_TEXT = {
+  success: "text-[var(--v2-positive-text)]",
+  danger: "text-[var(--v2-danger-text)]",
+  info: "text-[var(--v2-info-text)]",
+  muted: "text-[var(--v2-text-muted)]",
+};
+const RUN_STATUS_DOT = {
+  success: "bg-[var(--v2-positive-text)]",
+  danger: "bg-[var(--v2-danger-text)]",
+  info: "bg-[var(--v2-info-text)]",
+  muted: "bg-[var(--v2-text-faint)]",
+};
+
 export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
   const t = useT();
   const canOpen = Boolean(run.chat_path);
@@ -164,12 +178,26 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
     runId: run.run_id,
   });
   const canOpenLogs = Boolean((run.thread_id || run.run_id) && onOpenLogs);
+  const tone = RUN_STATUS_TEXT[run.status_tone] ? run.status_tone : "muted";
 
   return html`
-    <div className="flex flex-wrap items-center gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0">
-      <div className="min-w-0 flex-1">
+    <div
+      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[minmax(0,11rem)_minmax(0,1fr)_auto]"
+    >
+      <div className="min-w-0">
         <div className="text-sm font-semibold text-iron-100">${run.fired_label}</div>
-        <div className="mt-1 truncate font-mono text-[11px] text-iron-400">
+        <div className="mt-1 flex items-center gap-1.5">
+          <span
+            aria-hidden="true"
+            className=${cn("h-1.5 w-1.5 shrink-0 rounded-full", RUN_STATUS_DOT[tone])}
+          />
+          <span className=${cn("text-xs font-medium", RUN_STATUS_TEXT[tone])}>
+            ${run.status_label}
+          </span>
+        </div>
+      </div>
+      <div className="order-last col-span-2 min-w-0 sm:order-none sm:col-span-1">
+        <div className="truncate font-mono text-[11px] text-iron-400">
           ${run.thread_id
             ? `${t("automations.detail.thread")} ${run.thread_id}`
             : t("automations.detail.noThread")}
@@ -181,11 +209,6 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
           </div>
         `}
       </div>
-      <${StatusPill}
-        tone=${run.status_tone}
-        label=${run.status_label}
-        className="shrink-0"
-      />
       <div className="flex shrink-0 items-center gap-2">
         <${Button}
           variant="secondary"
@@ -198,12 +221,13 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
         <//>
         <${Button}
           variant="ghost"
-          size="sm"
+          size="icon-sm"
+          aria-label=${t("nav.logs")}
+          title=${t("nav.logs")}
           disabled=${!canOpenLogs}
           onClick=${canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
         >
-          <${Icon} name="file" className="mr-1.5 h-4 w-4" />
-          ${t("nav.logs")}
+          <${Icon} name="file" className="h-4 w-4" />
         <//>
       </div>
     </div>

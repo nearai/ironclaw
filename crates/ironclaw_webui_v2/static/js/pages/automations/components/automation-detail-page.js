@@ -133,11 +133,13 @@ export function AutomationDetailPage({
                   type="button"
                   variant=${canResume ? "primary" : "secondary"}
                   size="sm"
-                  className=${canResume ? "text-white" : ""}
                   disabled=${isMutating}
                   onClick=${handleAction}
                 >
-                  <${Icon} name=${canResume ? "play" : "pause"} className="mr-1.5 h-4 w-4" />
+                  <${Icon}
+                    name=${canResume ? "play" : "pause"}
+                    className=${canResume ? "h-4 w-4" : "mr-1.5 h-4 w-4"}
+                  />
                   ${canResume ? t("missions.action.resume") : t("missions.action.pause")}
                 <//>
               `}

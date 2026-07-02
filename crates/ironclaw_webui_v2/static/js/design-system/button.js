@@ -95,7 +95,10 @@ export function Button({
           BASE,
           sizeClass,
           fullClass,
-          "relative overflow-hidden text-white group",
+          // Arbitrary-value class on purpose: the `.text-white` compat shim in
+          // app.css remaps plain `text-white` to the theme ink, which would
+          // render dark text on the accent gradient in light mode.
+          "relative overflow-hidden text-[#ffffff] group",
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}

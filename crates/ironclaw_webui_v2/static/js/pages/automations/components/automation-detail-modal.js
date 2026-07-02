@@ -166,11 +166,11 @@ export function AutomationDetailModal({
             <//>
           </div>
           <div className="flex items-center gap-2">
-            <${Button} variant="secondary" size="sm" onClick=${onClose}>
+            <${Button} variant="ghost" size="sm" onClick=${onClose}>
               ${t("nav.close")}
             <//>
-            <${Button} variant="primary" size="sm" className="text-white" onClick=${openFullView}>
-              <${Icon} name="layers" className="mr-1.5 h-4 w-4" />
+            <${Button} variant="primary" size="sm" onClick=${openFullView}>
+              <${Icon} name="layers" className="h-4 w-4" />
               ${t("automations.detail.openFullView")}
             <//>
           </div>

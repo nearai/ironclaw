@@ -317,7 +317,6 @@ export function DeliveryDefaultsContent({ deliveryState }) {
             variant="primary"
             size="sm"
             fullWidth
-            className="text-white"
             disabled=${!canSave}
             onClick=${handleSave}
           >

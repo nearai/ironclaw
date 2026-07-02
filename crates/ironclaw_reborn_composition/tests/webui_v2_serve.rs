@@ -3052,9 +3052,25 @@ async fn static_automations_run_row_spaces_action_button_icons() {
         body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
         "the Open run button icon must be spaced away from its label"
     );
+    // Logs is an icon-only button (design review): it must carry an
+    // accessible label instead of visible text next to the file glyph.
     assert!(
-        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
-        "the Logs button icon must be spaced away from its label"
+        body.contains(r#"size="icon-sm""#),
+        "the Logs button must render as an icon-only button"
+    );
+    assert!(
+        body.contains(r#"aria-label=${t("nav.logs")}"#),
+        "the icon-only Logs button must carry an aria-label"
+    );
+    // The run status sits on the left of the row as a plain dot + text, not a
+    // pill, and the thread/run identifiers move into their own column.
+    assert!(
+        body.contains("RUN_STATUS_DOT"),
+        "run status must render as a dot + text instead of a pill"
+    );
+    assert!(
+        !body.contains("StatusPill"),
+        "run rows must not wrap the status in pill chrome"
     );
 }
 

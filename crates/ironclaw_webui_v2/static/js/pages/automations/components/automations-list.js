@@ -57,9 +57,9 @@ export function AutomationsList({
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
           <div
-            className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
+            className="inline-flex h-9 max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] p-0.5"
             role="group"
             aria-label=${t("automations.filterLabel")}
           >
@@ -70,17 +70,19 @@ export function AutomationsList({
                 aria-pressed=${filter === item.value}
                 onClick=${() => onFilterChange(item.value)}
                 className=${cn(
-                  "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight",
+                  "shrink-0 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] font-medium leading-none transition-colors",
                   filter === item.value
-                    ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-                    : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+                    ? "bg-[var(--v2-surface)] text-[var(--v2-text-strong)] shadow-sm"
+                    : "text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
                 )}
               >
                 ${t(item.labelKey)}
               </button>
             `)}
           </div>
-          <label className="inline-flex items-center gap-1.5">
+          <label
+            className="inline-flex h-9 shrink-0 items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] pl-3 focus-within:border-[var(--v2-accent)]"
+          >
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
               ${t("automations.sort.label")}
             </span>
@@ -88,7 +90,12 @@ export function AutomationsList({
               value=${sort}
               onChange=${(event) => setSort(event.target.value)}
               aria-label=${t("automations.sort.label")}
-              className="h-9 rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5 text-xs font-semibold text-[var(--v2-text-strong)] hover:bg-[var(--v2-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
+              style=${{
+                backgroundImage: "var(--v2-select-chevron)",
+                backgroundRepeat: "no-repeat",
+                backgroundPosition: "right 0.75rem center",
+              }}
+              className="h-full appearance-none rounded-full bg-transparent pl-2 pr-8 text-[11px] font-medium text-[var(--v2-text-strong)] focus-visible:outline-none"
             >
               ${AUTOMATION_SORTS.map(
                 (item) => html`<option key=${item.value} value=${item.value}>
@@ -102,9 +109,10 @@ export function AutomationsList({
             <${Button}
               variant="secondary"
               size="sm"
+              className="shrink-0"
               onClick=${() => setDeliveryOpen(true)}
             >
-              <${Icon} name="send" className="mr-1.5 h-4 w-4" />
+              <${Icon} name="gear" className="mr-1.5 h-4 w-4" />
               ${t("automations.delivery.setDefaults")}
             <//>
           `}

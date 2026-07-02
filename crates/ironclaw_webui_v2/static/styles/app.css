@@ -4,54 +4,58 @@
    ════════════════════════════════════════════════════════════════════ */
 
 /* ── Light theme ─────────────────────────────────────────────────── */
+/* Values follow the design-system neutral zinc palette (PR #5563):
+   surfaces are achromatic — the previous blue-tinted washes read as
+   "everything is selected" — and status/accent colors come from the
+   nux light ramps so chips stay legible on white. */
 :root {
   color-scheme: light;
 
   /* Canvas / surfaces */
-  --v2-canvas:        #f4f7fb;
+  --v2-canvas:        #f5f5f7;
   --v2-canvas-strong: #ffffff;
   --v2-surface:       #ffffff;
-  --v2-surface-soft:  #eef4fa;
-  --v2-surface-muted: #e4edf5;
+  --v2-surface-soft:  #f5f5f7;
+  --v2-surface-muted: #ebebed;
 
   /* Card tokens — used by Card component */
-  --v2-card-bg:     rgba(255, 255, 255, 0.92);
-  --v2-card-border: rgba(19, 45, 68, 0.12);
-  --v2-card-shadow: none;
+  --v2-card-bg:     #ffffff;
+  --v2-card-border: rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
 
   /* Panel border (nav items, dividers, form borders) */
-  --v2-panel-border: rgba(19, 45, 68, 0.12);
+  --v2-panel-border: rgba(0, 0, 0, 0.08);
 
   /* Rail (input bg in dark) */
-  --v2-rail:    #edf3f8;
+  --v2-rail:    #f5f5f7;
   --v2-input-bg: #ffffff;
 
   /* Typography */
-  --v2-text:        #243244;
-  --v2-text-strong: #0f1720;
-  --v2-text-muted:  #5f7183;
-  --v2-text-faint:  #8a9aab;
+  --v2-text:        #1a1a2e;
+  --v2-text-strong: #090909;
+  --v2-text-muted:  #555555;
+  --v2-text-faint:  #999999;
   --v2-inverse:     #ffffff;
-  --v2-ink:         #0f1720;
+  --v2-ink:         #090909;
 
   /* Controls */
-  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23555555%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
 
-  /* Accent — signal blue */
-  --v2-accent:       #2e9de2;
-  --v2-accent-strong:#1678bd;
-  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
-  --v2-accent-text:  #146fae;
+  /* Accent — IronClaw brand blue (nux light ramp) */
+  --v2-accent:       #2882c8;
+  --v2-accent-strong:#1f6ca8;
+  --v2-accent-soft:  rgba(40, 130, 200, 0.1);
+  --v2-accent-text:  #2882c8;
 
-  /* Semantic colours */
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
-  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
-  --v2-warning-text:  #8b5b00;
-  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
-  --v2-danger-text:   #b42342;
-  --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
+  /* Semantic colours — nux light status set */
+  --v2-positive-soft: rgba(5, 150, 105, 0.1);
+  --v2-positive-text: #059669;
+  --v2-warning-soft:  rgba(217, 119, 6, 0.1);
+  --v2-warning-text:  #d97706;
+  --v2-danger-soft:   rgba(220, 38, 38, 0.1);
+  --v2-danger-text:   #dc2626;
+  --v2-info-soft:     rgba(37, 99, 235, 0.1);
+  --v2-info-text:     #2563eb;
 
   background: var(--v2-canvas);
 }

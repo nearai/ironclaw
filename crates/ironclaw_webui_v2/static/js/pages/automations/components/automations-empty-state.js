@@ -94,7 +94,7 @@ export function AutomationsEmptyState() {
 
         <div className="mt-6">
           <${Button} variant="primary" size="sm" onClick=${() => navigate("/chat")}>
-            <${Icon} name="chat" className="mr-1.5 h-4 w-4" />
+            <${Icon} name="chat" className="h-4 w-4" />
             ${t("automations.empty.startInChat")}
           <//>
         </div>
