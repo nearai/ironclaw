@@ -2551,6 +2551,64 @@ mod reborn_support_tests {
 }
 
 // ---------------------------------------------------------------------------
+// reborn support: session_thread
+// ---------------------------------------------------------------------------
+
+mod session_thread_tests {
+    use ironclaw_host_api::{AgentId, ResourceScope, SYSTEM_RESERVED_ID, TenantId};
+    use ironclaw_threads::ThreadScope;
+
+    use crate::reborn_support::session_thread::{path_segment, threads_mount_view};
+
+    /// Direct unit pin for `path_segment`'s sentinel mapping: the
+    /// `SYSTEM_RESERVED_ID` control-byte sentinel becomes the path-safe
+    /// `_system` segment; any ordinary id passes through unchanged.
+    #[test]
+    fn path_segment_maps_system_sentinel_to_system_segment() {
+        assert_eq!(path_segment(SYSTEM_RESERVED_ID), "_system");
+        assert_eq!(path_segment("tenant-real"), "tenant-real");
+    }
+
+    /// `ResourceScope::system()` (both tenant AND user are the sentinel, the
+    /// scope `find_idempotency_record` routes through) must mount under
+    /// `_system/_system`, not leak the raw control-byte sentinel into a
+    /// filesystem path.
+    #[test]
+    fn threads_mount_view_system_scope_mounts_under_system_segments() {
+        let view =
+            threads_mount_view("", &ResourceScope::system()).expect("system scope mount view");
+        assert_eq!(view.mounts.len(), 1);
+        assert_eq!(
+            view.mounts[0].target.as_str(),
+            "/tenants/_system/users/_system/threads"
+        );
+    }
+
+    /// An owner-less thread scope (`ThreadScope::to_resource_scope` with no
+    /// `owner_user_id` — system-scoped thread infrastructure with no owning
+    /// user) carries a REAL tenant but the sentinel only in the user segment.
+    /// Only the user axis should fall back to `_system`; the tenant axis must
+    /// resolve normally.
+    #[test]
+    fn threads_mount_view_owner_less_scope_mounts_only_user_segment_under_system() {
+        let owner_less = ThreadScope {
+            tenant_id: TenantId::new("tenant-owner-less").unwrap(),
+            agent_id: AgentId::new("agent-owner-less").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        }
+        .to_resource_scope();
+
+        let view = threads_mount_view("", &owner_less).expect("owner-less scope mount view");
+        assert_eq!(
+            view.mounts[0].target.as_str(),
+            "/tenants/tenant-owner-less/users/_system/threads"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // trace_llm
 // ---------------------------------------------------------------------------
 

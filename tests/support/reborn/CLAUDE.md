@@ -387,8 +387,9 @@ probe and submit always resolve the same binding/owner. The group's one
 shared runtime resolves each turn's thread by the run's own owner
 (production's `ThreadScopeResolver::resolve_for_turn` over the harness's
 per-op `/threads` mount), so two actors' threads coexist over one
-coordinator with their history isolated under separate `owners/<user>`
-subtrees. Driving test: `tests/reborn_group_multiuser/`.
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 
