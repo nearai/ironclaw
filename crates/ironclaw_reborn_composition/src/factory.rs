@@ -585,6 +585,36 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::clone(&local_runtime.project_service))
     }
+
+    /// Test-support access to the local-dev per-tool permission override store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_override`,
+    /// which the synthetic `outbound_delivery_target_set` capability consults for
+    /// its settings decision — a `Disabled` override drives the `policy_denied`
+    /// route. Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_tool_permission_overrides_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        Some(overrides)
+    }
+
+    /// Test-support access to the local-dev persistent approval-policy store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_always_allow`.
+    /// Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_persistent_approval_policies_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+            local_runtime.persistent_approval_policies.clone();
+        Some(policies)
+    }
 }
 
 #[cfg(feature = "test-support")]

@@ -913,6 +913,21 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Flip the per-`(tenant, user)` auto-approve toggle OFF for the run's
+    /// capability scope (the gate arm: with auto-approve disabled, an
+    /// `Ask`-mode capability raises a real `BlockedApproval` gate instead of
+    /// dispatching). Inverse of [`enable_auto_approve`](Self::enable_auto_approve);
+    /// same `_shared.auto_approve_scope()` = `(run tenant, capability user)`.
+    pub async fn disable_auto_approve(&self) -> HarnessResult<()> {
+        let scope = self
+            ._shared
+            .auto_approve_scope()
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.capability_recorder
+            .disable_auto_approve_for(scope)
+            .await
+    }
+
     async fn resume_run(
         &self,
         run_id: TurnRunId,

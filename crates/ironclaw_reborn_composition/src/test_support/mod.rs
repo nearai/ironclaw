@@ -33,6 +33,7 @@ mod budget_gateway;
 mod durable;
 mod local_dev_boot;
 mod oauth_product_auth;
+mod outbound_delivery;
 mod project_create;
 mod skill_activation;
 mod user_profile;
@@ -58,6 +59,11 @@ pub use local_dev_boot::{
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use outbound_delivery::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    wrap_outbound_delivery_capabilities_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
