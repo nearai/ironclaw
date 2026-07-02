@@ -42,8 +42,9 @@ use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, Product
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::InstructionSafetyContext;
+use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -111,6 +112,17 @@ pub struct RebornIntegrationHarnessBuilder {
     /// E-GATEWAY: when set, the model call parks until released, enabling a
     /// mid-turn cancel test. Threaded into the degenerate one-thread group.
     park_gate: Option<ParkingModelGate>,
+    /// C-BUDGET: when `true`, wire the production budget accountant into the
+    /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
+    budget_accounting: bool,
+    /// C-COMMCTX: optional communication-context provider threaded into the
+    /// degenerate one-thread group (see
+    /// `RebornIntegrationGroupBuilder::communication_context_provider`).
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// C-HOOKS / E-HOOK-INFRA: optional per-run hook dispatcher builder factory
+    /// threaded into the degenerate one-thread group (see
+    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
+    hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -137,6 +149,38 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
     pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Wire the production budget accountant into this harness's underlying group
+    /// (C-BUDGET). On the turn's first model call the accountant seeds the run
+    /// owner's daily USD cap into an in-memory governor; read it back with
+    /// `assert_budget_user_cap_seeded`. Defaults off. See
+    /// `RebornIntegrationGroupBuilder::budget_accounting` for the wiring.
+    pub fn with_budget_accounting(mut self) -> Self {
+        self.budget_accounting = true;
+        self
+    }
+
+    /// Wire a `CommunicationContextProvider` into this harness's underlying group
+    /// (C-COMMCTX), so the delivery-preference / connected-channel slice it
+    /// resolves renders into the model request (assert via
+    /// `assert_model_request_contains`). Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::communication_context_provider`.
+    pub fn with_communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Wire a per-run `HookDispatcherBuilderFactory` into this harness's
+    /// underlying group (C-HOOKS / E-HOOK-INFRA), so hooks fire at their
+    /// lifecycle points on a coordinator-path turn. Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`.
+    pub fn with_hook_factory(mut self, factory: HookDispatcherBuilderFactory) -> Self {
+        self.hook_dispatcher_builder_factory = Some(factory);
         self
     }
 
@@ -291,6 +335,15 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(ctx) = self.safety_context {
             group_builder = group_builder.safety_context(ctx);
         }
+        if self.budget_accounting {
+            group_builder = group_builder.budget_accounting();
+        }
+        if let Some(provider) = self.communication_context_provider {
+            group_builder = group_builder.communication_context_provider(provider);
+        }
+        if let Some(factory) = self.hook_dispatcher_builder_factory {
+            group_builder = group_builder.hook_dispatcher_builder_factory(factory);
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -389,6 +442,9 @@ impl RebornIntegrationHarness {
             safety_context: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
+            budget_accounting: false,
+            communication_context_provider: None,
+            hook_dispatcher_builder_factory: None,
         }
     }
 

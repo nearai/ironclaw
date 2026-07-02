@@ -30,6 +30,10 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::ResourceGovernor;
+use rust_decimal::Decimal;
+
 use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -438,6 +442,51 @@ impl RebornIntegrationHarness {
             "no network egress request matching url {url_substr:?} has header {header_name:?} \
              with the expected value (redacted, not logged); header names present (first \
              matching request): {seen:?}"
+        )
+        .into())
+    }
+
+    /// C-BUDGET liveness assertion: the group's wired `model_budget_accountant`
+    /// seeded the run owner's daily USD cap on the turn's first model call.
+    ///
+    /// Reads the in-memory `ResourceGovernor` retained behind the production
+    /// `build_default_budget_accountant` accountant (wired via
+    /// `with_budget_accounting()` / `budget_accounting()`). Before any turn the
+    /// run-owner account does not exist; after a completed turn the accountant's
+    /// `pre_model_call` has fired through the real coordinator → loop → model-port
+    /// path and its compiled-default seeding policy has installed the daily cap.
+    /// Asserting the cap equals the compiled default (`$5.00`) proves the value
+    /// came from the production helper's `BudgetDefaults`, not an incidental path.
+    ///
+    /// This is wiring-liveness only — budget SEMANTICS (thresholds, gates,
+    /// `BudgetEvent` cascade) are covered at crate tier (`budget_e2e.rs`).
+    pub async fn assert_budget_user_cap_seeded(&self) -> HarnessResult<()> {
+        let governor = self._shared.budget_governor.as_ref().ok_or(
+            "harness was not built with budget accounting wired (call with_budget_accounting)",
+        )?;
+        let account = self
+            ._shared
+            .budget_account
+            .as_ref()
+            .ok_or("budget-accounting harness is missing its run-owner account")?;
+        let snapshot = governor
+            .account_snapshot(account)
+            .map_err(|e| format!("budget account snapshot failed: {e}"))?
+            .ok_or(
+                "budget accountant never seeded the run owner's account \
+                 (pre_model_call did not fire through the wired accountant)",
+            )?;
+        let limits = snapshot
+            .limits
+            .ok_or("budget account exists but carries no seeded limits")?;
+        let expected = Decimal::from_f64_retain(BudgetDefaults::compiled_defaults().user_daily_usd)
+            .unwrap_or_default();
+        if limits.max_usd == Some(expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "expected seeded user daily cap {expected:?} (compiled default), saw {:?}",
+            limits.max_usd
         )
         .into())
     }
