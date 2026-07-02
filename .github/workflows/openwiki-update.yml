@@ -13,18 +13,20 @@ name: OpenWiki Update
 #     the required-check workflows actually trigger on it — a GITHUB_TOKEN-opened PR
 #     does not trigger other workflows, so a human reviewer would see no checks and
 #     the ruleset would block the merge.
-#   - OPENWIKI_PROVIDER + OPENWIKI_MODEL_ID come from openwiki's own src/constants.ts,
-#     not the raw Anthropic API ids. Provider must be set explicitly ("anthropic") or
-#     openwiki defaults to OpenRouter. Anthropic model ids: claude-haiku-4-5 (default),
-#     claude-sonnet-5, claude-opus-4.8. Override per-run via the model_id dispatch input.
+#   - Uses openwiki's OpenAI provider pointed at NEAR AI's OpenAI-compatible endpoint
+#     (base https://cloud-api.near.ai/v1) with the existing LIVE_OPENAI_COMPATIBLE_API_KEY
+#     repo secret — same key/host/model the live-canary workflow uses. This avoids the
+#     Anthropic path, whose strict document-content-block validation openwiki trips on
+#     (400 invalid_request_error). Provider MUST be set or openwiki defaults to OpenRouter.
+#     Override the model per-run via the model_id dispatch input.
 
 on:
   workflow_dispatch:
     inputs:
       model_id:
-        description: "OPENWIKI_MODEL_ID (openwiki Anthropic ids: claude-haiku-4-5, claude-sonnet-5, claude-opus-4.8)"
+        description: "OPENWIKI_MODEL_ID (NEAR AI model, e.g. Qwen/Qwen3.5-122B-A10B or deepseek-ai/DeepSeek-V4-Flash)"
         required: false
-        default: "claude-haiku-4-5"
+        default: ""
   schedule:
     - cron: "0 8 * * 1"   # Mondays 08:00 UTC (weekly)
 
@@ -60,12 +62,12 @@ jobs:
       - name: Regenerate wiki
         run: openwiki --update --print
         env:
-          # openwiki needs OPENWIKI_PROVIDER explicitly; without it it defaults to
-          # OpenRouter and demands OPENROUTER_API_KEY. Provider ids + model ids come
-          # from openwiki's src/constants.ts (NOT the raw Anthropic API ids).
-          OPENWIKI_PROVIDER: anthropic
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENWIKI_MODEL_ID: ${{ github.event.inputs.model_id || 'claude-haiku-4-5' }}
+          # openwiki's OpenAI provider -> NEAR AI OpenAI-compatible endpoint.
+          # base URL + model default to the same values live-canary.yml uses.
+          OPENWIKI_PROVIDER: openai
+          OPENAI_API_KEY: ${{ secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
+          OPENWIKI_MODEL_ID: ${{ github.event.inputs.model_id || vars.LIVE_OPENAI_COMPATIBLE_MODEL || 'Qwen/Qwen3.5-122B-A10B' }}
 
       - name: Open review PR
         id: cpr
