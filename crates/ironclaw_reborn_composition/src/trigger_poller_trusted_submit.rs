@@ -566,6 +566,7 @@ mod tests {
                 scope,
                 limit: Some(10),
                 cursor: None,
+                excluded_metadata_sources: Vec::new(),
             })
             .await
             .expect("threads load");
@@ -1685,6 +1686,7 @@ mod tests {
                 scope: expected_scope.clone(),
                 limit: Some(10),
                 cursor: None,
+                excluded_metadata_sources: Vec::new(),
             })
             .await
             .expect("threads load");
@@ -1837,6 +1839,7 @@ mod tests {
                 },
                 limit: Some(10),
                 cursor: None,
+                excluded_metadata_sources: Vec::new(),
             })
             .await
             .expect("threads load");

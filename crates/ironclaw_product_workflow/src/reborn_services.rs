@@ -44,9 +44,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
+    LifecyclePackageRef, LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
@@ -59,7 +59,7 @@ use crate::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
+    is_approval_gate_ref, is_auth_gate_ref,
 };
 
 mod error;
@@ -4309,68 +4309,20 @@ impl RebornServices {
             .await
             .map_err(|_| notification_approval_timeout_error())?;
         }
-        let fetch_limit = visible_limit
-            .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
-            .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
-        let mut cursor = request.cursor;
-        let mut visible_threads = Vec::with_capacity(visible_limit);
-        let mut next_cursor = None;
-        let mut pages_fetched = 0usize;
-
-        while visible_threads.len() < visible_limit {
-            if pages_fetched >= THREAD_LIST_FILTER_MAX_PAGES {
-                tracing::warn!(
-                    cursor = ?cursor,
-                    pages_fetched,
-                    max_pages = THREAD_LIST_FILTER_MAX_PAGES,
-                    visible_threads = visible_threads.len(),
-                    visible_limit,
-                    "thread listing filter page budget exhausted while skipping automation threads"
-                );
-                next_cursor = None;
-                break;
-            }
-            pages_fetched += 1;
-            let response = self
-                .thread_service
-                .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
-                    scope: scope.clone(),
-                    limit: Some(fetch_limit as u32),
-                    cursor: cursor.clone(),
-                })
-                .await
-                .map_err(map_thread_error)?;
-            for thread in response.threads {
-                if is_automation_trigger_thread(&thread) {
-                    continue;
-                }
-                visible_threads.push(thread);
-            }
-            next_cursor = response.next_cursor;
-            let Some(next) = next_cursor.clone() else {
-                break;
-            };
-            if cursor.as_deref() == Some(next.as_str()) {
-                tracing::warn!(
-                    cursor = %next,
-                    "thread listing cursor did not advance while filtering automation threads"
-                );
-                next_cursor = None;
-                break;
-            }
-            cursor = Some(next);
-        }
-
-        if visible_threads.len() > visible_limit {
-            next_cursor = visible_threads
-                .get(visible_limit.saturating_sub(1))
-                .map(|thread| thread.thread_id.as_str().to_string());
-            visible_threads.truncate(visible_limit);
-        }
+        let response = self
+            .thread_service
+            .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
+                scope,
+                limit: Some(visible_limit as u32),
+                cursor: request.cursor,
+                excluded_metadata_sources: vec![AUTOMATION_TRIGGER_THREAD_SOURCE_TAG.to_string()],
+            })
+            .await
+            .map_err(map_thread_error)?;
 
         Ok(RebornListThreadsResponse {
-            threads: visible_threads,
-            next_cursor,
+            threads: response.threads,
+            next_cursor: response.next_cursor,
         })
     }
 
@@ -4653,23 +4605,6 @@ impl RebornServices {
 
 fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
-}
-
-fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
-    let Some(metadata) = thread.metadata_json.as_deref() else {
-        return false;
-    };
-    match thread_metadata_is_automation_trigger(metadata) {
-        Ok(is_automation_trigger) => is_automation_trigger,
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                thread_id = %thread.thread_id,
-                "failed to parse thread metadata_json for automation filter"
-            );
-            false
-        }
-    }
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
@@ -5763,8 +5698,6 @@ const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
 
 const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
-const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
-const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
 const NOTIFICATION_APPROVAL_AUTOMATION_LIMIT: usize = 20;
 const NOTIFICATION_APPROVAL_RUN_LIMIT: usize = 20;
 const NOTIFICATION_APPROVAL_CANDIDATE_LIMIT: usize = 20;

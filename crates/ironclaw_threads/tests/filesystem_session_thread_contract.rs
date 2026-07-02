@@ -1336,6 +1336,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             scope: scope_a.clone(),
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1383,6 +1384,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             scope: scope_a.clone(),
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1403,6 +1405,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             scope: scope_a.clone(),
             limit: Some(2),
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1420,6 +1423,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             scope: scope_a.clone(),
             limit: Some(2),
             cursor: page_1.next_cursor.clone(),
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1440,6 +1444,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             scope: scope_b,
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1449,6 +1454,81 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(ids_b, ["t-b-001"]);
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_filters_metadata_sources_before_pagination() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-filtered-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope_a = scope("filtered-list-fs");
+
+    let visible = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_a.clone(),
+            thread_id: Some(ThreadId::new("t-visible").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("Visible chat".into()),
+            metadata_json: Some(serde_json::json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .unwrap();
+    wait_until_after(visible.updated_at.expect("activity stamp")).await;
+
+    for id in ["t-auto-001", "t-auto-002", "t-auto-003"] {
+        let record = service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: Some(
+                    serde_json::json!({ "source": "automation_trigger" }).to_string(),
+                ),
+            })
+            .await
+            .unwrap();
+        wait_until_after(record.updated_at.expect("activity stamp")).await;
+    }
+
+    let unfiltered = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(1),
+            cursor: None,
+            excluded_metadata_sources: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        unfiltered.threads[0].thread_id.as_str(),
+        "t-auto-003",
+        "newer automation threads should dominate the unfiltered activity list",
+    );
+
+    let filtered = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: Some(1),
+            cursor: None,
+            excluded_metadata_sources: vec!["automation_trigger".to_string()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        filtered
+            .threads
+            .iter()
+            .map(|record| record.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["t-visible"],
+    );
+    assert!(
+        filtered.next_cursor.is_none(),
+        "cursor should be based on visible records, not hidden automation rows",
+    );
 }
 
 /// Regression: the "Recent" list must order by last interaction, not by
@@ -1490,6 +1570,7 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
             scope: scope_a.clone(),
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1523,6 +1604,7 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
             scope: scope_a.clone(),
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1595,6 +1677,7 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
             scope: scope_a,
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1707,6 +1790,7 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
             scope,
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();
@@ -2655,6 +2739,7 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
             scope,
             limit: None,
             cursor: None,
+            excluded_metadata_sources: Vec::new(),
         })
         .await
         .unwrap();

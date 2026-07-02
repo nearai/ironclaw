@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::service::thread_metadata_source_is_excluded;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
 use crate::{
@@ -65,6 +66,100 @@ impl InboundIdempotencyKey {
             scope: request.scope.clone(),
             source_binding_id: request.source_binding_id.clone()?,
             external_event_id: request.external_event_id.clone()?,
+        })
+    }
+}
+
+impl InMemorySessionThreadService {
+    async fn list_threads_for_scope_inner(
+        &self,
+        scope: ThreadScope,
+        limit: Option<u32>,
+        cursor: Option<String>,
+        excluded_metadata_sources: &[String],
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        // In-memory enumeration for local-dev. Production backends
+        // (filesystem / postgres) override with their own pagination
+        // strategy; this impl is fine because the store is bounded
+        // by tenant memory in the first place.
+        let limit = limit
+            .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
+            .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+
+        let state = self.state.lock().await;
+
+        // Scope filter is exact equality on the full `ThreadScope`
+        // tuple — tenant + agent + project + owner — so a caller
+        // cannot see threads owned by other users in the same
+        // (tenant, agent, project) triple. The trait contract
+        // documents this invariant.
+        //
+        // Filter before cloning: matching on the borrowed scope avoids
+        // cloning records owned by other tenants/projects only to throw
+        // them away. Metadata-source exclusions are also applied before
+        // pagination so hidden system-owned threads cannot bury visible
+        // chat threads behind cursor windows.
+        //
+        // Derive a sidebar-friendly title from the first user message
+        // when the record itself has none. Matches v1's libSQL list
+        // semantics: titles aren't stored, they're computed on read
+        // from the first user message in the transcript. The
+        // filesystem backend does the same thing via
+        // `list_thread_messages` + `derive_title_from_message`.
+        let mut matching: Vec<SessionThreadRecord> = state
+            .threads
+            .values()
+            .filter(|stored| stored.record.scope == scope)
+            .filter(|stored| {
+                !thread_metadata_source_is_excluded(&stored.record, excluded_metadata_sources)
+            })
+            .map(|stored| {
+                let mut record = stored.record.clone();
+                if record.title.is_none()
+                    && let Some(title) = derive_thread_title(&stored.messages)
+                {
+                    record.title = Some(title);
+                }
+                record
+            })
+            .collect();
+        // Newest activity first (`updated_at`, falling back to
+        // `created_at`); legacy records without timestamps sort last.
+        // Tie-break on thread_id ascending so the order is stable and
+        // opaque cursors stay resumable, matching the filesystem backend
+        // and the web sidebar's `byActivityDesc` comparator.
+        matching.sort_by(|a, b| {
+            let a_key = a.updated_at.or(a.created_at);
+            let b_key = b.updated_at.or(b.created_at);
+            std::cmp::Reverse(a_key)
+                .cmp(&std::cmp::Reverse(b_key))
+                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
+        });
+
+        // Opaque cursor is the last thread_id of the previous page; find
+        // it in the activity-sorted list and resume after it. A cursor
+        // that no longer resolves ends the stream rather than restarting.
+        let start_index = match cursor.as_deref() {
+            Some(cursor) => matching
+                .iter()
+                .position(|record| record.thread_id.as_str() == cursor)
+                .map(|index| index + 1)
+                .unwrap_or(matching.len()),
+            None => 0,
+        };
+        let end_index = start_index.saturating_add(limit).min(matching.len());
+        let next_cursor = if end_index < matching.len() {
+            matching[start_index..end_index]
+                .last()
+                .map(|record| record.thread_id.as_str().to_string())
+        } else {
+            None
+        };
+        let page: Vec<SessionThreadRecord> = matching[start_index..end_index].to_vec();
+
+        Ok(ListThreadsForScopeResponse {
+            threads: page,
+            next_cursor,
         })
     }
 }
@@ -746,88 +841,13 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-        // In-memory enumeration for local-dev. Production backends
-        // (filesystem / postgres) override with their own pagination
-        // strategy; this impl is fine because the store is bounded
-        // by tenant memory in the first place.
-        let limit = request
-            .limit
-            .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
-            .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
-
-        let state = self.state.lock().await;
-
-        // Scope filter is exact equality on the full `ThreadScope`
-        // tuple — tenant + agent + project + owner — so a caller
-        // cannot see threads owned by other users in the same
-        // (tenant, agent, project) triple. The trait contract
-        // documents this invariant.
-        //
-        // Filter before cloning: matching on the borrowed scope avoids
-        // cloning records owned by other tenants/projects only to throw
-        // them away. The store is bounded by tenant memory so a full
-        // scan is still acceptable here; a scope-indexed secondary
-        // map would help with very large stores but local-dev never
-        // gets close to that scale.
-        //
-        // Derive a sidebar-friendly title from the first user message
-        // when the record itself has none. Matches v1's libSQL list
-        // semantics: titles aren't stored, they're computed on read
-        // from the first user message in the transcript. The
-        // filesystem backend does the same thing via
-        // `list_thread_messages` + `derive_title_from_message`.
-        let mut matching: Vec<SessionThreadRecord> = state
-            .threads
-            .values()
-            .filter(|stored| stored.record.scope == request.scope)
-            .map(|stored| {
-                let mut record = stored.record.clone();
-                if record.title.is_none()
-                    && let Some(title) = derive_thread_title(&stored.messages)
-                {
-                    record.title = Some(title);
-                }
-                record
-            })
-            .collect();
-        // Newest activity first (`updated_at`, falling back to
-        // `created_at`); legacy records without timestamps sort last.
-        // Tie-break on thread_id ascending so the order is stable and
-        // opaque cursors stay resumable, matching the filesystem backend
-        // and the web sidebar's `byActivityDesc` comparator.
-        matching.sort_by(|a, b| {
-            let a_key = a.updated_at.or(a.created_at);
-            let b_key = b.updated_at.or(b.created_at);
-            std::cmp::Reverse(a_key)
-                .cmp(&std::cmp::Reverse(b_key))
-                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
-        });
-
-        // Opaque cursor is the last thread_id of the previous page; find
-        // it in the activity-sorted list and resume after it. A cursor
-        // that no longer resolves ends the stream rather than restarting.
-        let start_index = match request.cursor.as_deref() {
-            Some(cursor) => matching
-                .iter()
-                .position(|record| record.thread_id.as_str() == cursor)
-                .map(|index| index + 1)
-                .unwrap_or(matching.len()),
-            None => 0,
-        };
-        let end_index = start_index.saturating_add(limit).min(matching.len());
-        let next_cursor = if end_index < matching.len() {
-            matching[start_index..end_index]
-                .last()
-                .map(|record| record.thread_id.as_str().to_string())
-        } else {
-            None
-        };
-        let page: Vec<SessionThreadRecord> = matching[start_index..end_index].to_vec();
-
-        Ok(ListThreadsForScopeResponse {
-            threads: page,
-            next_cursor,
-        })
+        self.list_threads_for_scope_inner(
+            request.scope,
+            request.limit,
+            request.cursor,
+            &request.excluded_metadata_sources,
+        )
+        .await
     }
 
     async fn read_thread_by_id(

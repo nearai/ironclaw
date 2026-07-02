@@ -10401,94 +10401,26 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
 }
 
 #[tokio::test]
-async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
+async fn list_threads_requests_backend_filter_for_automation_trigger_threads() {
     let caller = caller();
     let scope = thread_scope_for(&caller);
-    let automation_thread = |thread_id: &str| SessionThreadRecord {
+    let visible_thread_id = ThreadId::new("thread-visible-filtered").expect("thread id");
+    let visible_thread = SessionThreadRecord {
         scope: scope.clone(),
-        thread_id: ThreadId::new(thread_id).expect("automation thread id"),
+        thread_id: visible_thread_id.clone(),
         created_by_actor_id: caller.user_id.as_str().to_string(),
-        title: Some(format!("Automation run {thread_id}")),
-        metadata_json: Some(automation_trigger_thread_metadata_json(
-            "trigger-scheduled-summary",
-        )),
+        title: Some("Visible chat".to_string()),
+        metadata_json: Some(json!({ "source": "webui" }).to_string()),
         goal: None,
         created_at: None,
         updated_at: None,
     };
-    let stalled_cursor = "cursor-stalled".to_string();
     let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
         ListThreadsForScopeResponse {
-            threads: vec![automation_thread("thread-automation-stall-1")],
-            next_cursor: Some(stalled_cursor.clone()),
-        },
-        ListThreadsForScopeResponse {
-            threads: vec![automation_thread("thread-automation-stall-2")],
-            next_cursor: Some(stalled_cursor.clone()),
+            threads: vec![visible_thread],
+            next_cursor: Some("cursor-visible".to_string()),
         },
     ]));
-    let services = RebornServices::new(
-        thread_service.clone(),
-        Arc::new(FakeTurnCoordinator::default()),
-    );
-
-    let response = tokio::time::timeout(
-        Duration::from_secs(1),
-        services.list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(2),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        ),
-    )
-    .await
-    .expect("list_threads should terminate when backend cursor stalls")
-    .expect("list threads");
-
-    assert!(
-        response.threads.is_empty(),
-        "automation trigger threads must stay hidden even when every fetched page is filtered",
-    );
-    assert_eq!(
-        response.next_cursor, None,
-        "stalled cursor must be cleared so callers do not keep replaying the same filtered page",
-    );
-    let list_requests = thread_service.list_requests();
-    assert_eq!(
-        list_requests.len(),
-        2,
-        "facade should fetch the stalled page once and then break on the repeated cursor",
-    );
-    assert_eq!(list_requests[0].cursor, None);
-    assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
-}
-
-#[tokio::test]
-async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
-    let caller = caller();
-    let scope = thread_scope_for(&caller);
-    let automation_thread = |index: usize| SessionThreadRecord {
-        scope: scope.clone(),
-        thread_id: ThreadId::new(format!("thread-automation-budget-{index:02}"))
-            .expect("automation thread id"),
-        created_by_actor_id: caller.user_id.as_str().to_string(),
-        title: Some(format!("Automation run {index}")),
-        metadata_json: Some(automation_trigger_thread_metadata_json(
-            "trigger-scheduled-summary",
-        )),
-        goal: None,
-        created_at: None,
-        updated_at: None,
-    };
-    let responses = (0..20)
-        .map(|index| ListThreadsForScopeResponse {
-            threads: vec![automation_thread(index)],
-            next_cursor: Some(format!("cursor-{index:02}")),
-        })
-        .collect::<Vec<_>>();
-    let thread_service = Arc::new(ScriptedThreadService::list_pages(responses));
     let services = RebornServices::new(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
@@ -10498,33 +10430,25 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
         .list_threads(
             caller,
             WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
+                limit: Some(2),
+                cursor: Some("cursor-in".to_string()),
                 ..WebUiListThreadsRequest::default()
             },
         )
         .await
         .expect("list threads");
 
-    assert!(
-        response.threads.is_empty(),
-        "automation trigger threads must stay hidden when filter pages are exhausted",
-    );
-    assert_eq!(
-        response.next_cursor, None,
-        "filter page budget exhaustion must clear the cursor so callers do not keep scanning",
-    );
+    assert_eq!(response.threads.len(), 1);
+    assert_eq!(response.threads[0].thread_id, visible_thread_id);
+    assert_eq!(response.next_cursor.as_deref(), Some("cursor-visible"));
     let list_requests = thread_service.list_requests();
+    assert_eq!(list_requests.len(), 1);
+    assert_eq!(list_requests[0].limit, Some(2));
+    assert_eq!(list_requests[0].cursor.as_deref(), Some("cursor-in"));
     assert_eq!(
-        list_requests.len(),
-        20,
-        "facade must enforce a hard cap on filtered backend pages",
-    );
-    assert!(
-        list_requests
-            .iter()
-            .all(|request| request.limit == Some(50)),
-        "facade should use a fixed candidate page size instead of shrinking toward one"
+        list_requests[0].excluded_metadata_sources,
+        vec![AUTOMATION_TRIGGER_THREAD_SOURCE_TAG.to_string()],
+        "the product facade must ask the backend to hide automation threads before pagination",
     );
 }
 

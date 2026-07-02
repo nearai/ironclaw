@@ -3862,6 +3862,7 @@ mod tests {
                     scope: scope.clone(),
                     limit: Some(1),
                     cursor: None,
+                    excluded_metadata_sources: Vec::new(),
                 })
                 .await
                 .expect("list Slack-created threads");
@@ -3899,6 +3900,7 @@ mod tests {
                 scope: scope.clone(),
                 limit: Some(100),
                 cursor: None,
+                excluded_metadata_sources: Vec::new(),
             })
             .await
             .expect("list Slack-created threads");
@@ -3959,6 +3961,7 @@ mod tests {
                 scope,
                 limit: Some(1),
                 cursor: None,
+                excluded_metadata_sources: Vec::new(),
             })
             .await
             .expect("list Slack-created threads");

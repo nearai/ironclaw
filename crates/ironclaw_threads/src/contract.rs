@@ -445,6 +445,7 @@ pub struct ListThreadsForScopeRequest {
     pub scope: ThreadScope,
     pub limit: Option<u32>,
     pub cursor: Option<String>,
+    pub excluded_metadata_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

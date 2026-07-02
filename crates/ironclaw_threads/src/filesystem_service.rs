@@ -51,6 +51,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::service::thread_metadata_source_is_excluded;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
 use crate::{
@@ -2402,7 +2403,13 @@ where
         let mut listed: Vec<(SessionThreadRecord, u64)> = Vec::with_capacity(reads.len());
         for (thread_id, result) in reads {
             match result {
-                Ok(Some((stored, _))) if stored.record.scope == request.scope => {
+                Ok(Some((stored, _)))
+                    if stored.record.scope == request.scope
+                        && !thread_metadata_source_is_excluded(
+                            &stored.record,
+                            &request.excluded_metadata_sources,
+                        ) =>
+                {
                     let next_sequence = stored.next_sequence;
                     listed.push((stored.record, next_sequence));
                 }
