@@ -36,7 +36,7 @@ use ironclaw_threads::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    ThreadMetadataSource, ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -1465,19 +1465,48 @@ async fn filesystem_list_threads_filters_metadata_sources_before_pagination() {
     let service = FilesystemSessionThreadService::new(scoped);
     let scope_a = scope("filtered-list-fs");
 
-    let visible = service
+    let visible_older = service
         .ensure_thread(EnsureThreadRequest {
             scope: scope_a.clone(),
-            thread_id: Some(ThreadId::new("t-visible").unwrap()),
+            thread_id: Some(ThreadId::new("t-visible-older").unwrap()),
             created_by_actor_id: "actor-a".into(),
-            title: Some("Visible chat".into()),
+            title: Some("Older visible chat".into()),
             metadata_json: Some(serde_json::json!({ "source": "webui" }).to_string()),
         })
         .await
         .unwrap();
-    wait_until_after(visible.updated_at.expect("activity stamp")).await;
+    wait_until_after(visible_older.updated_at.expect("activity stamp")).await;
 
-    for id in ["t-auto-001", "t-auto-002", "t-auto-003"] {
+    let hidden_before_visible_newer = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_a.clone(),
+            thread_id: Some(ThreadId::new("t-auto-001").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("t-auto-001".into()),
+            metadata_json: Some(serde_json::json!({ "source": "automation_trigger" }).to_string()),
+        })
+        .await
+        .unwrap();
+    wait_until_after(
+        hidden_before_visible_newer
+            .updated_at
+            .expect("activity stamp"),
+    )
+    .await;
+
+    let visible_newer = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_a.clone(),
+            thread_id: Some(ThreadId::new("t-visible-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("Newer visible chat".into()),
+            metadata_json: Some(serde_json::json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .unwrap();
+    wait_until_after(visible_newer.updated_at.expect("activity stamp")).await;
+
+    for id in ["t-auto-002", "t-auto-003"] {
         let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
@@ -1510,10 +1539,10 @@ async fn filesystem_list_threads_filters_metadata_sources_before_pagination() {
 
     let filtered = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: scope_a,
+            scope: scope_a.clone(),
             limit: Some(1),
             cursor: None,
-            excluded_metadata_sources: vec!["automation_trigger".to_string()],
+            excluded_metadata_sources: vec![metadata_source("automation_trigger")],
         })
         .await
         .unwrap();
@@ -1523,11 +1552,34 @@ async fn filesystem_list_threads_filters_metadata_sources_before_pagination() {
             .iter()
             .map(|record| record.thread_id.as_str())
             .collect::<Vec<_>>(),
-        ["t-visible"],
+        ["t-visible-newer"],
+    );
+    assert_eq!(
+        filtered.next_cursor.as_deref(),
+        Some("t-visible-newer"),
+        "cursor should be based on visible records, not hidden automation rows",
+    );
+
+    let second_page = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: Some(1),
+            cursor: filtered.next_cursor,
+            excluded_metadata_sources: vec![metadata_source("automation_trigger")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page
+            .threads
+            .iter()
+            .map(|record| record.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["t-visible-older"],
     );
     assert!(
-        filtered.next_cursor.is_none(),
-        "cursor should be based on visible records, not hidden automation rows",
+        second_page.next_cursor.is_none(),
+        "second page should exhaust visible records",
     );
 }
 
@@ -2160,6 +2212,10 @@ fn scope(label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn metadata_source(source: &str) -> ThreadMetadataSource {
+    ThreadMetadataSource::new(source).unwrap()
 }
 
 fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {

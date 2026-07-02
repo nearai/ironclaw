@@ -500,7 +500,7 @@ where
 
 pub(crate) fn thread_metadata_source_is_excluded(
     thread: &SessionThreadRecord,
-    excluded_sources: &[String],
+    excluded_sources: &[crate::ThreadMetadataSource],
 ) -> bool {
     if excluded_sources.is_empty() {
         return false;
@@ -508,11 +508,21 @@ pub(crate) fn thread_metadata_source_is_excluded(
     let Some(metadata) = thread.metadata_json.as_deref() else {
         return false;
     };
+    if !excluded_sources
+        .iter()
+        .any(|excluded| metadata.contains(excluded.as_str()))
+    {
+        return false;
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata) else {
         return false;
     };
     value
         .get("source")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|source| excluded_sources.iter().any(|excluded| excluded == source))
+        .is_some_and(|source| {
+            excluded_sources
+                .iter()
+                .any(|excluded| excluded.as_str() == source)
+        })
 }

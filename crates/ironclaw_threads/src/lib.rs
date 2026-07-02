@@ -43,8 +43,9 @@ pub use contract::{
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
     SummaryModelContextPolicy, ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadMetadataSource,
+    ThreadMetadataSourceError, ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};

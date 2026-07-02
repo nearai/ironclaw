@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
@@ -8,6 +10,7 @@ use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
 use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
+const THREAD_METADATA_SOURCE_MAX_CHARS: usize = 128;
 
 /// Canonical scope carried by a Reborn session thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -434,6 +437,78 @@ pub struct FinalizedAssistantMessageByRunRequest {
     pub turn_run_id: String,
 }
 
+/// Typed metadata `source` selector used by thread list filters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ThreadMetadataSource(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ThreadMetadataSourceError {
+    #[error("thread metadata source must not be empty")]
+    Empty,
+    #[error("thread metadata source exceeds {max} chars")]
+    TooLong { max: usize },
+    #[error("thread metadata source must not contain control characters")]
+    ControlCharacter,
+}
+
+impl ThreadMetadataSource {
+    pub fn new(raw: impl Into<String>) -> Result<Self, ThreadMetadataSourceError> {
+        let value = raw.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    fn validate(value: &str) -> Result<(), ThreadMetadataSourceError> {
+        if value.trim().is_empty() {
+            return Err(ThreadMetadataSourceError::Empty);
+        }
+        if value.chars().count() > THREAD_METADATA_SOURCE_MAX_CHARS {
+            return Err(ThreadMetadataSourceError::TooLong {
+                max: THREAD_METADATA_SOURCE_MAX_CHARS,
+            });
+        }
+        if value.chars().any(char::is_control) {
+            return Err(ThreadMetadataSourceError::ControlCharacter);
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<String> for ThreadMetadataSource {
+    type Error = ThreadMetadataSourceError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ThreadMetadataSource {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ThreadMetadataSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<ThreadMetadataSource> for String {
+    fn from(value: ThreadMetadataSource) -> Self {
+        value.into_inner()
+    }
+}
+
 /// Browser-driven list-threads query scoped to a single caller.
 ///
 /// Pagination is opaque: `cursor` is whatever value the backend
@@ -445,7 +520,7 @@ pub struct ListThreadsForScopeRequest {
     pub scope: ThreadScope,
     pub limit: Option<u32>,
     pub cursor: Option<String>,
-    pub excluded_metadata_sources: Vec<String>,
+    pub excluded_metadata_sources: Vec<ThreadMetadataSource>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

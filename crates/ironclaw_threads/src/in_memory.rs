@@ -76,7 +76,7 @@ impl InMemorySessionThreadService {
         scope: ThreadScope,
         limit: Option<u32>,
         cursor: Option<String>,
-        excluded_metadata_sources: &[String],
+        excluded_metadata_sources: &[crate::ThreadMetadataSource],
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
         // In-memory enumeration for local-dev. Production backends
         // (filesystem / postgres) override with their own pagination

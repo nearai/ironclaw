@@ -89,7 +89,7 @@ use ironclaw_threads::{
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    ThreadMessageRecord, ThreadMetadataSource, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
@@ -157,6 +157,10 @@ fn run_id_string() -> String {
 
 fn automation_run_id() -> TurnRunId {
     TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid automation run id")
+}
+
+fn metadata_source(source: &str) -> ThreadMetadataSource {
+    ThreadMetadataSource::new(source).expect("valid metadata source")
 }
 
 fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
@@ -10447,7 +10451,7 @@ async fn list_threads_requests_backend_filter_for_automation_trigger_threads() {
     assert_eq!(list_requests[0].cursor.as_deref(), Some("cursor-in"));
     assert_eq!(
         list_requests[0].excluded_metadata_sources,
-        vec![AUTOMATION_TRIGGER_THREAD_SOURCE_TAG.to_string()],
+        vec![metadata_source(AUTOMATION_TRIGGER_THREAD_SOURCE_TAG)],
         "the product facade must ask the backend to hide automation threads before pagination",
     );
 }

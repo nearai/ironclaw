@@ -31,7 +31,7 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
     MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope,
+    ThreadMessageId, ThreadMetadataSource, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -4315,7 +4315,7 @@ impl RebornServices {
                 scope,
                 limit: Some(visible_limit as u32),
                 cursor: request.cursor,
-                excluded_metadata_sources: vec![AUTOMATION_TRIGGER_THREAD_SOURCE_TAG.to_string()],
+                excluded_metadata_sources: vec![automation_trigger_metadata_source()],
             })
             .await
             .map_err(map_thread_error)?;
@@ -5851,6 +5851,13 @@ fn blocked_authentication_unavailable() -> RebornServicesError {
 
 fn segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
+}
+
+fn automation_trigger_metadata_source() -> ThreadMetadataSource {
+    // Invariant: the automation source tag is a static non-empty ASCII label
+    // below the thread metadata source bound.
+    ThreadMetadataSource::new(AUTOMATION_TRIGGER_THREAD_SOURCE_TAG)
+        .expect("static automation trigger metadata source is non-empty and bounded")
 }
 
 fn map_timeline_probe_error(error: SessionThreadError) -> RebornServicesError {
