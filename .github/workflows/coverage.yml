@@ -28,6 +28,12 @@
 
 name: Code Coverage
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
   push:
     branches: [main]
 
@@ -81,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Free runner disk space
@@ -149,6 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Free runner disk space

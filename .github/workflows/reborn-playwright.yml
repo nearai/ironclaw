@@ -1,6 +1,12 @@
 name: Reborn Playwright
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
   workflow_dispatch:
   schedule:
     - cron: "20 3 * * *" # Nightly standalone Reborn browser coverage at 03:20 UTC
@@ -21,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Check referenced scenario files
@@ -68,6 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Install Rust
@@ -109,6 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Download binaries

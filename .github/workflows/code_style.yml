@@ -346,3 +346,58 @@ jobs:
               exit 1
             fi
           done
+
+  ci-sweep-legacy-tests:
+    name: CI Sweep / Legacy Tests
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      include_docker: true
+
+  ci-sweep-platform-and-compat:
+    name: CI Sweep / Platform & Compat
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/platform-and-compat.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      include_docker: true
+
+  ci-sweep-reborn-tests:
+    name: CI Sweep / Reborn Tests
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/reborn-tests.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  ci-sweep-reborn-e2e:
+    name: CI Sweep / Reborn E2E
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/reborn-e2e.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  ci-sweep-full-e2e:
+    name: CI Sweep / Full E2E
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      mode: full
+
+  ci-sweep-reborn-playwright:
+    name: CI Sweep / Reborn Playwright
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    uses: ./.github/workflows/reborn-playwright.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  ci-sweep-coverage:
+    name: CI Sweep / Coverage
+    if: github.event_name == 'pull_request' && github.head_ref == 'ci-force-full-pr-checks'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/coverage.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
