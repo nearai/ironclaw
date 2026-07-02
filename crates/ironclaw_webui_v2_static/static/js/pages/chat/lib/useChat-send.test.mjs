@@ -3329,6 +3329,45 @@ test("useChat: a channel-connection-required tool card does NOT open the panel w
   );
 });
 
+test("useChat: a card already resumed by the connected continuation stays closed, even after the extension is removed", async () => {
+  // Regression: pairing redeemed in another chat/tab resumes this thread via
+  // the durable continuation message, but records no browser-local dismissal
+  // for this thread's card. Once the Slack extension is later removed, the
+  // live-connection gate can no longer suppress the durable card, and the
+  // panel re-opened on exactly the threads whose pairing had been redeemed
+  // elsewhere — inconsistently, since sibling threads redeemed in-panel stayed
+  // closed. The continuation in the durable timeline is the cross-browser
+  // proof this thread's flow completed; a fresh requirement on such a thread
+  // arrives as a new backend card on the next send.
+  const threadId = "thread-activate-resumed-then-removed";
+  const stateUpdates = [];
+  const context = channelConnectionContext({
+    threadId,
+    messages: [
+      channelConnectionRequiredCard(),
+      {
+        id: "user-continuation-1",
+        role: "user",
+        content: channelConnectionContinuationMessage("slack"),
+      },
+      { id: "assistant-after-1", role: "assistant", content: "Continuing." },
+    ],
+    // No slackExtension: the extension was removed, so the connection
+    // snapshot cannot satisfy the gate.
+    stateUpdates,
+  });
+
+  runUseChatSource(context);
+  context.globalThis.__testExports.useChat(threadId);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(
+    stateUpdates.some((update) => update.value?.state === "pairing_required"),
+    false,
+    "a thread already resumed by the connected continuation must not re-open the panel",
+  );
+});
+
 test("useChat: a dismissed channel-connection-required tool card stays closed", async () => {
   const threadId = "thread-activate-dismissed";
   const stateUpdates = [];

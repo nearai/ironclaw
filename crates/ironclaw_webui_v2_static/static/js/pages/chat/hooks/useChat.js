@@ -178,9 +178,31 @@ function latestChannelConnectionRequirement(messages, dismissedIds) {
     if (requirement.sourceMessageId && dismissedIds?.has?.(requirement.sourceMessageId)) {
       return null;
     }
+    if (threadResumedAfterConnection(messages, index, requirement.extensionName)) {
+      return null;
+    }
     return requirement;
   }
   return null;
+}
+
+// A connection card is consumed once the durable timeline already carries the
+// channel-connected continuation after it: pairing completed (here, in
+// another chat, or in another tab) and this thread was resumed. Unlike the
+// localStorage dismissal set — which only records panels dismissed or
+// submitted in *this* browser — the continuation is part of the thread's own
+// data, so the verdict holds across browsers and after the extension is
+// later removed. A fresh requirement on such a thread arrives as a new
+// backend card on the next send.
+function threadResumedAfterConnection(messages, cardIndex, channel) {
+  const expected = channelConnectionContinuationMessage(channel);
+  for (let index = cardIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const content = typeof message?.content === "string" ? message.content : "";
+    if (content.trim() === expected) return true;
+  }
+  return false;
 }
 
 // True when the caller's account for `channel` is already connected, per the
