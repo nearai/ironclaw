@@ -13,12 +13,18 @@ name: OpenWiki Update
 #     the required-check workflows actually trigger on it — a GITHUB_TOKEN-opened PR
 #     does not trigger other workflows, so a human reviewer would see no checks and
 #     the ruleset would block the merge.
-#   - OPENWIKI_MODEL_ID must match OpenWiki's Anthropic model resolution; if the
-#     run errors on the model, adjust the string (e.g. an "anthropic/"/"anthropic:"
-#     prefix, or claude-haiku-4-5-20251001 for a cheaper pass).
+#   - OPENWIKI_PROVIDER + OPENWIKI_MODEL_ID come from openwiki's own src/constants.ts,
+#     not the raw Anthropic API ids. Provider must be set explicitly ("anthropic") or
+#     openwiki defaults to OpenRouter. Anthropic model ids: claude-haiku-4-5 (default),
+#     claude-sonnet-5, claude-opus-4.8. Override per-run via the model_id dispatch input.
 
 on:
   workflow_dispatch:
+    inputs:
+      model_id:
+        description: "OPENWIKI_MODEL_ID (openwiki Anthropic ids: claude-haiku-4-5, claude-sonnet-5, claude-opus-4.8)"
+        required: false
+        default: "claude-haiku-4-5"
   schedule:
     - cron: "0 8 * * 1"   # Mondays 08:00 UTC (weekly)
 
@@ -54,8 +60,12 @@ jobs:
       - name: Regenerate wiki
         run: openwiki --update --print
         env:
+          # openwiki needs OPENWIKI_PROVIDER explicitly; without it it defaults to
+          # OpenRouter and demands OPENROUTER_API_KEY. Provider ids + model ids come
+          # from openwiki's src/constants.ts (NOT the raw Anthropic API ids).
+          OPENWIKI_PROVIDER: anthropic
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENWIKI_MODEL_ID: claude-sonnet-4-6
+          OPENWIKI_MODEL_ID: ${{ github.event.inputs.model_id || 'claude-haiku-4-5' }}
 
       - name: Open review PR
         id: cpr
