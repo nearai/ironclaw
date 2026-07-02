@@ -278,6 +278,84 @@ async fn refresh_request_uses_stored_refresh_token_and_preserves_scope_fallback(
 }
 
 #[test]
+fn parse_token_response_coerces_string_expires_in() {
+    // Spec-legal providers may send `expires_in` as a JSON string
+    // ("3600") rather than a number; the shared parser hit by both the
+    // exchange and refresh legs must accept it.
+    let body = br#"{"access_token":"oauth-access","expires_in":"3600"}"#;
+
+    let response = parse_token_response(body).expect("string expires_in must coerce to u64");
+
+    assert_eq!(response.expires_in_seconds, Some(3600));
+}
+
+#[test]
+fn parse_token_response_accepts_numeric_expires_in() {
+    let body = br#"{"access_token":"oauth-access","expires_in":3600}"#;
+
+    let response = parse_token_response(body).expect("numeric expires_in must parse");
+
+    assert_eq!(response.expires_in_seconds, Some(3600));
+}
+
+#[test]
+fn parse_token_response_accepts_absent_expires_in() {
+    let body = br#"{"access_token":"oauth-access"}"#;
+
+    let response = parse_token_response(body).expect("absent expires_in must parse as None");
+
+    assert_eq!(response.expires_in_seconds, None);
+}
+
+#[test]
+fn parse_token_response_rejects_non_numeric_expires_in_string() {
+    let body = br#"{"access_token":"oauth-access","expires_in":"not-a-number"}"#;
+
+    let error = parse_token_response(body)
+        .expect_err("non-numeric expires_in string must not silently coerce");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::TokenExchangeFailed
+    );
+}
+
+#[tokio::test]
+async fn exchange_accepts_provider_response_with_string_expires_in() {
+    // Caller-level pin (test through the caller, not just the parser):
+    // a provider that sends `expires_in` as a JSON string must not fail
+    // the whole exchange.
+    let egress = Arc::new(RecordingEgress::ok(
+        br#"{"access_token":"oauth-access","refresh_token":"oauth-refresh","expires_in":"3600"}"#
+            .to_vec(),
+    ));
+    let store = Arc::new(RecordingSecretStore::recording());
+    let client = HostOAuthProviderClient::new(
+        notion_spec(),
+        egress,
+        store.clone(),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("client-id").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("notion", "notion", &[]),
+        )
+        .await
+        .expect("string expires_in must not fail the exchange");
+
+    assert_eq!(
+        store.put_handles().len(),
+        2,
+        "access + refresh secrets stored"
+    );
+}
+
+#[test]
 fn token_endpoint_host_is_derived_and_rejects_non_https_endpoints() {
     assert_eq!(
         oauth_endpoint_host("https://oauth2.googleapis.com/token").unwrap(),
