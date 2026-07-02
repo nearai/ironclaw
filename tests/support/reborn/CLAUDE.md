@@ -414,7 +414,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
-| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | enabled |
+| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 
 ### Distinct actors per thread (E-MULTIUSER)

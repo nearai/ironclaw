@@ -25,6 +25,7 @@ mod support;
 
 use ironclaw_turns::TurnEventKind;
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 
 #[tokio::test]
@@ -64,11 +65,62 @@ async fn no_events_recorded_without_opting_in() {
         .await
         .expect("turn completes");
 
+    let err = harness
+        .assert_turn_event_recorded(TurnEventKind::Completed)
+        .await
+        .unwrap_err();
     assert!(
-        harness
-            .assert_turn_event_recorded(TurnEventKind::Completed)
-            .await
-            .is_err(),
-        "no sink was installed, so no turn event should have been recorded"
+        err.to_string().contains("no recorded turn event of kind"),
+        "expected error about missing turn event, got: {err}"
+    );
+}
+
+/// Regression: the sink is shared across every thread in a `.with_turn_event_sink()`
+/// group (it has no per-thread channel), so `assert_turn_event_recorded` must slice
+/// `[baseline_turn_event_count..]` to see only THIS thread's events. Drives a first
+/// thread to Completed, then builds a second thread AFTER that (so its baseline
+/// already includes the first thread's event) and never submits a turn on it. If
+/// the baseline slice were missing, the second thread's assertion would incorrectly
+/// pass on the first thread's Completed event.
+#[tokio::test]
+async fn group_thread_does_not_see_a_sibling_threads_turn_event() {
+    let group = RebornIntegrationGroup::builder()
+        .with_turn_event_sink()
+        .builtin_tools()
+        .await
+        .expect("builtin-tools group builds");
+
+    let first = group
+        .thread("conv-tracecap-first")
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("first thread builds");
+    first
+        .submit_turn("do something")
+        .await
+        .expect("first turn completes");
+    first
+        .assert_turn_event_recorded(TurnEventKind::Completed)
+        .await
+        .expect("first thread recorded its own Completed event");
+
+    // Built after `first` completed, so the shared sink already holds `first`'s
+    // Completed event ahead of this thread's baseline.
+    let second = group
+        .thread("conv-tracecap-second")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("second thread builds");
+
+    let err = second
+        .assert_turn_event_recorded(TurnEventKind::Completed)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no recorded turn event of kind"),
+        "second thread never submitted a turn, so it must not see the first \
+         thread's Completed event; got: {err}"
     );
 }

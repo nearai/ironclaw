@@ -317,9 +317,16 @@ impl RebornIntegrationHarness {
         if urls.iter().any(|url| url == &expected) {
             return Ok(());
         }
+        // Redacted: the full base64-encoded attachment bytes must never land in
+        // CI logs on assertion failure (a future test using a sensitive/screenshot
+        // fixture would otherwise leak its contents). Report mime type, byte
+        // length, and a short digest instead — enough to distinguish "wrong bytes"
+        // from "no image part at all" without reproducing the content.
+        let seen: Vec<String> = urls.iter().map(|url| redact_data_url(url)).collect();
         Err(format!(
-            "no captured image data: URL equal to {expected:?}; saw {} image part(s): {urls:?}",
-            urls.len()
+            "no captured image data: URL matching {}; saw {} image part(s): {seen:?}",
+            redact_data_url(&expected),
+            seen.len()
         )
         .into())
     }
@@ -533,5 +540,38 @@ impl RebornIntegrationHarness {
             "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
         )
         .into())
+    }
+}
+
+/// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
+/// failure message — never prints the base64 payload itself (which is the raw
+/// attachment content) or even a prefix of it. Reports the mime type, decoded
+/// byte length, and a short SHA-256 prefix, which is enough to tell "wrong
+/// bytes" apart from "no image part at all" without reconstructing the content.
+fn redact_data_url(url: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let Some(rest) = url.strip_prefix("data:") else {
+        return "<non-data: URL>".to_string();
+    };
+    let Some((mime, b64)) = rest.split_once(";base64,") else {
+        return format!(
+            "data:{}...<unparseable, redacted>",
+            &rest.chars().take(40).collect::<String>()
+        );
+    };
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => {
+            let digest_hex: String = Sha256::digest(&bytes)
+                .iter()
+                .take(4)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                "data:{mime};base64=<redacted, {} byte(s), sha256={digest_hex}>",
+                bytes.len(),
+            )
+        }
+        Err(_) => format!("data:{mime};base64=<redacted, undecodable>"),
     }
 }

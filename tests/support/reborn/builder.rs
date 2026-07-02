@@ -396,6 +396,16 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_process_count: usize,
     /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_network_count: usize,
+    /// Turn-lifecycle-event count on the group-shared `InMemoryTurnEventSink` at
+    /// harness construction, if `.with_turn_event_sink()` opted in. The sink has
+    /// no per-thread channel — every thread in a group publishes to the same
+    /// `Arc<InMemoryTurnEventSink>` — so without this baseline a group thread's
+    /// `assert_turn_event_recorded` could pass on an EARLIER thread's event
+    /// (e.g. a prior thread's `Completed`) even if this thread's own turn never
+    /// published anything, silently defeating the assertion. `recorded_turn_events`
+    /// slices `[baseline_turn_event_count..]` the same way the other
+    /// `baseline_*_count` fields scope their recorders to this thread only (R2).
+    pub(crate) baseline_turn_event_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -739,15 +749,18 @@ impl RebornIntegrationHarness {
     }
 
     /// Turn-lifecycle events recorded by the in-memory `TurnEventSink`
-    /// installed via `.with_turn_event_sink()` (C-TRACECAP). Empty when the
-    /// harness did not opt in — reads the group-shared sink, so a group
-    /// thread sees every thread's events (the sink has no per-thread baseline;
-    /// callers that need thread scoping should match on `TurnLifecycleEvent::run_id`).
+    /// installed via `.with_turn_event_sink()` (C-TRACECAP), for this thread
+    /// only. Empty when the harness did not opt in. Reads the group-shared
+    /// sink but slices `[baseline_turn_event_count..]` (R2) so a group thread
+    /// never sees an earlier sibling thread's events.
     pub(super) fn recorded_turn_events(&self) -> Vec<ironclaw_turns::TurnLifecycleEvent> {
         self._shared
             .turn_event_sink
             .as_ref()
-            .map(|sink| sink.events())
+            .map(|sink| {
+                let all = sink.events();
+                all[self.baseline_turn_event_count.min(all.len())..].to_vec()
+            })
             .unwrap_or_default()
     }
 

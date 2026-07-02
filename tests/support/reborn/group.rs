@@ -908,6 +908,11 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_turn_event_count = shared
+            .turn_event_sink
+            .as_ref()
+            .map(|sink| sink.events().len())
+            .unwrap_or(0);
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -962,6 +967,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_turn_event_count,
         })
     }
 }

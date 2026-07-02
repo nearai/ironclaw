@@ -1544,20 +1544,15 @@ impl RebornRuntime {
     /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
     /// is intentionally read-only (it backs setup-marker reads — see
     /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
-    /// an attachment through it fails closed with `PermissionDenied`. Build a
-    /// read-write view over the same root using the read-write `workspace_mounts`
-    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
-    /// attachment is addressable at its recorded `storage_key`.
+    /// an attachment through it fails closed with `PermissionDenied`. Delegates
+    /// to `RebornServices::read_write_workspace_filesystem` — the single owner
+    /// of this recipe, shared with the `local_dev_attachment_test_support_for_test`
+    /// C-ATTACH test seam so the two views can never drift apart.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services.local_runtime.as_ref().map(|rt| {
-            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
-                Arc::clone(&rt.extension_filesystem),
-                rt.workspace_mounts.clone(),
-            ))
-        })
+        self.services.read_write_workspace_filesystem()
     }
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
