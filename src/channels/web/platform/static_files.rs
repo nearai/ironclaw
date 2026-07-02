@@ -59,7 +59,9 @@ use crate::workspace::Workspace;
 const SCRIPT_SRC_EXTRAS: &str =
     "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
 const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
-const FONT_SRC: &str = "https://fonts.gstatic.com data:";
+// 'self' serves the embedded FK Grotesk brand fonts under /fonts/*;
+// fonts.gstatic.com remains for any workspace-customized Google Fonts.
+const FONT_SRC: &str = "'self' https://fonts.gstatic.com data:";
 const CONNECT_SRC: &str =
     "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org";
 const IMG_SRC: &str =
@@ -744,6 +746,30 @@ pub(crate) async fn favicon_handler() -> impl IntoResponse {
         ],
         assets::FAVICON_ICO,
     )
+}
+
+/// Brand font files (Geist), embedded like the favicon and referenced
+/// by the `@font-face` rules in `theme.css`. Immutable binaries — cache hard.
+fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+}
+
+pub(crate) async fn font_geist_variable_handler() -> impl IntoResponse {
+    font_response(assets::FONT_GEIST_VARIABLE)
+}
+
+pub(crate) async fn font_geist_mono_variable_handler() -> impl IntoResponse {
+    font_response(assets::FONT_GEIST_MONO_VARIABLE)
+}
+
+pub(crate) async fn font_geist_pixel_square_handler() -> impl IntoResponse {
+    font_response(assets::FONT_GEIST_PIXEL_SQUARE)
 }
 
 pub(crate) async fn i18n_index_handler() -> impl IntoResponse {

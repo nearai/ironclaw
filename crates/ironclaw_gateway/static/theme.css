@@ -1,5 +1,29 @@
 /* Shared IronClaw theme tokens */
 
+/* Brand type system — Geist (shared with ironclaw.com), served from
+   /fonts/*. Variable woff2 from the official `geist` npm package; Geist
+   Pixel Square is the stylistic face for uppercase tags/labels. */
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Square';
+  src: url('/fonts/GeistPixel-Square.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
 :root {
   --bg: #09090b;
   --bg-secondary: #0f0f11;
@@ -7,18 +31,21 @@
   --border: rgba(255, 255, 255, 0.08);
   --text: #fafafa;
   --text-secondary: #a1a1aa;
-  --accent: #34d399;
-  --accent-hover: #2fc48d;
-  --accent-soft: rgba(52, 211, 153, 0.15);
+  --accent: #4CA7E6;
+  --accent-hover: #6BB8EC;
+  --accent-soft: rgba(76, 167, 230, 0.15);
   --success: #34d399;
   --info: #60a5fa;
   --warning: #F5A623;
   --danger: #E64C4C;
   --code-bg: #111113;
   --radius: 8px;
-  --radius-lg: 12px;
+  /* Landing card radius (1rem) — cards/surfaces read rounder than controls */
+  --radius-lg: 16px;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', 'SF Mono', Consolas, monospace;
+  --font-pixel: 'Geist Pixel Square', 'Geist Mono', monospace;
   --bg-overlay: rgba(0, 0, 0, 0.5);
   --bg-modal: #1a1a1a;
   --border-modal: #333;
@@ -26,9 +53,9 @@
   --text-tertiary: #e0e0e0;
   --text-muted: #888;
   --text-dimmed: #666;
-  --text-on-accent: #09090b;
-  --accent-brand: #00D894;
-  --accent-brand-hover: #00be82;
+  --text-on-accent: #ffffff;
+  --accent-brand: #4CA7E6;
+  --accent-brand-hover: #2882c8;
   --warning-bg: #1e1400;
   --warning-border: #3a2a00;
   --warning-text: #facc15;
@@ -37,33 +64,33 @@
   --badge-sandbox-bg: rgba(136, 132, 216, 0.15);
   --badge-sandbox-text: #b4b0e8;
   --hover-surface: rgba(255, 255, 255, 0.03);
-  --focus-ring: rgba(52, 211, 153, 0.1);
-  --accent-subtle: rgba(52, 211, 153, 0.15);
-  --accent-border-subtle: rgba(52, 211, 153, 0.3);
+  --focus-ring: rgba(76, 167, 230, 0.1);
+  --accent-subtle: rgba(76, 167, 230, 0.15);
+  --accent-border-subtle: rgba(76, 167, 230, 0.3);
   --danger-subtle: rgba(230, 76, 76, 0.15);
   --danger-border-subtle: rgba(230, 76, 76, 0.3);
   --warning-subtle: rgba(245, 166, 35, 0.15);
   --border-hover: rgba(255, 255, 255, 0.15);
-  --user-msg-bg: rgba(52, 211, 153, 0.08);
-  --user-msg-border: rgba(52, 211, 153, 0.2);
+  --user-msg-bg: rgba(76, 167, 230, 0.08);
+  --user-msg-border: rgba(76, 167, 230, 0.2);
   --danger-error-bg: rgba(230, 76, 76, 0.1);
-  --accent-tee-bg: rgba(52, 211, 153, 0.1);
-  --accent-tee-border: rgba(52, 211, 153, 0.25);
-  --accent-tee-hover: rgba(52, 211, 153, 0.18);
+  --accent-tee-bg: rgba(76, 167, 230, 0.1);
+  --accent-tee-border: rgba(76, 167, 230, 0.25);
+  --accent-tee-hover: rgba(76, 167, 230, 0.18);
   --text-on-danger: #fff;
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
   --danger-error-border: rgba(230, 76, 76, 0.2);
   --note-bg: rgba(255, 255, 255, 0.04);
   --overlay-heavy: rgba(0, 0, 0, 0.6);
-  --highlight-bg: rgba(52, 211, 153, 0.3);
+  --highlight-bg: rgba(76, 167, 230, 0.3);
   --hover-subtle: rgba(255, 255, 255, 0.06);
   --transition-fast: 150ms ease;
   --transition-base: 0.2s ease;
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.2);
   --shadow-lg: 0 12px 40px rgba(0,0,0,0.5), 0 4px 12px rgba(0,0,0,0.3);
-  --glow-accent: 0 0 20px rgba(52,211,153,0.1);
+  --glow-accent: 0 0 20px rgba(76,167,230,0.1);
   --glass-bg: rgba(9,9,11,0.72);
   --glass-blur: blur(16px) saturate(180%);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -94,17 +121,38 @@
   --bg-hover: var(--hover-surface);
   --danger-soft: var(--danger-subtle);
   --warning-soft: var(--warning-subtle);
+  /* Landing-page button language (ironclaw.com parity). The gradient is the
+     brand blue ramp in both themes; secondary buttons are translucent with a
+     strong accent outline and fill solid on hover. */
+  --btn-primary-bg: radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%);
+  --btn-primary-bg-hover: radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%);
+  --btn-primary-shadow-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+  --btn-radius: 16px;
+  --btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --btn-secondary-bg: rgba(76, 167, 230, 0.05);
+  --heading-tracking: -0.02em;
+  --radius-xl: 24px;
+  /* Aliases for tokens referenced across surface CSS but never defined —
+     without these, color-mix()/var() fall back to transparent/invalid. */
+  --bg-primary: var(--bg);
+  --text-primary: var(--text);
+  --surface-muted: var(--bg-tertiary);
+  --error: var(--danger);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --space-5: 20px;
 }
 
 [data-theme="light"] {
   --bg: #ffffff;
   --bg-secondary: #f5f5f7;
   --bg-tertiary: #ebebed;
-  --border: rgba(0, 0, 0, 0.1);
+  /* Landing ink line: rgba(0,0,0,0.08) */
+  --border: rgba(0, 0, 0, 0.08);
   --text: #1a1a2e;
   --text-secondary: #555555;
-  --accent: #059669;
-  --accent-hover: #047857;
+  --accent: #2882c8;
+  --accent-hover: #1f6ca8;
   --success: #059669;
   --info: #2563eb;
   --warning: #d97706;
@@ -119,8 +167,8 @@
   --text-muted: #777777;
   --text-dimmed: #999999;
   --text-on-accent: #ffffff;
-  --accent-brand: #059669;
-  --accent-brand-hover: #047857;
+  --accent-brand: #2882c8;
+  --accent-brand-hover: #1f6ca8;
   --warning-bg: #fffbeb;
   --warning-border: #fde68a;
   --warning-text: #92400e;
@@ -129,19 +177,19 @@
   --badge-sandbox-bg: rgba(136, 132, 216, 0.1);
   --badge-sandbox-text: #6b67b0;
   --hover-surface: rgba(0, 0, 0, 0.03);
-  --focus-ring: rgba(5, 150, 105, 0.15);
-  --accent-subtle: rgba(5, 150, 105, 0.1);
-  --accent-border-subtle: rgba(5, 150, 105, 0.3);
+  --focus-ring: rgba(40, 130, 200, 0.15);
+  --accent-subtle: rgba(40, 130, 200, 0.1);
+  --accent-border-subtle: rgba(40, 130, 200, 0.3);
   --danger-subtle: rgba(220, 38, 38, 0.1);
   --danger-border-subtle: rgba(220, 38, 38, 0.2);
   --warning-subtle: rgba(217, 119, 6, 0.1);
   --border-hover: rgba(0, 0, 0, 0.15);
-  --user-msg-bg: rgba(5, 150, 105, 0.08);
-  --user-msg-border: rgba(5, 150, 105, 0.2);
+  --user-msg-bg: rgba(40, 130, 200, 0.08);
+  --user-msg-border: rgba(40, 130, 200, 0.2);
   --danger-error-bg: rgba(220, 38, 38, 0.06);
-  --accent-tee-bg: rgba(5, 150, 105, 0.08);
-  --accent-tee-border: rgba(5, 150, 105, 0.2);
-  --accent-tee-hover: rgba(5, 150, 105, 0.15);
+  --accent-tee-bg: rgba(40, 130, 200, 0.08);
+  --accent-tee-border: rgba(40, 130, 200, 0.2);
+  --accent-tee-hover: rgba(40, 130, 200, 0.15);
   --text-on-danger: #fff;
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
@@ -149,11 +197,11 @@
   --danger-error-border: rgba(220, 38, 38, 0.15);
   --note-bg: rgba(0, 0, 0, 0.02);
   --overlay-heavy: rgba(0, 0, 0, 0.4);
-  --highlight-bg: rgba(5, 150, 105, 0.2);
+  --highlight-bg: rgba(40, 130, 200, 0.2);
   --hover-subtle: rgba(0, 0, 0, 0.04);
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  --glow-accent: 0 0 20px rgba(5,150,105,0.08);
+  --glow-accent: 0 0 20px rgba(40,130,200,0.08);
   --glass-bg: rgba(255,255,255,0.85);
   --glass-blur: blur(16px) saturate(180%);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -184,4 +232,14 @@
   --bg-hover: var(--hover-surface);
   --danger-soft: var(--danger-subtle);
   --warning-soft: var(--warning-subtle);
+  /* Landing-page button language — same brand-blue ramp as dark; the
+     secondary translucent fill reads as frosted white on light surfaces. */
+  --btn-primary-bg: radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%);
+  --btn-primary-bg-hover: radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%);
+  --btn-primary-shadow-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+  --btn-radius: 16px;
+  --btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --btn-secondary-bg: rgba(255, 255, 255, 0.5);
+  --heading-tracking: -0.02em;
+  --radius-xl: 24px;
 }

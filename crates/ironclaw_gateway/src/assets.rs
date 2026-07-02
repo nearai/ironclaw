@@ -123,6 +123,10 @@ pub const STYLE_CSS: &str = concat!(
     include_str!("../static/styles/surfaces/tool-permissions.css"),
     "\n",
     include_str!("../static/styles/surfaces/projects.css"),
+    "\n",
+    // Loaded last on purpose: landing-page button/typography parity layer
+    // that overrides per-surface button styling (see file header).
+    include_str!("../static/styles/components/buttons.css"),
 );
 
 /// Theme initialization script (runs synchronously in `<head>` to prevent FOUC).
@@ -130,6 +134,23 @@ pub const THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 
 /// Favicon.
 pub const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+
+// ==================== Brand Fonts ====================
+// Geist — the brand type system shared with ironclaw.com (variable woff2
+// from the official `geist` npm package, SIL OFL licensed). Served under
+// `/fonts/*` and declared via @font-face in theme.css. Geist Pixel Square
+// is the stylistic face for uppercase tags/labels.
+
+/// Geist variable (weights 100-900).
+pub const FONT_GEIST_VARIABLE: &[u8] = include_bytes!("../static/fonts/Geist-Variable.woff2");
+
+/// Geist Mono variable (weights 100-900).
+pub const FONT_GEIST_MONO_VARIABLE: &[u8] =
+    include_bytes!("../static/fonts/GeistMono-Variable.woff2");
+
+/// Geist Pixel Square (500) — stylistic uppercase tags/labels.
+pub const FONT_GEIST_PIXEL_SQUARE: &[u8] =
+    include_bytes!("../static/fonts/GeistPixel-Square.woff2");
 
 // ==================== Internationalization ====================
 

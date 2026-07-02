@@ -67,6 +67,7 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
+    font_geist_mono_variable_handler, font_geist_pixel_square_handler, font_geist_variable_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
     i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
     project_redirect_handler, theme_css_handler, theme_init_handler,
@@ -499,6 +500,18 @@ pub async fn start_server(
         .route("/debug-panel.js", get(debug_panel_js_handler))
         .route("/debug-panel.css", get(debug_panel_css_handler))
         .route("/favicon.ico", get(favicon_handler))
+        .route(
+            "/fonts/Geist-Variable.woff2",
+            get(font_geist_variable_handler),
+        )
+        .route(
+            "/fonts/GeistMono-Variable.woff2",
+            get(font_geist_mono_variable_handler),
+        )
+        .route(
+            "/fonts/GeistPixel-Square.woff2",
+            get(font_geist_pixel_square_handler),
+        )
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
