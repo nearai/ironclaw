@@ -15,20 +15,32 @@
 //! observes a real lifecycle transition over the shared store rather than an
 //! already-installed/activated no-op.
 //!
-//! Key behaviours asserted (from `extension_lifecycle.rs::commit_activation` and
-//! `search_installation_phase`): a successful activate yields `"activated":true`
-//! plus a `visible_capability_ids` array of the now-published capability ids; and
-//! `extension_search` renders an ACTIVE extension as `"installation_phase":"active"`
-//! versus `"installed"` for an installed-but-not-yet-activated one.
+//! Key behaviours asserted (from `extension_lifecycle.rs::commit_activation`): a
+//! successful activate yields `"activated":true` plus a `visible_capability_ids`
+//! array of the now-published capability ids; and `extension_search` renders a
+//! ready, credential-free extension as `"availability":"available"`.
 //!
 //! Because all three conversations use different conversation IDs but the same
-//! `Arc<HostRuntimeCapabilityHarness>`, asserting that thread C sees
-//! `installation_phase:active` proves cross-thread ACTIVATION persistence: an
-//! activate in thread B is durably visible to thread C, and the extension's
-//! capability surface (e.g. `web-access.search`) has come online.
+//! `Arc<HostRuntimeCapabilityHarness>`, asserting that thread C's search sees
+//! `availability:available` proves cross-thread install+activate persistence:
+//! an activate in thread B is durably visible to thread C.
+//!
+//! SHAPE NOTE (post-#5416 Phase 0): `availability` is the collapsed
+//! `installed? × credential-readiness` projection — for a credential-free
+//! extension like "web-access", `Installed` and `Active` BOTH project to
+//! `available` (by design: activation vs mere installation is a lifecycle
+//! detail the model does not need, see the 5416 plan §4.1). So
+//! `extension_search`'s `availability` field can no longer discriminate
+//! "installed but not yet activated" from "active" the way the old
+//! `installation_phase` field did. To still prove that THREAD B's
+//! **activation** specifically (not just thread A's install) is durably
+//! visible to thread C, this scenario also reads the shared durable
+//! installation store directly (the same E-EXTSTORE seam the credential-gap
+//! regression test uses) and asserts `ExtensionActivationState::Enabled`.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_extensions::{ExtensionActivationState, ExtensionInstallationId};
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
@@ -92,8 +104,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // ── Thread C: viewer (DIFFERENT conversation, SAME shared store) ─────────
     // A third distinct conversation_id over the Arc-cloned store. Searching for
-    // "web-access" must now report it as ACTIVE — observing Thread B's activation
-    // across threads.
+    // "web-access" must now report it ready — observing Thread A's install and
+    // Thread B's activation across threads.
     let viewer = g
         .thread("ext-activate-phase-viewer")
         .script([
@@ -111,33 +123,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     viewer
         .assert_tool_invoked("builtin.extension_search")
         .await?;
-    // Cross-thread activation persistence: the search result carries
-    // `installation_phase:"active"` only because Thread B's activation enabled the
-    // installation in the shared store. Assert the VALUE so a still-`installed`
-    // phase cannot satisfy this.
+    // Cross-thread install+activate persistence: the search result carries
+    // `availability:"available"` because both Thread A's install and Thread B's
+    // activation reached the shared store (web-access needs no credentials, so
+    // `available` fires as soon as it's installed — see the module SHAPE NOTE).
     viewer
-        .assert_tool_result_contains(r#""installation_phase":"active""#)
+        .assert_tool_result_contains(r#""availability":"available""#)
         .await?;
-
-    // Discriminating guard: an extension that was installed but NOT activated
-    // renders `installation_phase:"installed"`. Its ABSENCE here proves the phase
-    // genuinely advanced past install — a no-op activate (leaving the extension
-    // inactive) would surface `"installed"` and trip this guard.
-    if viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
-        .await
-        .is_ok()
-    {
-        return Err(
-            "web-access still shows installation_phase:installed after a cross-thread activate; \
-             builtin.extension_activate did not advance the lifecycle through the shared store"
-                .into(),
-        );
-    }
 
     // Non-vacuity guard: "web-access" must still appear in the catalog search
     // result, proving the search actually ran and returned a catalog entry. The
-    // presence of `installation_phase:active` is therefore meaningful — not a
+    // presence of `availability:available` is therefore meaningful — not a
     // symptom of an empty or errored result.
     if viewer
         .assert_tool_result_contains("\"web-access\"")
@@ -146,9 +142,33 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     {
         return Err(
             "non-vacuity guard failed: web-access catalog entry must appear in search results \
-             after activation; the active-phase assertion would otherwise be vacuous"
+             after activation; the availability assertion would otherwise be vacuous"
                 .into(),
         );
+    }
+
+    // `availability` cannot discriminate "installed" from "active" for a
+    // credential-free extension (see module SHAPE NOTE), so read the shared
+    // durable installation store directly to prove Thread B's ACTIVATION
+    // specifically — not just Thread A's install — is durably visible: the
+    // store must report `ExtensionActivationState::Enabled`, not `Installed`.
+    let installation_id = ExtensionInstallationId::new("web-access")?;
+    let store = g
+        .capability_harness()
+        .ok_or("extension_lifecycle group missing HostRuntime capability harness")?
+        .extension_installation_store_for_test()
+        .ok_or("harness missing extension installation store (E-EXTSTORE seam)")?;
+    let installation = store
+        .get_installation(&installation_id)
+        .await?
+        .ok_or("web-access installation missing from the shared store after activation")?;
+    if installation.activation_state() != ExtensionActivationState::Enabled {
+        return Err(format!(
+            "web-access installation state is {:?}, not Enabled, after a cross-thread activate; \
+             builtin.extension_activate did not durably advance the lifecycle through the shared store",
+            installation.activation_state()
+        )
+        .into());
     }
 
     Ok(())

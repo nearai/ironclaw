@@ -264,8 +264,13 @@ fn extension_info(
     let authenticated = match readiness {
         ExtensionCredentialReadiness::NotRequired => lifecycle_authenticated,
         ExtensionCredentialReadiness::Configured => true,
-        ExtensionCredentialReadiness::MissingRequired => false,
-        ExtensionCredentialReadiness::Unknown => lifecycle_authenticated,
+        // #5416 Defect B: fail closed. An unresolved credential backend must
+        // not read as "connected" just because the lifecycle phase looks
+        // active — that's exactly the fail-open contradiction the settings
+        // list must not repeat.
+        ExtensionCredentialReadiness::MissingRequired | ExtensionCredentialReadiness::Unknown => {
+            false
+        }
     };
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
@@ -279,11 +284,16 @@ fn extension_info(
         authenticated,
         active: phase == LifecyclePhase::Active,
         tools: summary.visible_capability_ids,
-        needs_setup: readiness == ExtensionCredentialReadiness::MissingRequired
-            || matches!(
-                phase,
-                LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
-            ),
+        // `Unknown` also stays actionable (paired with `authenticated: false`
+        // above) rather than landing on `authenticated: false, needs_setup:
+        // false` — a dead-end state with no way to fix it.
+        needs_setup: matches!(
+            readiness,
+            ExtensionCredentialReadiness::MissingRequired | ExtensionCredentialReadiness::Unknown
+        ) || matches!(
+            phase,
+            LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
+        ),
         has_auth,
         activation_status: Some(phase_status(phase).to_string()),
         activation_error: None,
@@ -458,7 +468,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_preserves_lifecycle_state_when_credential_status_is_retryably_unavailable() {
+    async fn list_fails_closed_and_stays_actionable_when_credential_status_is_retryably_unavailable()
+     {
+        // #5416 Defect B: a retryable credential-status outage on an `Active`
+        // extension must project `Unknown` readiness fail-CLOSED (not the old
+        // fail-open `lifecycle_authenticated` fallback), while remaining
+        // actionable — a reconnect/reverify affordance, not a dead-end
+        // "not connected, no way to fix it" state.
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
@@ -472,13 +488,20 @@ mod tests {
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert!(extension.active);
+        assert!(extension.active, "lifecycle activation remains visible");
         assert!(
-            extension.authenticated,
-            "retryable status outages should not be projected as missing credentials"
+            !extension.authenticated,
+            "an unresolved credential backend must not read as connected"
         );
-        assert!(!extension.needs_setup);
-        assert!(extension.onboarding_state.is_none());
+        assert!(
+            extension.needs_setup,
+            "Unknown readiness must stay actionable, not a dead end"
+        );
+        assert_eq!(
+            extension.onboarding_state,
+            Some(RebornExtensionOnboardingState::ReverifyRequired),
+            "Unknown readiness should surface a reconnect/reverify affordance, not generic install onboarding"
+        );
     }
 
     #[tokio::test]
@@ -1008,7 +1031,7 @@ mod tests {
     ) -> LifecycleSearchExtensionSummary {
         LifecycleSearchExtensionSummary {
             summary,
-            installation_phase: None,
+            availability: None,
         }
     }
 }

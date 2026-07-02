@@ -1781,6 +1781,19 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
                 handle,
             })
     }
+
+    async fn account_configured(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "github");
+        assert_eq!(request.requester_extension.as_str(), "github");
+        match &self.result {
+            Ok(_) => Ok(true),
+            Err(CredentialStageError::AuthRequired) => Ok(false),
+            Err(CredentialStageError::Backend) => Err(CredentialStageError::Backend),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1808,6 +1821,23 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
                 scope: request.scope.clone(),
                 handle,
             })
+    }
+
+    async fn account_configured(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "google");
+        assert_eq!(
+            request.requester_extension,
+            &self.expected_requester_extension
+        );
+        assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
+        match &self.result {
+            Ok(_) => Ok(true),
+            Err(CredentialStageError::AuthRequired) => Ok(false),
+            Err(CredentialStageError::Backend) => Err(CredentialStageError::Backend),
+        }
     }
 }
 

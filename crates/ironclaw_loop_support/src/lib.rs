@@ -54,8 +54,8 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
-    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER, CapabilityResultWrite, CapabilityTrajectoryObserver,
+    CapabilityWriteResult, DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
     loop_driver_execution_extension_id,

@@ -570,6 +570,37 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             handle,
         })
     }
+
+    /// Side-effect-free presence check for the capability-surface downgrade
+    /// path (issue #5416, Phase 2, Fix A). Deliberately uses
+    /// `select_unique_configured_runtime_account` ONLY — no refresh
+    /// round-trip — so this is safe to call on every `visible_capabilities`
+    /// render. `resolve_access_secret` above stays the dispatch-time path
+    /// that stages/refreshes the actual secret material.
+    async fn account_configured(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        let selection_request = runtime_credential_account_selection_request(
+            request.scope,
+            request.provider,
+            request.setup.clone(),
+            request.provider_scopes,
+            request.requester_extension,
+        )?;
+        match self
+            .accounts
+            .select_unique_configured_runtime_account(selection_request)
+            .await
+        {
+            Ok(account) => Ok(account.status == CredentialAccountStatus::Configured
+                && account.access_secret.is_some()),
+            Err(error) => match map_account_error(error) {
+                CredentialStageError::AuthRequired => Ok(false),
+                CredentialStageError::Backend => Err(CredentialStageError::Backend),
+            },
+        }
+    }
 }
 
 fn runtime_credential_account_selection_request(

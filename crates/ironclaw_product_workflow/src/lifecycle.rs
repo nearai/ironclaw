@@ -147,6 +147,41 @@ pub enum LifecyclePhase {
     UnsupportedOrLegacy,
 }
 
+/// Collapsed model-facing connection state for an extension search result
+/// (#5416 Phase 0).
+///
+/// The model's only questions for "connect X" are "is it installed?" and "is
+/// the credential present?" — this is the single projected answer, replacing
+/// the raw `LifecyclePhase` (which stays internal; it drives the
+/// install/activate tool flow, not the model's connection judgment) and the
+/// separate credential-readiness axis. See
+/// `docs/plans/2026-07-01-reborn-google-connection-state-5416.md` §4.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionAvailability {
+    /// Usable now — connect without asking the user for anything.
+    Available,
+    /// Installed, but a required credential is missing — run sign-in.
+    NeedsAuth,
+    /// No installation record — discover / install it first.
+    NotInstalled,
+    /// Could not determine (transient backend) — don't claim either way.
+    Unknown,
+}
+
+impl ExtensionAvailability {
+    /// Wire/UI rendering label. Never `format!("{:?}", ..)` — see
+    /// `.claude/rules/types.md` "Wire-stable enums".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::NeedsAuth => "needs_auth",
+            Self::NotInstalled => "not_installed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleReadinessBlocker {
@@ -359,7 +394,7 @@ pub struct LifecycleSearchExtensionSummary {
     #[serde(flatten)]
     pub summary: LifecycleExtensionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_phase: Option<LifecyclePhase>,
+    pub availability: Option<ExtensionAvailability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

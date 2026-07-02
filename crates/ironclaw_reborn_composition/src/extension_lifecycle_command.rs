@@ -338,7 +338,7 @@ mod tests {
                         credential_requirements: Vec::new(),
                         onboarding: None,
                     },
-                    installation_phase: None,
+                    availability: None,
                 }],
             }),
         };

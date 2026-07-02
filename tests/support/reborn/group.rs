@@ -767,7 +767,12 @@ impl<'g> RebornThreadBuilder<'g> {
         // --- per-thread scripted gateway, registered before any submit ---------
         // Session path is per-conversation so group threads do not clobber each
         // other's LLM session cache under the same `turn_root`.
-        let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(self.replies));
+        // Retain the concrete `TraceLlm` handle (before it is type-erased into
+        // `Arc<dyn LlmProvider>` below) so the harness can expose
+        // `captured_tool_definitions()` for assertions on the model-visible
+        // tool descriptions the real decorator chain actually shipped.
+        let trace_llm = Arc::new(scripted_trace_llm(self.replies));
+        let raw: Arc<dyn LlmProvider> = trace_llm.clone();
         let session = create_session_manager(SessionConfig {
             session_path: shared
                 .turn_root
@@ -844,6 +849,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_egress_count,
             baseline_result_count,
             baseline_process_count,
+            trace_llm,
         })
     }
 }

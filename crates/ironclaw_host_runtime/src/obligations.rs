@@ -70,6 +70,17 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError>;
+
+    /// Side-effect-free presence check: is a configured account available for
+    /// this requirement WITHOUT staging or refreshing any secret material? Safe
+    /// to call repeatedly on every capability-surface render. `Ok(true)` =
+    /// configured account present; `Ok(false)` = no configured account (user must
+    /// sign in); `Err(Backend)` = indeterminate backend failure (caller fails
+    /// open). Must NOT perform token refresh, network staging, or lease consumption.
+    async fn account_configured(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError>;
 }
 
 /// Runtime secret material staged after `InjectSecretOnce` lease consumption.

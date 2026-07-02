@@ -37,6 +37,8 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod credential_presence;
+mod credential_presence_cache;
 mod document_output;
 mod egress;
 mod extension_contracts;

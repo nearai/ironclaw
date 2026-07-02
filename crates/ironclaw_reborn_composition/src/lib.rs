@@ -38,6 +38,7 @@ mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
+mod extension_availability;
 mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;

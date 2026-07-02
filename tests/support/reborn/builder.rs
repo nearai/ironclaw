@@ -56,6 +56,8 @@ use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
+use crate::support::trace_llm::TraceLlm;
+use ironclaw_llm::ToolDefinition;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -324,6 +326,12 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
+    /// The scripted raw-provider seam, retained (in addition to the
+    /// type-erased `Arc<dyn LlmProvider>` fed to the real decorator chain) so
+    /// tests can inspect what the real chain actually shipped to the model —
+    /// e.g. `captured_tool_definitions()` for asserting on model-visible tool
+    /// descriptions (#5416 Phase 3).
+    pub(crate) trace_llm: Arc<TraceLlm>,
 }
 
 impl RebornIntegrationHarness {
@@ -534,6 +542,18 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_egress_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         let all = self.capability_recorder.runtime_http_requests();
         all[self.baseline_egress_count..].to_vec()
+    }
+
+    /// Tool definitions the real `ironclaw_llm` decorator chain shipped to the
+    /// scripted model for each call so far, in call order (index `i` matches
+    /// the `i`-th model turn). Reads straight through to `TraceLlm`, the
+    /// vendor-SDK-seam fake — everything above it (dispatcher, capability
+    /// surface mapping, `CompletionRequest`/tool-def assembly) ran for real.
+    /// Not baseline-sliced: unlike the capability recorder, `TraceLlm` is
+    /// per-thread (built fresh in `RebornThreadBuilder::build()`), so there is
+    /// no prior-thread history to exclude.
+    pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
+        self.trace_llm.captured_tool_definitions()
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process

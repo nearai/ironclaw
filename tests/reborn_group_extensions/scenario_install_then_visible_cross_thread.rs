@@ -3,10 +3,12 @@
 //!
 //! Thread A calls `builtin.extension_install` for "github". Thread B calls
 //! `builtin.extension_search` for "github" and asserts the result carries
-//! `installation_phase: "installed"` — a field that only appears in search
-//! results for an already-installed extension. Because the two threads use
-//! different conversation IDs but the same `Arc<HostRuntimeCapabilityHarness>`,
-//! this proves cross-thread extension persistence.
+//! `availability: "needs_auth"` — GitHub requires a credential and none is
+//! configured here, so an installed-but-uncredentialed extension projects
+//! `needs_auth` (not `not_installed`, which is what an unknown/never-installed
+//! extension would show). Because the two threads use different conversation
+//! IDs but the same `Arc<HostRuntimeCapabilityHarness>`, this proves
+//! cross-thread extension persistence.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -54,13 +56,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     viewer
         .assert_tool_invoked("builtin.extension_search")
         .await?;
-    // The search result carries `installation_phase: "installed"` for the github
-    // package only when it is already installed (before installation the field is
-    // absent entirely). Assert the VALUE, not just the key — a `pending`/`failed`
-    // phase must not satisfy this — so the check proves thread B observes thread
-    // A's *successful* installation over the shared store.
+    // The search result carries `availability: "needs_auth"` for the github
+    // package only once it is installed (before installation the field reads
+    // `not_installed`). Assert the VALUE, not just the key, so the check proves
+    // thread B observes thread A's *successful* installation over the shared
+    // store.
     viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
+        .assert_tool_result_contains(r#""availability":"needs_auth""#)
         .await?;
 
     // Committed negative guard (non-vacuity): a marker for a never-installed,

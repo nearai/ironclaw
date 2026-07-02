@@ -24,6 +24,7 @@ mod support;
 mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_remove_then_absent_cross_thread;
+mod scenario_search_ready_message_requires_credential;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -53,13 +54,28 @@ async fn extensions_group_e2e() {
     );
 
     // Scenario 3: install in thread A → activate in thread B → search in thread C
-    // confirms the extension reports `installation_phase:active` over the shared
-    // store. Closes the `extension_activate` int-tier gap. Independent of
-    // Scenarios 1 & 2: it uses "web-access" (the only credential-free bundled
-    // extension), untouched by "github"/"notion", so it is self-contained.
+    // confirms the extension reports `availability:available` over the shared
+    // store (plus a direct durable-store read confirming activation specifically,
+    // see the scenario's SHAPE NOTE). Closes the `extension_activate` int-tier
+    // gap. Independent of Scenarios 1 & 2: it uses "web-access" (the only
+    // credential-free bundled extension), untouched by "github"/"notion", so it
+    // is self-contained.
     report.record(
         "activate_then_active_cross_thread",
         scenario_activate_then_active_cross_thread::run(&g).await,
+    );
+
+    // Scenario 4 (regression, bug #5416): extensions seeded `Enabled` with NO
+    // credential account must NOT be reported by `builtin.extension_search` as
+    // "already configured or active" / safe to skip asking for credentials —
+    // across credential types: gmail (Google OAuth), github (GitHub OAuth),
+    // notion (Notion OAuth / MCP). A credential-free extension (web-access)
+    // must STILL be reported ready (control against over-suppression). Runs
+    // after Scenarios 1-3 and reuses their shared-store state (github installed,
+    // notion removed, web-access Enabled).
+    report.record(
+        "search_ready_message_requires_credential",
+        scenario_search_ready_message_requires_credential::run(&g).await,
     );
 
     report.assert_all_passed();

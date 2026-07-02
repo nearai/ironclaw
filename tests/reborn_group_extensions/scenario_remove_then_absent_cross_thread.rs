@@ -9,11 +9,13 @@
 //! Thread A-install calls `builtin.extension_install` for "notion". Thread
 //! A-remove (a distinct conversation) calls `builtin.extension_remove` for the
 //! same package. Thread B calls `builtin.extension_search` for "notion" and
-//! asserts the result does NOT carry `installation_phase: "installed"` — the
-//! field is absent in search results for extensions that are not installed.
-//! Because all three conversations use different conversation IDs but the same
-//! `Arc<HostRuntimeCapabilityHarness>`, this proves cross-thread extension
-//! removal persistence: a remove in thread A is durably visible to thread B.
+//! asserts the result carries `availability: "not_installed"` (not
+//! `needs_auth`/`available`) — `not_installed` is the collapsed projection's
+//! explicit value for "no installation record", replacing the old
+//! field-presence-as-signal shape. Because all three conversations use
+//! different conversation IDs but the same `Arc<HostRuntimeCapabilityHarness>`,
+//! this proves cross-thread extension removal persistence: a remove in thread A
+//! is durably visible to thread B.
 //!
 //! The `builtin.extension_remove` arg shape is `{"extension_id": "<id>"}`,
 //! identical to `builtin.extension_install` and `builtin.extension_activate`
@@ -23,13 +25,13 @@
 //! (confirmed from the unit test in `extension_lifecycle_capabilities.rs` that
 //! calls `assert_eq!(remove["payload"]["removed"], true)`).
 //!
-//! The search output contains `installation_phase: "installed"` only when the
-//! extension is in the installed lifecycle state — the field is entirely absent
-//! when the extension is not installed (confirmed from the unit test that calls
-//! `assert_eq!(available_github.get("installation_phase"), None)` before install
-//! and `assert_eq!(installed_github["installation_phase"], "installed")` after).
-//! After removal the extension reverts to the pre-install state, so
-//! `installation_phase` disappears again.
+//! Post-#5416-Phase-0, `availability` is populated for every search result,
+//! including registry-only (not-installed) ones — `not_installed` for "notion"
+//! after removal proves the removal reverted the installation record, not that
+//! the whole field vanished (confirmed from the unit test that calls
+//! `assert_eq!(available_github["availability"], "not_installed")` before
+//! install and `assert_eq!(installed_github["availability"], "needs_auth")`
+//! after).
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -107,26 +109,18 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_invoked("builtin.extension_search")
         .await?;
 
-    // Absence assertion: after removal `installation_phase` reverts to absent.
-    // `assert_tool_result_contains` returns `Ok` when the needle IS present and
-    // `Err` when it is absent — invert to assert absence.
-    if viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
-        .await
-        .is_ok()
-    {
-        return Err(
-            "removed extension still shows installation_phase:installed in cross-thread search; \
-             builtin.extension_remove did not propagate through the shared store"
-                .into(),
-        );
-    }
+    // Positive assertion: after removal, "notion" reverts to `not_installed`
+    // (the collapsed projection's explicit "no installation record" value) —
+    // not `needs_auth`/`available`, which would mean the removal did not
+    // propagate through the shared store.
+    viewer
+        .assert_tool_result_contains(r#""availability":"not_installed""#)
+        .await?;
 
     // Non-vacuity guard: "notion" must still appear in the catalog search result
     // (as an available-but-not-installed bundled extension), proving the search
-    // actually ran and returned catalog entries. The absence of
-    // `installation_phase` is therefore meaningful — not a symptom of an empty
-    // or errored result.
+    // actually ran and returned catalog entries. The `not_installed` value is
+    // therefore meaningful — not a symptom of an empty or errored result.
     if viewer
         .assert_tool_result_contains("\"notion\"")
         .await

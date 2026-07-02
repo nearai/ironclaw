@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
@@ -13,9 +14,9 @@ use ironclaw_host_api::{
     sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleSearchExtensionSummary, ProductWorkflowError,
+    ExtensionAvailability, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -30,6 +31,9 @@ use crate::available_extensions::{
 use crate::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
     UnavailableExtensionActivationCredentialGate,
+};
+use crate::extension_availability::{
+    EXTENSION_READINESS_CONCURRENCY, any_available, resolve_extension_availability,
 };
 use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::lifecycle::response_with_payload;
@@ -190,11 +194,23 @@ impl RebornLocalExtensionManagementPort {
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let extensions = self.catalog.search(query);
-        let mut summaries = Vec::new();
-        for extension in extensions {
-            summaries.push(self.search_summary(extension, credential_gate).await?);
-        }
+        // Every result's credential readiness is now checked (not just
+        // `Installed`-phase ones, see #5416 A1), which widens this into an
+        // O(extensions × requirements) await chain. Fan out with the same
+        // bounded concurrency the list path uses
+        // (`reborn_services/extensions.rs::lifecycle_extension_infos`).
+        //
+        // Indexed by position (rather than `.map()` over the borrowed items
+        // directly) to sidestep a higher-ranked-lifetime inference limitation:
+        // a closure taking a bare `&AvailableExtensionPackage` and returning
+        // this method's opaque `impl Future` gets inferred as `for<'r> Fn(&'r
+        // ..)`, which the single-lifetime future type cannot satisfy.
+        let extensions: Vec<&AvailableExtensionPackage> = self.catalog.search(query).collect();
+        let summaries: Vec<LifecycleSearchExtensionSummary> = stream::iter(0..extensions.len())
+            .map(|index| self.search_summary(extensions[index], credential_gate))
+            .buffered(EXTENSION_READINESS_CONCURRENCY)
+            .try_collect()
+            .await?;
         let count = summaries.len();
         let mut response = response_with_payload(
             None,
@@ -321,17 +337,14 @@ impl RebornLocalExtensionManagementPort {
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let mut summary = extension.summary();
-        suppress_search_credential_onboarding(&mut summary);
-        let Some(installation) = self.search_installation(&extension.package.id).await? else {
-            return Ok(LifecycleSearchExtensionSummary {
-                summary,
-                installation_phase: None,
-            });
-        };
-        let phase = search_installation_phase(extension, &installation, credential_gate).await?;
+        let installation = self.search_installation(&extension.package.id).await?;
+        let availability =
+            resolve_extension_availability(extension, installation.as_ref(), credential_gate)
+                .await?;
+        apply_search_availability_onboarding(&mut summary, availability);
         Ok(LifecycleSearchExtensionSummary {
             summary,
-            installation_phase: Some(phase),
+            availability: Some(availability),
         })
     }
 
@@ -1190,73 +1203,26 @@ fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase
     }
 }
 
-async fn search_installation_phase(
-    extension: &AvailableExtensionPackage,
-    installation: &ExtensionInstallation,
-    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-) -> Result<LifecyclePhase, ProductWorkflowError> {
-    let phase = phase_for_activation_state(installation.activation_state());
-    if phase != LifecyclePhase::Installed {
-        return Ok(phase);
+/// Availability-driven onboarding handling for a search result (#5416 §4.3):
+/// `available` clears the requirements/onboarding a searcher no longer needs
+/// to act on; `needs_auth` / `unknown` keep them (the model needs the
+/// actionable how-to-connect detail); `not_installed` is left unchanged (raw
+/// discovery copy).
+fn apply_search_availability_onboarding(
+    summary: &mut LifecycleExtensionSummary,
+    availability: ExtensionAvailability,
+) {
+    if availability == ExtensionAvailability::Available {
+        summary.credential_requirements.clear();
+        summary.onboarding = None;
     }
-    if search_credentials_configured(extension, credential_gate).await? {
-        return Ok(LifecyclePhase::Configured);
-    }
-    Ok(phase)
-}
-
-async fn search_credentials_configured(
-    extension: &AvailableExtensionPackage,
-    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-) -> Result<bool, ProductWorkflowError> {
-    let requirements = package_runtime_credential_auth_requirements(&extension.package);
-    if requirements.is_empty() {
-        return Ok(false);
-    }
-    let Some(credential_gate) = credential_gate else {
-        return Ok(false);
-    };
-    Ok(credential_gate
-        .missing_requirements(requirements)
-        .await
-        .map_err(map_search_credential_stage_error)?
-        .is_empty())
-}
-
-fn suppress_search_credential_onboarding(summary: &mut LifecycleExtensionSummary) {
-    summary.credential_requirements.clear();
-    summary.onboarding = None;
 }
 
 fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) -> bool {
     let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
         return false;
     };
-    extensions.iter().any(|extension| {
-        matches!(
-            extension.installation_phase,
-            Some(LifecyclePhase::Configured | LifecyclePhase::Active)
-        ) && extension.summary.credential_requirements.is_empty()
-            && extension.summary.onboarding.is_none()
-    })
-}
-
-fn map_search_credential_stage_error(
-    error: ironclaw_host_api::CredentialStageError,
-) -> ProductWorkflowError {
-    match error {
-        ironclaw_host_api::CredentialStageError::AuthRequired => {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: "extension requires product auth credentials before search can project configured state".to_string(),
-            }
-        }
-        ironclaw_host_api::CredentialStageError::Backend => {
-            ProductWorkflowError::Transient {
-                reason: "extension product auth credential state is temporarily unavailable"
-                    .to_string(),
-            }
-        }
-    }
+    any_available(extensions)
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -2356,7 +2322,7 @@ mod tests {
             .iter()
             .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
-        assert_eq!(github.installation_phase, Some(LifecyclePhase::Configured));
+        assert_eq!(github.availability, Some(ExtensionAvailability::Available));
         assert!(
             github.summary.credential_requirements.is_empty(),
             "configured inactive GitHub search results must not expose satisfied PAT requirements"
@@ -2415,7 +2381,7 @@ mod tests {
             .iter()
             .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
-        assert_eq!(github.installation_phase, Some(LifecyclePhase::Active));
+        assert_eq!(github.availability, Some(ExtensionAvailability::Available));
         assert!(
             github.summary.credential_requirements.is_empty(),
             "active GitHub search results must not expose satisfied PAT requirements"
@@ -2452,7 +2418,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_lifecycle_search_reports_credential_backend_failure_as_transient() {
+    async fn extension_lifecycle_search_reports_credential_backend_failure_as_unknown() {
+        // #5416 §4.4 "Backend degrade": a credential backend blip must not
+        // fail the whole search — it degrades that one result to `unknown`
+        // (fail-closed for the "ready" claim) while search still succeeds.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
         let facade = facade.with_runtime_credential_accounts(Arc::new(
@@ -2470,7 +2439,7 @@ mod tests {
             )
             .await
             .expect("install extension");
-        let error = facade
+        let search = facade
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -2478,9 +2447,27 @@ mod tests {
                 },
             )
             .await
-            .expect_err("search reports credential backend failure");
+            .expect("search succeeds despite the credential backend blip");
 
-        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        assert!(
+            search.message.is_none(),
+            "an unknown-availability result must not claim ready, got {:?}",
+            search.message
+        );
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let github = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "github")
+            .expect("github search result");
+        assert_eq!(github.availability, Some(ExtensionAvailability::Unknown));
+        assert!(
+            !github.summary.credential_requirements.is_empty(),
+            "unknown-availability search results must retain actionable credential requirements"
+        );
     }
 
     #[tokio::test]

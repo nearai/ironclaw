@@ -104,7 +104,11 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    VisibleCapabilitySurface,
+    credential_presence::ProductionCredentialPresence,
+    credential_presence_cache::CredentialPresenceCache,
+    obligations::{RuntimeCredentialAccountResolver, secret_present},
+    plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -142,6 +146,22 @@ pub struct DefaultHostRuntime {
     // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
     // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
     credential_preflight_store: Option<Arc<dyn SecretStore>>,
+    /// Optional product-auth account resolver used for capability-surface
+    /// credential-presence checks (`visible_capabilities` `NeedsAuth`
+    /// downgrade — issue #5416, Phase 2).
+    ///
+    /// Distinct from the dispatch-time resolver wired into
+    /// `BuiltinObligationHandler`: that one stages the actual credential
+    /// material for one capability invocation; this one only answers "is an
+    /// account configured" for surface rendering. Production composition
+    /// wires both from the same underlying resolver.
+    // arch-exempt: optional_arc, credential presence is disabled in minimal/test
+    // host-runtime graphs that do not wire a resolver, plan #5416 (Phase 2)
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
+    /// Short-TTL cache backing the credential-presence checks above. Always
+    /// constructed (cheap, in-memory); it is inert unless a presence check
+    /// actually runs.
+    credential_presence_cache: Arc<CredentialPresenceCache>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -208,6 +228,8 @@ impl DefaultHostRuntime {
             runtime_health: None,
             obligation_handler: None,
             credential_preflight_store: None,
+            credential_account_resolver: None,
+            credential_presence_cache: Arc::new(CredentialPresenceCache::new()),
             surface_version,
             runtime_policy,
         }
@@ -382,6 +404,22 @@ impl DefaultHostRuntime {
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
         self.credential_preflight_store = Some(secret_store);
+        self
+    }
+
+    /// Attaches the product-auth account resolver used for capability-surface
+    /// credential-presence checks (`visible_capabilities` `NeedsAuth`
+    /// downgrade).
+    ///
+    /// Production code must use `HostRuntimeServices::build_host_runtime()`
+    /// which wires the resolver automatically. This setter is `pub(crate)` for
+    /// the same reason as [`Self::with_credential_preflight_store`]: prevent a
+    /// second public seam for this wiring.
+    pub(crate) fn with_credential_account_resolver(
+        mut self,
+        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.credential_account_resolver = Some(resolver);
         self
     }
 
@@ -1043,6 +1081,18 @@ impl HostRuntime for DefaultHostRuntime {
         let catalog = match self.surface_filesystem.as_deref() {
             Some(filesystem) => catalog.with_filesystem(filesystem),
             None => catalog,
+        };
+        let presence = ProductionCredentialPresence {
+            secret_store: self.credential_preflight_store.as_deref(),
+            resolver: self.credential_account_resolver.as_deref(),
+            cache: &self.credential_presence_cache,
+        };
+        let catalog = if self.credential_preflight_store.is_some()
+            || self.credential_account_resolver.is_some()
+        {
+            catalog.with_credential_presence(&presence)
+        } else {
+            catalog
         };
         catalog.visible_capabilities(request).await
     }

@@ -37,6 +37,22 @@ pub(super) fn for_installed_with_credential_status(
     if readiness == ExtensionCredentialReadiness::MissingRequired {
         return credential_onboarding(&extension.summary);
     }
+    if readiness == ExtensionCredentialReadiness::Unknown
+        && matches!(
+            extension.phase,
+            LifecyclePhase::Active | LifecyclePhase::Activating | LifecyclePhase::Configured
+        )
+    {
+        // #5416 Defect B: an `Unknown` credential readiness on an extension that
+        // was plausibly connected (Active/Activating/Configured) must stay
+        // actionable via reconnect/reverify, not fall through to generic install
+        // onboarding that would tell an already-connected user to start setup
+        // from scratch. For a not-yet-connected phase (Installed/Failed/…),
+        // `Unknown` falls through to the normal setup onboarding below — the
+        // user genuinely still needs initial setup, and "reverify" copy would be
+        // misleading for something never connected.
+        return reverify_onboarding(&extension.summary);
+    }
     if readiness == ExtensionCredentialReadiness::Configured
         && matches!(
             extension.phase,
@@ -51,6 +67,30 @@ pub(super) fn for_installed_with_credential_status(
         return no_credential_onboarding(&extension.summary, phase);
     }
     for_installed(extension)
+}
+
+/// Reconnect/reverify affordance for a credential readiness that could not be
+/// determined. Distinct from `credential_onboarding` (genuinely missing
+/// credential): this extension may already be connected, so the copy asks the
+/// user to reverify rather than walking through setup from scratch.
+fn reverify_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboarding {
+    let instructions = format!(
+        "{} connection status could not be confirmed right now. Reverify or reconnect its credentials to restore access.",
+        summary.name
+    );
+    ExtensionOnboarding {
+        state: Some(RebornExtensionOnboardingState::ReverifyRequired),
+        onboarding: Some(RebornExtensionOnboardingPayload {
+            credential_instructions: Some(instructions.clone()),
+            setup_url: setup_url(summary),
+            credential_next_step: Some(format!(
+                "Reconnect {} to confirm its credentials are still valid.",
+                summary.name
+            )),
+        }),
+        instructions: Some(instructions),
+        awaiting_token: None,
+    }
 }
 
 pub(super) fn from_lifecycle(lifecycle: &LifecycleProductResponse) -> ExtensionOnboarding {
@@ -422,6 +462,48 @@ mod tests {
         assert_eq!(
             onboarding.instructions.as_deref(),
             Some("Gmail activation failed.")
+        );
+    }
+
+    #[test]
+    fn unknown_credential_readiness_projects_reverify_state_not_generic_onboarding() {
+        // #5416 Defect B: an `Active` extension whose credential backend blipped
+        // (`Unknown`) must stay actionable — a reconnect/reverify affordance,
+        // not generic "not connected" install onboarding with no way to fix it.
+        let extension = installed_extension(
+            "gmail",
+            "Gmail",
+            LifecyclePhase::Active,
+            vec![oauth_requirement("gmail_account", "google")],
+            LifecycleExtensionRuntimeKind::FirstParty,
+            Some(LifecycleExtensionOnboarding {
+                instructions: "Gmail needs Google OAuth authorization before mail tools can run."
+                    .to_string(),
+                credential_instructions: Some(
+                    "Authorize the Google account that IronClaw should use for Gmail.".to_string(),
+                ),
+                setup_url: None,
+                credential_next_step: Some(
+                    "After authorization completes, activate Gmail to publish its tools."
+                        .to_string(),
+                ),
+            }),
+        );
+
+        let onboarding =
+            for_installed_with_credential_status(&extension, ExtensionCredentialReadiness::Unknown);
+
+        assert_eq!(
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::ReverifyRequired)
+        );
+        assert!(
+            onboarding
+                .instructions
+                .as_deref()
+                .is_some_and(|instructions| instructions.contains("could not be confirmed")),
+            "expected a reverify-specific message, got {:?}",
+            onboarding.instructions
         );
     }
 

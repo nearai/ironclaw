@@ -1267,6 +1267,13 @@ impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
     ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
         Err(ironclaw_host_api::CredentialStageError::AuthRequired)
     }
+
+    async fn account_configured(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, ironclaw_host_api::CredentialStageError> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug)]
@@ -1282,6 +1289,13 @@ impl RuntimeCredentialAccountResolver for FixedHandleResolver {
             scope: request.scope.clone(),
             handle: self.0.clone(),
         })
+    }
+
+    async fn account_configured(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, ironclaw_host_api::CredentialStageError> {
+        Ok(true)
     }
 }
 
@@ -1301,6 +1315,13 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
             scope: self.source_scope.clone(),
             handle: self.handle.clone(),
         })
+    }
+
+    async fn account_configured(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, ironclaw_host_api::CredentialStageError> {
+        Ok(true)
     }
 }
 

@@ -35,7 +35,7 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{ExtensionInstallationStore, ExtensionRegistry};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
@@ -1591,6 +1591,15 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `capability_ids` (i.e. only `project_tools()` surfaces it), so other
     /// local-dev groups are unaffected. Tests read projects back via `project_service`.
     project_service: Option<Arc<dyn ProjectService>>,
+    /// Extension installation store backing the local-dev extension-lifecycle
+    /// port (E-EXTSTORE seam). `Some` only for `new_with_options`-built
+    /// local-dev harnesses (which flow through `RebornServices`); `None` for
+    /// the lower-level constructors and the Echo backend. Mirrors
+    /// `profile_filesystem`/`project_service`'s role: lets a test seed an
+    /// `ExtensionInstallation` directly (e.g. `Enabled` with no credential
+    /// binding) without driving it through `install`/`activate`, which gates
+    /// on credentials. Read back via `extension_installation_store_for_test`.
+    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1804,6 +1813,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            installation_store: None,
         })
     }
 
@@ -2136,10 +2146,12 @@ impl HostRuntimeCapabilityHarness {
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
-        // Capture the profile filesystem + project service before
-        // `services.host_runtime` is moved out below (E-PROFILE / E-PROJ seams).
+        // Capture the profile filesystem + project service + extension
+        // installation store before `services.host_runtime` is moved out below
+        // (E-PROFILE / E-PROJ / E-EXTSTORE seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
         let project_service = services.local_dev_project_service_for_test();
+        let installation_store = services.extension_installation_store_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -2173,6 +2185,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem,
             project_service,
+            installation_store,
         })
     }
 
@@ -2319,6 +2332,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            installation_store: None,
         })
     }
 
@@ -2387,6 +2401,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            installation_store: None,
         })
     }
 
@@ -2460,6 +2475,7 @@ impl HostRuntimeCapabilityHarness {
             process_port: None,
             profile_filesystem: None,
             project_service: None,
+            installation_store: None,
         })
     }
 
@@ -2659,6 +2675,23 @@ impl HostRuntimeCapabilityHarness {
     /// than reconstructing an equivalent (and possibly unwritten) one.
     pub(crate) fn project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
         self.project_service.clone()
+    }
+
+    /// E-EXTSTORE: the extension installation store backing this harness's
+    /// local-dev extension-lifecycle port, for direct seed/read-back in tests.
+    /// Mirrors `profile_filesystem_for_test`/`project_service_for_test`'s role.
+    /// `Some` only for `new_with_options`-built local-dev harnesses (e.g.
+    /// `extension_lifecycle_tools()`). Lets a test write an
+    /// `ExtensionInstallation` directly (e.g. `Enabled` with an empty
+    /// `credential_bindings` list) so `builtin.extension_search` observes an
+    /// activation state that `install`/`activate` cannot reach on their own —
+    /// `activate` gates on credentials and returns `AuthRequired` instead of
+    /// ever reaching `Enabled` when the extension requires credentials that
+    /// are not configured.
+    pub(crate) fn extension_installation_store_for_test(
+        &self,
+    ) -> Option<Arc<dyn ExtensionInstallationStore>> {
+        self.installation_store.clone()
     }
 
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness
@@ -3395,6 +3428,19 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
                 scope: request.scope.clone(),
                 handle,
             })
+    }
+
+    async fn account_configured(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "github");
+        assert_eq!(request.requester_extension.as_str(), "github");
+        match &self.result {
+            Ok(_) => Ok(true),
+            Err(CredentialStageError::AuthRequired) => Ok(false),
+            Err(CredentialStageError::Backend) => Err(CredentialStageError::Backend),
+        }
     }
 }
 

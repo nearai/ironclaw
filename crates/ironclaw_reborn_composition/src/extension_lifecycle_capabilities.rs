@@ -501,7 +501,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_search_hides_onboarding_after_credentialed_activation() {
+    async fn local_dev_extension_search_availability_gates_onboarding_and_ready_message() {
+        // #5416 Phase 0: the collapsed `availability` field — not the raw
+        // lifecycle phase — decides both the ready message and whether
+        // credential_requirements/onboarding are cleared. `not_installed` and
+        // `needs_auth` keep the actionable how-to-connect detail; only
+        // `available` clears it.
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "extension-tools-active-search-owner",
@@ -524,14 +529,16 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(available_github.get("installation_phase"), None);
+        assert_eq!(available_github["availability"], "not_installed");
         assert!(
-            available_github.get("credential_requirements").is_none(),
-            "available GitHub model-visible search results must not expose PAT requirements before activation"
+            available_github
+                .get("credential_requirements")
+                .is_some_and(|requirements| requirements.as_array().is_some_and(|r| !r.is_empty())),
+            "not-installed GitHub discovery results should show how to connect once installed"
         );
         assert!(
-            available_github.get("onboarding").is_none(),
-            "available GitHub model-visible search results must not expose PAT setup onboarding before activation"
+            available_github.get("onboarding").is_some(),
+            "not-installed GitHub discovery results should show setup onboarding"
         );
 
         invoke_json(
@@ -556,14 +563,23 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(installed_github["installation_phase"], "installed");
+        assert_eq!(installed_github["availability"], "needs_auth");
         assert!(
-            installed_github.get("credential_requirements").is_none(),
-            "installed inactive GitHub model-visible search results must not expose stale PAT requirements before activation"
+            !installed_search["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already configured or active"),
+            "an installed-but-uncredentialed GitHub must not be reported ready"
         );
         assert!(
-            installed_github.get("onboarding").is_none(),
-            "installed inactive GitHub model-visible search results must not expose stale PAT setup onboarding before activation"
+            installed_github
+                .get("credential_requirements")
+                .is_some_and(|requirements| requirements.as_array().is_some_and(|r| !r.is_empty())),
+            "installed inactive GitHub with a missing credential should expose actionable PAT requirements"
+        );
+        assert!(
+            installed_github.get("onboarding").is_some(),
+            "installed inactive GitHub with a missing credential should expose setup onboarding"
         );
 
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
@@ -589,7 +605,7 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(github["installation_phase"], "configured");
+        assert_eq!(github["availability"], "available");
         assert!(
             github.get("credential_requirements").is_none(),
             "configured GitHub model-visible search results must not expose satisfied PAT requirements"
@@ -628,7 +644,7 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(github["installation_phase"], "active");
+        assert_eq!(github["availability"], "available");
         assert!(
             github.get("credential_requirements").is_none(),
             "active GitHub model-visible search results must not expose satisfied PAT requirements"

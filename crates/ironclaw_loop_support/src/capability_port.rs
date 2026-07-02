@@ -14,7 +14,7 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind,
+    RuntimeFailureKind, VisibleCapabilityAccess,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
@@ -1591,6 +1591,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 snapshot
                     .provider_names
                     .insert(provider_tool_name.clone(), capability_id.clone());
+                // Fold the connection-state signal (#5416 Phase 3) into ONE
+                // description binding shared by both the provider tool-def
+                // snapshot and the descriptor view below, so they can never
+                // drift from each other.
+                let description =
+                    describe_with_access(capability.descriptor.description, capability.access);
                 snapshot.capabilities.insert(
                     capability_id.clone(),
                     SurfaceCapabilitySnapshot::Runtime(Box::new(
@@ -1598,7 +1604,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                             provider: capability.descriptor.provider.clone(),
                             runtime: capability.descriptor.runtime,
                             estimate: capability.estimated_resources.clone(),
-                            safe_description: capability.descriptor.description.clone(),
+                            safe_description: description.clone(),
                             parameters_schema: capability.descriptor.parameters_schema.clone(),
                             effects: capability.descriptor.effects.clone(),
                             provider_tool_name,
@@ -1610,7 +1616,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     provider: Some(capability.descriptor.provider),
                     runtime: capability.descriptor.runtime,
                     safe_name: capability.descriptor.id.as_str().to_string(),
-                    safe_description: capability.descriptor.description,
+                    safe_description: description,
                     concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
@@ -2521,6 +2527,41 @@ fn loop_surface_version(
             "host runtime capability surface version could not be represented",
         )
     })
+}
+
+/// Fixed, host-authored sentence appended to a capability's model-visible
+/// description when its `VisibleCapabilityAccess` is `NeedsAuth` (issue
+/// #5416, Phase 3). Kept as a `const` (rather than inlined per call site) so
+/// wording tweaks land in one place and tests assert against this symbol, not
+/// a duplicated literal.
+///
+/// Never interpolate descriptor/user data into this text — see
+/// `.claude/rules/agent-loop-capabilities.md` (Invariant 2: safe/model-visible
+/// host strings must stay fixed text, not string-built from untrusted input).
+pub const CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER: &str = " [Not connected: a required account \
+    or credential is missing. Do not claim this tool is ready — ask the user to connect it \
+    first; invoking it will require sign-in.]";
+
+/// Folds a `VisibleCapabilityAccess` connection-state signal into the
+/// model-visible capability description, at the ONE seam
+/// (`HostRuntimeLoopCapabilityPort::visible_capabilities`) where a host
+/// `VisibleCapability` is mapped onto the loop surface. Both the provider
+/// tool-definition snapshot and the `CapabilityDescriptorView` must read the
+/// same folded string, so callers should compute it once and reuse it for
+/// both — never re-derive it independently, or the two can drift.
+///
+/// `RequiresApproval` is deliberately a no-op here: approval gating is
+/// already enforced at invocation time (dispatch authorization / lease
+/// checks), so no model-visible description change is needed. Out of scope
+/// for #5416 Phase 3.
+fn describe_with_access(description: String, access: VisibleCapabilityAccess) -> String {
+    match access {
+        VisibleCapabilityAccess::Available => description,
+        VisibleCapabilityAccess::RequiresApproval => description,
+        VisibleCapabilityAccess::NeedsAuth => {
+            format!("{description}{CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER}")
+        }
+    }
 }
 
 fn runtime_resume_replay<'a>(
@@ -7966,6 +8007,20 @@ mod tests {
         }
     }
 
+    /// Like [`visible_capability`], but with the given [`VisibleCapabilityAccess`]
+    /// instead of always `Available` — for #5416 Phase 3 connection-state fold
+    /// coverage.
+    fn visible_capability_with_access(
+        id: CapabilityId,
+        provider: ExtensionId,
+        access: VisibleCapabilityAccess,
+    ) -> VisibleCapability {
+        VisibleCapability {
+            access,
+            ..visible_capability(id, provider)
+        }
+    }
+
     fn dummy_runtime() -> Arc<dyn HostRuntime> {
         Arc::new(NoopHostRuntime)
     }
@@ -8628,5 +8683,119 @@ mod tests {
             TurnRunId::new(),
             resolved,
         )
+    }
+
+    // ── #5416 Phase 3: connection-state description fold ───────────────────
+
+    #[test]
+    fn describe_with_access_available_is_unchanged() {
+        let description = describe_with_access(
+            "demo capability".to_string(),
+            VisibleCapabilityAccess::Available,
+        );
+        assert_eq!(description, "demo capability");
+        assert!(!description.contains(CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER));
+    }
+
+    #[test]
+    fn describe_with_access_requires_approval_is_unchanged() {
+        // Deliberate no-op: approval gating is already enforced at invocation
+        // time, not on the model-visible description. See the doc comment on
+        // `describe_with_access`.
+        let description = describe_with_access(
+            "demo capability".to_string(),
+            VisibleCapabilityAccess::RequiresApproval,
+        );
+        assert_eq!(description, "demo capability");
+    }
+
+    #[test]
+    fn describe_with_access_needs_auth_appends_fixed_marker() {
+        let description = describe_with_access(
+            "demo capability".to_string(),
+            VisibleCapabilityAccess::NeedsAuth,
+        );
+        assert_eq!(
+            description,
+            format!("demo capability{CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER}")
+        );
+    }
+
+    #[tokio::test]
+    async fn visible_capabilities_folds_needs_auth_marker_into_description_and_tool_definition() {
+        let available_id = CapabilityId::new("demo.available").expect("valid capability id");
+        let needs_auth_id = CapabilityId::new("demo.needs-auth").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-needs-auth-marker");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability(available_id.clone(), provider_id.clone()),
+            visible_capability_with_access(
+                needs_auth_id.clone(),
+                provider_id,
+                VisibleCapabilityAccess::NeedsAuth,
+            ),
+        ]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let available_view = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == available_id)
+            .expect("available capability is on the surface");
+        assert!(
+            !available_view
+                .safe_description
+                .contains(CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER),
+            "Available capability must not carry the not-connected marker"
+        );
+
+        let needs_auth_view = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == needs_auth_id)
+            .expect("needs-auth capability is on the surface");
+        assert!(
+            needs_auth_view
+                .safe_description
+                .contains(CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER),
+            "NeedsAuth capability descriptor view must carry the not-connected marker"
+        );
+
+        let definitions = port
+            .tool_definitions()
+            .expect("tool definitions build from the cached surface snapshot");
+        let available_definition = definitions
+            .iter()
+            .find(|definition| definition.capability_id == available_id)
+            .expect("available capability has a tool definition");
+        assert!(
+            !available_definition
+                .description
+                .contains(CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER),
+            "Available capability's model-visible tool definition must not carry the marker"
+        );
+        let needs_auth_definition = definitions
+            .iter()
+            .find(|definition| definition.capability_id == needs_auth_id)
+            .expect("needs-auth capability has a tool definition");
+        assert!(
+            needs_auth_definition
+                .description
+                .contains(CAPABILITY_NEEDS_AUTH_DESCRIPTION_MARKER),
+            "NeedsAuth capability's model-visible tool definition must carry the not-connected marker"
+        );
     }
 }

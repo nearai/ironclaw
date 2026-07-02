@@ -4499,6 +4499,13 @@ impl RuntimeCredentialAccountResolver for SourceScopedCredentialAccountResolver 
             handle: self.handle.clone(),
         })
     }
+
+    async fn account_configured(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        Ok(true)
+    }
 }
 
 #[async_trait::async_trait]

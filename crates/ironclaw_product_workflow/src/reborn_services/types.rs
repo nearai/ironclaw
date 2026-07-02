@@ -1171,6 +1171,12 @@ pub enum RebornExtensionOnboardingState {
     SetupRequired,
     Installed,
     Failed,
+    /// Credential readiness could not be determined (transient backend
+    /// failure) — distinct from `AuthRequired` (a genuinely missing
+    /// credential): the extension may already be connected, so onboarding
+    /// should offer to reconnect/reverify rather than generic setup copy.
+    /// #5416 Defect B.
+    ReverifyRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

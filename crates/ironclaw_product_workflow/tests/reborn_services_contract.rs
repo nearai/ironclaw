@@ -4878,6 +4878,17 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     let extension = response.extensions.first().expect("one extension");
 
     assert_eq!(extension.tools, vec!["github.read", "github.write"]);
+    // No `ExtensionCredentialSetupService` is wired above, so credential
+    // readiness for this required requirement resolves to `Unknown` (#5416
+    // Defect B) — not `MissingRequired`. The extension's phase here is
+    // `Installed` (never yet connected), which `for_installed_with_credential_status`
+    // deliberately excludes from the reconnect/reverify affordance (that copy
+    // would be misleading for something that was never connected) — so
+    // `Unknown` falls through to the normal setup onboarding, same as before.
+    // The reverify-specific projection is covered by
+    // `extension_onboarding::tests::unknown_credential_readiness_projects_reverify_state_not_generic_onboarding`
+    // and `extensions::tests::list_fails_closed_and_stays_actionable_when_credential_status_is_retryably_unavailable`,
+    // both of which use an `Active` phase.
     assert_eq!(
         extension.onboarding_state,
         Some(RebornExtensionOnboardingState::SetupRequired)
