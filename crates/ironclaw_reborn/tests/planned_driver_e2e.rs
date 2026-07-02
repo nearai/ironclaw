@@ -7,8 +7,8 @@ use chrono::Utc;
 use ironclaw_agent_loop::{
     state::CheckpointKind,
     test_support::{
-        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedModelResponse,
-        test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
+        ScriptedModelResponse, test_run_context,
     },
 };
 use ironclaw_reborn::app_loop_family::build_loop_family_registry;
@@ -89,6 +89,47 @@ fn run_context_for_driver(driver: &PlannedDriver) -> LoopRunContext {
     context.checkpoint_schema_id = context.resolved_run_profile.checkpoint_schema_id.clone();
     context.checkpoint_schema_version = context.resolved_run_profile.checkpoint_schema_version;
     context
+}
+
+/// Scripted no-progress scenario: 4 repeated identical calls, the last
+/// reporting no change — proven to drive `NoProgressDetected` through the
+/// full strategy pipeline (mirrors
+/// `safety_nets.rs::repeated_signature_stops_after_rendered_warning_and_no_progress_result`).
+/// A 5th scripted reply is appended for hosts where the final-answer nudge is
+/// enabled: `try_final_answer_nudge` issues one extra tool-free `stream_model`
+/// call after the 4 repeats, which this reply satisfies. Hosts where the
+/// nudge is disabled never reach that 5th response, so it is inert there.
+fn no_progress_script() -> ScenarioScript {
+    let mut script =
+        ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+            vec![ScriptedCapabilityOutcome::completed_no_change(
+                "result:repeat-4",
+            )],
+        ]);
+    script
+        .model_responses
+        .push_back(ScriptedModelResponse::Reply {
+            text: "final answer synthesized via nudge".to_string(),
+        });
+    script
+}
+
+/// Asserts a no-progress run resolved via the final-answer nudge: one extra
+/// tool-free model call on top of the 4 scripted repeats, and a completed
+/// (not failed) exit.
+fn assert_completed_via_nudge(exit: LoopExit, host: &MockAgentLoopDriverHost) {
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "no-progress exit should complete via the final-answer nudge, got {exit:?}"
+    );
+    assert_eq!(
+        host.model_call_count(),
+        5,
+        "4 repeated calls + 1 tool-free nudge call"
+    );
 }
 
 #[tokio::test]
@@ -172,6 +213,42 @@ async fn planned_driver_live_default_smoke() {
         .expect("planned live default should run");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
+}
+
+#[tokio::test]
+async fn planned_default_profile_completes_via_final_answer_nudge() {
+    let resolver = default_planned_run_profile_resolver().expect("resolver should build");
+    let resolved = resolver
+        .resolve_run_profile(ironclaw_turns::RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("planned_default profile should resolve");
+    assert_eq!(resolved.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
+    assert!(
+        resolved.steering_policy.allow_driver_specific_nudges,
+        "planned_default must have driver-specific nudges enabled"
+    );
+
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let base_context = test_run_context("planned-default-nudge");
+    let context = LoopRunContext::new(
+        base_context.scope,
+        base_context.turn_id,
+        base_context.run_id,
+        resolved.clone(),
+    );
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .run_context(context)
+        .script(no_progress_script())
+        .build();
+    let request = run_request(&driver, &host);
+
+    let exit = driver
+        .run(request, &host)
+        .await
+        .expect("planned driver run should succeed");
+
+    assert_completed_via_nudge(exit, &host);
 }
 
 #[tokio::test]
