@@ -4232,6 +4232,29 @@ fn resolve_effective_flush_target(
     resolve_effective_flush_target_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
 }
 
+/// The effective trace-contribution policy a scope captures under: its own
+/// personal-invite policy when enabled, else the admin-provisioned instance
+/// policy (scope `None`). Returns `Ok(None)` when the scope is enrolled in
+/// neither — i.e. capture must skip. This is the *capture-side* mirror of the
+/// flush gate ([`resolve_effective_flush_target`]) so an instance-only-enrolled
+/// user's turns are captured (and later flushed) instead of being dropped
+/// because their per-user policy is absent/disabled. The returned policy is
+/// always enabled.
+pub fn resolve_effective_capture_policy(
+    scope: Option<&str>,
+) -> anyhow::Result<Option<StandingTraceContributionPolicy>> {
+    resolve_effective_capture_policy_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
+}
+
+/// Dir-parameterised core for [`resolve_effective_capture_policy`] so tests can
+/// use an isolated tempdir instead of the process-global instance scope.
+fn resolve_effective_capture_policy_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> anyhow::Result<Option<StandingTraceContributionPolicy>> {
+    Ok(resolve_effective_flush_target_at(base, scope)?.map(|target| target.policy))
+}
+
 pub fn mark_trace_credit_notice_due_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<Option<CreditSummary>> {
@@ -15435,6 +15458,54 @@ mod tests {
             Some(local_pseudonymous_contributor_id(&expected_scope))
         );
         assert!(r.policy.enabled);
+    }
+
+    #[test]
+    fn capture_policy_resolves_personal_then_instance_then_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+
+        // Neither enrolled → capture must skip.
+        assert!(
+            resolve_effective_capture_policy_at(dir.path(), Some(scope.as_str()))
+                .unwrap()
+                .is_none(),
+            "unenrolled scope must yield no capture policy"
+        );
+
+        // Instance-only enrollment (scope None), no per-user policy: capture must
+        // resolve the instance policy — the P1 the per-user-only gate dropped.
+        let instance = StandingTraceContributionPolicy {
+            enabled: true,
+            upload_token_tenant_id: Some("instance-tenant".to_string()),
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), None, &instance);
+        let resolved = resolve_effective_capture_policy_at(dir.path(), Some(scope.as_str()))
+            .unwrap()
+            .expect("instance-only scope must capture under the instance policy");
+        assert!(resolved.enabled);
+        assert_eq!(
+            resolved.upload_token_tenant_id.as_deref(),
+            Some("instance-tenant"),
+            "instance-only capture must use the instance policy"
+        );
+
+        // A user's own enabled personal-invite policy takes precedence.
+        let personal = StandingTraceContributionPolicy {
+            enabled: true,
+            upload_token_tenant_id: Some("personal-tenant".to_string()),
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), Some(scope.as_str()), &personal);
+        let resolved = resolve_effective_capture_policy_at(dir.path(), Some(scope.as_str()))
+            .unwrap()
+            .expect("personal enrollment resolves");
+        assert_eq!(
+            resolved.upload_token_tenant_id.as_deref(),
+            Some("personal-tenant"),
+            "personal-invite policy must take precedence over the instance policy"
+        );
     }
 
     #[test]

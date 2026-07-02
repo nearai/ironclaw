@@ -30,7 +30,7 @@ use ironclaw_reborn_traces::client::{
     TraceClientAutonomousCaptureOutcome, TraceClientAutonomousCaptureRequest, TraceClientHost,
     TraceClientScope,
 };
-use ironclaw_reborn_traces::contribution::{self as trace, read_trace_policy_for_scope};
+use ironclaw_reborn_traces::contribution::{self as trace, resolve_effective_capture_policy};
 use ironclaw_threads::{
     ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -193,16 +193,20 @@ pub(crate) async fn capture_turn_trace(
     scope: String,
 ) {
     let scope_ref = trace::local_pseudonymous_contributor_id(&scope);
-    let policy = match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) => policy,
+    // Gate on the EFFECTIVE enrollment (personal-invite OR admin-provisioned
+    // instance), mirroring the flush gate: an instance-only-enrolled user has no
+    // enabled per-user policy, so a per-user-only check would drop their turns
+    // before queueing — leaving the instance-aware flush nothing to submit. The
+    // resolver returns the governing (and always-enabled) policy, or None when
+    // the scope is enrolled in neither.
+    let policy = match resolve_effective_capture_policy(Some(scope.as_str())) {
+        Ok(Some(policy)) => policy,
+        Ok(None) => return,
         Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not read policy");
+            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not resolve policy");
             return;
         }
     };
-    if !policy.enabled {
-        return;
-    }
 
     let Some(messages) = load_capture_messages(&history, &event, &scope_ref).await else {
         return;
