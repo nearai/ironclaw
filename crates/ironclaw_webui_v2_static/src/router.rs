@@ -735,6 +735,16 @@ mod tests {
         let asset =
             assets::lookup("js/app/auth.js").expect("auth.js must be in the embedded asset table");
         let source = std::str::from_utf8(asset.bytes).expect("auth.js is UTF-8");
+        let consume_token = source
+            .split("function consumeTokenFromUrl()")
+            .nth(1)
+            .and_then(|tail| tail.split("function consumeLoginTicketFromUrl()").next())
+            .expect("auth.js must define consumeTokenFromUrl before consumeLoginTicketFromUrl");
+        let consume_ticket = source
+            .split("function consumeLoginTicketFromUrl()")
+            .nth(1)
+            .and_then(|tail| tail.split("// Map opaque error codes").next())
+            .expect("auth.js must define consumeLoginTicketFromUrl before login error mapping");
 
         // 1. Reads and strips the one-time login ticket from the
         //    query string before exchanging it for the bearer.
@@ -758,17 +768,50 @@ mod tests {
             "auth.js must call history.replaceState to clean the URL",
         );
 
-        // 3. Refuses to overwrite an existing stored token —
-        //    `consumeTokenFromUrl` must early-return when
+        // 3. Refuses to overwrite an existing stored token for raw
+        //    bearer URLs — `consumeTokenFromUrl` must early-return when
         //    `readStoredToken()` is truthy. This guards against the
         //    `/v2#token=BAD` lock-out scenario the doc-comment
         //    calls out.
+        let guard_index = consume_token
+            .find("if (readStoredToken())")
+            .expect("consumeTokenFromUrl must check sessionStorage before storing URL tokens");
+        let store_index = consume_token
+            .find("storeToken(token)")
+            .expect("consumeTokenFromUrl must store accepted raw bearer URL tokens");
         assert!(
-            source.contains("readStoredToken()"),
-            "auth.js must consult sessionStorage before storing a new token",
+            guard_index < store_index
+                && consume_token[guard_index..store_index].contains("return \"\";"),
+            "consumeTokenFromUrl must early-return before storeToken(token) when a stored token exists",
         );
 
-        // 4. Logout calls the server-side revoke endpoint —
+        // 4. OAuth callback tickets are trusted, single-use login
+        //    continuations. They must still be exchanged when a stale
+        //    sessionStorage token exists, so an intentional relogin can
+        //    replace the previous bearer.
+        assert!(
+            consume_ticket.contains("storeToken(\"\")"),
+            "login tickets must clear stale sessionStorage before exchange fallback is possible",
+        );
+        assert!(
+            source.contains("loginTicket ? \"\" : consumeTokenFromUrl() || readStoredToken()"),
+            "login-ticket initialization must bypass any stale stored bearer before exchange",
+        );
+        assert!(
+            source.contains("Boolean(loginTicket)"),
+            "login tickets must trigger exchange even when sessionStorage already has a token",
+        );
+        assert!(
+            source.contains("Boolean(!loginTicket && readStoredToken())"),
+            "stored-token session checks must be suppressed while a login-ticket exchange is pending",
+        );
+        assert!(
+            !source.contains("loginTicket && !readStoredToken()")
+                && !source.contains("!loginTicket || readStoredToken()"),
+            "login-ticket exchange must not be skipped because sessionStorage already has a token",
+        );
+
+        // 5. Logout calls the server-side revoke endpoint —
         //    locks the regression where `signOut` drops the local
         //    token without telling the server (which would let the
         //    bearer roam in other tabs until natural expiry).
@@ -777,7 +820,7 @@ mod tests {
             "signOut must fire-and-forget the server-side revoke",
         );
 
-        // 5. Surfaces the OAuth callback's `?login_error=<code>`
+        // 6. Surfaces the OAuth callback's `?login_error=<code>`
         //    so users who deny consent or trip a hd / state guard
         //    see an explanation instead of a blank login page.
         assert!(
