@@ -12,6 +12,7 @@ The implementation lives in:
 
 - `.github/workflows/test.yml` for the normal blocking test lanes;
 - `.github/workflows/live-canary.yml` for scheduled and manual live lanes;
+- `.github/workflows/live-canary-command.yml` for maintainer PR comment dispatch;
 - `scripts/live-canary/run.sh` for lane dispatch;
 - `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
 - `scripts/live-canary/upgrade-canary.sh` for previous-release upgrade checks.
