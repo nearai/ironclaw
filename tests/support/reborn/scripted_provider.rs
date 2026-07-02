@@ -92,7 +92,8 @@ impl ParkingModelGate {
     pub async fn wait_until_parked(&self) {
         let rx = lock(&self.0.parked_rx).take();
         if let Some(rx) = rx {
-            let _ = rx.await;
+            rx.await
+                .expect("parking model provider dropped before signalling parked");
         }
     }
 
@@ -111,7 +112,8 @@ impl ParkingModelGate {
         }
         let rx = lock(&self.0.release_rx).take();
         if let Some(rx) = rx {
-            let _ = rx.await;
+            rx.await
+                .expect("parking gate dropped before releasing the parked model call");
         }
     }
 }
@@ -132,19 +134,17 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// single-fake invariant (the real `ironclaw_llm` decorator chain still runs
 /// on top).
 pub struct ParkingLlm {
-    inner: TraceLlm,
+    inner: Arc<TraceLlm>,
     gate: ParkingModelGate,
 }
 
-/// Build a parking provider replaying `replies` once released via `gate`.
-pub fn parking_trace_llm(
-    gate: ParkingModelGate,
-    replies: impl IntoIterator<Item = RebornScriptedReply>,
-) -> ParkingLlm {
-    ParkingLlm {
-        inner: scripted_trace_llm(replies),
-        gate,
-    }
+/// Build a parking provider wrapping the already-built `inner` trace, released
+/// via `gate`. Takes an `Arc<TraceLlm>` (rather than building its own from raw
+/// replies) so the caller retains the SAME trace handle the parked provider
+/// replays through — parking mode is only a wrapper around the same scripted
+/// provider, not a separate trace.
+pub fn parking_trace_llm(gate: ParkingModelGate, inner: Arc<TraceLlm>) -> ParkingLlm {
+    ParkingLlm { inner, gate }
 }
 
 #[async_trait]

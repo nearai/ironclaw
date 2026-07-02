@@ -851,22 +851,32 @@ pub(crate) fn wrap_project_create_capability_for_test(
 }
 
 /// Test-support forwarder (E-SKILL seam): build the local-dev filesystem skill
-/// context source (the `HostSkillContextSource` for prompt injection plus its
-/// `activation_source` backing `skill_activate`) exactly as production does in
-/// [`build_reborn_runtime`]. Reuses the private
-/// [`local_dev_filesystem_skill_context_source`] so the wiring never drifts.
-/// Tests only.
+/// context source exactly as production does in [`build_reborn_runtime`], and
+/// hand back just the `HostSkillContextSource` (for prompt injection) plus the
+/// `activation_source` (backing `skill_activate`) that `test_support.rs` needs.
+/// Reuses the private [`local_dev_filesystem_skill_context_source`] so the
+/// wiring never drifts, but deliberately does NOT return the internal
+/// [`LocalDevSkillContextSource`] struct — that type (and its
+/// `execution_adapter` field) stays private to this module; only the two
+/// fields an external caller actually consumes cross the boundary. Tests only.
 #[cfg(feature = "test-support")]
 pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
     regex_skill_activation_enabled: bool,
-) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
-    local_dev_filesystem_skill_context_source(
+) -> Result<
+    (
+        Arc<dyn HostSkillContextSource>,
+        Arc<LocalDevSelectableSkillContextSource>,
+    ),
+    RebornRuntimeError,
+> {
+    let built = local_dev_filesystem_skill_context_source(
         local_runtime,
         tenant_id,
         regex_skill_activation_enabled,
-    )
+    )?;
+    Ok((built.source, built.activation_source))
 }
 
 /// Test-support forwarder (E-SKILL seam) for the `skill_activate`
@@ -3820,9 +3830,9 @@ async fn append_trusted_laptop_access_audit(
         })
 }
 
-pub(crate) struct LocalDevSkillContextSource {
-    pub(crate) source: Arc<dyn HostSkillContextSource>,
-    pub(crate) activation_source: Arc<LocalDevSelectableSkillContextSource>,
+struct LocalDevSkillContextSource {
+    source: Arc<dyn HostSkillContextSource>,
+    activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 

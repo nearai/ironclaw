@@ -363,11 +363,11 @@ pub struct RebornIntegrationHarness {
     /// requests: the system prompt (safety banners, profile lines —
     /// `captured_system_prompts()`/`assert_system_prompt_contains`) and any
     /// host-injected context such as activated-skill instructions
-    /// (`assert_model_request_contains`, E-SKILL half B). `None` when the thread
-    /// parks the model (`park_model`, E-GATEWAY), which swaps in a `ParkingLlm`
-    /// and retains no standalone trace — a parked thread asserts on run status,
-    /// not captured requests.
-    pub(crate) scripted_llm: Option<Arc<TraceLlm>>,
+    /// (`assert_model_request_contains`, E-SKILL half B). Retained even when
+    /// the thread parks the model (`park_model`, E-GATEWAY): parking mode is
+    /// only a wrapper (`ParkingLlm`) around this SAME `TraceLlm`, so captured
+    /// requests are still inspectable for a parked thread.
+    pub(crate) scripted_llm: Arc<TraceLlm>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -646,13 +646,7 @@ impl RebornIntegrationHarness {
     /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
     /// not a group-shared recorder, so it only ever holds this thread's requests.
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
-        // `None` only for a parked-model (`park_model`) thread, which retains no
-        // trace and never asserts on the system prompt — so an empty snapshot is
-        // the correct answer there.
-        let Some(scripted_llm) = self.scripted_llm.as_ref() else {
-            return Vec::new();
-        };
-        scripted_llm
+        self.scripted_llm
             .captured_requests()
             .into_iter()
             .flatten()
@@ -907,11 +901,7 @@ impl RebornIntegrationHarness {
     /// actually reached the model. Reads the retained `TraceLlm`'s captured
     /// requests (E-SKILL half B).
     pub async fn assert_model_request_contains(&self, needle: &str) -> HarnessResult<()> {
-        let trace = self
-            .scripted_llm
-            .as_ref()
-            .ok_or("no scripted model trace retained (a parked-model thread has none)")?;
-        let requests = trace.captured_requests();
+        let requests = self.scripted_llm.captured_requests();
         for messages in &requests {
             let rendered = serde_json::to_string(messages)
                 .map_err(|e| format!("serialize captured model request: {e}"))?;

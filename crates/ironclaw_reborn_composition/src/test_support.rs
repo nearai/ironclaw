@@ -942,15 +942,16 @@ pub fn build_local_dev_skill_context_source_for_test(
     // masking it as an un-wired skill source (which would fail a skill test at
     // a confusing, far-removed assertion instead of here). Test-only code, so a
     // panic is the right failure mode.
-    let built = crate::runtime::local_dev_filesystem_skill_context_source_for_test(
-        local_runtime,
-        tenant_id,
-        regex_skill_activation_enabled,
-    )
-    .expect("build local-dev skill context source for test");
+    let (source, activation_source) =
+        crate::runtime::local_dev_filesystem_skill_context_source_for_test(
+            local_runtime,
+            tenant_id,
+            regex_skill_activation_enabled,
+        )
+        .expect("build local-dev skill context source for test");
     Some(SkillActivationTestSource {
-        source: built.source,
-        activation_source: built.activation_source,
+        source,
+        activation_source,
     })
 }
 
