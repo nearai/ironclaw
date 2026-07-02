@@ -475,6 +475,10 @@ mod tests {
             snapshot.capability_surface_profile_id.as_str(),
             SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
         );
+        assert!(
+            !snapshot.steering_policy.allow_driver_specific_nudges,
+            "subagent must not have driver-specific nudges enabled"
+        );
     }
 
     #[tokio::test]
