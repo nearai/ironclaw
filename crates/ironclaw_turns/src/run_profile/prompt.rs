@@ -344,7 +344,7 @@ mod tests {
             InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
             LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
             LoopContextMessage, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
-            LoopRuntimeContext, LoopSafeSummary, ResolvedRunProfile,
+            LoopRuntimeContext, ResolvedRunProfile,
         },
     };
 
