@@ -421,6 +421,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
+    assert!(stdout.contains("multi-agent"), "stdout: {stdout}");
     assert!(stdout.contains("onboard"), "stdout: {stdout}");
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
@@ -431,6 +432,57 @@ fn help_mentions_reborn_commands() {
     #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
+}
+
+#[test]
+fn multi_agent_run_prints_delegation_report() {
+    let output = Command::new(reborn_bin())
+        .args([
+            "multi-agent",
+            "run",
+            "--task",
+            "test recursive task",
+            "--max-depth",
+            "3",
+        ])
+        .output()
+        .expect("ironclaw-reborn multi-agent run should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Root Task"), "stdout: {stdout}");
+    assert!(stdout.contains("Execution Plan"), "stdout: {stdout}");
+    assert!(stdout.contains("Final Result"), "stdout: {stdout}");
+}
+
+#[test]
+fn multi_agent_run_verbose_prints_agent_outputs() {
+    let output = Command::new(reborn_bin())
+        .args([
+            "multi-agent",
+            "run",
+            "--task",
+            "Research X; Plan implementation; Verify result",
+            "--max-depth",
+            "3",
+            "--verbose",
+        ])
+        .output()
+        .expect("ironclaw-reborn multi-agent run --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Execution Plan"), "stdout: {stdout}");
+    assert!(stdout.contains("Agent Outputs"), "stdout: {stdout}");
+    assert!(stdout.contains("Final Result"), "stdout: {stdout}");
 }
 
 #[test]
