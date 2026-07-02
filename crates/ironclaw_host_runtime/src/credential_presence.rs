@@ -13,13 +13,13 @@ use ironclaw_secrets::SecretStore;
 
 use crate::{
     credential_presence_cache::{
-        CredentialOwnerScope, CredentialPresenceCache, CredentialPresenceKey,
+        CredentialOwnerScope, CredentialPresenceCache, CredentialPresenceKey, CredentialSetupKind,
     },
     obligations::{
         RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, secret_present,
     },
     production::capability_credential_requirements,
-    surface::CapabilityCredentialPresence,
+    surface::{CapabilityCredentialPresence, CredentialPresenceStatus},
 };
 
 /// Mirrors [`crate::production::DefaultHostRuntime::credential_preflight_check`]'s
@@ -39,11 +39,11 @@ impl CapabilityCredentialPresence for ProductionCredentialPresence<'_> {
         &self,
         scope: &ResourceScope,
         descriptor: &CapabilityDescriptor,
-    ) -> Option<bool> {
+    ) -> CredentialPresenceStatus {
         let (required_secrets, credential_requirements) =
             capability_credential_requirements(descriptor);
         if required_secrets.is_empty() && credential_requirements.is_empty() {
-            return Some(true);
+            return CredentialPresenceStatus::Present;
         }
 
         let owner_scope = CredentialOwnerScope::from_scope(scope);
@@ -83,18 +83,23 @@ impl CapabilityCredentialPresence for ProductionCredentialPresence<'_> {
         }
 
         for requirement in &credential_requirements {
-            // Scopes are sorted before the key is built (mirrors
-            // `stable_auth_gate_id`'s scope-sort) so key equality does not
-            // depend on manifest declaration order, and — critically — so a
-            // requirement's presence answer is never aliased onto a
-            // different requirement that shares provider/extension but
-            // requests different scopes (#5416 Phase 2 Fix B).
+            // Scopes are sorted AND deduplicated before the key is built
+            // (mirrors `stable_auth_gate_id`'s scope-sort) so key equality
+            // does not depend on manifest declaration order or duplicate
+            // scope entries, and — critically — so a requirement's presence
+            // answer is never aliased onto a different requirement that
+            // shares provider/extension but requests different scopes
+            // (#5416 Phase 2 Fix B). The setup kind is part of the key too:
+            // `ManualToken` and `OAuth` select accounts differently even for
+            // an otherwise-identical requirement (see `CredentialSetupKind`).
             let mut scopes = requirement.provider_scopes.clone();
             scopes.sort();
+            scopes.dedup();
             let key = CredentialPresenceKey::ProductAuth(
                 owner_scope.clone(),
                 requirement.provider.clone(),
                 requirement.requester_extension.clone(),
+                CredentialSetupKind::from_setup(&requirement.setup),
                 scopes,
             );
             if let Some(present) = self.cache.get(&key) {
@@ -139,11 +144,11 @@ impl CapabilityCredentialPresence for ProductionCredentialPresence<'_> {
         }
 
         if any_missing {
-            Some(false)
+            CredentialPresenceStatus::Missing
         } else if any_indeterminate {
-            None
+            CredentialPresenceStatus::Indeterminate
         } else {
-            Some(true)
+            CredentialPresenceStatus::Present
         }
     }
 }
@@ -166,6 +171,13 @@ mod tests {
     /// `provider_scopes`) used to reproduce the #5416 Phase 2 Fix B cache
     /// aliasing bug.
     fn descriptor_with_product_auth_scope(id: &str, scope: &str) -> CapabilityDescriptor {
+        descriptor_with_product_auth_scopes(id, &[scope])
+    }
+
+    /// Same as [`descriptor_with_product_auth_scope`] but accepts the full
+    /// `provider_scopes` list verbatim (including literal duplicates), so
+    /// tests can pin the cache key's canonicalization behavior.
+    fn descriptor_with_product_auth_scopes(id: &str, scopes: &[&str]) -> CapabilityDescriptor {
         CapabilityDescriptor {
             id: CapabilityId::new(id).unwrap(),
             provider: ExtensionId::new("gmail").unwrap(),
@@ -181,7 +193,7 @@ mod tests {
                     provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
                     setup: RuntimeCredentialAccountSetup::ManualToken,
                 },
-                provider_scopes: vec![scope.to_string()],
+                provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
                 audience: NetworkTargetPattern {
                     scheme: None,
                     host_pattern: "gmail.googleapis.com".to_string(),
@@ -234,6 +246,35 @@ mod tests {
         }
     }
 
+    /// Resolver that always reports the account as configured, counting how
+    /// many times `account_configured` is actually invoked — used to prove a
+    /// second lookup hit the cache instead of the backend.
+    #[derive(Debug, Default)]
+    struct CountingAccountResolver {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RuntimeCredentialAccountResolver for CountingAccountResolver {
+        async fn resolve_access_secret(
+            &self,
+            request: RuntimeCredentialAccountRequest<'_>,
+        ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+            Ok(RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle: SecretHandle::new("google_oauth_token").unwrap(),
+            })
+        }
+
+        async fn account_configured(
+            &self,
+            _request: RuntimeCredentialAccountRequest<'_>,
+        ) -> Result<bool, CredentialStageError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
     /// #5416 Phase 2 Fix B (BLOCKER) regression: two capabilities that share
     /// `(provider, requester_extension)` but require different
     /// `provider_scopes` (the real gmail manifest shape — gmail.readonly /
@@ -264,12 +305,50 @@ mod tests {
             .await;
         let send_present = presence.required_credentials_present(&scope, &send).await;
 
-        assert_eq!(readonly_present, Some(true));
+        assert_eq!(readonly_present, CredentialPresenceStatus::Present);
         assert_eq!(
             send_present,
-            Some(false),
+            CredentialPresenceStatus::Missing,
             "the send-scope capability must not inherit the readonly capability's \
              cached presence answer"
+        );
+    }
+
+    /// PR #5528 review regression: two requirements for the SAME scope, one
+    /// declared once and one declared with a literal duplicate, must resolve
+    /// through the identical cache key. Before the fix, `scopes.sort()` ran
+    /// without a following `.dedup()`, so `["gmail.readonly"]` and
+    /// `["gmail.readonly", "gmail.readonly"]` hashed to different keys —
+    /// wasting a cache slot and a resolver round trip on a manifest-declared
+    /// duplicate that carries no additional meaning.
+    #[tokio::test]
+    async fn required_credentials_present_key_is_canonical_across_duplicate_scope_declarations() {
+        let cache = CredentialPresenceCache::new();
+        let resolver = CountingAccountResolver::default();
+        let presence = ProductionCredentialPresence {
+            secret_store: None,
+            resolver: Some(&resolver),
+            cache: &cache,
+        };
+        let scope = test_resource_scope();
+        let single = descriptor_with_product_auth_scope("gmail.single_cap", "gmail.readonly");
+        let duplicated = descriptor_with_product_auth_scopes(
+            "gmail.duplicated_cap",
+            &["gmail.readonly", "gmail.readonly"],
+        );
+
+        let single_present = presence.required_credentials_present(&scope, &single).await;
+        let duplicated_present = presence
+            .required_credentials_present(&scope, &duplicated)
+            .await;
+
+        assert_eq!(single_present, CredentialPresenceStatus::Present);
+        assert_eq!(duplicated_present, CredentialPresenceStatus::Present);
+        assert_eq!(
+            resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a manifest-declared duplicate scope must not miss the cache entry the \
+             canonical (deduplicated) scope list already populated"
         );
     }
 }

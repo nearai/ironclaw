@@ -7,11 +7,13 @@
 //! far less often than that — so the naive approach would issue N redundant
 //! presence lookups per step for no benefit.
 //!
-//! Only CONCLUSIVE presence results are cached (`Ok(true)`/`Ok(false)` from the
-//! secret store, or `AuthRequired`-vs-resolved from the product-auth account
-//! resolver). A backend-error/indeterminate outcome is never cached, so a
-//! transient blip cannot wedge a stale wrong answer for the whole TTL window —
-//! the next lookup simply re-probes live.
+//! Only CONCLUSIVE presence results are cached: `Ok(true)`/`Ok(false)` from the
+//! secret store's `metadata` lookup, or `Ok(true)`/`Ok(false)` from the
+//! side-effect-free `account_configured` product-auth check. Any backend error
+//! — from the secret store, or `Err(CredentialStageError::Backend)` from
+//! `account_configured` — is indeterminate and is never cached, so a transient
+//! blip cannot wedge a stale wrong answer for the whole TTL window; the next
+//! lookup simply re-probes live.
 //!
 //! ## Cache key: owner scope, not full [`ResourceScope`]
 //!
@@ -32,7 +34,7 @@ use std::{
 
 use ironclaw_host_api::{
     AgentId, ExtensionId, ProjectId, ResourceScope, RuntimeCredentialAccountProviderId,
-    SecretHandle, TenantId, UserId,
+    RuntimeCredentialAccountSetup, SecretHandle, TenantId, UserId,
 };
 
 /// Default TTL for cached credential-presence answers. Short enough that a
@@ -63,14 +65,45 @@ impl CredentialOwnerScope {
     }
 }
 
+/// Cache-key-only projection of [`RuntimeCredentialAccountSetup`]'s
+/// selection-relevant axis.
+///
+/// Account selection (`account_has_provider_scopes` in
+/// `ironclaw_reborn_composition::product_auth_runtime_credentials`) branches
+/// only on the setup *variant* — `ManualToken` skips the stored-scopes gate
+/// entirely, `OAuth` requires the account to already carry the requested
+/// `provider_scopes`. Two requirements identical on every other axis but with
+/// different setup variants therefore select accounts differently and must
+/// not share a cache entry.
+///
+/// Deliberately does NOT encode the `OAuth { scopes }` payload: that field is
+/// the manifest-declared OAuth *consent* scope list (what to request from the
+/// provider when creating an authorization flow), never consulted during
+/// account selection. Encoding it here would double-encode the already-keyed
+/// `provider_scopes` requirement axis for no correctness benefit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CredentialSetupKind {
+    ManualToken,
+    OAuth,
+}
+
+impl CredentialSetupKind {
+    pub(crate) fn from_setup(setup: &RuntimeCredentialAccountSetup) -> Self {
+        match setup {
+            RuntimeCredentialAccountSetup::ManualToken => Self::ManualToken,
+            RuntimeCredentialAccountSetup::OAuth { .. } => Self::OAuth,
+        }
+    }
+}
+
 /// Cache key for one credential presence answer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CredentialPresenceKey {
     /// Generic secret-handle credential, keyed by owner scope + handle.
     Secret(CredentialOwnerScope, SecretHandle),
     /// Product-auth account credential, keyed by owner scope + provider +
-    /// requesting extension + requested provider scopes (the account
-    /// identity axes — see `RuntimeCredentialAuthRequirement`).
+    /// requesting extension + setup kind + requested provider scopes (the
+    /// account identity axes — see `RuntimeCredentialAuthRequirement`).
     ///
     /// The scopes component is REQUIRED, not cosmetic: presence is
     /// scope-dependent (`account_has_provider_scopes` filters configured
@@ -85,10 +118,16 @@ pub(crate) enum CredentialPresenceKey {
     /// this variant with scopes sorted (mirrors `stable_auth_gate_id`'s
     /// scope-sort) so key equality does not depend on manifest declaration
     /// order.
+    ///
+    /// The setup-kind component is likewise required: the same
+    /// provider/extension/scopes triple can be requested under `ManualToken`
+    /// or `OAuth` setup, and `account_has_provider_scopes` selects
+    /// differently for each (see [`CredentialSetupKind`]).
     ProductAuth(
         CredentialOwnerScope,
         RuntimeCredentialAccountProviderId,
         ExtensionId,
+        CredentialSetupKind,
         Vec<String>,
     ),
 }
@@ -195,12 +234,31 @@ mod tests {
         extension: &str,
         scopes: &[&str],
     ) -> CredentialPresenceKey {
+        product_auth_key_with_setup(
+            tenant,
+            user,
+            provider,
+            extension,
+            scopes,
+            CredentialSetupKind::ManualToken,
+        )
+    }
+
+    fn product_auth_key_with_setup(
+        tenant: &str,
+        user: &str,
+        provider: &str,
+        extension: &str,
+        scopes: &[&str],
+        setup: CredentialSetupKind,
+    ) -> CredentialPresenceKey {
         let mut scopes: Vec<String> = scopes.iter().map(|scope| scope.to_string()).collect();
         scopes.sort();
         CredentialPresenceKey::ProductAuth(
             owner_scope(tenant, user),
             RuntimeCredentialAccountProviderId::new(provider).unwrap(),
             ExtensionId::new(extension).unwrap(),
+            setup,
             scopes,
         )
     }
@@ -259,6 +317,7 @@ mod tests {
             scope,
             RuntimeCredentialAccountProviderId::new("google").unwrap(),
             ExtensionId::new("gmail").unwrap(),
+            CredentialSetupKind::ManualToken,
             Vec::new(),
         );
 
@@ -295,6 +354,100 @@ mod tests {
             None,
             "a different scope combination under the same provider/extension must not \
              alias onto the readonly answer"
+        );
+    }
+
+    /// PR #5528 review regression: two product-auth requirements identical on
+    /// every axis except `setup` (`ManualToken` vs `OAuth`) must not collide.
+    /// `account_has_provider_scopes` branches on the setup variant —
+    /// `ManualToken` ignores stored account scopes, `OAuth` requires the
+    /// account to already carry them — so caching one setup's answer under a
+    /// key the other setup's lookup also hits would alias a wrong presence
+    /// result across the two selection semantics.
+    #[test]
+    fn product_auth_keys_with_different_setup_do_not_collide() {
+        let cache = CredentialPresenceCache::with_ttl(Duration::from_secs(60));
+        let manual_token_key = product_auth_key_with_setup(
+            "tenant",
+            "user",
+            "google",
+            "gmail",
+            &["gmail.readonly"],
+            CredentialSetupKind::ManualToken,
+        );
+        let oauth_key = product_auth_key_with_setup(
+            "tenant",
+            "user",
+            "google",
+            "gmail",
+            &["gmail.readonly"],
+            CredentialSetupKind::OAuth,
+        );
+
+        cache.insert(manual_token_key.clone(), true);
+
+        assert_eq!(
+            cache.get(&manual_token_key),
+            Some(true),
+            "the setup this entry was inserted for must retain its own answer"
+        );
+        assert_eq!(
+            cache.get(&oauth_key),
+            None,
+            "a different setup under the same owner/provider/extension/scopes must not \
+             alias onto the manual-token answer"
+        );
+    }
+
+    /// `CredentialOwnerScope::from_scope` must project two `ResourceScope`
+    /// values that share tenant/user/agent/project but differ in
+    /// invocation/thread/mission id onto the SAME owner scope — those axes are
+    /// transient per-request identifiers (see the module doc), not part of
+    /// credential ownership, and keeping them out of the projection is what
+    /// makes the cache hit across the fresh `invocation_id` every request
+    /// carries.
+    #[test]
+    fn owner_scope_projection_ignores_invocation_thread_and_mission_id() {
+        let tenant_id = TenantId::new("tenant").unwrap();
+        let user_id = UserId::new("user").unwrap();
+        let agent_id = AgentId::new("agent").unwrap();
+        let project_id = ProjectId::new("project").unwrap();
+
+        let scope_a = ResourceScope {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            mission_id: Some(ironclaw_host_api::MissionId::new("mission-a").unwrap()),
+            thread_id: Some(ironclaw_host_api::ThreadId::new("thread-a").unwrap()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let scope_b = ResourceScope {
+            tenant_id,
+            user_id,
+            agent_id: Some(agent_id),
+            project_id: Some(project_id),
+            mission_id: Some(ironclaw_host_api::MissionId::new("mission-b").unwrap()),
+            thread_id: Some(ironclaw_host_api::ThreadId::new("thread-b").unwrap()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+
+        assert_ne!(
+            scope_a.mission_id, scope_b.mission_id,
+            "test fixture must actually vary mission_id"
+        );
+        assert_ne!(
+            scope_a.thread_id, scope_b.thread_id,
+            "test fixture must actually vary thread_id"
+        );
+        assert_ne!(
+            scope_a.invocation_id, scope_b.invocation_id,
+            "test fixture must actually vary invocation_id"
+        );
+        assert_eq!(
+            CredentialOwnerScope::from_scope(&scope_a),
+            CredentialOwnerScope::from_scope(&scope_b),
+            "owner scope must be identical across differing invocation/thread/mission ids"
         );
     }
 

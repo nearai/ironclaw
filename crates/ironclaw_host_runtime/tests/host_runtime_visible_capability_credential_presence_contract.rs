@@ -37,7 +37,10 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -303,6 +306,98 @@ impl RuntimeCredentialAccountResolver for PanicsOnResolveAccountResolver {
     }
 }
 
+/// `SecretStore` wrapper whose `metadata` call fails while `fail.load()` is
+/// true and otherwise delegates to a real `InMemorySecretStore`. Used to prove
+/// the fail-open + never-cache contract from the caller (not just the
+/// `ProductionCredentialPresence` unit level): a `metadata` backend error must
+/// leave the capability `Available` AND must not populate the presence cache,
+/// so a subsequent render against a healthy store gets the fresh (not stale)
+/// answer.
+#[derive(Debug, Default)]
+struct ToggleableFailureSecretStore {
+    inner: InMemorySecretStore,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl ToggleableFailureSecretStore {
+    fn set_failing(&self, failing: bool) {
+        self.fail
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SecretStore for ToggleableFailureSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.inner.put(scope, handle, material, expires_at).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SecretStoreError::StoreUnavailable {
+                reason: "simulated backend outage".to_string(),
+            });
+        }
+        self.inner.metadata(scope, handle).await
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata_for_scope(scope).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.inner.leases_for_scope(scope).await
+    }
+}
+
 fn only_capability(
     surface: &ironclaw_host_runtime::VisibleCapabilitySurface,
 ) -> VisibleCapabilityAccess {
@@ -484,5 +579,67 @@ async fn product_auth_capability_presence_check_never_calls_resolve_access_secre
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "capability-surface presence check must never invoke resolve_access_secret"
+    );
+}
+
+/// PR #5528 review regression (fail-open coverage gap): a `SecretStore::metadata`
+/// backend error must fail open (capability stays `Available`, matching
+/// `generic_secret_capability_needs_auth_when_secret_absent`'s Ok(None) case
+/// staying missing) AND must not populate the credential-presence cache.
+/// Proven from the caller (`HostRuntimeServices::build_host_runtime`'s real
+/// wiring, not just the `ProductionCredentialPresence` unit) by rendering
+/// twice against the SAME runtime instance (so the cache persists across
+/// renders): first while the store fails (must stay `Available`), then after
+/// the store recovers (must get the FRESH answer — `NeedsAuth`, since the
+/// secret was never actually stored). If the first render had wrongly cached
+/// anything, the second render would still report the render-1 outcome
+/// instead of re-probing live.
+#[tokio::test]
+async fn generic_secret_capability_stays_available_and_uncached_when_metadata_errors() {
+    let secret_store = Arc::new(ToggleableFailureSecretStore::default());
+    secret_store.set_failing(true);
+
+    let (_storage, fs, registry) = registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST);
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        Arc::new(fs),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_secret_store(Arc::clone(&secret_store));
+    let runtime = services.host_runtime_for_local_testing();
+
+    let context = execution_context_with_script_grant(
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        vec![SecretHandle::new("script_api_token").unwrap()],
+    );
+
+    let surface_while_failing = runtime
+        .visible_capabilities(visible_request(context.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        only_capability(&surface_while_failing),
+        VisibleCapabilityAccess::Available,
+        "a metadata backend error must fail open, not report NeedsAuth"
+    );
+
+    secret_store.set_failing(false);
+    let surface_after_recovery = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+    assert_eq!(
+        only_capability(&surface_after_recovery),
+        VisibleCapabilityAccess::NeedsAuth,
+        "the indeterminate render must not have cached anything — once the store \
+         recovers, the capability must get the fresh (never-stored) answer, not a \
+         stale value carried over from the failing render"
     );
 }

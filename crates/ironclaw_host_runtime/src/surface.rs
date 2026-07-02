@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -15,6 +16,14 @@ use crate::{
     first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
     plan_capability,
 };
+
+/// Fan-out width for the per-capability credential-presence downgrade pass in
+/// `visible_capabilities`. Mirrors
+/// `ironclaw_reborn_composition::extension_availability::EXTENSION_READINESS_CONCURRENCY`
+/// (the extension-search path's identical bounded fan-out over credential
+/// readiness checks) — kept as a separate constant because the two live in
+/// different crates.
+const CREDENTIAL_PRESENCE_DOWNGRADE_CONCURRENCY: usize = 8;
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
@@ -105,6 +114,27 @@ pub enum VisibleCapabilityAccess {
     NeedsAuth,
 }
 
+/// Outcome of a capability-credential presence check.
+///
+/// A three-state enum instead of `Option<bool>` per `.claude/rules/types.md`
+/// ("match-on-string-literals means the type should be an enum" — the same
+/// reasoning applies to a boolean-plus-sentinel encoding two independent
+/// facts, presence and conclusiveness, into one `Option<bool>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialPresenceStatus {
+    /// All required credentials are present (or none are required).
+    Present,
+    /// At least one required credential is missing → downgrade to
+    /// [`VisibleCapabilityAccess::NeedsAuth`].
+    Missing,
+    /// Indeterminate (backend blip, unwired dependency, or a defensive
+    /// contract-violation guard). The caller keeps `Available` — fail-open,
+    /// matching `credential_preflight_check` — rather than falsely prompting
+    /// sign-in for a transient failure that has nothing to do with the user's
+    /// credentials.
+    Indeterminate,
+}
+
 /// Presence check for capability-required credentials, used to downgrade an
 /// otherwise-`Available` capability to [`VisibleCapabilityAccess::NeedsAuth`]
 /// on the visible surface.
@@ -115,15 +145,11 @@ pub enum VisibleCapabilityAccess {
 /// `RuntimeCredentialAccountResolver` behind a short-TTL cache.
 #[async_trait]
 pub(crate) trait CapabilityCredentialPresence: Send + Sync {
-    /// `Some(true)` = all required credentials present (or none required);
-    /// `Some(false)` = at least one required credential missing (→
-    /// `NeedsAuth`); `None` = indeterminate (backend blip) → caller keeps
-    /// `Available` (fail-open, matching `credential_preflight_check`).
     async fn required_credentials_present(
         &self,
         scope: &ResourceScope,
         descriptor: &CapabilityDescriptor,
-    ) -> Option<bool>;
+    ) -> CredentialPresenceStatus;
 }
 
 /// Capability metadata safe to render on a model/tool surface.
@@ -251,16 +277,35 @@ impl<'a> CapabilityCatalog<'a> {
 
         if let Some(presence) = self.credential_presence {
             let scope = &request.context.resource_scope;
-            for capability in &mut capabilities {
-                if capability.access != VisibleCapabilityAccess::Available {
-                    continue;
-                }
-                if presence
-                    .required_credentials_present(scope, &capability.descriptor)
-                    .await
-                    == Some(false)
-                {
-                    capability.access = VisibleCapabilityAccess::NeedsAuth;
+            let available_indices: Vec<usize> = capabilities
+                .iter()
+                .enumerate()
+                .filter(|(_, capability)| capability.access == VisibleCapabilityAccess::Available)
+                .map(|(index, _)| index)
+                .collect();
+            // Presence checks are read-only backend round trips (secret-store
+            // metadata reads / product-auth `account_configured` calls) — on a
+            // cold cache, checking each Available capability serially pays N
+            // sequential round trips per render. Resolve with bounded
+            // concurrency instead, mirroring
+            // `ironclaw_reborn_composition::extension_availability::EXTENSION_READINESS_CONCURRENCY`
+            // (the search path's identical fan-out over the same kind of
+            // credential-gate lookup). `buffered` (not `buffer_unordered`)
+            // preserves the input order, so `available_indices` zips back onto
+            // `results` positionally without threading the index through the
+            // future itself, keeping result application deterministic.
+            let results: Vec<CredentialPresenceStatus> =
+                stream::iter(available_indices.iter().copied())
+                    .map(|index| {
+                        presence
+                            .required_credentials_present(scope, &capabilities[index].descriptor)
+                    })
+                    .buffered(CREDENTIAL_PRESENCE_DOWNGRADE_CONCURRENCY)
+                    .collect()
+                    .await;
+            for (index, status) in available_indices.into_iter().zip(results) {
+                if status == CredentialPresenceStatus::Missing {
+                    capabilities[index].access = VisibleCapabilityAccess::NeedsAuth;
                 }
             }
         }
@@ -610,18 +655,20 @@ mod tests {
 
     /// Fixed-response fake [`CapabilityCredentialPresence`], keyed by
     /// capability id string. A capability id not present in the map defaults
-    /// to `Some(true)` (not gated) so tests only need to register the ids
-    /// they care about.
+    /// to [`CredentialPresenceStatus::Present`] (not gated) so tests only need
+    /// to register the ids they care about.
     struct FakeCredentialPresence {
-        responses: HashMap<String, Option<bool>>,
+        responses: HashMap<String, CredentialPresenceStatus>,
     }
 
     impl FakeCredentialPresence {
-        fn new(responses: impl IntoIterator<Item = (&'static str, Option<bool>)>) -> Self {
+        fn new<K: Into<String>>(
+            responses: impl IntoIterator<Item = (K, CredentialPresenceStatus)>,
+        ) -> Self {
             Self {
                 responses: responses
                     .into_iter()
-                    .map(|(id, presence)| (id.to_string(), presence))
+                    .map(|(id, presence)| (id.into(), presence))
                     .collect(),
             }
         }
@@ -633,11 +680,11 @@ mod tests {
             &self,
             _scope: &ResourceScope,
             descriptor: &CapabilityDescriptor,
-        ) -> Option<bool> {
+        ) -> CredentialPresenceStatus {
             self.responses
                 .get(descriptor.id.as_str())
                 .copied()
-                .unwrap_or(Some(true))
+                .unwrap_or(CredentialPresenceStatus::Present)
         }
     }
 
@@ -760,7 +807,10 @@ prompt_doc_ref = "prompts/test/say.md"
         };
         let runtime_policy = test_runtime_policy();
         let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
-        let presence = FakeCredentialPresence::new([("test-ext.available", Some(false))]);
+        let presence = FakeCredentialPresence::new([(
+            "test-ext.available",
+            CredentialPresenceStatus::Missing,
+        )]);
         let catalog =
             CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
                 .with_credential_presence(&presence);
@@ -785,8 +835,11 @@ prompt_doc_ref = "prompts/test/say.md"
         let runtime_policy = test_runtime_policy();
         let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
         let presence = FakeCredentialPresence::new([
-            ("test-ext.present", Some(true)),
-            ("test-ext.indeterminate", None),
+            ("test-ext.present", CredentialPresenceStatus::Present),
+            (
+                "test-ext.indeterminate",
+                CredentialPresenceStatus::Indeterminate,
+            ),
         ]);
         let catalog =
             CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
@@ -801,7 +854,7 @@ prompt_doc_ref = "prompts/test/say.md"
                 .capabilities
                 .iter()
                 .all(|capability| capability.access == VisibleCapabilityAccess::Available),
-            "presence Some(true)/None must not downgrade Available: {:?}",
+            "presence Present/Indeterminate must not downgrade Available: {:?}",
             surface.capabilities
         );
     }
@@ -814,7 +867,8 @@ prompt_doc_ref = "prompts/test/say.md"
         };
         let runtime_policy = test_runtime_policy();
         let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
-        let presence = FakeCredentialPresence::new([("test-ext.approval", Some(false))]);
+        let presence =
+            FakeCredentialPresence::new([("test-ext.approval", CredentialPresenceStatus::Missing)]);
         let catalog =
             CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
                 .with_credential_presence(&presence);
@@ -844,8 +898,10 @@ prompt_doc_ref = "prompts/test/say.md"
         let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
         let context = test_execution_context();
 
-        let present = FakeCredentialPresence::new([("test-ext.cred", Some(true))]);
-        let missing = FakeCredentialPresence::new([("test-ext.cred", Some(false))]);
+        let present =
+            FakeCredentialPresence::new([("test-ext.cred", CredentialPresenceStatus::Present)]);
+        let missing =
+            FakeCredentialPresence::new([("test-ext.cred", CredentialPresenceStatus::Missing)]);
 
         let catalog_present =
             CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
@@ -876,5 +932,66 @@ prompt_doc_ref = "prompts/test/say.md"
             "credential-derived NeedsAuth downgrade must not change the surface \
              fingerprint (see #4789)"
         );
+    }
+
+    /// PR #5528 review regression: the credential-presence downgrade pass runs
+    /// with bounded concurrency (`CREDENTIAL_PRESENCE_DOWNGRADE_CONCURRENCY`)
+    /// instead of one presence check at a time. This must not scramble which
+    /// capability gets which answer. Uses more capabilities than the
+    /// concurrency width so at least two `buffered` batches are exercised, and
+    /// interleaves missing/present so a naive unordered fan-out (or a
+    /// mismatched index zip) would misapply at least one result.
+    #[tokio::test]
+    async fn concurrent_downgrade_pass_applies_each_result_to_the_right_capability() {
+        const CAPABILITY_COUNT: usize = 20;
+        let ids: Vec<String> = (0..CAPABILITY_COUNT)
+            .map(|index| format!("test-ext.cap-{index}"))
+            .collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let registry = registry_with_capabilities(&id_refs, "test-ext");
+        let authorizer = FixedAccessAuthorizer {
+            require_approval_for: Vec::new(),
+        };
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        // Odd-indexed capabilities are missing their credential; even-indexed
+        // stay present. Deliberately not a uniform answer so a scrambled
+        // ordering shows up as a specific-capability mismatch, not a
+        // count-only discrepancy.
+        let presence = FakeCredentialPresence::new(ids.iter().enumerate().map(|(index, id)| {
+            let status = if index % 2 == 1 {
+                CredentialPresenceStatus::Missing
+            } else {
+                CredentialPresenceStatus::Present
+            };
+            (id.as_str(), status)
+        }));
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
+                .with_credential_presence(&presence);
+        let request = test_visible_request(test_execution_context(), "test-ext");
+
+        let surface = catalog.visible_capabilities(request).await.unwrap();
+
+        assert_eq!(surface.capabilities.len(), CAPABILITY_COUNT);
+        for capability in &surface.capabilities {
+            let index: usize = capability
+                .descriptor
+                .id
+                .as_str()
+                .strip_prefix("test-ext.cap-")
+                .and_then(|suffix| suffix.parse().ok())
+                .expect("capability id must carry its index suffix");
+            let expected = if index % 2 == 1 {
+                VisibleCapabilityAccess::NeedsAuth
+            } else {
+                VisibleCapabilityAccess::Available
+            };
+            assert_eq!(
+                capability.access, expected,
+                "capability {} got the wrong access after the concurrent downgrade pass",
+                capability.descriptor.id
+            );
+        }
     }
 }

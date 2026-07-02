@@ -1582,6 +1582,74 @@ async fn resolver_maps_configured_account_without_access_secret_to_backend() {
     assert_eq!(error, CredentialStageError::Backend);
 }
 
+/// PR #5528 review regression: `account_configured` (the side-effect-free
+/// capability-surface presence check) must mirror `resolve_access_secret`'s
+/// data-corruption classification above. Before the fix it collapsed a
+/// `Configured` account with no `access_secret` into `Ok(false)` — the same
+/// bucket as "no account configured yet" — which the capability-surface
+/// downgrade path (`surface.rs`) reads as `NeedsAuth` and prompts the user to
+/// re-authenticate. Re-auth cannot fix data corruption (the durable store
+/// preserves Configured ↔ access_secret=Some, so this state means something
+/// went wrong server-side, not that the user needs to sign in again); the
+/// correct outcome is `Err(Backend)`, which the presence path treats as
+/// indeterminate (fail-open, not cached, capability stays `Available`).
+#[tokio::test]
+async fn account_configured_maps_configured_account_without_access_secret_to_backend() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    ConfiguredAccount::new(auth_scope, "github")
+        // Configured but missing secret — data corruption
+        .access_secret(None)
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_accounts(accounts);
+
+    let error = resolver
+        .account_configured(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("github").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, CredentialStageError::Backend);
+}
+
+/// Control for the regression above: an account that is genuinely not
+/// `Configured` (no data corruption, just no account yet) must still resolve
+/// to `Ok(false)`, not `Err`.
+#[tokio::test]
+async fn account_configured_maps_unconfigured_account_status_to_ok_false() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    ConfiguredAccount::new(auth_scope, "github")
+        .status(CredentialAccountStatus::PendingSetup)
+        .access_secret(None)
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_accounts(accounts);
+
+    let present = resolver
+        .account_configured(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("github").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(!present);
+}
+
 #[tokio::test]
 async fn activation_preflight_maps_configured_account_without_access_secret_to_backend() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());

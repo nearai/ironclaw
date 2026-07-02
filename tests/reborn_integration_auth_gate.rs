@@ -82,9 +82,16 @@ async fn github_capability_with_auth_required_credential_raises_blocked_auth_gat
     let first_call_tools = captured
         .first()
         .expect("the scripted turn made at least one tool-bearing model call");
+    // Exact match, not a substring: the harness's github surface also
+    // registers `github.create_issue_comment`
+    // (`tests/support/reborn/extension_surface.rs`), whose provider tool
+    // name (`provider_tool_name_base` in
+    // `ironclaw_loop_support::capability_port` maps `.` -> `__`) is
+    // `github__create_issue_comment` — a `.contains("create_issue")` match
+    // would silently accept either tool depending on iteration order.
     let create_issue_tool = first_call_tools
         .iter()
-        .find(|tool| tool.name.contains("create_issue"))
+        .find(|tool| tool.name == "github__create_issue")
         .expect("github.create_issue is on the model-visible tool list");
     assert!(
         create_issue_tool

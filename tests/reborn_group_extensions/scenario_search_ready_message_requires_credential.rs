@@ -4,16 +4,24 @@
 //! but has NO credential account configured — and must STILL render it for an
 //! extension that is legitimately ready (no credential required).
 //!
-//! Root cause (`extension_lifecycle.rs::search_installation_phase`): once an
-//! installation's `activation_state()` maps to `LifecyclePhase::Active`, the
-//! function returns that phase immediately — `search_credentials_configured`
-//! (which consults the `RuntimeExtensionActivationCredentialGate`) is only ever
+//! Root cause (as originally diagnosed, in `extension_lifecycle.rs::search_installation_phase`,
+//! since REMOVED by the #5416 fix — see the SHAPE NOTE below): once an
+//! installation's `activation_state()` mapped to `LifecyclePhase::Active`, the
+//! function returned that phase immediately — `search_credentials_configured`
+//! (which consulted the `RuntimeExtensionActivationCredentialGate`) was only ever
 //! called for the `LifecyclePhase::Installed` case. An `Enabled` installation
-//! therefore never has its credential state checked, so
-//! `extension_search_has_ready_result` (which looks at `installation_phase` +
+//! therefore never had its credential state checked, so
+//! `extension_search_has_ready_result` (which looked at `installation_phase` +
 //! the always-cleared `credential_requirements` field — see
-//! `suppress_search_credential_onboarding`) reports it as ready regardless of
-//! whether a credential account exists.
+//! `suppress_search_credential_onboarding`) reported it as ready regardless of
+//! whether a credential account existed.
+//!
+//! The fix replaced that lifecycle-phase-gated check with the collapsed
+//! `resolve_extension_availability` / `ExtensionAvailability` projection (see
+//! `ironclaw_reborn_composition::extension_availability`), which now checks
+//! credential presence uniformly regardless of activation state — so this
+//! scenario drives the current `builtin.extension_search` path, not the
+//! removed `search_installation_phase`/`LifecyclePhase::Active` branch.
 //!
 //! `builtin.extension_activate` cannot reach `Enabled` without a configured
 //! credential account for a credentialed extension (it raises `AuthRequired`
@@ -109,8 +117,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "bug #5416: `builtin.extension_search` mis-reported credential readiness for: {bugs:?}. \
              Credentialed Enabled-but-unauthenticated extensions must NOT be reported \"already \
              configured or active / do not ask the user for credentials\", and a credential-free \
-             ready extension must still be. `search_installation_phase` must consult the credential \
-             gate for `LifecyclePhase::Active`, not only `LifecyclePhase::Installed`."
+             ready extension must still be. `resolve_extension_availability` must consult the \
+             credential gate for every installed extension regardless of activation state, not \
+             only for a specific lifecycle phase (the historical bug — see the module doc — gated \
+             that check on the now-removed `LifecyclePhase::Installed` vs `LifecyclePhase::Active` \
+             branch in the deleted `search_installation_phase`)."
         )
         .into());
     }

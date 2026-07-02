@@ -593,8 +593,17 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .select_unique_configured_runtime_account(selection_request)
             .await
         {
-            Ok(account) => Ok(account.status == CredentialAccountStatus::Configured
-                && account.access_secret.is_some()),
+            Ok(account) if account.status != CredentialAccountStatus::Configured => Ok(false),
+            // A `Configured` account with no `access_secret` indicates data
+            // corruption, not a re-auth prompt — mirrors `resolve_access_secret`'s
+            // classification above (see the comment on that branch). The durable
+            // product-auth store preserves the Configured ↔ access_secret=Some
+            // invariant, so this branch can only fire on corrupt state; return
+            // `Backend` (indeterminate, not cached, capability stays `Available`)
+            // rather than `Ok(false)` (which the surface reads as `NeedsAuth` and
+            // re-auth cannot fix).
+            Ok(account) if account.access_secret.is_none() => Err(CredentialStageError::Backend),
+            Ok(_) => Ok(true),
             Err(error) => match map_account_error(error) {
                 CredentialStageError::AuthRequired => Ok(false),
                 CredentialStageError::Backend => Err(CredentialStageError::Backend),
