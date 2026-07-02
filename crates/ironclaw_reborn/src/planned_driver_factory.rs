@@ -286,6 +286,7 @@ pub fn scheduled_trigger_planned_profile_definition()
         descriptor,
         SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
     )
+    .map(|definition| definition.with_driver_specific_nudges(true))
 }
 
 pub fn register_default_planned_profile(
@@ -501,6 +502,10 @@ mod tests {
         assert_eq!(
             snapshot.capability_surface_profile_id.as_str(),
             SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+        );
+        assert!(
+            snapshot.steering_policy.allow_driver_specific_nudges,
+            "scheduled_trigger must have driver-specific nudges enabled"
         );
     }
 
