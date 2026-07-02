@@ -4,7 +4,7 @@
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server): ~464k nodes / ~2.5M edges spanning all of `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
 
 **Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
 
