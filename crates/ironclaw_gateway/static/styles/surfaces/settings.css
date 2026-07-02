@@ -1,4 +1,9 @@
-/* --- Settings Tab Layout --- */
+/* --- Settings takeover (Linear pattern) ---
+   Opening Settings hides the app sidebar + topbar; this shell owns
+   navigation: "Back to app", search, grouped nav rail, content pane. */
+
+#app.settings-takeover .app-sidebar { display: none; }
+
 .settings-layout {
   flex: 1;
   display: flex;
@@ -6,39 +11,114 @@
 }
 
 .settings-sidebar {
-  width: 180px;
+  width: 220px;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  background: var(--bg-secondary);
-  padding: 12px 0;
+  background: var(--v2-rail);
+  padding: var(--v2-space-3) var(--v2-space-2);
+  gap: 2px;
   flex-shrink: 0;
+  overflow-y: auto;
 }
+
+.settings-back-app {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  padding: 7px 10px;
+  margin-bottom: var(--v2-space-2);
+  background: none;
+  border: none;
+  border-radius: var(--v2-radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-back-app:hover {
+  background: var(--hover-subtle);
+  color: var(--text);
+}
+
+.settings-sidebar .settings-search {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  margin: 0 2px var(--v2-space-3);
+  background: var(--v2-input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-sm);
+  color: var(--text-dimmed);
+}
+
+.settings-sidebar .settings-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.settings-sidebar .settings-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: var(--v2-font-size-caption);
+  font-family: var(--font-sans);
+}
+
+.settings-sidebar .settings-search input:focus { outline: none; }
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: var(--v2-space-3);
+}
+
+.settings-nav-label {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-dimmed);
+  padding: 4px 10px;
+}
+
+.settings-sidebar-spacer { flex: 1; }
 
 .settings-subtab {
   display: block;
   width: 100%;
-  padding: 10px 20px;
+  padding: 6px 10px;
   background: none;
   border: none;
-  border-left: 2px solid transparent;
+  border-radius: var(--v2-radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
   font-weight: 500;
+  font-family: var(--font-sans);
   text-align: left;
-  transition: color 0.2s, background 0.2s, border-color 0.2s;
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
 
 .settings-subtab:hover {
   color: var(--text);
-  background: var(--bg-tertiary);
+  background: var(--hover-subtle);
 }
 
 .settings-subtab.active {
-  color: var(--accent);
-  border-left-color: var(--accent);
-  background: var(--bg-tertiary);
+  color: var(--text);
+  background: var(--v2-surface-muted);
+  font-weight: 600;
 }
 
 .settings-content {
@@ -343,59 +423,43 @@ input[type="checkbox"]:focus-visible {
   background: var(--bg-secondary);
 }
 
-/* Settings toolbar (search + import/export) */
+/* Settings content toolbar: big view title + export/import. */
 .settings-toolbar {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  padding: var(--v2-space-5) var(--v2-space-8) var(--v2-space-3);
   flex-shrink: 0;
 }
 
-.settings-search {
-  flex: 1;
-}
-
-.settings-search input {
-  width: 100%;
-  padding: 6px 10px 6px 32px;
-  background: var(--bg);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: 10px center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+.settings-view-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--heading-tracking);
   color: var(--text);
-  font-size: var(--text-sm);
-  font-family: 'IBM Plex Mono', monospace;
 }
 
-.settings-search input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
-}
+.settings-toolbar-spacer { flex: 1; }
 
 .settings-toolbar-btn {
-  padding: 6px 12px;
-  background: var(--bg-tertiary);
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--v2-radius-sm);
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  font-family: var(--font-sans);
   cursor: pointer;
-  transition: all var(--transition-fast), transform 150ms var(--ease-spring);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
   white-space: nowrap;
 }
 
 .settings-toolbar-btn:hover {
-  background: var(--bg-secondary);
   color: var(--text);
-  border-color: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
+  border-color: var(--border-hover);
 }
 
 .settings-toolbar-btn:active {
@@ -537,3 +601,28 @@ input[type="checkbox"]:focus-visible {
   font-size: var(--text-sm);
 }
 
+
+/* Content pane: settings read best on a centered measure (Linear). */
+.settings-subpanel > .extensions-container,
+.settings-subpanel > div {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding-left: var(--v2-space-8);
+  padding-right: var(--v2-space-8);
+}
+
+.settings-toolbar {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Settings selects/inputs ride the shared control primitives. */
+.settings-row select,
+.settings-row input[type="text"],
+.settings-row input[type="number"],
+.settings-row input[type="password"] {
+  height: var(--v2-control-h-md);
+  border-radius: var(--v2-radius-sm);
+}

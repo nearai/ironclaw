@@ -548,6 +548,8 @@ document.getElementById('skill-install-btn').addEventListener('click', () => ins
 document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
 document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
 document.getElementById('settings-back-btn')?.addEventListener('click', () => settingsBack());
+// "Back to app" exits the settings takeover to the chat surface.
+document.getElementById('settings-back-app')?.addEventListener('click', () => switchTab('chat'));
 
 // --- "Just ask the agent" affordance ---
 // Config surfaces exist 'just in case'; the canonical way to do anything is

@@ -693,26 +693,48 @@
     </div>
 
     <!-- Settings Tab -->
+    <!-- Settings is a full takeover (Linear pattern): the app sidebar and
+         topbar hide; this shell owns navigation with "Back to app". -->
     <div class="tab-panel" id="tab-settings">
       <div class="settings-layout">
         <div class="settings-sidebar">
-          <button class="settings-subtab active" data-settings-subtab="inference" data-i18n="settings.inference">Inference</button>
-          <button class="settings-subtab" data-settings-subtab="agent" data-i18n="settings.agent">Agent</button>
-          <button class="settings-subtab" data-settings-subtab="channels" data-i18n="settings.channels">Channels</button>
-          <button class="settings-subtab" data-settings-subtab="networking" data-i18n="settings.networking">Networking</button>
-          <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
-          <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
-          <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
-          <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
-          <button type="button" class="settings-subtab" data-settings-subtab="trace-commons" data-i18n="settings.traceCommons">Trace Commons</button>
+          <button type="button" class="settings-back-app" id="settings-back-app">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+            <span data-i18n="settings.backToApp">Back to app</span>
+          </button>
+          <div class="settings-search">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="settings-search-input" data-i18n-placeholder="settings.searchPlaceholder" placeholder="Search settings..." data-i18n-attr="aria-label" data-i18n="settings.searchPlaceholder" aria-label="Search settings...">
+          </div>
+          <div class="settings-nav-group">
+            <div class="settings-nav-label" data-i18n="settings.groupModel">Model</div>
+            <button class="settings-subtab active" data-settings-subtab="inference" data-i18n="settings.inference">Inference</button>
+          </div>
+          <div class="settings-nav-group">
+            <div class="settings-nav-label" data-i18n="settings.groupAgent">Agent</div>
+            <button class="settings-subtab" data-settings-subtab="agent" data-i18n="settings.agent">Agent</button>
+            <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
+            <button type="button" class="settings-subtab" data-settings-subtab="trace-commons" data-i18n="settings.traceCommons">Trace Commons</button>
+          </div>
+          <div class="settings-nav-group">
+            <div class="settings-nav-label" data-i18n="settings.groupConnectivity">Connectivity</div>
+            <button class="settings-subtab" data-settings-subtab="channels" data-i18n="settings.channels">Channels</button>
+            <button class="settings-subtab" data-settings-subtab="networking" data-i18n="settings.networking">Networking</button>
+            <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
+            <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
+          </div>
+          <div class="settings-nav-group">
+            <div class="settings-nav-label" data-i18n="settings.groupWorkspace">Workspace</div>
+            <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
+          </div>
+          <div class="settings-sidebar-spacer"></div>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
           <div class="settings-toolbar">
-            <button id="settings-back-btn" class="settings-back-btn">&larr; Back</button>
-            <div class="settings-search">
-              <input type="text" id="settings-search-input" data-i18n-placeholder="settings.searchPlaceholder" placeholder="Search settings..." data-i18n-attr="aria-label" data-i18n="settings.searchPlaceholder" aria-label="Search settings...">
-            </div>
+            <button id="settings-back-btn" class="settings-back-btn">&larr; <span data-i18n="common.back">Back</span></button>
+            <h1 class="settings-view-title" id="settings-view-title" data-i18n="settings.inference">Inference</h1>
+            <div class="settings-toolbar-spacer"></div>
             <button id="settings-export-btn" class="settings-toolbar-btn" data-i18n="settings.export">Export</button>
             <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
