@@ -3,12 +3,18 @@
  * check-design-tokens.mjs — design-token ratchet for the WebUI v2.
  *
  * Scans crates/ironclaw_webui_v2/static/js/** (excluding vendor/,
- * dist/, and colocated *.test.{js,mjs} files) for hardcoded color
- * literals — hex (#abc / #aabbcc / #aabbccdd) and rgb()/rgba() calls.
- * The design system requires colors to come from the --v2-* custom
- * properties defined in static/styles/app.css (see
- * crates/ironclaw_webui_v2/DESIGN_SYSTEM.md), so raw color literals
- * in JS are violations.
+ * dist/, and colocated *.test.{js,mjs} files) for:
+ *
+ * 1. Hardcoded color literals — hex (#abc / #aabbcc / #aabbccdd) and
+ *    rgb()/rgba() calls. Colors must come from the --v2-* custom
+ *    properties defined in static/styles/app.css.
+ * 2. Legacy alias utility classes (text-white, bg-white/*, iron-* /
+ *    signal / copper / mint palette classes, red-* status classes).
+ *    These are compat shims remapped by app.css to theme tokens —
+ *    several contradict their literal meaning (`.text-white` renders
+ *    the theme ink color, i.e. dark in light mode), so new code must
+ *    use the semantic token classes instead. See DESIGN_SYSTEM.md
+ *    ("Provenance & reconciliation" + the color rules in §2).
  *
  * Pre-existing occurrences are grandfathered in
  * scripts/design-tokens-baseline.json. The check fails when any file
@@ -37,6 +43,13 @@ const HEX_RE = /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g;
 // values (`shadow-[0_24px_rgba(...)]` — underscores are word chars)
 // is still caught.
 const RGB_RE = /(?<![A-Za-z0-9-])rgba?\(/g;
+// Legacy alias utilities (remapped by the app.css compat shim /
+// index.html @theme block). Matches the utility with any prefix
+// variant (hover:, focus:, md:, …) via the leading quote/space/colon
+// boundary. `text-white` is the canonical trap: it renders
+// --v2-text-strong (dark ink in light mode), not white.
+const LEGACY_ALIAS_RE =
+  /(?<![A-Za-z0-9_/[-])(?:text-white|(?:text|bg|border)-(?:iron-\d+|signal|copper|mint|red-\d+)|(?:bg|border)-white\/)/g;
 
 function collectJsFiles(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -58,8 +71,12 @@ function collectJsFiles(dir, out = []) {
 function findViolations(source) {
   const violations = [];
   const lines = source.split("\n");
-  lines.forEach((line, index) => {
-    for (const re of [HEX_RE, RGB_RE]) {
+  lines.forEach((rawLine, index) => {
+    // Drop line comments (whitespace-preceded `//` so `https://` in
+    // string literals survives) — a comment *mentioning* text-white
+    // or a hex value is not a violation.
+    const line = rawLine.replace(/(^|\s)\/\/.*$/, "$1");
+    for (const re of [HEX_RE, RGB_RE, LEGACY_ALIAS_RE]) {
       re.lastIndex = 0;
       let match;
       while ((match = re.exec(line)) !== null) {
@@ -118,12 +135,18 @@ for (const [rel, count] of Object.entries(counts)) {
 
 if (failed) {
   console.error(
-    "\nHardcoded colors are not allowed in WebUI v2 JS — use the --v2-* " +
-      "design tokens (var(--v2-...)) instead. See " +
+    "\nHardcoded colors and legacy alias utilities (text-white, iron-*/" +
+      "signal/copper/mint/red-* classes, bg-white/*) are not allowed in " +
+      "new WebUI v2 JS — use the --v2-* design tokens (var(--v2-...)) " +
+      "instead. In particular `text-white` does NOT render white: the " +
+      "compat shim remaps it to the theme ink color; use " +
+      "text-[var(--v2-on-accent)] on accent fills. See " +
       "crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. If you removed other " +
       "violations in the same file, re-run with --update-baseline."
   );
   process.exit(1);
 }
 
-console.log("design-tokens check passed: no new raw color literals.");
+console.log(
+  "design-tokens check passed: no new raw color literals or legacy alias utilities."
+);

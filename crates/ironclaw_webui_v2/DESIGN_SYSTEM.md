@@ -66,6 +66,16 @@ flagged four deliberate divergences:
   Telegram etc. are intentionally outside the semantic system — see
   the brand-colors rule in §2.
 
+Alias-shim audit (prompted by the `text-white` primary-button bug):
+every compat alias was checked for literal-vs-semantic divergence.
+Fixes: `--v2-on-accent` for text on brand fills (the shim's own
+`bg-signal` rule now uses it too), `text-mint` re-aliased from the
+blue accent to `--v2-positive-text` (legacy pages use mint only for
+success/connected states — they rendered blue), and the hazardous
+aliases are documented in §2 + flagged by the token ratchet, which
+now also counts legacy alias utilities (grandfathered per file in
+the baseline).
+
 **Live reference:** open `/v2/playground` in any running WebUI — it
 renders every token and every component state below, in both themes.
 
@@ -124,9 +134,25 @@ add a token first — do not inline the raw value.
   | warning / degraded / attention | `warning` | `--v2-warning-text` | `--v2-warning-soft` |
   | failure / error / cancelled | `danger` | `--v2-danger-text` | `--v2-danger-soft` |
   | paused / idle / disabled | `muted` | `--v2-text-muted` | `--v2-surface-soft` |
-- The legacy `iron-*` / `signal` / `copper` Tailwind aliases in
-  `index.html` are compat shims for old pages. Do not use them in new
-  code.
+- **Legacy alias utilities are forbidden in new code** (the ratchet
+  flags them). The compat shim in app.css / the `@theme` block in
+  index.html remap old utility classes to theme tokens, and several
+  contradict their literal meaning — they are traps:
+  - `text-white` / `hover:text-white` → renders `--v2-text-strong`
+    (**dark ink in light mode**). On accent/brand fills use
+    `text-[var(--v2-on-accent)]`; for headings use
+    `text-[var(--v2-text-strong)]`.
+  - `bg-white/*`, `border-white/*` → render surface-soft /
+    panel-border, not a white veil. Never use them to lighten an
+    image or gradient.
+  - `bg-red-500` (solid) → renders the pale `--v2-danger-soft` tint,
+    not a solid red fill. `bg-copper` (solid) → pale warning tint.
+  - `text-mint` → `--v2-positive-text` (success green). It was
+    mis-aliased to the blue accent until the alias audit; legacy
+    pages use mint exclusively for success/connected states.
+  - `iron-*`, `signal`, `copper`, `red-*` palette classes → theme
+    tokens; write the `var(--v2-*)` form instead so intent is
+    explicit.
 - Code (inline + blocks) sits on `--v2-code-bg`, not `input-bg` or a
   surface tint — the roles diverge in light mode.
 - **Third-party brand colors** (Gmail red, Slack aubergine, Telegram

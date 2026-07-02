@@ -391,8 +391,12 @@ input:focus, select:focus, textarea:focus {
 .text-iron-400,
 .text-iron-700                         { color: var(--v2-text-muted) !important; }
 
-.text-signal, .text-mint,
+.text-signal,
 [class~="hover:text-signal"]:hover     { color: var(--v2-accent-text) !important; }
+/* mint = success green (see STATUS_CANON). Previously mis-aliased to
+   the blue accent alongside `signal`, which rendered success/connected
+   states in blue. */
+.text-mint                             { color: var(--v2-positive-text) !important; }
 .text-copper                           { color: var(--v2-warning-text) !important; }
 .text-red-200, .text-red-300,
 [class~="hover:text-red-200"]:hover    { color: var(--v2-danger-text) !important; }
@@ -414,7 +418,8 @@ input:focus, select:focus, textarea:focus {
 }
 
 [class~="bg-signal"],[class~="bg-signal/60"] {
-  background-color: var(--v2-accent) !important; color: #ffffff !important;
+  background-color: var(--v2-accent) !important;
+  color: var(--v2-on-accent) !important;
 }
 [class~="bg-signal/10"],[class~="bg-signal/12"],[class~="bg-signal/15"],
 [class~="hover:bg-signal/10"]:hover,[class~="hover:bg-signal/15"]:hover {

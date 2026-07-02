@@ -70,7 +70,11 @@
         --color-iron-100: var(--v2-text-strong);
         --color-signal: var(--v2-accent-text);
         --color-copper: var(--v2-warning-text);
-        --color-mint: var(--v2-accent-text);
+        /* mint is GREEN: legacy pages use it exclusively for success/
+           connected states (`success: "text-mint"`), so it maps to the
+           positive status token. It was previously mis-aliased to the
+           blue accent, which painted every success state blue. */
+        --color-mint: var(--v2-positive-text);
       }
     </style>
     <link rel="stylesheet" href="/v2/styles/app.css" />
