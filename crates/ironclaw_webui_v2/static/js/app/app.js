@@ -121,8 +121,8 @@ export function App() {
           <${Route} path="routines" element=${html`<${RoutinesPage} />`} />
           <${Route} path="routines/:routineId" element=${html`<${RoutinesPage} />`} />
           <${Route} path="automations" element=${html`<${AutomationsPage} />`} />
-          <${Route} path="extensions" element=${html`<${ExtensionsPage} />`} />
-          <${Route} path="extensions/:tab" element=${html`<${ExtensionsPage} />`} />
+          <${Route} path="extensions" element=${html`<${ExtensionsPage} isAdmin=${auth.isAdmin} />`} />
+          <${Route} path="extensions/:tab" element=${html`<${ExtensionsPage} isAdmin=${auth.isAdmin} />`} />
           <${Route} path="logs" element=${html`<${LogsPage} />`} />
           <${Route} path="settings" element=${html`<${SettingsPage} />`} />
           <${Route} path="settings/:tab" element=${html`<${SettingsPage} />`} />
