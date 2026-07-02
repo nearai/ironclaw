@@ -529,11 +529,89 @@ pub struct ToolListResponse {
     pub tools: Vec<ToolInfo>,
 }
 
+/// Request body for `POST /api/extensions/install`.
+///
+/// `headers` and `oauth` are only consumed when `kind == "mcp_server"`.
+/// For other extension kinds they are silently ignored (a debug log is
+/// emitted so operators can spot misconfigured payloads without failing
+/// the request for existing callers).
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionRequest {
     pub name: String,
     pub url: Option<String>,
     pub kind: Option<String>,
+
+    /// Custom HTTP headers to embed in every request the MCP client sends
+    /// to this server (e.g. `Authorization: Bearer <token>`).
+    /// Ignored for non-MCP extension kinds.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+
+    /// Pre-configured OAuth metadata for this MCP server.
+    /// Ignored for non-MCP extension kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<crate::tools::mcp::config::OAuthConfig>,
+}
+
+/// Request body for `PATCH /api/extensions/{name}`.
+///
+/// All fields are optional; only the fields present in the JSON payload
+/// are applied. Currently only `ExtensionKind::McpServer` supports
+/// partial updates — other kinds return 400.
+///
+/// # OAuth tri-state
+///
+/// `oauth` uses a tri-state to distinguish between three caller intents:
+/// - **Absent** (field not present in JSON): leave existing OAuth config unchanged.
+/// - **`null`**: clear the existing OAuth config entirely.
+/// - **`{ "client_id": "...", ... }`**: replace the OAuth config.
+///
+/// This requires a custom deserializer (`deserialize_optional_oauth`) because
+/// the default `Option<T>` serde implementation maps both absent and `null` to
+/// `None`, making it impossible to distinguish the two.
+#[derive(Debug, Deserialize)]
+pub struct UpdateExtensionRequest {
+    /// Replace the server URL.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Replace the full set of custom HTTP headers.
+    /// An absent field leaves existing headers unchanged.
+    /// An empty map (`{}`) clears all previously configured headers.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+
+    /// Tri-state OAuth field.
+    ///
+    /// - Absent → `None`: leave existing OAuth config unchanged.
+    /// - `null` → `Some(None)`: clear OAuth config.
+    /// - `{ "client_id": "...", ... }` → `Some(Some(config))`: replace.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_oauth",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub oauth: Option<Option<crate::tools::mcp::config::OAuthConfig>>,
+}
+
+/// Deserializes the tri-state `oauth` field on [`UpdateExtensionRequest`].
+///
+/// Serde's default `Option<T>` treats both absent and `null` as `None`.
+/// This helper adds a layer: absent → `None`, `null` → `Some(None)`,
+/// object → `Some(Some(value))`.
+fn deserialize_optional_oauth<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<crate::tools::mcp::config::OAuthConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    // Deserialize into a plain Option<OAuthConfig>. When the field is ABSENT,
+    // serde skips this deserializer entirely (due to `#[serde(default)]`) and
+    // the struct field receives its Default, which is `None`. When the field IS
+    // present, we land here and produce `Some(inner_opt)`.
+    let inner: Option<crate::tools::mcp::config::OAuthConfig> = Option::deserialize(deserializer)?;
+    Ok(Some(inner))
 }
 
 // --- Extension Setup ---

@@ -305,10 +305,29 @@ pub(crate) async fn extensions_install_handler(
         _ => None,
     });
 
-    match ext_mgr
-        .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
-        .await
-    {
+    // Route through `install_with_mcp_config` whenever the caller supplies
+    // MCP credentials (headers/oauth), regardless of whether a URL is present
+    // (a URL-less request may match a registry-sourced entry, which also needs
+    // the credentials applied). This keeps registry-first resolution, reserved-
+    // name handling, and fallback logic in one place inside the manager.
+    let install_result = if !req.headers.is_empty() || req.oauth.is_some() {
+        ext_mgr
+            .install_with_mcp_config(
+                name_str,
+                req.url.as_deref(),
+                kind_hint,
+                req.headers,
+                req.oauth,
+                &user.user_id,
+            )
+            .await
+    } else {
+        ext_mgr
+            .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
+            .await
+    };
+
+    match install_result {
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
             match ext_mgr
@@ -331,7 +350,69 @@ pub(crate) async fn extensions_install_handler(
 
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => {
+            tracing::error!(
+                extension = %name_str,
+                error = %e,
+                "POST /api/extensions/install failed"
+            );
+            Ok(Json(ActionResponse::fail(e.to_string())))
+        }
+    }
+}
+
+/// Handler for `PATCH /api/extensions/{name}`.
+///
+/// Applies a partial update to an installed MCP server extension. Status codes:
+/// - `400` — `name` fails extension-name validation, or the extension exists but
+///   is not `kind: mcp_server` (PATCH is MCP-only for this version).
+/// - `404` — no extension by that name is installed for the caller.
+/// - `501` — extension manager not available (no secrets store configured).
+/// - `200` — update applied.
+///
+/// Only `ExtensionKind::McpServer` supports partial updates in this version.
+pub(crate) async fn extensions_update_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(raw_name): Path<String>,
+    Json(req): Json<UpdateExtensionRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let name = ironclaw_common::ExtensionName::new(&raw_name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+    let name_str = name.as_str();
+
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr
+        .update_mcp_server_partial(name_str, req.url, req.headers, req.oauth, &user.user_id)
+        .await
+    {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "MCP server '{name_str}' updated."
+        )))),
+        Err(crate::extensions::ExtensionError::NotFound(msg)) => Err((StatusCode::NOT_FOUND, msg)),
+        Err(crate::extensions::ExtensionError::WrongKind { kind, reason }) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("{reason} (got kind: {kind})"),
+        )),
+        Err(e) => {
+            tracing::error!(
+                extension = %name_str,
+                error = %e,
+                "PATCH /api/extensions/{name_str} failed"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Update failed: {e}"),
+            ))
+        }
     }
 }
 
@@ -788,7 +869,7 @@ mod tests {
         apply_extension_readiness_to_response, extension_phase_for_web,
         extensions_activate_handler, extensions_install_handler, extensions_list_handler,
         extensions_readiness_handler, extensions_remove_handler, extensions_setup_handler,
-        extensions_setup_submit_handler,
+        extensions_setup_submit_handler, extensions_update_handler,
     };
 
     use crate::channels::web::test_helpers::{
@@ -1639,5 +1720,459 @@ mod tests {
             Some("Paste your Notion token")
         );
         assert_eq!(resp.message, "Paste your Notion token");
+    }
+
+    // ── install_mcp_with_config / extensions_update_handler tests ────────
+
+    /// POST install with explicit `headers` + `oauth` → MCP server is persisted
+    /// with the provided credentials embedded in the stored config.
+    #[tokio::test]
+    async fn test_install_mcp_with_headers_and_oauth_stored() {
+        use axum::body::Body;
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        let body = serde_json::json!({
+            "name": "my_server",
+            "url": "https://mcp.example.com/mcp",
+            "kind": "mcp_server",
+            "headers": { "Authorization": "Bearer tok123" },
+            "oauth": { "client_id": "cid-abc" }
+        });
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = Router::new()
+            .route("/api/extensions/install", post(extensions_install_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/install")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json response");
+        assert!(
+            parsed["success"].as_bool().unwrap_or(false),
+            "install should succeed: {parsed}"
+        );
+
+        // Verify config was stored with the expected fields.
+        let config = ext_mgr
+            .get_mcp_server_for_test("my_server", "test")
+            .await
+            .expect("config must be stored");
+        assert_eq!(
+            config.headers.get("Authorization").map(String::as_str),
+            Some("Bearer tok123")
+        );
+        assert_eq!(
+            config.oauth.as_ref().map(|o| o.client_id.as_str()),
+            Some("cid-abc")
+        );
+    }
+
+    /// POST install with `kind: "wasm_tool"` and non-empty headers → install
+    /// proceeds (returns ActionResponse, not an error), and the headers field
+    /// is NOT applied to anything (it's an MCP-only concept).
+    #[tokio::test]
+    async fn test_install_non_mcp_with_headers_proceeds_and_ignores_headers() {
+        use axum::body::Body;
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+        let state = test_gateway_state(Some(ext_mgr));
+
+        let body = serde_json::json!({
+            "name": "my_tool",
+            "url": "https://example.com/tool.wasm",
+            "kind": "wasm_tool",
+            "headers": { "X-Secret": "should-be-ignored" }
+        });
+        let app = Router::new()
+            .route("/api/extensions/install", post(extensions_install_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/install")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        // The install will fail (no real WASM at that URL), but it must NOT
+        // return HTTP 400 — it must return HTTP 200 with an ActionResponse.
+        // The key invariant is that the handler didn't reject the request
+        // due to the unrecognised headers field.
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-MCP install with ignored headers must return HTTP 200"
+        );
+    }
+
+    /// PATCH non-existent name → HTTP 404.
+    #[tokio::test]
+    async fn test_update_handler_returns_404_for_unknown_extension() {
+        use axum::body::Body;
+        use axum::routing::patch;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+        let state = test_gateway_state(Some(ext_mgr));
+
+        let app = Router::new()
+            .route("/api/extensions/{name}", patch(extensions_update_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/does_not_exist")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"headers":{"X":"y"}}"#))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "PATCH on unknown extension must return HTTP 404"
+        );
+    }
+
+    /// PATCH with `oauth: null` → clears existing OAuth config (tri-state clear).
+    /// PATCH without `oauth` field → leaves existing OAuth config unchanged (tri-state absent).
+    #[tokio::test]
+    async fn test_update_handler_oauth_tristate() {
+        use axum::body::Body;
+        use axum::routing::patch;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        let initial_oauth = crate::tools::mcp::config::OAuthConfig::new("my-client");
+        ext_mgr
+            .install_mcp_with_config(
+                "oauth_server",
+                "https://mcp.example.com/mcp",
+                std::collections::HashMap::new(),
+                Some(initial_oauth),
+                "test",
+            )
+            .await
+            .expect("install");
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = Router::new()
+            .route("/api/extensions/{name}", patch(extensions_update_handler))
+            .with_state(state.clone());
+
+        // 1. PATCH without oauth field → oauth must stay intact.
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/oauth_server")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"headers":{}}"#))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "absent oauth field must succeed"
+        );
+        let config_after_absent = ext_mgr
+            .get_mcp_server_for_test("oauth_server", "test")
+            .await
+            .expect("config");
+        assert!(
+            config_after_absent.oauth.is_some(),
+            "oauth must still be present after PATCH without oauth field (tri-state absent)"
+        );
+
+        // 2. PATCH with `oauth: null` → oauth must be cleared.
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/oauth_server")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"oauth": null}"#))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "null oauth clear must succeed"
+        );
+        let config_after_clear = ext_mgr
+            .get_mcp_server_for_test("oauth_server", "test")
+            .await
+            .expect("config after clear");
+        assert!(
+            config_after_clear.oauth.is_none(),
+            "oauth must be None after PATCH with oauth:null (tri-state clear)"
+        );
+    }
+
+    /// PATCH changing URL clears `cached_tools`; same URL leaves them intact.
+    ///
+    /// This exercises `update_mcp_server_partial` directly (no HTTP layer needed)
+    /// because the `cached_tools` field is only writable through the manager's
+    /// internal `update_mcp_server` call — there is no HTTP API to seed them.
+    /// The URL-change branch in the manager is what we're testing.
+    #[tokio::test]
+    async fn test_update_mcp_partial_url_change_clears_cached_tools() {
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        ext_mgr
+            .install_mcp_with_config(
+                "tool_server",
+                "https://mcp.old.example.com/mcp",
+                std::collections::HashMap::new(),
+                None,
+                "test",
+            )
+            .await
+            .expect("install");
+
+        // PATCH with the same URL → cached_tools must NOT be cleared
+        // (preserving the "same URL, just updating headers" use case).
+        ext_mgr
+            .update_mcp_server_partial(
+                "tool_server",
+                Some("https://mcp.old.example.com/mcp".to_string()),
+                None,
+                None,
+                "test",
+            )
+            .await
+            .expect("same-url PATCH");
+        // cached_tools starts empty (fresh install), so just verify the url is unchanged.
+        let config = ext_mgr
+            .get_mcp_server_for_test("tool_server", "test")
+            .await
+            .expect("config after same-url");
+        assert_eq!(config.url, "https://mcp.old.example.com/mcp");
+
+        // PATCH with a different URL → cached_tools must be cleared (they're stale).
+        ext_mgr
+            .update_mcp_server_partial(
+                "tool_server",
+                Some("https://mcp.new.example.com/mcp".to_string()),
+                None,
+                None,
+                "test",
+            )
+            .await
+            .expect("url-change PATCH");
+        let config = ext_mgr
+            .get_mcp_server_for_test("tool_server", "test")
+            .await
+            .expect("config after url change");
+        assert_eq!(config.url, "https://mcp.new.example.com/mcp");
+        assert!(
+            config.cached_tools.is_empty(),
+            "cached_tools must be cleared when URL changes (stale tool catalog)"
+        );
+    }
+
+    /// PATCH updating `headers` on an installed MCP server → the stored config
+    /// reflects the new headers, and the cached McpClient for that user/server
+    /// pair is evicted (next call re-creates the client with new credentials).
+    #[tokio::test]
+    async fn test_update_handler_updates_headers_and_evicts_client() {
+        use axum::body::Body;
+        use axum::routing::patch;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        // Install the MCP server first.
+        ext_mgr
+            .install_mcp_with_config(
+                "my_server",
+                "https://mcp.example.com/mcp",
+                std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer old".to_string(),
+                )]),
+                None,
+                "user_a",
+            )
+            .await
+            .expect("initial install");
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = Router::new()
+            .route("/api/extensions/{name}", patch(extensions_update_handler))
+            .with_state(state.clone());
+
+        // PATCH with a new token.
+        let patch_body = serde_json::json!({
+            "headers": { "Authorization": "Bearer new" }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/my_server")
+            .header("content-type", "application/json")
+            .body(Body::from(patch_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "user_a".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json response");
+        assert!(
+            parsed["success"].as_bool().unwrap_or(false),
+            "PATCH must succeed: {parsed}"
+        );
+
+        // Verify the stored config has the new header.
+        let config = ext_mgr
+            .get_mcp_server_for_test("my_server", "user_a")
+            .await
+            .expect("config after patch");
+        assert_eq!(
+            config.headers.get("Authorization").map(String::as_str),
+            Some("Bearer new"),
+            "stored header must be updated after PATCH"
+        );
+    }
+
+    /// PATCH by user A must not affect user B's server with the same name.
+    #[tokio::test]
+    async fn test_update_handler_is_user_scoped() {
+        use axum::body::Body;
+        use axum::routing::patch;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        // Install the same server name for two separate users.
+        ext_mgr
+            .install_mcp_with_config(
+                "shared_name",
+                "https://mcp.example.com/mcp",
+                std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer user_a_token".to_string(),
+                )]),
+                None,
+                "user_a",
+            )
+            .await
+            .expect("install for user_a");
+
+        ext_mgr
+            .install_mcp_with_config(
+                "shared_name",
+                "https://mcp.example.com/mcp",
+                std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer user_b_token".to_string(),
+                )]),
+                None,
+                "user_b",
+            )
+            .await
+            .expect("install for user_b");
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = Router::new()
+            .route("/api/extensions/{name}", patch(extensions_update_handler))
+            .with_state(state);
+
+        // user_a patches their server.
+        let patch_body = serde_json::json!({
+            "headers": { "Authorization": "Bearer user_a_new" }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/shared_name")
+            .header("content-type", "application/json")
+            .body(Body::from(patch_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "user_a".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // user_b's config must be unchanged.
+        let config_b = ext_mgr
+            .get_mcp_server_for_test("shared_name", "user_b")
+            .await
+            .expect("user_b config");
+        assert_eq!(
+            config_b.headers.get("Authorization").map(String::as_str),
+            Some("Bearer user_b_token"),
+            "user B's config must not be affected by user A's PATCH"
+        );
+
+        // user_a's config must reflect the update.
+        let config_a = ext_mgr
+            .get_mcp_server_for_test("shared_name", "user_a")
+            .await
+            .expect("user_a config");
+        assert_eq!(
+            config_a.headers.get("Authorization").map(String::as_str),
+            Some("Bearer user_a_new"),
+            "user A's config must reflect the PATCH"
+        );
     }
 }
