@@ -423,7 +423,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build WASM channels
         run: ./scripts/build-wasm-extensions.sh --channels
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -471,7 +471,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Run deterministic replay lane
@@ -525,7 +525,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-component@0.21.1
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Pre-install zizmor
@@ -1263,7 +1265,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-component@0.21.1
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Run rotating persona lane
@@ -1319,7 +1323,9 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-component@0.21.1
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Run private OAuth lane
@@ -1383,7 +1389,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-component@0.21.1
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Configure Anthropic provider
@@ -1392,9 +1400,11 @@ jobs:
           LIVE_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LIVE_ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
         run: |
-          echo "LLM_BACKEND=anthropic" >> "${GITHUB_ENV}"
-          echo "ANTHROPIC_MODEL=${LIVE_ANTHROPIC_MODEL}" >> "${GITHUB_ENV}"
-          echo "ANTHROPIC_API_KEY=${LIVE_ANTHROPIC_API_KEY}" >> "${GITHUB_ENV}"
+          {
+            echo "LLM_BACKEND=anthropic"
+            echo "ANTHROPIC_MODEL=${LIVE_ANTHROPIC_MODEL}"
+            echo "ANTHROPIC_API_KEY=${LIVE_ANTHROPIC_API_KEY}"
+          } >> "${GITHUB_ENV}"
       - name: Configure OpenAI-compatible provider
         if: matrix.provider == 'openai-compatible'
         env:
@@ -1402,10 +1412,12 @@ jobs:
           LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL }}
           LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL }}
         run: |
-          echo "LLM_BACKEND=openai_compatible" >> "${GITHUB_ENV}"
-          echo "LLM_API_KEY=${LIVE_OPENAI_COMPATIBLE_API_KEY}" >> "${GITHUB_ENV}"
-          echo "LLM_BASE_URL=${LIVE_OPENAI_COMPATIBLE_BASE_URL}" >> "${GITHUB_ENV}"
-          echo "LLM_MODEL=${LIVE_OPENAI_COMPATIBLE_MODEL}" >> "${GITHUB_ENV}"
+          {
+            echo "LLM_BACKEND=openai_compatible"
+            echo "LLM_API_KEY=${LIVE_OPENAI_COMPATIBLE_API_KEY}"
+            echo "LLM_BASE_URL=${LIVE_OPENAI_COMPATIBLE_BASE_URL}"
+            echo "LLM_MODEL=${LIVE_OPENAI_COMPATIBLE_MODEL}"
+          } >> "${GITHUB_ENV}"
       - name: Run provider matrix lane
         env:
           LANE: provider-matrix
@@ -1458,7 +1470,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-component@0.21.1
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
       - name: Pre-install zizmor
