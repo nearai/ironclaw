@@ -321,9 +321,10 @@ impl RunProfileId {
     }
 
     /// Dedicated run profile for scheduled-trigger fires (issue #5505). Its
-    /// `capability_surface_profile_id` denies the trigger mutator
-    /// capabilities (`trigger_create`/`remove`/`pause`/`resume`) so a fire
-    /// cannot self-create or otherwise manage the trigger fleet.
+    /// `capability_surface_profile_id` selects the capability surface that the
+    /// Reborn runtime composition (`ironclaw_reborn::runtime`) narrows to deny
+    /// the trigger-mutator capabilities — this crate only owns the stable,
+    /// distinct id; the deny policy itself is defined and enforced in Reborn.
     pub fn scheduled_trigger() -> Self {
         Self::from_trusted_static("scheduled_trigger")
     }

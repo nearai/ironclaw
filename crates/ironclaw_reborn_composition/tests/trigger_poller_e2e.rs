@@ -68,8 +68,8 @@ const TRIGGER_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__trigger_create";
 async fn captured_message_contents(
     requests: &Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
 ) -> Vec<String> {
-    let snapshot = requests.lock().await.clone();
-    snapshot
+    let guard = requests.lock().await;
+    guard
         .iter()
         .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
         .collect()

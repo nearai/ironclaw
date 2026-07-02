@@ -850,7 +850,11 @@ impl LoopCapabilityPortDecorator for DisabledCapabilitiesDecorator {
         {
             denied.extend(self.scheduled_trigger_denied.iter().cloned());
         }
-        Arc::new(CapabilitySurfaceDenyFilter::new(inner, denied))
+        if denied.is_empty() {
+            inner
+        } else {
+            Arc::new(CapabilitySurfaceDenyFilter::new(inner, denied))
+        }
     }
 }
 
