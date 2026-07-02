@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Calendar meeting_prep",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "calendar_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "calendar_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+    },
+    "include_all_calendars": { "type": "boolean" },
+    "window": {
+      "type": "string",
+      "enum": ["today", "tomorrow", "week", "this_week", "upcoming"],
+      "description": "Defaults to upcoming when omitted."
+    },
+    "time_zone": {
+      "type": "string",
+      "pattern": "^(?:UTC|Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "description": "Fixed offset such as UTC or +03:00. Defaults to UTC."
+    },
+    "time_min": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+    },
+    "time_max": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+    },
+    "max_results": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 20 },
+        { "type": "string", "pattern": "^(?:[1-9]|1[0-9]|20)$" }
+      ],
+      "description": "Number of candidate meetings to inspect. Defaults to 5."
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Meeting title, attendee, location, or keyword search."
+    },
+    "description_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4000,
+      "description": "Maximum meeting description preview characters. Defaults to 1500."
+    },
+    "linked_resource_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 25,
+      "description": "Maximum URLs extracted from meeting location/link/description fields. Defaults to 8."
+    }
+  },
+  "allOf": [
+    { "not": { "required": ["calendar_id", "calendar_ids"] } },
+    {
+      "not": {
+        "required": ["calendar_id", "include_all_calendars"],
+        "properties": { "include_all_calendars": { "const": true } }
+      }
+    },
+    {
+      "not": {
+        "required": ["calendar_ids", "include_all_calendars"],
+        "properties": { "include_all_calendars": { "const": true } }
+      }
+    },
+    {
+      "oneOf": [
+        { "required": ["time_min", "time_max"] },
+        {
+          "not": {
+            "anyOf": [{ "required": ["time_min"] }, { "required": ["time_max"] }]
+          }
+        }
+      ]
+    }
+  ]
+}

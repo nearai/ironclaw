@@ -57,6 +57,10 @@ pub enum GsuiteCapabilityOperation {
     GmailCreateDraft,
     GmailReplyToMessage,
     GmailTrashMessage,
+    GmailFetchMessageSummaries,
+    CalendarAgenda,
+    CalendarDailyBrief,
+    CalendarMeetingPrep,
 }
 
 const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
@@ -141,6 +145,33 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         required_scopes: CALENDAR_EVENTS_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarSetReminder,
     },
+    GsuiteCapabilitySpec {
+        id: "google-calendar.agenda",
+        short_name: "agenda",
+        description: "Return a compact Google Calendar agenda for today, tomorrow, this week, or an upcoming window.",
+        default_permission: PermissionMode::Allow,
+        effects: READ_EFFECTS,
+        required_scopes: CALENDAR_READONLY_SCOPES,
+        operation: GsuiteCapabilityOperation::CalendarAgenda,
+    },
+    GsuiteCapabilitySpec {
+        id: "google-calendar.daily_brief",
+        short_name: "daily_brief",
+        description: "Return a compact daily brief with agenda events and Gmail attention summaries.",
+        default_permission: PermissionMode::Allow,
+        effects: READ_EFFECTS,
+        required_scopes: CALENDAR_AND_GMAIL_READONLY_SCOPES,
+        operation: GsuiteCapabilityOperation::CalendarDailyBrief,
+    },
+    GsuiteCapabilitySpec {
+        id: "google-calendar.meeting_prep",
+        short_name: "meeting_prep",
+        description: "Return compact prep context for the next matching Google Calendar meeting.",
+        default_permission: PermissionMode::Allow,
+        effects: READ_EFFECTS,
+        required_scopes: CALENDAR_READONLY_SCOPES,
+        operation: GsuiteCapabilityOperation::CalendarMeetingPrep,
+    },
 ];
 
 const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
@@ -198,6 +229,15 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         required_scopes: GMAIL_MODIFY_SCOPES,
         operation: GsuiteCapabilityOperation::GmailTrashMessage,
     },
+    GsuiteCapabilitySpec {
+        id: "gmail.fetch_message_summaries",
+        short_name: "fetch_message_summaries",
+        description: "Fetch compact Gmail message summaries for triage and inbox context.",
+        default_permission: PermissionMode::Allow,
+        effects: READ_EFFECTS,
+        required_scopes: GMAIL_READONLY_SCOPES,
+        operation: GsuiteCapabilityOperation::GmailFetchMessageSummaries,
+    },
 ];
 
 const READ_EFFECTS: &[EffectKind] = &[
@@ -216,6 +256,10 @@ const CALENDAR_EVENTS_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_CALENDAR_EVENTS_
 const GMAIL_READONLY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE];
 const GMAIL_SEND_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE];
 const GMAIL_MODIFY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE];
+const CALENDAR_AND_GMAIL_READONLY_SCOPES: &[&str] = &[
+    ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE,
+];
 pub const GSUITE_PROVIDER_SCOPES: &[&str] = &[
     ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE,
     ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE,

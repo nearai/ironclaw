@@ -4321,7 +4321,9 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+    use ironclaw_auth::{
+        GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+    };
 
     #[test]
     fn budget_gate_ref_parser_rejects_malformed_budget_ref() {
@@ -8680,6 +8682,7 @@ output_schema_ref = "schemas/write.output.json"
             [
                 GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
                 GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
             ]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()

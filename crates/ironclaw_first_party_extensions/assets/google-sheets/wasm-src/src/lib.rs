@@ -14,6 +14,7 @@
 //! - `create_spreadsheet`: Create a new spreadsheet with optional sheet names
 //! - `get_spreadsheet`: Get metadata (title, sheets, named ranges)
 //! - `read_values`: Read cell values from a range (A1 notation)
+//! - `preview`: Read bounded sheet context with headers and sample rows
 //! - `batch_read_values`: Read from multiple ranges at once
 //! - `write_values`: Write values to a range (overwrites)
 //! - `append_values`: Append rows after existing data
@@ -113,6 +114,23 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             range,
         } => {
             let result = api::read_values(&spreadsheet_id, &range)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleSheetsAction::Preview {
+            spreadsheet_id,
+            sheet_name,
+            range,
+            max_rows,
+            max_columns,
+        } => {
+            let result = api::preview(
+                &spreadsheet_id,
+                sheet_name.as_deref(),
+                range.as_deref(),
+                max_rows,
+                max_columns,
+            )?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -224,6 +242,7 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-sheets.create_spreadsheet" => Ok("create_spreadsheet"),
         "google-sheets.get_spreadsheet" => Ok("get_spreadsheet"),
         "google-sheets.read_values" => Ok("read_values"),
+        "google-sheets.preview" => Ok("preview"),
         "google-sheets.batch_read_values" => Ok("batch_read_values"),
         "google-sheets.write_values" => Ok("write_values"),
         "google-sheets.append_values" => Ok("append_values"),

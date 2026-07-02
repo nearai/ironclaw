@@ -44,6 +44,46 @@ pub enum GoogleDriveAction {
         page_token: Option<String>,
     },
 
+    /// Search/list files and folders with compact context-focused output.
+    FindFilesCompact {
+        /// Drive search query (same syntax as Drive search).
+        #[serde(default)]
+        query: Option<String>,
+        /// Maximum number of compact results (default: 10, max: 100).
+        #[serde(default = "default_compact_page_size")]
+        page_size: u32,
+        /// Sort order (defaults to "modifiedTime desc").
+        #[serde(default)]
+        order_by: Option<String>,
+        /// Search corpus: "user" (personal, default), "drive" (specific shared drive),
+        /// "domain" (org-wide), "allDrives" (everything accessible).
+        #[serde(default = "default_corpora")]
+        corpora: String,
+        /// Shared drive ID (required when corpora is "drive").
+        #[serde(default)]
+        drive_id: Option<String>,
+        /// Page token for pagination.
+        #[serde(default)]
+        page_token: Option<String>,
+    },
+
+    /// Return recently modified files with compact context-focused output.
+    RecentFiles {
+        /// Maximum number of compact results (default: 10, max: 100).
+        #[serde(default = "default_compact_page_size")]
+        page_size: u32,
+        /// Search corpus: "user" (personal, default), "drive" (specific shared drive),
+        /// "domain" (org-wide), "allDrives" (everything accessible).
+        #[serde(default = "default_corpora")]
+        corpora: String,
+        /// Shared drive ID (required when corpora is "drive").
+        #[serde(default)]
+        drive_id: Option<String>,
+        /// Page token for pagination.
+        #[serde(default)]
+        page_token: Option<String>,
+    },
+
     /// Get file metadata.
     GetFile {
         /// The file ID.
@@ -162,6 +202,10 @@ fn default_page_size() -> u32 {
     25
 }
 
+fn default_compact_page_size() -> u32 {
+    10
+}
+
 fn default_corpora() -> String {
     "user".to_string()
 }
@@ -235,6 +279,32 @@ pub struct SharedDrive {
 #[derive(Debug, Serialize)]
 pub struct ListFilesResult {
     pub files: Vec<DriveFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Compact Drive file card for context-focused file discovery.
+#[derive(Debug, Serialize)]
+pub struct CompactDriveFile {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_view_link: Option<String>,
+    pub is_folder: bool,
+    pub shared: bool,
+    pub owned_by_me: bool,
+    pub trashed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// Result from compact file search/list operations.
+#[derive(Debug, Serialize)]
+pub struct CompactFilesResult {
+    pub files: Vec<CompactDriveFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_page_token: Option<String>,
 }

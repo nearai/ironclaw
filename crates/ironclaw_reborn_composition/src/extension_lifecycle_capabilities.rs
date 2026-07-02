@@ -262,7 +262,9 @@ mod tests {
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
-        CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+        CredentialAccountStatus, CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE,
+        GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount,
+        ProviderScope,
     };
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
@@ -694,8 +696,9 @@ mod tests {
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([
-                "https://www.googleapis.com/auth/calendar.events".to_string(),
-                "https://www.googleapis.com/auth/calendar.readonly".to_string(),
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
             ])
         );
 
