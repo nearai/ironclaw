@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from helpers import sse_stream
+from helpers import REBORN_V2_AUTH_TOKEN, sse_stream
 from reborn_webui_harness import (
     close_reborn_server,
     reborn_bearer_headers,
@@ -160,6 +160,7 @@ async def test_reborn_legacy_responses_streaming_raw_sse(reborn_openai_compat_se
         reborn_openai_compat_server,
         path="/v1/responses",
         method="POST",
+        token=REBORN_V2_AUTH_TOKEN,
         headers={"Content-Type": "application/json"},
         json={"model": "default", "input": "Say hi", "stream": True},
     ) as response:

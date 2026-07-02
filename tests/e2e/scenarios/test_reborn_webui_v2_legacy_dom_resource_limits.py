@@ -474,7 +474,7 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
           };
           window.__activeSseReconnectTimeoutCount = () =>
             Array.from(reconnectTimers.values()).filter(
-              (delay) => delay >= 2000 && delay <= 30000
+              (delay) => delay === 2000
             ).length;
           window.__timerDebugState = () => ({
             activeReconnectTimeouts: reconnectTimers.size,
