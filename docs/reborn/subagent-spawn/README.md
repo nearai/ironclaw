@@ -2,7 +2,7 @@
 
 **Status:** Implemented for blocking mode; background mode deferred
 
-> **Erratum (2026-07):** references to `TurnRunnerWorker` below predate #5085, which split it into `TurnRunScheduler` (`ironclaw_host_runtime`) + `RebornTurnRunExecutor` (`ironclaw_reborn`). Also note `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`).
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`). `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`).
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,

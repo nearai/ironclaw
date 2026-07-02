@@ -2,7 +2,7 @@
 
 Monty is the embedded Python interpreter used for Tier 1 (CodeAct) execution. It's a lightweight Rust-native Python implementation — not CPython — so it has a restricted feature set.
 
-**Source**: `git = "https://github.com/pydantic/monty.git"` — see `Cargo.toml` for the authoritative tag (this doc's pin note has lagged before; the changelog table below stops at v0.0.16 while the pin has moved on, e.g. v0.0.18 as of 2026-07)
+**Source**: `git = "https://github.com/pydantic/monty.git"` — `Cargo.toml` is authoritative for the tag; this crate currently pins `v0.0.18`.
 
 ## Upgrade Process
 
@@ -13,7 +13,7 @@ Monty is the embedded Python interpreter used for Tier 1 (CodeAct) execution. It
 5. **Run tests**: `cargo test -p ironclaw_engine`
 6. **Watch traces**: After deploying, check traces for new `NotImplementedError` patterns (self-improvement mission catches these)
 
-## Current Limitations (as of pin `v0.0.16`)
+## Current Limitations
 
 These are documented in `prompts/codeact_preamble.md` so the LLM avoids them:
 

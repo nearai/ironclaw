@@ -138,6 +138,3 @@ alive in the tree today:
 - Wiring: `build_llm_config_service` attach in
   `crates/ironclaw_reborn_composition/src/webui.rs`
 - Frontend: `crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.js`
-
-(An earlier revision cited a `webui2-llm-config` branch; that branch no longer
-exists — use the in-tree files above.)

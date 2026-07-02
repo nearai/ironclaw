@@ -28,11 +28,9 @@ Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph i
 | Effects | `CapabilityHost::invoke_json` (`crates/ironclaw_capabilities/src/host.rs`) → dispatcher → wasm/scripts/mcp/first-party lanes | `grep -n "invoke_json" crates/ironclaw_capabilities/src/host.rs` |
 | Reply to browser | SSE projection drain: `stream_events` (`crates/ironclaw_webui_v2/src/handlers.rs`) over `ProjectionStream` | `grep -n "stream_events" crates/ironclaw_webui_v2/src/handlers.rs` |
 
-(Old docs may say `TurnRunnerWorker` — that component was split into the scheduler + executor above in #5085.)
-
 ## v1 anchors (legacy maintenance only)
 
-Message flow: `src/agent/agent_loop.rs` (`handle_message`, `run_agentic_loop`) → `crates/ironclaw_llm/src/reasoning.rs` (`respond_with_tools`) → `crates/ironclaw_llm/src/nearai_chat.rs`. Web/SSE: `src/channels/web/` (split into `handlers/`, `platform/`, `features/` — the old `server.rs` is gone) → `crates/ironclaw_gateway/static/js/core/sse.js`. Tools: `src/tools/registry.rs` → `src/agent/agent_loop.rs` `execute_chat_tool()` → `crates/ironclaw_safety/src/sanitizer.rs`. Engine v2 bridge: `src/bridge/` ↔ `crates/ironclaw_engine`.
+Message flow: `src/agent/agent_loop.rs` (`handle_message`, `run_agentic_loop`) → `crates/ironclaw_llm/src/reasoning.rs` (`respond_with_tools`) → `crates/ironclaw_llm/src/nearai_chat.rs`. Web/SSE: `src/channels/web/` (`handlers/`, `platform/`, `features/`) → `crates/ironclaw_gateway/static/js/core/sse.js`. Tools: `src/tools/registry.rs` → `src/agent/agent_loop.rs` `execute_chat_tool()` → `crates/ironclaw_safety/src/sanitizer.rs`. Engine v2 bridge: `src/bridge/` ↔ `crates/ironclaw_engine`.
 
 ## Tracing instructions
 

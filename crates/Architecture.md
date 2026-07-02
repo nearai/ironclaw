@@ -541,12 +541,10 @@ sequenceDiagram
 ## Runner And Lease Flow
 
 `TurnRunScheduler` (in `ironclaw_host_runtime`) plus `RebornTurnRunExecutor`
-(in `ironclaw_reborn`) form the trusted worker-side control plane — earlier
-revisions of this document called the combined component `TurnRunnerWorker`;
-it was split in #5085. It does not accept traffic directly; the scheduler
-claims durable work already accepted by `TurnCoordinator` and runs claimed
-executions concurrently under a bounded semaphore with per-user and
-per-inbound-type caps.
+(in `ironclaw_reborn`) form the trusted worker-side control plane. It does not
+accept traffic directly; the scheduler claims durable work already accepted by
+`TurnCoordinator` and runs claimed executions concurrently under a bounded
+semaphore with per-user and per-inbound-type caps.
 
 ```mermaid
 stateDiagram-v2
@@ -628,9 +626,8 @@ runner crashes or stops heartbeating
 ```
 
 Reborn does not automatically retry uncertain side-effecting work after a lost
-lease — expiry is terminal, and the user resubmits explicitly. (Earlier
-revisions parked such runs in a `RecoveryRequired` state with the lock held;
-that state is now legacy-only.)
+lease — expiry is terminal, and the user resubmits explicitly. `RecoveryRequired`
+is legacy-only and is not the Reborn lease-expiry path.
 
 ### Invalid Loop Exit
 

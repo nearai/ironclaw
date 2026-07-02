@@ -1,6 +1,6 @@
 # Worked Examples — Good and Bad Reborn Architecture Hygiene
 
-Living curriculum for the checklist in `../SKILL.md`. Each example names its live in-tree exemplar and the command that re-verifies it still holds. Maintained under `ironclaw-reborn-skill-maintainer` rules; historical provenance for all of these is the (immutable) 2026-07 audit.
+Living curriculum for the checklist in `../SKILL.md`. Each example names its live in-tree exemplar and the command that re-verifies it still holds. Maintained under `ironclaw-reborn-skill-maintainer` rules.
 
 ## Contents
 - 1. Traits: ritual vs boundary
@@ -12,7 +12,7 @@ Living curriculum for the checklist in `../SKILL.md`. Each example names its liv
 
 ## 1. Traits: ritual vs boundary
 
-**BAD — the one-impl ritual** (observed verbatim in a 2026-07 baseline test; an agent accepted this shape without pushback):
+**BAD — the one-impl ritual**:
 
 ```rust
 /// "Make it a trait so we can swap formatters later."
@@ -64,7 +64,7 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 
 ## 4. Placement: composition vs owning crate
 
-**BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_reborn_composition`, so mine can too." That ~13.5k LoC (delivery observer, host state, setup, channel routes) was audited as misplaced behavior with an extraction plan — debt, not precedent.
+**BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_reborn_composition`, so mine can too." Existing delivery observer, host state, setup, and channel route code there is behavior debt with an extraction plan — not precedent.
 
 **GOOD — the host-side product crate**: `ironclaw_reborn_webui_ingress` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
 
@@ -77,7 +77,7 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 #[allow(clippy::too_many_arguments)]
 ```
 
-**BAD**: the bare `#[allow(clippy::too_many_arguments)]` with no annotation — at the 2026-07 audit, 24 of 36 allows were bare, 13 of them clustered in the legacy engine. Don't add to the deficit; if you can't write the aggregation plan, that's the signal to do the aggregation instead.
+**BAD**: the bare `#[allow(clippy::too_many_arguments)]` with no annotation. Don't add bare allows; if you can't write the aggregation plan, that's the signal to do the aggregation instead.
 
 ## 6. Backend parity done right
 

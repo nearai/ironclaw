@@ -32,14 +32,14 @@ The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) liv
 
 ## 4. Helper-only coverage: the cautionary shape
 
-Observed 2026-07 (Slack v2 adapter): `requires_app_mention()` gated user-visible egress text and was tested only by same-file `mod tests`; `delivery.rs` had zero tests; **no test anywhere constructed the real adapter** — while its Telegram twin had a real-adapter caller test (`crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs`, the `…renders_through_telegram_egress_after_validation` case). The lesson generalizes: when a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. If you're adding a channel, write the Telegram-shaped caller test on day one.
+When a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. Use `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs` and its Telegram egress case as the shape to copy. If you're adding a channel, write the caller-level adapter test on day one.
 
 ## 5. Silent skip vs loud skip
 
-**BAD** (observed 2026-07, `crates/ironclaw_process_sandbox/tests/docker_security.rs`): `if docker_unavailable { return }` — the container security suite silently vanished from CI and no gate noticed.
+**BAD**: `if docker_unavailable { return }` — the container security suite silently vanishes from CI and no gate notices.
 
 **GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`, which `scripts/check-boundaries.sh` enforces for root `tests/`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
 
 ## 6. Naming your contract's tests
 
-`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map (48 pinned invocations). If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing — at the 2026-07 audit, 39 of 45 contract docs named none.
+`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map (48 pinned invocations). If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.

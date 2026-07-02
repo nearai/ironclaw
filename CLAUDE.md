@@ -110,8 +110,8 @@ Current ownership:
 
 - `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
 - `src/bridge/router.rs`: auth gate display + submit routing
-- `src/channels/web/` (see its `CLAUDE.md`): pending-gate/history rehydration — the module was split into `handlers/`, `platform/`, `features/`; the old `server.rs` no longer exists
-- `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/ironclaw_gateway/src/assets.rs` for the concat order)
+- `src/channels/web/` (see its `CLAUDE.md`): pending-gate/history rehydration across `handlers/`, `platform/`, and `features/`
+- `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing; see `crates/ironclaw_gateway/src/assets.rs` for the concat order
 
 Temporary compatibility boundary:
 
