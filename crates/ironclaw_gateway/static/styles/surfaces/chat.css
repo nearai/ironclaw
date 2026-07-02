@@ -34,19 +34,21 @@
   transform: translateY(2px);
 }
 
+/* ChatGPT-style centered column: the horizontal padding grows once the
+   viewport exceeds the 768px content width, keeping messages centered. */
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-4);
+  padding: var(--space-6) max(var(--space-4), calc((100% - 768px) / 2));
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 
 .message {
-  max-width: 72%;
+  max-width: 100%;
   padding: 10px 14px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   font-size: var(--text-base);
   line-height: 1.5;
   word-wrap: break-word;
@@ -75,35 +77,26 @@
   50% { opacity: 0.3; }
 }
 
+/* User: subtle brand-tinted bubble on the right (ChatGPT-style) */
 .message.user {
   align-self: flex-end;
+  max-width: 80%;
+  padding: 10px 16px;
   background: var(--accent-soft);
-  color: var(--accent);
-  border-bottom-right-radius: 2px;
+  color: var(--text);
+  border-radius: 20px;
+  border-bottom-right-radius: 6px;
   white-space: pre-wrap;
 }
 
-.message.user::after {
-  content: '';
-  position: absolute;
-  right: -6px;
-  bottom: 10px;
-  width: 0;
-  height: 0;
-  border: 6px solid transparent;
-  border-left-color: var(--accent-soft);
-  border-right: 0;
-}
-
+/* Assistant: plain text on the page background, no bubble chrome */
 .message.assistant {
-  align-self: flex-start;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-bottom-left-radius: 2px;
-  padding: 14px 18px;
+  align-self: stretch;
+  background: none;
+  border: none;
+  padding: 2px 0;
   font-size: 15px;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 
 .message.has-copy {
@@ -1072,19 +1065,54 @@
   line-height: 1.5;
 }
 
-/* Chat input */
+/* Chat input — floating rounded composer, centered on the chat column */
 .chat-input {
   display: flex;
   flex-wrap: wrap;
-  margin: 0 16px 12px;
-  padding: 12px 16px;
+  align-items: flex-end;
+  width: min(768px, calc(100% - 32px));
+  margin: 0 auto 10px;
+  padding: 10px 12px;
   gap: var(--space-2);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: 24px;
   flex-shrink: 0;
   min-height: 56px;
   box-shadow: var(--shadow-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.chat-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md), 0 0 0 3px var(--focus-ring);
+}
+
+/* Status row under the composer (active model, etc.) — centered under the
+   input, ChatGPT-footnote style. */
+.chat-statusbar {
+  display: flex;
+  justify-content: center;
+  width: min(768px, calc(100% - 32px));
+  margin: 0 auto 8px;
+  flex-shrink: 0;
+}
+
+.chat-model-chip {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-dimmed);
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.chat-model-chip:hover {
+  color: var(--text-secondary);
+  background: var(--hover-surface);
 }
 
 .chat-input-wrapper {
@@ -1093,11 +1121,13 @@
   display: flex;
 }
 
+/* Borderless textarea inside the rounded composer; the focus ring lives on
+   the composer container (.chat-input:focus-within). */
 .chat-input-wrapper textarea {
   width: 100%;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  padding: 8px 6px;
+  background: none;
+  border: none;
   border-radius: var(--radius);
   color: var(--text);
   font-size: var(--text-base);
@@ -1132,8 +1162,6 @@
 
 .chat-input-wrapper textarea:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .chat-input-wrapper textarea:disabled {
@@ -1170,16 +1198,16 @@
 }
 
 .chat-input button {
-  padding: 8px 20px;
+  padding: 8px 18px;
   background: var(--accent);
   color: var(--text-on-accent);
   border: none;
-  border-radius: var(--radius);
+  border-radius: 999px;
   cursor: pointer;
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
   font-weight: 600;
   align-self: flex-end;
-  transition: background 0.2s, transform 150ms var(--ease-spring);
+  transition: background 0.2s, opacity 0.2s, transform 150ms var(--ease-spring);
 }
 
 .chat-input button:hover:not(:disabled) {
@@ -1197,7 +1225,13 @@
   transform: none;
 }
 
+/* Send reads as inert until there's text (JS toggles .active on input). */
+#send-btn:not(.active):not(:disabled) {
+  opacity: 0.45;
+}
+
 #send-btn.active {
+  opacity: 1;
   box-shadow: var(--glow-accent);
 }
 
@@ -1489,6 +1523,24 @@
   background: none;
   color: var(--text);
   transform: none;
+}
+
+/* Voice input (mocked: always disabled, tooltip explains). */
+.chat-input .voice-btn {
+  background: none;
+  border: none;
+  padding: 8px;
+  align-self: flex-end;
+  color: var(--text-secondary);
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-input .voice-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .image-preview-strip {
