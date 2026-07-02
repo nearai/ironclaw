@@ -16,6 +16,7 @@ import { ExtensionsPage } from "../pages/extensions/extensions-page.js";
 import { SettingsPage } from "../pages/settings/settings-page.js";
 import { AdminPage } from "../pages/admin/admin-page.js";
 import { LogsPage } from "../pages/logs/logs-page.js";
+import { PlaygroundPage } from "../pages/playground/playground-page.js";
 
 function AuthLoading() {
   return html`
@@ -102,6 +103,11 @@ export function App() {
     <${BrowserRouter} basename="/v2">
       <${Routes}>
         <${Route} path="/login" element=${html`<${LoginPage} auth=${auth} />`} />
+        <!-- Design-system workbench. Lives outside the authenticated
+             layout (like /login) so it renders full-bleed with no app
+             chrome. Static reference surface only: it makes no API
+             calls and exposes no data. See DESIGN_SYSTEM.md. -->
+        <${Route} path="/playground" element=${html`<${PlaygroundPage} />`} />
         <${Route} path="/" element=${html`<${AuthenticatedLayout} auth=${auth} />`}>
           <${Route} index element=${html`<${Navigate} to=${defaultRoute} replace />`} />
           <${Route} path="overview" element=${html`<${Navigate} to=${defaultRoute} replace />`} />

@@ -104,6 +104,86 @@
   color-scheme: light;
 }
 
+/* ── Structural tokens (theme-independent) ───────────────────────── */
+/* Canonical non-color scales for the v2 design system. Derived from
+   what the design-system components (button.js / card.js / input.js /
+   modal.js / badge.js) already render — not aspirational values.
+   New UI must reference these instead of restating raw px/rem/z
+   numbers. Browse them live at /v2/playground; rules and do/don't
+   guidance live in crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. */
+:root {
+  /* Radii — sm: compact controls; md/lg: default controls
+     (mobile/desktop); xl: cards + composer; 2xl: large cards and
+     modals; full: pills and round icon chips. */
+  --v2-radius-xs:   6px;
+  --v2-radius-sm:   10px;
+  --v2-radius-md:   14px;
+  --v2-radius-lg:   16px;
+  --v2-radius-xl:   1.25rem;
+  --v2-radius-2xl:  1.5rem;
+  --v2-radius-full: 9999px;
+
+  /* Spacing — 4px base grid (matches the Tailwind scale the UI uses).
+     Named steps so agents can pick semantically: gap-hairline for
+     chip innards, gap-tight for icon+label rows, gap-control for
+     form stacks, gap-section between panels, pad-panel for card
+     insets. */
+  --v2-space-1: 0.25rem;   /* 4px  — hairline gaps inside chips */
+  --v2-space-2: 0.5rem;    /* 8px  — icon-to-label gaps */
+  --v2-space-3: 0.75rem;   /* 12px — control gaps, button rows */
+  --v2-space-4: 1rem;      /* 16px — form-field stacks */
+  --v2-space-5: 1.25rem;   /* 20px — card padding (mobile) */
+  --v2-space-6: 1.5rem;    /* 24px — section gaps */
+  --v2-space-7: 1.75rem;   /* 28px — card padding (desktop) */
+  --v2-space-8: 2rem;      /* 32px — page-level gutters */
+  --v2-space-10: 2.5rem;   /* 40px — hero / empty-state breathing room */
+
+  /* Typography scale — sizes actually rendered by the components.
+     label: mono-caps eyebrows/badges; caption: hints + meta rows;
+     body-sm/body: default UI text (mobile/desktop); title: modal +
+     panel headings; heading: sub-page headings; display sizes:
+     page h1 and stat values. */
+  --v2-font-size-label:      0.6875rem;  /* 11px  mono-caps labels, badges */
+  --v2-font-size-caption:    0.75rem;    /* 12px  hints, meta, errors */
+  --v2-font-size-body-sm:    0.8125rem;  /* 13px  controls + body (mobile) */
+  --v2-font-size-body:       0.875rem;   /* 14px  controls + body (desktop) */
+  --v2-font-size-body-lg:    0.9375rem;  /* 15px  descriptions, empty states */
+  --v2-font-size-title:      1.2rem;     /* modal/panel titles */
+  --v2-font-size-heading:    1.35rem;    /* section sub-labels */
+  --v2-font-size-display-sm: 1.75rem;    /* stat values (mobile) */
+  --v2-font-size-display:    2.2rem;     /* page h1 (desktop) */
+
+  --v2-tracking-caps:   0.14em;  /* uppercase mono labels */
+  --v2-tracking-wide:   0.22em;  /* card eyebrow labels */
+  --v2-tracking-tight: -0.02em;  /* titles */
+  --v2-tracking-display: -0.04em; /* display headings */
+
+  /* Shadows — modal is the only strong elevation; card shadow is
+     themed via --v2-card-shadow above. */
+  --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Motion — the v2 UI is static by policy (see "Motion policy"
+     below). These durations exist only for the sanctioned exceptions
+     and for any future explicitly-approved motion. */
+  --v2-duration-spin:    0.8s;
+  --v2-duration-typing:  1.4s;
+  --v2-duration-breathe: 2s;
+  --v2-ease-standard: ease-in-out;
+
+  /* Z-index ladder — pick the semantic layer, never invent a number.
+     raised: in-page floats (scroll-to-bottom, input adornments)
+     sticky: pinned headers/banners inside a pane
+     overlay: scrims + off-canvas drawers
+     modal:   dialogs, command palette, keyboard-shortcut sheets
+     toast:   toast viewport (must beat modals) */
+  --v2-z-raised:  10;
+  --v2-z-sticky:  20;
+  --v2-z-overlay: 40;
+  --v2-z-modal:   50;
+  --v2-z-toast:   60;
+}
+
 /* ── Global resets ───────────────────────────────────────────────── */
 
 *, *::before, *::after {
