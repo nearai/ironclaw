@@ -21,6 +21,8 @@ pub const INDEX_HTML: &str = include_str!("../static/index.html");
 /// prevents the last token of one file running into the first token of
 /// the next when a file ends without a trailing newline.
 pub const APP_JS: &str = concat!(
+    include_str!("../static/js/core/mock-backend.js"),
+    "\n",
     include_str!("../static/js/core/bootstrap.js"),
     "\n",
     include_str!("../static/js/core/activity-store.js"),
