@@ -245,7 +245,7 @@ warn() {
 
 arch_exempt_re() {
     local category="$1"
-    printf '//[[:space:]]*arch-exempt:[[:space:]]*%s,[[:space:]]*[^,]+,[[:space:]]*plan #[0-9]+' "$category"
+    printf '//[[:space:]]*arch-exempt:[[:space:]]*%s,[[:space:]]*.+,[[:space:]]*plan #[0-9]+' "$category"
 }
 
 diff_for_file() {
@@ -570,7 +570,7 @@ for f in $CHANGED_FILES; do
     file_diff=$(diff_for_file "$f")
     added_count=$(printf '%s\n' "$file_diff" | awk '/^\+/ && !/^\+\+\+ / { count++ } END { print count + 0 }')
     [ "${added_count:-0}" -gt 0 ] || continue
-    if ! printf '%s\n' "$file_diff" | grep -Eq "$LARGE_FILE_EXEMPT_RE"; then
+    if ! grep -Eq "$LARGE_FILE_EXEMPT_RE" "$f"; then
         LARGE_FILE_HITS="${LARGE_FILE_HITS}    ${f} (${line_count} lines, +${added_count})
 "
     fi

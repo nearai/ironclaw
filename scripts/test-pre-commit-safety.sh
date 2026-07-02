@@ -327,6 +327,11 @@ assert_precommit_allows "ARCH-SPRAWL: annotated too_many_arguments allow is acce
     "fn existing() {}\n" \
     "// arch-exempt: too_many_args, needs RuntimeInputs bundle, plan #2800\n#[allow(clippy::too_many_arguments)]\nfn execute(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) {}\n"
 
+assert_precommit_allows "ARCH-SPRAWL: exemption reason may contain commas" \
+    "src/runtime.rs" \
+    "fn existing() {}\n" \
+    "// arch-exempt: too_many_args, split struct, add builder, plan #2800\n#[allow(clippy::too_many_arguments)]\nfn execute(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) {}\n"
+
 assert_precommit_blocks "ARCH-SPRAWL: optional Arc plus with-builder needs arch-exempt plan" \
     "src/runtime.rs" \
     "fn existing() {}\n" \
@@ -344,6 +349,14 @@ assert_precommit_blocks "ARCH-SPRAWL: large file additions need arch-exempt plan
     "${large_base}// added line
 " \
     "ARCH-SPRAWL"
+
+large_base_with_exempt="// arch-exempt: large_file, tracked decomposition, plan #2800
+${large_base}"
+assert_precommit_allows "ARCH-SPRAWL: existing large-file exemption covers later edits" \
+    "src/large.rs" \
+    "$large_base_with_exempt" \
+    "${large_base_with_exempt}// added line
+"
 
 assert_precommit_blocks "ARCH-SPRAWL: duplicate dispatcher call needs arch-exempt plan" \
     "src/runtime.rs" \
