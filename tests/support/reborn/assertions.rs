@@ -196,6 +196,11 @@ impl RebornIntegrationHarness {
     /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for
     /// single-turn harnesses today). Shared collector for [`assert_tool_error`],
     /// [`assert_no_tool_error`], and [`assert_tool_error_summary_contains`].
+    ///
+    /// A `ToolResultReference` message with `content: None`, or with `content`
+    /// that fails to decode as a `ToolResultReferenceEnvelope`, is an `Err` —
+    /// never silently skipped. Both would otherwise vanish from `summaries`
+    /// and degrade into a misleading "not found; saw [...]" for the caller.
     async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
         let history = self
             .thread_harness
@@ -204,12 +209,15 @@ impl RebornIntegrationHarness {
         history
             .iter()
             .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
-            .filter_map(|message| message.content.as_deref())
-            .map(|content| {
-                // Fail loud on a decode error rather than silently dropping the
-                // message (.claude/rules/error-handling.md) — a malformed
-                // envelope must surface as its own diagnosis, not degrade into a
-                // misleading "not found" from the caller.
+            .map(|message| {
+                // Fail loud on a missing `content` field, and on a decode
+                // error, rather than silently dropping the message
+                // (.claude/rules/error-handling.md) — a malformed or
+                // content-less envelope must surface as its own diagnosis,
+                // not degrade into a misleading "not found" from the caller.
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
                 serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
                     .map(|envelope| envelope.safe_summary.as_str().to_string())
                     .map_err(|err| {
