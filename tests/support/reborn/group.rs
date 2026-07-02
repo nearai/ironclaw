@@ -132,6 +132,14 @@ use super::session_thread::RebornThreadHarness;
 use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
 use crate::support::trace_llm::TraceLlm;
 
+/// Per-capability preset constructors layered on `build_base`/`into_group`
+/// below. A private child module (not `pub mod` from `mod.rs`) so its only
+/// caller — the constructor catalog — can reach `GroupBaseData` and the
+/// assembly methods via plain module-private visibility instead of widening
+/// them to `pub(crate)` for the whole test-support crate.
+#[path = "group_constructors.rs"]
+mod group_constructors;
+
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -272,9 +280,11 @@ impl GroupCapability {
 /// `builtin_tools`, `extension_lifecycle`, `live_auth_gate`,
 /// `project_lifecycle`, `profile_tools`, `triggers`, `skill_activation_tools`,
 /// `skill_management_tools`, and their `RebornIntegrationGroupBuilder`
-/// counterparts) live in the sibling `group_constructors.rs` — a thin catalog
-/// of "which capability" selections layered over the one-shared-runtime
-/// assembly mechanics (`build_base`/`into_group`) this file owns. Mirrors the
+/// counterparts) live in the child `group_constructors` module (file:
+/// `group_constructors.rs`, kept private to `group` — see the `mod
+/// group_constructors` declaration below) — a thin catalog of "which
+/// capability" selections layered over the one-shared-runtime assembly
+/// mechanics (`build_base`/`into_group`) this file owns. Mirrors the
 /// `harness_mcp.rs` split.
 pub struct RebornIntegrationGroup {
     pub(crate) shared: Arc<GroupSharedStorage>,
@@ -350,11 +360,14 @@ impl RebornIntegrationGroup {
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
-/// `pub(crate)` (not private): the per-capability preset constructors in the
-/// sibling `group_constructors.rs` take/return this type as the opaque handoff
-/// between `build_base` and `into_group` — they never read its fields except
-/// `canonical_binding` (also `pub(crate)`).
-pub(crate) struct GroupBaseData {
+/// Private (not `pub(crate)`): `group_constructors.rs` is a private child
+/// module of `group` (see the `mod group_constructors` declaration above), so
+/// module-private visibility already reaches it without widening these
+/// internals to the whole test-support crate. The per-capability preset
+/// constructors there take/return this type as the opaque handoff between
+/// `build_base` and `into_group` — they never read its fields except
+/// `canonical_binding`.
+struct GroupBaseData {
     product_harness: RebornProductWorkflowHarness,
     composite: Arc<CompositeRootFilesystem>,
     libsql_db_path: Option<PathBuf>,
@@ -368,10 +381,11 @@ pub(crate) struct GroupBaseData {
     /// valid stand-in for the whole group (see `ensure_thread_scope_matches_turn_scope`,
     /// which checks only tenant/agent/project, never thread_id).
     ///
-    /// `pub(crate)`: `group_constructors.rs`'s `live_approvals`/
-    /// `skill_activation_tools` read the resolved tenant/subject user off this
-    /// field directly (see field docs above).
-    pub(crate) canonical_binding: ResolvedBinding,
+    /// `group_constructors.rs`'s `live_approvals`/`skill_activation_tools`
+    /// read the resolved tenant/subject user off this field directly (see
+    /// field docs above); reachable at module-private visibility since that
+    /// file is a child module of `group`.
+    canonical_binding: ResolvedBinding,
 }
 
 impl GroupBaseData {
@@ -381,7 +395,7 @@ impl GroupBaseData {
     /// dispatch shares the run's `(tenant, user)` with the turn-store /
     /// evidence scope resolved from the SAME `canonical_binding` (see the
     /// `canonical_binding` field docs above).
-    pub(crate) fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
         Ok(self
             .canonical_binding
             .subject_user_id
@@ -423,9 +437,9 @@ impl RebornIntegrationGroupBuilder {
     /// the thread/turn composite. Returns [`GroupBaseData`] so each constructor
     /// names the fields it needs — the fixed test-scope strings live HERE only.
     ///
-    /// `pub(crate)`: called by the per-capability preset constructors in the
-    /// sibling `group_constructors.rs`.
-    pub(crate) async fn build_base(&self) -> HarnessResult<GroupBaseData> {
+    /// Module-private: called by the per-capability preset constructors in
+    /// the child `group_constructors` module.
+    async fn build_base(&self) -> HarnessResult<GroupBaseData> {
         apply_hermetic_env();
         let scope = test_product_scope(
             "tenant-itest",
@@ -482,9 +496,9 @@ impl RebornIntegrationGroupBuilder {
     /// `.with_approval_gate_evidence` when the capability backend exposes a
     /// local-dev approval store.
     ///
-    /// `pub(crate)`: called by the per-capability preset constructors in the
-    /// sibling `group_constructors.rs`.
-    pub(crate) async fn into_group(
+    /// Module-private: called by the per-capability preset constructors in
+    /// the child `group_constructors` module.
+    async fn into_group(
         self,
         base: GroupBaseData,
         capability: GroupCapability,

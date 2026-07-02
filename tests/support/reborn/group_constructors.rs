@@ -2,12 +2,17 @@
 //! [`RebornIntegrationGroupBuilder`].
 //!
 //! `group.rs` owns the one-shared-runtime assembly mechanics
-//! (`RebornIntegrationGroupBuilder::build_base` / `into_group`); this sibling
-//! file is a thin catalog of "which capability" selections layered on top of
-//! that mechanics — one method per `HostRuntimeCapabilityHarness` preset.
-//! Split out (design precedent: `harness_mcp.rs`) once `group.rs` crossed the
-//! 1000-line ceiling with PR-E2's E-SKILL/E-DURABLE/E-GATEWAY additions; new
-//! capability presets belong HERE, not back in `group.rs`.
+//! (`RebornIntegrationGroupBuilder::build_base` / `into_group`); this file is
+//! a private child module of `group` (declared `#[path = "group_constructors.rs"]
+//! mod group_constructors;` in `group.rs`, NOT `pub mod` from `mod.rs`) that
+//! catalogs "which capability" selections layered on top of that mechanics —
+//! one method per `HostRuntimeCapabilityHarness` preset. Keeping it a child
+//! module (rather than a top-level sibling) lets it reach `build_base`/
+//! `into_group`/`GroupBaseData` at plain module-private visibility instead of
+//! widening them to `pub(crate)` for the whole test-support crate. Split out
+//! (design precedent: `harness_mcp.rs`) once `group.rs` crossed the 1000-line
+//! ceiling with PR-E2's E-SKILL/E-DURABLE/E-GATEWAY additions; new capability
+//! presets belong HERE, not back in `group.rs`.
 
 // Shared by all group test binaries; symbols read as dead when a binary does
 // not exercise every preset (mirrors the same attribute on `group.rs`/`builder.rs`).
@@ -15,10 +20,10 @@
 
 use std::sync::Arc;
 
-use super::group::{
+use super::super::harness::HostRuntimeCapabilityHarness;
+use super::{
     GroupCapability, HarnessResult, RebornIntegrationGroup, RebornIntegrationGroupBuilder,
 };
-use super::harness::HostRuntimeCapabilityHarness;
 
 impl RebornIntegrationGroup {
     /// Group with real file-tool approval stores (write_file/read_file at

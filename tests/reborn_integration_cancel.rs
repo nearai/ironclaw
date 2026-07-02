@@ -9,8 +9,8 @@
 //! (`group.rs` leaves the optional `cancellation_factory` as `None`), not a
 //! wired coordinator fan-out.
 //!
-//! The three tests below extend the same seam with C-ERRORS' other two rows:
-//! a leaked-permit regression guard on the cancel path (precedent: PR #5206's
+//! The tests below extend the same seam with C-ERRORS coverage: a
+//! leaked-permit regression guard on the cancel path (precedent: PR #5206's
 //! RAII `ReservationGuard` bugs), thread-busy rejection, and a non-retryable
 //! provider-`Err` reaching a categorized `TurnStatus::Failed`.
 

@@ -2604,22 +2604,17 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
 /// [`ironclaw_triggers::TriggerRepository`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`].
 /// Reuses [`open_local_dev_libsql_database`] (the same libSQL-open sequence
-/// production uses) + the real [`ironclaw_triggers::LibSqlTriggerRepository`], so
-/// the reopen path never hand-mirrors [`local_dev_trigger_repository`]. Tests
-/// only; zero bytes in production builds.
+/// production uses) AND delegates to [`local_dev_trigger_repository`] for
+/// repository construction + migrations, so the reopen path shares the SAME
+/// construction code as production local-dev wiring — never a second place to
+/// update if trigger repository setup changes. Tests only; zero bytes in
+/// production builds.
 #[cfg(all(feature = "test-support", feature = "libsql"))]
 pub(crate) async fn open_local_dev_trigger_repository_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
     let db = open_local_dev_libsql_database(storage_root).await?;
-    let repository = ironclaw_triggers::LibSqlTriggerRepository::new(db);
-    repository
-        .run_migrations()
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("local-dev trigger repository migrations failed on reopen: {error}"),
-        })?;
-    Ok(Arc::new(repository))
+    local_dev_trigger_repository(&LocalDevDurableBackend::LibSql(db)).await
 }
 
 fn mount_local_dev_memory_root<F>(
