@@ -948,7 +948,8 @@ Implemented or strongly established:
 
 - product-facing `RebornRuntime` facade for local CLI/WebUI/harness usage;
 - `TurnCoordinator`, turn state contracts, active locks, idempotency, runner
-  leases, and recovery-required semantics;
+  leases, terminal lease-expiry semantics, and the legacy
+  `RecoveryRequired` terminal variant;
 - planned loop driver path over `CanonicalAgentLoopExecutor`;
 - loop-exit validation/application model;
 - host-runtime capability path with authorization, approvals, obligations,

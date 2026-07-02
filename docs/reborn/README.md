@@ -57,7 +57,7 @@ docs/reborn/contracts/skills-extension.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
-Until then, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
+If a topic is not covered there yet, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
 
 ## Harness docs
 

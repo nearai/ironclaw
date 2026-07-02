@@ -39,9 +39,11 @@ grep -rn "Swappable\|Reload\|UpdateSession\|FileExt\|SecretStore" crates/ironcla
 ```
 
 Read the crate-local `AGENTS.md`/`CLAUDE.md` for each crate you'll touch (most
-crates have one — they list the seams and the guardrails; where absent, fall
-back to `Cargo.toml` + `src/lib.rs` module docs). If a building block exists,
-the feature shrinks to *wiring*, not *building*.
+crates have one — they list the seams and the guardrails). When those are
+absent, check `CONTRACT.md` or `README.md`, then `Cargo.toml` plus the crate's
+primary `src/` entrypoint (`src/lib.rs` for libraries, `src/main.rs` for
+binaries). If a building block exists, the feature shrinks to *wiring*, not
+*building*.
 
 ## Pass 2 — Trace one full vertical (before the first edit)
 

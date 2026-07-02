@@ -154,7 +154,7 @@ PRs that are clearly superseded by merged work. Include reasoning.
 ## Rules
 
 - Use `gh` CLI for all GitHub operations. Never guess PR state — always check.
-- For large PR lists (>15), use the Task tool to parallelize fetching PR details and diffs.
+- For large PR lists (>15), use the Agent tool to parallelize fetching PR details and diffs; batch no more than 8 agents at a time.
 - Be concise in summaries. One line per PR in tables.
 - When assessing "ready to merge", be conservative. If there's any unresolved concern from a repo member, it's not ready.
 - Flag any PR that has been open >14 days with no review as needing attention.

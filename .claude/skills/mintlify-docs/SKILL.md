@@ -12,7 +12,7 @@ metadata:
 
 **Always consult [mintlify.com/docs](https://mintlify.com/docs) for components, configuration, and latest features.**
 
-> **This repo:** the Mintlify site lives under `docs/` — its config is `docs/docs.json` (not a root `docs.json`), with a localized tree under `docs/zh/`. Committed `.md`/`.mdx` must not contain developer-local absolute paths (`.claude/rules/doc-hygiene.md`).
+> **This repo:** the Mintlify site lives under `docs/` — its config is `docs/docs.json` (not a root `docs.json`), with a localized tree under `docs/zh/`. Committed `.md`/`.mdx` must not contain developer-local absolute paths; see `.claude/rules/doc-hygiene.md`.
 
 If you are not already connected to the Mintlify MCP server, https://mintlify.com/docs/mcp, add it so that you can search more efficiently.
 

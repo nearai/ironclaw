@@ -17,7 +17,7 @@ Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph i
 
 | Hop | Anchor | Re-derive with |
 |---|---|---|
-| Browser JS | `crates/ironclaw_webui_v2_static/static/js/lib/api.js` (`apiFetch`) + `pages/*/lib/*-api.js` | `grep -rn "apiFetch(" crates/ironclaw_webui_v2_static/static/js/pages` |
+| Browser JS | `crates/ironclaw_webui_v2_static/static/js/lib/api.js` (`apiFetch`) + `static/js/pages/*/lib/*-api.js` | `grep -rn "apiFetch(" crates/ironclaw_webui_v2_static/static/js/pages` |
 | Route + policy | `crates/ironclaw_webui_v2/src/descriptors.rs`, `router.rs`, `handlers.rs` | `grep -n "WEBUI_V2_PATTERN_\|_descriptor" crates/ironclaw_webui_v2/src/descriptors.rs` |
 | Facade | `RebornServicesApi` in `crates/ironclaw_product_workflow/src/reborn_services.rs` | `grep -n "async fn <name>" crates/ironclaw_product_workflow/src/reborn_services.rs` |
 | Port impl | `crates/ironclaw_reborn_composition/src/<feature>*.rs` | `grep -rln "impl <PortTrait>" crates/ironclaw_reborn_composition/src` |
