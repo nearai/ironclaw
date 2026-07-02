@@ -4065,6 +4065,7 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
+ "ironclaw_conversations",
  "ironclaw_embeddings",
  "ironclaw_engine",
  "ironclaw_extensions",

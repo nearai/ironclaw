@@ -23,3 +23,4 @@ pub mod scope_gateway;
 pub mod scripted_provider;
 pub mod session_thread;
 pub mod test_adapter;
+pub mod triggered_submit;

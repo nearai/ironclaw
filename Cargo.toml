@@ -285,7 +285,13 @@ ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", ver
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
-ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0" }
+# `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
+# harness seam) — cfg(test) does not propagate from an integration-test binary into its deps.
+ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
+# Trigger-conversation binding/session services for the E-TRIGGERED-SUBMIT harness seam —
+# mirrors the conversation-services type production's own local-dev build wires for the
+# trusted-trigger submit path (ironclaw_reborn_composition::runtime.rs).
+ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
