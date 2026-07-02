@@ -152,13 +152,19 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate))
+                    .search(&input.query, Some(&credential_gate), &request.scope.user_id)
                     .await
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                // The dispatch scope carries the ACTING user, so a chat-driven
+                // install derives the same owner the WebUI path would (#5459
+                // P1): operator → tenant-shared, member → private.
                 self.extension_management
-                    .install(extension_package_ref(input.extension_id)?)
+                    .install(
+                        extension_package_ref(input.extension_id)?,
+                        &request.scope.user_id,
+                    )
                     .await
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
@@ -188,13 +194,21 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.services.runtime_http_egress.clone(),
                 );
                 self.extension_management
-                    .activate_with_credential_gate(package_ref, mode, credential_gate)
+                    .activate_with_credential_gate(
+                        package_ref,
+                        mode,
+                        credential_gate,
+                        &request.scope.user_id,
+                    )
                     .await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 self.extension_management
-                    .remove(extension_package_ref(input.extension_id)?)
+                    .remove(
+                        extension_package_ref(input.extension_id)?,
+                        &request.scope.user_id,
+                    )
                     .await
             }
             _ => {

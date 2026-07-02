@@ -5,7 +5,7 @@ use chrono::Utc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope, UserId};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
@@ -19,6 +19,7 @@ use ironclaw_product_workflow::{
 
 use ironclaw_triggers::TriggerRepository;
 
+use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
@@ -42,26 +43,53 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
     synthetic_tools: Arc<[RebornOperatorToolInfo]>,
+    /// Source of the installation owner-by-extension map (#5459 P1). Present
+    /// for the local-dev runtime; `None` for assemblies without extension
+    /// management, where every registry tool is treated as tenant-shared
+    /// (there is no per-user install path to leak).
+    owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
     fn new(
         registry: Arc<SharedExtensionRegistry>,
         synthetic_tools: Vec<RebornOperatorToolInfo>,
+        owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
     ) -> Self {
         Self {
             registry,
             synthetic_tools: Arc::from(synthetic_tools),
+            owner_source,
         }
     }
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo> {
+        // #5459 P1: the settings/tools catalog is read by any authenticated
+        // member, so it MUST hide another user's private tool. The global
+        // registry carries no owner, so join the installation owner map and
+        // keep a capability only when its provider is tenant-shared or owned
+        // by `caller`. A provider with no installation row (should not happen
+        // for a published capability — publish requires an install) defaults
+        // to visible, matching the pre-#5459 tenant-only behavior; a store
+        // read error also fails OPEN to tenant-visible only (never surfacing a
+        // private tool) because the map stays empty on error.
+        let owner_by_extension = match &self.owner_source {
+            Some(port) => port.installation_owners().await.unwrap_or_default(),
+            None => std::collections::BTreeMap::new(),
+        };
         let mut tools = self
             .registry
             .snapshot()
             .capabilities()
+            .filter(|descriptor| {
+                owner_by_extension
+                    .get(&descriptor.provider)
+                    .map(|owner| owner.visible_to(caller))
+                    .unwrap_or(true)
+            })
             .map(|descriptor| RebornOperatorToolInfo {
                 capability_id: descriptor.id.clone(),
                 provider: descriptor.provider.clone(),
@@ -230,6 +258,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
+                local_runtime.extension_management.clone(),
             )),
         );
         let mut lifecycle_facade =
@@ -959,21 +988,25 @@ mod tests {
     };
     use std::{path::Path, time::Duration};
 
-    #[test]
-    fn operator_tool_catalog_reads_shared_registry_updates() {
+    #[tokio::test]
+    async fn operator_tool_catalog_reads_shared_registry_updates() {
         let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let synthetic_provider =
             outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        // No owner source: every registry tool is tenant-visible (the
+        // assembly-without-extension-management case).
         let catalog = ActiveRegistryOperatorToolCatalog::new(
             Arc::clone(&registry),
             vec![
                 outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
                     .expect("synthetic tool info"),
             ],
+            None,
         );
+        let caller = UserId::new("caller").expect("caller id");
 
         assert!(
-            catalog.list_operator_tools().iter().any(|tool| {
+            catalog.list_operator_tools(&caller).await.iter().any(|tool| {
                 tool.capability_id.as_str()
                     == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
                     && tool.provider == synthetic_provider
@@ -985,13 +1018,140 @@ mod tests {
             .insert(test_extension_package("dynamic-tools", "echo"))
             .expect("insert dynamic extension");
 
-        let tools = catalog.list_operator_tools();
+        let tools = catalog.list_operator_tools(&caller).await;
 
         assert!(
             tools
                 .iter()
                 .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
             "catalog must read the shared registry at list time so lifecycle updates are visible"
+        );
+    }
+
+    /// #5459 P1 leak fix: the settings/tools catalog is read by any
+    /// authenticated member, so it MUST hide another user's private tool. With
+    /// an owner source wired, `list_operator_tools(bob)` excludes alice's
+    /// private capability while `list_operator_tools(alice)` includes it; a
+    /// tenant-shared tool is visible to both. This is the caller-level pin for
+    /// the confirmed enumeration/metadata-disclosure blocker.
+    #[tokio::test]
+    async fn operator_tool_catalog_hides_foreign_private_tools() {
+        use crate::available_extensions::AvailableExtensionCatalog;
+        use ironclaw_extensions::{
+            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+            ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifestRecord,
+            ExtensionManifestRef, InMemoryExtensionInstallationStore, InstallationOwner,
+        };
+        use ironclaw_host_api::ExtensionId;
+        use tokio::sync::Mutex;
+
+        fn manifest_record(ext: &str, capability: &str) -> ExtensionManifestRecord {
+            let toml = format!(
+                "schema_version = \"reborn.extension_manifest.v2\"\n\
+                 id = \"{ext}\"\nname = \"{ext}\"\nversion = \"0.1.0\"\n\
+                 description = \"test\"\ntrust = \"third_party\"\n\n\
+                 [runtime]\nkind = \"wasm\"\nmodule = \"wasm/{ext}.wasm\"\n\n\
+                 [[capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
+                 effects = [\"network\"]\ndefault_permission = \"ask\"\nvisibility = \"model\"\n\
+                 input_schema_ref = \"schemas/{capability}.input.json\"\n\
+                 output_schema_ref = \"schemas/{capability}.output.json\"\n"
+            );
+            ExtensionManifestRecord::from_toml(
+                toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+            )
+            .expect("manifest record")
+        }
+
+        let operator = UserId::new("operator").expect("operator id");
+        let alice = UserId::new("alice").expect("alice id");
+        let bob = UserId::new("bob").expect("bob id");
+
+        // Store: alice privately owns `market-data`; `hacker-news` is tenant-shared.
+        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+        for (ext, capability, owner) in [
+            (
+                "market-data",
+                "snp500",
+                InstallationOwner::user(alice.clone()),
+            ),
+            ("hacker-news", "top_stories", InstallationOwner::Tenant),
+        ] {
+            let ext_id = ExtensionId::new(ext).expect("ext id");
+            store
+                .upsert_manifest_and_installation(
+                    manifest_record(ext, capability),
+                    ExtensionInstallation::new(
+                        ExtensionInstallationId::new(ext).expect("installation id"),
+                        ext_id.clone(),
+                        ExtensionActivationState::Enabled,
+                        ExtensionManifestRef::new(ext_id, None),
+                        Vec::new(),
+                        Utc::now(),
+                        owner,
+                    )
+                    .expect("installation"),
+                )
+                .await
+                .expect("upsert manifest + installation");
+        }
+        let installation_store: Arc<dyn ExtensionInstallationStore> = store;
+
+        // Registry the catalog reads: both extensions' capabilities are published.
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        registry
+            .insert(test_extension_package("market-data", "snp500"))
+            .expect("insert market-data");
+        registry
+            .insert(test_extension_package("hacker-news", "top_stories"))
+            .expect("insert hacker-news");
+
+        let trust_policy = Arc::new(
+            ironclaw_trust::HostTrustPolicy::new(vec![
+                Box::new(ironclaw_trust::AdminConfig::new()),
+            ])
+            .expect("trust policy"),
+        );
+        let port = Arc::new(RebornLocalExtensionManagementPort::new(
+            Arc::new(LocalFilesystem::new()),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            crate::extension_lifecycle::ActiveExtensionPublisher::new(
+                Arc::clone(&registry),
+                trust_policy,
+                Arc::new(ironclaw_trust::InvalidationBus::new()),
+            ),
+            operator,
+        ));
+
+        let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
+
+        let ids_for = |tools: Vec<RebornOperatorToolInfo>| {
+            tools
+                .into_iter()
+                .map(|t| t.capability_id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        let bob_ids = ids_for(catalog.list_operator_tools(&bob).await);
+        assert!(
+            bob_ids.contains(&"hacker-news.top_stories".to_string()),
+            "tenant-shared tool must be visible to every member: {bob_ids:?}"
+        );
+        assert!(
+            !bob_ids.contains(&"market-data.snp500".to_string()),
+            "alice's PRIVATE tool must not appear in bob's settings/tools catalog: {bob_ids:?}"
+        );
+
+        let alice_ids = ids_for(catalog.list_operator_tools(&alice).await);
+        assert!(
+            alice_ids.contains(&"market-data.snp500".to_string())
+                && alice_ids.contains(&"hacker-news.top_stories".to_string()),
+            "the owner sees her own private tool plus shared tools: {alice_ids:?}"
         );
     }
 

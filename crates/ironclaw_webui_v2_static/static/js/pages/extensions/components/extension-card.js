@@ -209,6 +209,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       <div className=${META}>
         <span>${kindLabel}</span>
+        ${ext.install_scope &&
+        html`<span>· ${t(`extensions.scope.${ext.install_scope}`) || ext.install_scope}</span>`}
         ${ext.version && html`<span>· v${ext.version}</span>`}
       </div>
 
