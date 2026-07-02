@@ -61,6 +61,20 @@ const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-e
 /// `tool_definitions()` entirely — there would be nothing to look up.
 const TRIGGER_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__trigger_create";
 
+/// Shared by every scripted `HostManagedModelGateway` test double in this
+/// file that records raw requests (`RecordingGateway`,
+/// `SelfCreateAttemptGateway`) — flattens every captured request's message
+/// contents into one list.
+async fn captured_message_contents(
+    requests: &Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
+) -> Vec<String> {
+    let snapshot = requests.lock().await.clone();
+    snapshot
+        .iter()
+        .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
+        .collect()
+}
+
 #[derive(Debug, Default)]
 struct RecordingGateway {
     requests: Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
@@ -68,11 +82,7 @@ struct RecordingGateway {
 
 impl RecordingGateway {
     async fn captured_message_contents(&self) -> Vec<String> {
-        let snapshot = self.requests.lock().await.clone();
-        snapshot
-            .iter()
-            .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
-            .collect()
+        captured_message_contents(&self.requests).await
     }
 
     async fn request_count_containing(&self, needle: &str) -> usize {
@@ -143,11 +153,7 @@ struct SelfCreateAttemptGateway {
 
 impl SelfCreateAttemptGateway {
     async fn captured_message_contents(&self) -> Vec<String> {
-        let snapshot = self.requests.lock().await.clone();
-        snapshot
-            .iter()
-            .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
-            .collect()
+        captured_message_contents(&self.requests).await
     }
 
     async fn registration_outcome(&self) -> Option<Result<(), String>> {
@@ -285,14 +291,15 @@ fn current_minute_slot() -> chrono::DateTime<Utc> {
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
 /// wants; identity, runtime policy, and model-gateway override are shared.
 ///
-/// `model_gateway` is `Arc<dyn HostManagedModelGateway>` (rather than the
-/// concrete `RecordingGateway`) so tests that need a gateway which inspects
-/// the fired run's real capability port (e.g. `SelfCreateAttemptGateway`) can
-/// share this builder too — `Arc<Concrete>` coerces to `Arc<dyn Trait>` at
-/// the call site, so existing call sites are unchanged.
-async fn build_runtime_with(
+/// Generic over the concrete gateway type (rather than
+/// `Arc<dyn HostManagedModelGateway>`) so every call site — the existing
+/// `RecordingGateway` ones and `SelfCreateAttemptGateway`'s — passes its
+/// `Arc<Concrete>` unchanged; the unsized coercion to
+/// `Arc<dyn HostManagedModelGateway>` happens once, here, instead of at every
+/// call site.
+async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     root: &tempfile::TempDir,
-    model_gateway: Arc<dyn HostManagedModelGateway>,
+    model_gateway: Arc<G>,
     trigger_poller: TriggerPollerSettings,
 ) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
@@ -425,7 +432,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -589,7 +596,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -712,7 +719,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -809,7 +816,7 @@ async fn trigger_conversation_pairing_returns_none_when_poller_disabled() {
     // with_trigger_poller_settings with enabled: true.
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::default(),
     )
     .await;
@@ -838,7 +845,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -958,7 +965,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -1069,7 +1076,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -1241,7 +1248,7 @@ async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&gateway) as Arc<dyn HostManagedModelGateway>,
+        Arc::clone(&gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
