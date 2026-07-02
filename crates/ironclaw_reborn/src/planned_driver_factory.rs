@@ -275,8 +275,9 @@ pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, Run
 
 /// Dedicated run profile for scheduled-trigger fires (issue #5505). Reuses
 /// the default planned driver/family unchanged — only the capability
-/// surface differs — so `runtime.rs`'s host deny-map can strip the trigger
-/// mutator capabilities keyed on `capability_surface_profile_id`.
+/// surface and the driver-specific-nudges opt-in differ — so `runtime.rs`'s
+/// host deny-map can strip the trigger mutator capabilities keyed on
+/// `capability_surface_profile_id`.
 pub fn scheduled_trigger_planned_profile_definition()
 -> Result<RunProfileDefinition, RunProfileRegistryError> {
     let descriptor = planned_driver_descriptor()

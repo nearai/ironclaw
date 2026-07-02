@@ -24,15 +24,18 @@
 //! digest would drive the detector. `builtin.echo` IS registered as a
 //! first-party handler with `CapabilityVisibility::Model`
 //! (`crates/ironclaw_host_runtime/src/first_party_tools/mod.rs`), but the
-//! `reborn-planned-default` run profile's resolved capability surface (as
-//! observed via `RUST_LOG=debug` — `visible_capability_sample`) does not
-//! include it; the model gateway rejects the scripted call as "outside the
-//! visible capability surface" (`ironclaw_reborn::model_gateway`), which
-//! surfaces as a terminal `model_error`, not a no-progress signal. Swapping to
-//! `builtin.http` (already proven visible + deterministic by
+//! resolved capability surface here (as observed via `RUST_LOG=debug` —
+//! `visible_capability_sample`) does not include it — this test harness's
+//! `core_builtin_tools_from_runtime` grants a fixed `capability_ids` list
+//! (`tests/support/reborn/harness.rs`) that omits `builtin.echo`, not a
+//! production run-profile-level exclusion; the model gateway rejects the
+//! scripted call as "outside the visible capability surface"
+//! (`ironclaw_reborn::model_gateway`), which surfaces as a terminal
+//! `model_error`, not a no-progress signal. Swapping to `builtin.http`
+//! (already proven visible + deterministic by
 //! `tests/reborn_integration_tool_call.rs`) exercises the same digest-based
 //! `NoChange` mechanism without depending on a capability outside this
-//! profile's advertised surface.
+//! harness's granted surface.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
