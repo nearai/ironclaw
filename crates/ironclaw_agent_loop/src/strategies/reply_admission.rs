@@ -59,7 +59,22 @@ impl ReplyAdmissionStrategy for DefaultReplyAdmissionStrategy {
 }
 
 fn is_non_final_reply_artifact(content: &str) -> bool {
-    content.trim().is_empty() || is_only_provider_transcript_artifact_lines(content)
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Only treat content as a replayed provider-transcript artifact when it is
+    // MULTI-line. A genuine one-line answer that merely names a `__`-bearing tool
+    // (e.g. "Tool result from web__fetch: near.ai returned 200 OK") is a real
+    // final reply, not an echo of provider history — rejecting it on the
+    // single-line shape was eating valid answers. A weak model echoing replayed
+    // transcript reproduces multiple history lines, which this still catches.
+    trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > 1
+        && is_only_provider_transcript_artifact_lines(content)
 }
 
 pub(crate) fn reply_admission_control_message(
@@ -124,10 +139,14 @@ mod tests {
 
     #[tokio::test]
     async fn default_reply_admission_rejects_flattened_tool_history_echo() {
+        // A weak model echoing replayed provider history reproduces MULTIPLE
+        // transcript lines — that multi-line, all-artifact shape is still rejected.
         let context = test_run_context("default-reply-admission-tool-history");
         let state = LoopExecutionState::initial_for_run(&context);
         let reply = AssistantReply {
-            content: "Previous tool event: demo__echo was invoked.".to_string(),
+            content:
+                "Previous tool event: demo__echo was invoked.\nTool result from demo__echo: hi"
+                    .to_string(),
         };
 
         let outcome = DefaultReplyAdmissionStrategy
@@ -135,6 +154,23 @@ mod tests {
             .await;
 
         assert!(matches!(outcome, ReplyAdmissionOutcome::RejectFinal { .. }));
+    }
+
+    #[tokio::test]
+    async fn default_reply_admission_accepts_single_line_answer_naming_a_tool() {
+        // F3: a one-line final answer that names a `__`-bearing tool is a real
+        // reply, not a replayed-transcript artifact — it must be admitted.
+        let context = test_run_context("default-reply-admission-single-line-tool");
+        let state = LoopExecutionState::initial_for_run(&context);
+        let reply = AssistantReply {
+            content: "Tool result from web__fetch: near.ai returned 200 OK.".to_string(),
+        };
+
+        let outcome = DefaultReplyAdmissionStrategy
+            .admit_reply(&state, &reply)
+            .await;
+
+        assert_eq!(outcome, ReplyAdmissionOutcome::AcceptFinal);
     }
 
     #[tokio::test]

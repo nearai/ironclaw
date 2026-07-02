@@ -1365,7 +1365,11 @@ async fn repeated_reply_rejections_stop_as_invalid_model_output() {
 #[tokio::test]
 async fn default_reply_admission_rejects_tool_history_echo_and_continues() {
     let host = MockHost::new(vec![
-        reply_response_with_text("Previous tool event: demo__echo was invoked."),
+        // Multi-line, all provider-transcript-artifact lines: a replayed-history
+        // echo (still rejected under the multi-line artifact rule).
+        reply_response_with_text(
+            "Previous tool event: demo__echo was invoked.\nTool result from demo__echo: hi",
+        ),
         reply_response_with_text("done"),
     ]);
     let executor = CanonicalAgentLoopExecutor;
