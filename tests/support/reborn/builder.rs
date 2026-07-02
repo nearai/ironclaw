@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -43,9 +44,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    FilesystemTurnStateStore, GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
+    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
+    TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
@@ -56,6 +58,7 @@ use super::harness::{
 use super::http_matcher::ScriptedHttpResponse;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
+use super::scripted_provider::ParkingModelGate;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
@@ -130,6 +133,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// construction — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
+    /// E-GATEWAY: when set, the model call parks until released, enabling a
+    /// mid-turn cancel test. Threaded into the degenerate one-thread group.
+    park_gate: Option<ParkingModelGate>,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -160,6 +166,14 @@ impl RebornIntegrationHarnessBuilder {
     /// test on-disk durability via `assert_reply_persists_after_reopen`.
     pub fn storage(mut self, mode: StorageMode) -> Self {
         self.storage = mode;
+        self
+    }
+
+    /// Park this harness's model call until `gate` is released (E-GATEWAY seam),
+    /// so a test can cancel the run mid-turn. See
+    /// [`RebornThreadBuilder::park_model`].
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.park_gate = Some(gate);
         self
     }
 
@@ -321,6 +335,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
+            .park_model_opt(self.park_gate)
             .build()
             .await
     }
@@ -344,9 +359,14 @@ pub struct RebornIntegrationHarness {
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
     /// The concrete scripted `TraceLlm` retained before it was upcast to
     /// `dyn LlmProvider` in the per-thread gateway build. Its
-    /// `captured_requests()` lets assertions inspect the model-visible prompt
-    /// (system-prompt injection: safety banners, skill instructions, profile
-    /// lines). Read via `captured_system_prompts()`.
+    /// `captured_requests()` lets assertions inspect the exact model-visible
+    /// requests: the system prompt (safety banners, profile lines —
+    /// `captured_system_prompts()`/`assert_system_prompt_contains`) and any
+    /// host-injected context such as activated-skill instructions
+    /// (`assert_model_request_contains`, E-SKILL half B). Retained even when
+    /// the thread parks the model (`park_model`, E-GATEWAY): parking mode is
+    /// only a wrapper (`ParkingLlm`) around this SAME `TraceLlm`, so captured
+    /// requests are still inspectable for a parked thread.
     pub(crate) scripted_llm: Arc<TraceLlm>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
@@ -383,6 +403,7 @@ impl RebornIntegrationHarness {
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
             shell_mode: ShellMode::default(),
+            park_gate: None,
         }
     }
 
@@ -524,6 +545,44 @@ impl RebornIntegrationHarness {
                 .await
                 .map_err(Into::into)
         }
+    }
+
+    /// E-DURABLE: assert an installed extension survives an independent reopen
+    /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
+    /// at the capability harness's on-disk `storage_root` (a handle independent
+    /// of the live `Arc`) and asserts `extension_id` is present — proving the
+    /// install persisted to disk, not just to in-memory state. Parallels
+    /// `assert_reply_persists_after_reopen` for capability-produced state.
+    pub async fn assert_extension_install_persists_after_reopen(
+        &self,
+        extension_id: &str,
+    ) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err("no host-runtime capability backend for durable reopen".into());
+            }
+        };
+        let store =
+            ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+                &harness.storage_root_for_test(),
+            )
+            .await?;
+        let installations = store.list_installations().await?;
+        if installations
+            .iter()
+            .any(|installation| installation.extension_id().as_str() == extension_id)
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = installations
+            .iter()
+            .map(|installation| installation.extension_id().as_str())
+            .collect();
+        Err(
+            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
+                .into(),
+        )
     }
 
     /// Assert the named capability was invoked through the real capability path
@@ -752,17 +811,39 @@ impl RebornIntegrationHarness {
     /// Approve a blocked approval gate and resume the run (the user-approves path).
     /// Resolves the persisted approval request to an issued lease, then resumes the
     /// run so the originally-gated capability re-dispatches and the turn completes.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .approve_local_dev_gate(gate_ref)
             .await?;
-        self.resume_run(run_id, gate_ref.clone(), None).await
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
     }
 
     /// Deny a blocked approval gate and resume the run (the user-declines path).
     /// Resolves the persisted request to `Denied` (no lease) and resumes with
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
     /// authorization failure to the model rather than re-dispatching the gate.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_local_dev_gate(gate_ref)
@@ -771,6 +852,37 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
+    /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
+    /// [`deny_gate`](Self::deny_gate) (approval gates, which resolve a persisted request in the
+    /// local-dev approval store), auth gates have no such store entry — there is nothing to
+    /// resolve — so this resumes directly with `GateResumeDisposition::Denied`. The executor's
+    /// `short_circuit_denied_resume` then surfaces a model-visible gate-declined failure for the
+    /// parked capability instead of re-dispatching it (which would re-block on the still-missing
+    /// credential → infinite loop).
+    ///
+    /// Like `deny_gate` (which resumes with its own gate-class-specific
+    /// `ResumeTurnPrecondition::BlockedApprovalGate`), this resumes with a
+    /// gate-class-specific precondition — `ResumeTurnPrecondition::BlockedAuthGate` — the same
+    /// precondition `AuthInteractionService` uses for its production auth-resume path. That precondition is
+    /// enforced server-side (`resume_turn_once` requires `record.status == BlockedAuth`), so a
+    /// stale or wrong (non-auth) gate ref fails the resume with `TurnError::InvalidTransition`
+    /// instead of silently resuming whatever gate class happens to be blocked. A client-side
+    /// `gate:auth-` prefix check (mirroring `submit_turn_until_auth_blocked`) adds cheap
+    /// defense-in-depth on top of that server-side check.
+    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedAuthGate,
         )
         .await
     }
@@ -799,6 +911,7 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         gate_ref: GateRef,
         resume_disposition: Option<GateResumeDisposition>,
+        precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
         let response = self
             .coordinator
@@ -807,7 +920,7 @@ impl RebornIntegrationHarness {
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
-                precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                precondition,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
@@ -818,6 +931,22 @@ impl RebornIntegrationHarness {
             return Err(format!("expected resumed run to queue, got {:?}", response.status).into());
         }
         Ok(())
+    }
+
+    /// Request cancellation of an in-flight run (E-GATEWAY seam). Mirrors
+    /// `resume_run`'s coordinator-call shape; drives the mid-turn cancel path so
+    /// a parked model call can be cancelled and the run reaches `Cancelled`.
+    pub async fn cancel_run(&self, run_id: TurnRunId) -> HarnessResult<CancelRunResponse> {
+        self.coordinator
+            .cancel_run(CancelRunRequest {
+                scope: self.turn_scope.clone(),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
+            })
+            .await
+            .map_err(Into::into)
     }
 }
 

@@ -2534,6 +2534,41 @@ fn local_dev_project_filesystem(
     Ok(filesystem)
 }
 
+/// Test-only (E-DURABLE seam): open a FRESH, independent
+/// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
+/// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
+/// handle rather than reusing the live one. Reuses the production
+/// [`local_dev_project_filesystem`] mounts and [`FilesystemExtensionInstallationStore::default_state_path`]
+/// so the reopen reads the exact on-disk `/system/extensions` state the running
+/// harness wrote (mirrors the production install-store load in
+/// [`build_reborn_services`], above at the `extension_installation_store` binding).
+/// The store's virtual state path has no identity dependency for local-dev
+/// profiles, so no tenant/user context is needed. Tests only; zero bytes in
+/// production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_local_dev_extension_installation_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
+    let workspace_root = storage_root.join("workspace");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_dev_project_filesystem(
+        storage_root,
+        &workspace_root,
+        None,
+    )?);
+    let state_path =
+        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state path invalid: {error}"),
+            }
+        })?;
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be reopened: {error}"),
+        })?;
+    Ok(Arc::new(store))
+}
+
 fn mount_local_dev_memory_root<F>(
     root: &mut CompositeRootFilesystem,
     backend: Arc<F>,

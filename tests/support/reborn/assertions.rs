@@ -170,6 +170,75 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that some model request this thread sent to the scripted provider
+    /// contains `needle` anywhere in its serialized messages — the caller-tier
+    /// proof that host-injected context (e.g. activated-skill instructions)
+    /// actually reached the model. Reads the retained `TraceLlm`'s captured
+    /// requests (E-SKILL half B).
+    pub async fn assert_model_request_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        for messages in &requests {
+            let rendered = serde_json::to_string(messages)
+                .map_err(|e| format!("serialize captured model request: {e}"))?;
+            if rendered.contains(needle) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "no model request contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Collects the persisted `safe_summary` field of every `ToolResultReference`
+    /// message on this thread's FULL history (not baseline-sliced — same caveat
+    /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for
+    /// single-turn harnesses today). Shared collector for [`assert_tool_error`],
+    /// [`assert_no_tool_error`], and [`assert_tool_error_summary_contains`].
+    ///
+    /// A `ToolResultReference` message with `content: None`, or with `content`
+    /// that fails to decode as a `ToolResultReferenceEnvelope`, is an `Err` —
+    /// never silently skipped. Both would otherwise vanish from `summaries`
+    /// and degrade into a misleading "not found; saw [...]" for the caller.
+    async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                // Fail loud on a missing `content` field, and on a decode
+                // error, rather than silently dropping the message
+                // (.claude/rules/error-handling.md) — a malformed or
+                // content-less envelope must surface as its own diagnosis,
+                // not degrade into a misleading "not found" from the caller.
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| envelope.safe_summary.as_str().to_string())
+                    .map_err(|err| {
+                        // Truncate the raw payload before interpolating it into
+                        // the error: `content` can carry a `model_observation`
+                        // field with large/unbounded text, which is bad for
+                        // test-output size and potentially sensitive. Mirrors
+                        // the truncation shape in `assert_system_prompt_contains`.
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
     /// Assert a model-visible tool error of `class` carrying `reason` was
     /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
     /// reads the in-process recorder, populated only on the *Completed* write
@@ -205,19 +274,7 @@ impl RebornIntegrationHarness {
         class: ToolErrorClass,
         reason: &str,
     ) -> HarnessResult<()> {
-        let history = self
-            .thread_harness
-            .history(self.binding.thread_id.clone())
-            .await?;
-        let summaries: Vec<String> = history
-            .iter()
-            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
-            .filter_map(|message| message.content.as_deref())
-            .filter_map(|content| {
-                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
-            })
-            .map(|envelope| envelope.safe_summary.as_str().to_string())
-            .collect();
+        let summaries = self.persisted_tool_error_summaries().await?;
         let prefix = class.summary_prefix();
         if summaries
             .iter()
@@ -229,6 +286,53 @@ impl RebornIntegrationHarness {
             "no persisted tool-error summary of class {class:?} with reason {reason:?}; saw {summaries:?}"
         )
         .into())
+    }
+
+    /// Assert NO persisted `ToolResultReference` summary matches `class`'s
+    /// prefix and contains `reason` — the inverse predicate of
+    /// [`assert_tool_error`], built on the same `persisted_tool_error_summaries`
+    /// collector. Use to prove a specific tool-error was NOT recorded (e.g. no
+    /// leaked re-dispatch after a gate-declined short-circuit) without coupling
+    /// the test to `assert_tool_error`'s own diagnostic wording.
+    pub async fn assert_no_tool_error(
+        &self,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
+        let prefix = class.summary_prefix();
+        let matching: Vec<&String> = summaries
+            .iter()
+            .filter(|summary| summary.starts_with(prefix) && summary.contains(reason))
+            .collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no persisted tool-error summary of class {class:?} with reason {reason:?}; found {matching:?}"
+        )
+        .into())
+    }
+
+    /// Assert some persisted `ToolResultReference`'s raw `safe_summary` text
+    /// contains `text` — NO class-prefix requirement. Complements
+    /// [`assert_tool_error`] for `CapabilityErrorSummary`s the executor builds
+    /// via `SanitizedStrategySummary::from_trusted_static` in
+    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs` (filtered-surface
+    /// denial, stale-surface retry, auth/approval gate-declined short-circuit) —
+    /// those are fixed host-authored literals with no host-returned text to
+    /// prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary`
+    /// prefix match can never succeed for them. Use only for known
+    /// executor-synthesized literals.
+    pub async fn assert_tool_error_summary_contains(&self, text: &str) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
+        if summaries.iter().any(|summary| summary.contains(text)) {
+            return Ok(());
+        }
+        Err(
+            format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
+                .into(),
+        )
     }
 
     /// Assert that any captured **network** egress request whose URL

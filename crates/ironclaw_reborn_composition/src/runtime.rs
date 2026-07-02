@@ -357,7 +357,7 @@ mod skills;
 
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
@@ -845,6 +845,58 @@ pub(crate) fn wrap_project_create_capability_for_test(
         inner,
         project_service,
         fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
+/// Test-support forwarder (E-SKILL seam): build the local-dev filesystem skill
+/// context source exactly as production does in [`build_reborn_runtime`], and
+/// hand back just the `HostSkillContextSource` (for prompt injection) plus the
+/// `activation_source` (backing `skill_activate`) that `test_support.rs` needs.
+/// Reuses the private [`local_dev_filesystem_skill_context_source`] so the
+/// wiring never drifts, but deliberately does NOT return the internal
+/// [`LocalDevSkillContextSource`] struct — that type (and its
+/// `execution_adapter` field) stays private to this module; only the two
+/// fields an external caller actually consumes cross the boundary. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
+) -> Result<
+    (
+        Arc<dyn HostSkillContextSource>,
+        Arc<LocalDevSelectableSkillContextSource>,
+    ),
+    RebornRuntimeError,
+> {
+    let built = local_dev_filesystem_skill_context_source(
+        local_runtime,
+        tenant_id,
+        regex_skill_activation_enabled,
+    )?;
+    Ok((built.source, built.activation_source))
+}
+
+/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
+/// synthetic-capability wrap. Bridges the private `local_dev` module to
+/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_skill_activation_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_skill_activation_capability_for_test(
+        inner,
+        skill_activation_source,
         run_context,
         input_resolver,
         result_writer,

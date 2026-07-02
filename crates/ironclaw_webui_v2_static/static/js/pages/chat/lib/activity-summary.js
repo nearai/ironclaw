@@ -4,10 +4,13 @@ const FALLBACK_TRANSLATIONS = {
   "activity.title": "Activity",
   "activity.summaryWithParts": "Activity - {parts}",
   "activity.reasoning": "{count} reasoning",
+  "activity.reasonings": "{count} reasoning",
   "activity.tool": "{count} tool",
   "activity.tools": "{count} tools",
   "activity.failed": "{count} failed",
+  "activity.failedPlural": "{count} failed",
   "activity.declined": "{count} declined",
+  "activity.declinedPlural": "{count} declined",
   "activity.running": "running",
   "activity.separator": ", ",
 };
@@ -43,10 +46,22 @@ export function summarizeActivity(activity, t = fallbackT) {
   }
 
   const parts = [];
-  if (reasoning) parts.push(t("activity.reasoning", { count: reasoning }));
+  if (reasoning) {
+    parts.push(t(reasoning === 1 ? "activity.reasoning" : "activity.reasonings", {
+      count: reasoning,
+    }));
+  }
   if (tools) parts.push(t(tools === 1 ? "activity.tool" : "activity.tools", { count: tools }));
-  if (failed) parts.push(t("activity.failed", { count: failed }));
-  if (declined) parts.push(t("activity.declined", { count: declined }));
+  if (failed) {
+    parts.push(t(failed === 1 ? "activity.failed" : "activity.failedPlural", {
+      count: failed,
+    }));
+  }
+  if (declined) {
+    parts.push(t(declined === 1 ? "activity.declined" : "activity.declinedPlural", {
+      count: declined,
+    }));
+  }
   if (!failed && !declined && running) parts.push(t("activity.running"));
   const localizedSeparator = t("activity.separator");
   const separator = localizedSeparator === "activity.separator" ? ", " : localizedSeparator;
