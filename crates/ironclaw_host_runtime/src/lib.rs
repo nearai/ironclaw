@@ -44,6 +44,7 @@ mod first_party;
 mod first_party_tools;
 mod http_body;
 mod invocation_services;
+mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;

@@ -4512,6 +4512,7 @@ dependencies = [
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
  "regex",
