@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
     AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
-    AuditProjectionStage, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
-    EventStreamManager, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
-    ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
-    ReplayEventProjectionService, RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
+    AuditStreamResume, CapabilityActivityStatus, EventProjectionService, EventStreamManager,
+    MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError, ProjectionReplay,
+    ProjectionRequest, ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
+    RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
@@ -84,7 +84,7 @@ async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
@@ -561,7 +561,7 @@ async fn event_stream_manager_audit_resume_returns_updates_for_valid_cursor() {
     match resume {
         AuditStreamResume::Updates(replay) => {
             assert_eq!(replay.entries.len(), 1);
-            assert_eq!(replay.entries[0].stage, AuditProjectionStage::Denied);
+            assert_eq!(replay.entries[0].stage, AuditStage::Denied);
         }
         other => panic!("expected audit updates resume, got {other:?}"),
     }
@@ -708,7 +708,7 @@ async fn event_stream_manager_routes_audit_projection_and_preserves_no_exposure_
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();

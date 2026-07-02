@@ -17,8 +17,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool,
-    HostedMcpDiscoveredToolAnnotations,
+    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
 use ironclaw_host_api::{
     CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, NetworkMethod,
@@ -1117,7 +1116,9 @@ fn is_unsupported_description_char(value: char) -> bool {
     value.is_control() && !matches!(value, '\n' | '\r' | '\t')
 }
 
-fn parse_tool_annotations(value: Option<&Value>) -> Result<HostedMcpDiscoveredToolAnnotations, String> {
+fn parse_tool_annotations(
+    value: Option<&Value>,
+) -> Result<HostedMcpDiscoveredToolAnnotations, String> {
     let Some(value) = value else {
         return Ok(HostedMcpDiscoveredToolAnnotations::default());
     };

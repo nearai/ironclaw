@@ -4,7 +4,8 @@ use ironclaw_host_api::{
     CapabilityHostHttpRequest, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy,
     NetworkScheme, NetworkTargetPattern, ProjectId, ResourceScope, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, UserId,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    UserId,
 };
 use ironclaw_scripts::ScriptRuntimeHttpAdapter;
 

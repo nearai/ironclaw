@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
     MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
     ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
     VirtualPath,
 };
