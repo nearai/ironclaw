@@ -146,6 +146,49 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that ANY captured egress request whose URL contains `url_substr`
+    /// carried a body containing `body_substr` — checks every matching request,
+    /// not just the first. Needed for a multi-request handshake where every leg
+    /// shares the same URL (e.g. web-access's Exa MCP `initialize` /
+    /// `notifications/initialized` / `tools/call` sequence, C-WEBACCESS) and
+    /// only one leg's body carries the substring under test. Prefer
+    /// [`assert_egress_body_contains`] when `url_substr` is expected to match
+    /// exactly one request — its first-match semantics catch a false pass that
+    /// this looser check would miss if a later, unrelated same-URL request also
+    /// happened to satisfy `body_substr`.
+    pub async fn assert_egress_body_contains_any(
+        &self,
+        url_substr: &str,
+        body_substr: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.captured_egress_requests();
+        let matching: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.contains(url_substr))
+            .collect();
+        if matching.is_empty() {
+            let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+            return Err(format!(
+                "no captured egress request matching url {url_substr:?}; saw {seen:?}"
+            )
+            .into());
+        }
+        if matching
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains(body_substr))
+        {
+            return Ok(());
+        }
+        let bodies: Vec<String> = matching
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .collect();
+        Err(format!(
+            "no egress request to {url_substr:?} had a body containing {body_substr:?}; saw {bodies:?}"
+        )
+        .into())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —

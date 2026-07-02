@@ -343,6 +343,7 @@ pub use slack_serve::{
     slack_events_route_mount,
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
+pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

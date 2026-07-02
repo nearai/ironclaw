@@ -11,7 +11,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub(crate) fn register_bundled_web_access_first_party_handlers(
+pub fn register_bundled_web_access_first_party_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(WebAccessFirstPartyHandler {
