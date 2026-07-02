@@ -1967,8 +1967,9 @@ impl HostRuntimeCapabilityHarness {
     /// (because `SKILL_ACTIVATE_CAPABILITY_ID` is in the allowlist), which
     /// `create_capability_port` wraps onto the port and `into_group` wires as
     /// the runtime's `skill_context_source`. The skill file the model activates
-    /// is seeded by `RebornIntegrationGroup::skill_tools` (which knows the run's
-    /// tenant + user). Mirrors `skill_management_tools`/`project_tools`.
+    /// is seeded as a system-scoped skill by
+    /// `RebornIntegrationGroup::skill_activation_tools`. Mirrors
+    /// `skill_management_tools`/`project_tools`.
     pub(crate) async fn skill_activation_tools() -> HarnessResult<Self> {
         let mut harness = Self::new_with_options(
             "reborn-e2e-skill-activation-tools",
