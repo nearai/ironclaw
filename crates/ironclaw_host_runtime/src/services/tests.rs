@@ -44,8 +44,10 @@ use super::{
     RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
     ServiceResolvedRuntimeAdapter,
 };
+#[cfg(unix)]
+use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
-use crate::{CommandExecutionRequest, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
+use crate::{HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
 
 mod first_party_runtime_adapter;
 mod mcp_runtime_adapter;

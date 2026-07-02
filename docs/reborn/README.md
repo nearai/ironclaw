@@ -6,7 +6,7 @@ This page is intentionally short. Use it for progressive disclosure: start here,
 
 ## Current Reborn sources in this branch
 
-The `reborn-integration` branch currently exposes Reborn structure primarily through implementation crates, crate-local agent docs, tests, and CI guardrails.
+This repo exposes Reborn structure primarily through implementation crates, crate-local agent docs, tests, and CI guardrails.
 
 | Need | Start with |
 | --- | --- |
@@ -39,9 +39,10 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | E2E test harness | `tests/e2e/README.md` |
 | Live/replay testing guide | `tests/support/LIVE_TESTING.md` |
 
-## Future Reborn contract docs
+## Reborn contract docs
 
-When the Reborn contract-doc packet is present in this branch, agents should prefer these docs as the source of truth:
+Start with these common Reborn contract docs and prefer the full in-tree
+`docs/reborn/contracts/` set over older design notes:
 
 ```text
 docs/reborn/contracts/_contract-freeze-index.md
@@ -57,7 +58,7 @@ docs/reborn/contracts/skills-extension.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
-Until then, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
+If a topic is not covered there yet, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
 
 ## Harness docs
 

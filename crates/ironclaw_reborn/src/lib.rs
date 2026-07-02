@@ -17,6 +17,7 @@
 //! the boundary tests are designed to prevent.
 
 pub mod app_loop_family;
+mod context_shadow;
 pub mod driver_registry;
 pub mod failure_categories;
 pub mod hook_gate_refs;
@@ -37,6 +38,8 @@ pub mod runtime;
 pub mod subagent;
 pub mod text_loop_driver;
 pub mod thread_scope;
+mod tool_disclosure;
+mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;
 

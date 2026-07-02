@@ -22,6 +22,7 @@ use ironclaw_product_adapters::{
     ProductProjectionState, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
     ProjectionStream, ProjectionSubscriptionRequest,
 };
+use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
@@ -32,7 +33,7 @@ use ironclaw_product_workflow::{
 use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
 };
-use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
+use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
@@ -52,7 +53,6 @@ use ironclaw_reborn_openai_compat::{
 };
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
-use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,

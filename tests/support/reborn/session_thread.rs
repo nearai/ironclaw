@@ -59,8 +59,7 @@ where
 /// Shared methods: work for any `F: RootFilesystem`.
 impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
-        let scoped =
-            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
+        let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
             scope: self.scope.clone(),
@@ -74,8 +73,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub fn service_instance(
         &self,
     ) -> Result<FilesystemSessionThreadService<F>, RebornThreadHarnessError> {
-        let scoped =
-            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
+        let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
         Ok(FilesystemSessionThreadService::new(scoped))
     }
 
@@ -135,7 +133,7 @@ impl RebornThreadHarness<InMemoryBackend> {
         scope: ThreadScope,
         backend: Arc<InMemoryBackend>,
     ) -> Result<Self, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at("/engine", Arc::clone(&backend), &scope)?;
+        let scoped = scoped_threads_fs_at("/engine", Arc::clone(&backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
             scope,
@@ -163,7 +161,7 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
         backend: Arc<CompositeRootFilesystem>,
         root: Arc<tempfile::TempDir>,
     ) -> Result<Self, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at("", Arc::clone(&backend), &scope)?;
+        let scoped = scoped_threads_fs_at("", Arc::clone(&backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
             scope,
@@ -175,7 +173,21 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
     }
 }
 
-/// Build the scoped thread filesystem for `scope`.
+/// Build the scoped thread filesystem.
+///
+/// The `/threads` mount is resolved **per filesystem operation** from that
+/// operation's own `ResourceScope` (production's `invocation_mount_view`
+/// shape: `ScopedFilesystem::new` + resolver) — NOT fixed once at
+/// construction. `FilesystemSessionThreadService` derives each op's
+/// `ResourceScope` from the request's `ThreadScope` (owner included, via
+/// `ThreadScope::to_resource_scope`), so ONE service instance serves every
+/// owner's `/tenants/{t}/users/{owner}/threads` subtree. This is what lets a
+/// group's ONE shared runtime resolve a second actor's thread (issue #5479):
+/// the runtime's per-turn owner rewrite
+/// (`ThreadScopeResolver::resolve_for_turn`) now lands on the right physical
+/// root instead of a mount pinned to the group's canonical actor. For any
+/// single owner the resolved path is byte-identical to the previous fixed
+/// view, so single-actor tests are unaffected.
 ///
 /// `root_prefix` is prepended before `/tenants/...`:
 /// - Default `InMemoryBackend` tier: `"/engine"` → `/engine/tenants/{t}/users/{u}/threads`
@@ -183,23 +195,49 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
 fn scoped_threads_fs_at<F>(
     root_prefix: &str,
     backend: Arc<F>,
-    scope: &ThreadScope,
 ) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
 where
     F: RootFilesystem,
 {
-    let user_id = scope
-        .owner_user_id
-        .as_ref()
-        .map_or("_system", |user_id| user_id.as_str());
-    let target = format!(
-        "{root_prefix}/tenants/{}/users/{}/threads",
-        scope.tenant_id, user_id
-    );
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/threads").expect("valid threads alias"),
-        VirtualPath::new(target).expect("valid threads target"),
+    let root_prefix = root_prefix.to_owned();
+    Ok(Arc::new(ScopedFilesystem::new(backend, move |scope| {
+        threads_mount_view(&root_prefix, scope)
+    })))
+}
+
+/// The single `/threads` mount grant for one operation's `ResourceScope`.
+///
+/// System-scoped operations (e.g. `find_idempotency_record`, which routes
+/// through `ResourceScope::system()`) and owner-less thread scopes carry the
+/// `SYSTEM_RESERVED_ID` sentinel — control bytes, not path-safe — in the
+/// tenant and/or user segment. Map it to the harness's historical `_system`
+/// segment: this mirrors production's `resource_scope_path_segment`
+/// (`invocation_mount_view`, ironclaw_reborn_composition) only in SHAPE
+/// (sentinel-in, path-safe-segment-out) — production's actual segment value
+/// is `__system__`, not `_system`. Deliberately NOT switched to match, to
+/// avoid rewriting every existing harness fixture path; see `path_segment`.
+pub(crate) fn threads_mount_view(
+    root_prefix: &str,
+    scope: &ironclaw_host_api::ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = path_segment(scope.tenant_id.as_str());
+    let user_id = path_segment(scope.user_id.as_str());
+    let target = format!("{root_prefix}/tenants/{tenant_id}/users/{user_id}/threads");
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/threads")?,
+        VirtualPath::new(target)?,
         MountPermissions::read_write_list_delete(),
-    )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+    )])
+}
+
+/// Path-safe segment for one scope axis: the `SYSTEM_RESERVED_ID` sentinel
+/// becomes the harness's historical `_system` segment (NOT production's
+/// `__system__` value — see `threads_mount_view`); everything else is used
+/// verbatim, matching production's `resource_scope_path_segment` shape.
+pub(crate) fn path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "_system"
+    } else {
+        value
+    }
 }

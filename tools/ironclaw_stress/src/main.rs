@@ -108,6 +108,13 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 0)]
     pub(crate) active_thread_count: usize,
 
+    /// Distinct threads per owner-user that share one `/turns/state.json`. Set
+    /// above 1 to reproduce the production contention shape (a user's foreground
+    /// turn plus routine turns on different threads concurrently writing the same
+    /// per-user turn-state document). Default 1 = one thread per owner.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) threads_per_owner: usize,
+
     /// Synthetic tenants distributed across users.
     #[arg(long, default_value_t = 1)]
     pub(crate) tenants: usize,
@@ -124,8 +131,24 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 4)]
     pub(crate) prefill_concurrency: usize,
 
+    /// Exercise the gate-blocked turn path: every Nth measured user-turn
+    /// operation blocks its run on a gate (alternating approval/auth), resumes
+    /// it, then re-claims and completes. 0 (default) = never block, the pure
+    /// claim/complete hot path. Combine with
+    /// `--turn-state-backend memory-persist-on-block` to drive persist-on-block
+    /// writes under concurrency and confirm the durable sink does not
+    /// reintroduce contention.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) gate_blocked_every: usize,
+
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
+
+    /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
+    /// per-user state.json (CAS, current production path); `memory` = one shared
+    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
+    pub(crate) turn_state_backend: TurnStateBackend,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
@@ -439,6 +462,40 @@ impl Backend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub(crate) enum TurnStateBackend {
+    /// Durable per-user `state.json` via the filesystem store (per-step CAS
+    /// read-modify-write). The current production path; livelocks under
+    /// concurrent same-user writers.
+    Filesystem,
+    /// One shared in-process `InMemoryTurnStateStore` authority — coordination
+    /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
+    Memory,
+    /// The shipped hosted-single-tenant-volume config: the shared in-memory
+    /// authority with a durable persist-on-block sink attached. The sink fires
+    /// only when the gate-blocked set changes (off the hot path), so this
+    /// measures the extra cost the durability wiring adds to the normal
+    /// claim/complete path versus plain `Memory`.
+    MemoryPersistOnBlock,
+}
+
+impl TurnStateBackend {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Filesystem => "filesystem",
+            Self::Memory => "memory",
+            Self::MemoryPersistOnBlock => "memory-persist-on-block",
+        }
+    }
+
+    /// Whether a durable persist-on-block sink is attached to the in-memory
+    /// authority.
+    pub(crate) fn persists_on_block(self) -> bool {
+        matches!(self, Self::MemoryPersistOnBlock)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum ModelLatencySource {
     Synthetic,
     Provider,
@@ -590,6 +647,9 @@ struct RunSummary {
     trace_interval_seconds: u64,
     users: usize,
     active_thread_count: usize,
+    threads_per_owner: usize,
+    turn_state_backend: TurnStateBackend,
+    gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
     prefill_turns_per_thread: usize,
@@ -1064,6 +1124,18 @@ fn validate_args(args: &Args) -> Result<(), String> {
         }
         if args.prefill_threads > args.users {
             return Err("--prefill-threads must be less than or equal to --users".to_string());
+        }
+        // Prefill warms one thread per owner (`user_turn_context_for_user_index`,
+        // no slot), while measured runs spread across `threads_per_owner`
+        // slot-suffixed threads. Combining the two would warm different thread
+        // IDs than the workload benchmarks, so reject it rather than silently
+        // prefilling the wrong threads.
+        if args.threads_per_owner > 1 {
+            return Err(
+                "--prefill-threads is incompatible with --threads-per-owner > 1 (prefill would \
+                 warm different thread IDs than the measured slotted threads)"
+                    .to_string(),
+            );
         }
         if let Some(min_sweep_users) = args.sweep_users.iter().min()
             && args.prefill_threads > *min_sweep_users
@@ -1704,6 +1776,9 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
         active_thread_count: args.active_thread_count,
+        threads_per_owner: args.threads_per_owner,
+        turn_state_backend: args.turn_state_backend,
+        gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
         prefill_turns_per_thread: args.prefill_turns_per_thread,
