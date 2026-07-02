@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod assertions;
 pub mod builder;
+pub mod capability_backend;
 pub mod config;
 pub mod delivery;
 pub mod extension_surface;
