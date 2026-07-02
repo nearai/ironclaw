@@ -69,8 +69,8 @@ use crate::channels::web::platform::static_files::{
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
     font_geist_mono_variable_handler, font_geist_pixel_square_handler, font_geist_variable_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
-    i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
-    project_redirect_handler, theme_css_handler, theme_init_handler,
+    i18n_zh_handler, index_handler, integration_icon_handler, js_handler, project_file_handler,
+    project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -512,6 +512,7 @@ pub async fn start_server(
             "/fonts/GeistPixel-Square.woff2",
             get(font_geist_pixel_square_handler),
         )
+        .route("/icons/integrations/{file}", get(integration_icon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))

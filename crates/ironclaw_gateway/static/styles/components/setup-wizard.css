@@ -242,6 +242,16 @@
   border-radius: var(--radius-lg);
 }
 
+.nux-channel-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+  margin-right: var(--v2-space-3);
+}
+
 .nux-channel-info {
   display: flex;
   flex-direction: column;

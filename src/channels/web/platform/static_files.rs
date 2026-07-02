@@ -772,6 +772,23 @@ pub(crate) async fn font_geist_pixel_square_handler() -> impl IntoResponse {
     font_response(assets::FONT_GEIST_PIXEL_SQUARE)
 }
 
+/// Integration provider icons (`/icons/integrations/{file}.png`) — embedded
+/// App Store artwork, immutable like the fonts.
+pub(crate) async fn integration_icon_handler(Path(file): Path<String>) -> Response {
+    let name = file.strip_suffix(".png").unwrap_or(&file);
+    match assets::integration_icon(name) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub(crate) async fn i18n_index_handler() -> impl IntoResponse {
     (
         [

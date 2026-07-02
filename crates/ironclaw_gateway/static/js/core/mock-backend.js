@@ -157,10 +157,10 @@ window.NUX_DATA = {
   // MOCK: Channels to highlight in the guided setup. `name` must match the
   // extension registry name so install/configure uses the real flow.
   setupChannels: [
-    { name: 'telegram', label: 'Telegram', blurb: 'Chat with your agent from your phone, on the go.' },
-    { name: 'slack', label: 'Slack', blurb: 'Bring your agent into the place your team already works.' },
-    { name: 'discord', label: 'Discord', blurb: 'Run your agent inside your community server.' },
-    { name: 'whatsapp', label: 'WhatsApp', blurb: 'Message your agent like any other contact.' },
+    { name: 'telegram', icon: '/icons/integrations/telegram.png', label: 'Telegram', blurb: 'Chat with your agent from your phone, on the go.' },
+    { name: 'slack', icon: '/icons/integrations/slack.png', label: 'Slack', blurb: 'Bring your agent into the place your team already works.' },
+    { name: 'discord', icon: '/icons/integrations/discord.png', label: 'Discord', blurb: 'Run your agent inside your community server.' },
+    { name: 'whatsapp', icon: '/icons/integrations/whatsapp.png', label: 'WhatsApp', blurb: 'Message your agent like any other contact.' },
   ],
 
   // MOCK: Curated integration catalog for the first-class Integrations
@@ -169,15 +169,15 @@ window.NUX_DATA = {
   // (`?integrations=gmail,slack`). Entries with no registry match render as
   // "ask the agent to connect it" cards.
   integrationCatalog: [
-    { id: 'gmail', label: 'Gmail', glyph: '\u2709', blurb: 'Read, triage, label, and draft email on your behalf.' },
-    { id: 'google_calendar', label: 'Google Calendar', glyph: '\u29D7', blurb: 'See your schedule, prep you for meetings, and block time.' },
-    { id: 'google_sheets', label: 'Google Sheets', glyph: '\u2261', blurb: 'Append rows, build reports, and keep trackers up to date.' },
-    { id: 'slack', label: 'Slack', glyph: '\u2318', blurb: 'Chat with your agent and post updates where your team works.' },
-    { id: 'telegram', label: 'Telegram', glyph: '\u2708', blurb: 'Message your agent from your phone, anywhere.' },
-    { id: 'discord', label: 'Discord', glyph: '\u2756', blurb: 'Run your agent inside your community server.' },
-    { id: 'whatsapp', label: 'WhatsApp', glyph: '\u260E', blurb: 'Talk to your agent like any other contact.' },
-    { id: 'github', label: 'GitHub', glyph: '\u2387', blurb: 'Watch repos, summarize releases, and track issues.' },
-    { id: 'linear', label: 'Linear', glyph: '\u2713', blurb: 'Create and update tickets straight from chat.' },
+    { id: 'gmail', icon: '/icons/integrations/gmail.png', label: 'Gmail', glyph: '\u2709', blurb: 'Read, triage, label, and draft email on your behalf.' },
+    { id: 'google_calendar', icon: '/icons/integrations/google_calendar.png', label: 'Google Calendar', glyph: '\u29D7', blurb: 'See your schedule, prep you for meetings, and block time.' },
+    { id: 'google_sheets', icon: '/icons/integrations/google_sheets.png', label: 'Google Sheets', glyph: '\u2261', blurb: 'Append rows, build reports, and keep trackers up to date.' },
+    { id: 'slack', icon: '/icons/integrations/slack.png', label: 'Slack', glyph: '\u2318', blurb: 'Chat with your agent and post updates where your team works.' },
+    { id: 'telegram', icon: '/icons/integrations/telegram.png', label: 'Telegram', glyph: '\u2708', blurb: 'Message your agent from your phone, anywhere.' },
+    { id: 'discord', icon: '/icons/integrations/discord.png', label: 'Discord', glyph: '\u2756', blurb: 'Run your agent inside your community server.' },
+    { id: 'whatsapp', icon: '/icons/integrations/whatsapp.png', label: 'WhatsApp', glyph: '\u260E', blurb: 'Talk to your agent like any other contact.' },
+    { id: 'github', icon: '/icons/integrations/github.png', label: 'GitHub', glyph: '\u2387', blurb: 'Watch repos, summarize releases, and track issues.' },
+    { id: 'linear', icon: '/icons/integrations/linear.png', label: 'Linear', glyph: '\u2713', blurb: 'Create and update tickets straight from chat.' },
   ],
 
   // MOCK: Unified discovery categories. `kinds` map onto real registry entry

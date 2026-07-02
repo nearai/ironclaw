@@ -84,6 +84,7 @@ function renderIntegrations(extensions, registryEntries) {
         kind: entry.kind,
         blurb: entry.description || (catalog && catalog.blurb) || '',
         glyph: catalog && catalog.glyph,
+        icon: catalog && catalog.icon,
         installed,
         state,
         mock: false,
@@ -124,6 +125,7 @@ function renderIntegrations(extensions, registryEntries) {
       kind: null,
       blurb: entry.blurb,
       glyph: entry.glyph,
+      icon: entry.icon,
       installed: null,
       state: isMockConnected ? 'connected' : null,
       mock: isMockConnected,
@@ -153,8 +155,16 @@ function renderIntegrations(extensions, registryEntries) {
     connectedSection.style.display = connectedItems.length > 0 ? '' : 'none';
   }
   if (availableItems.length === 0) {
-    availableGrid.innerHTML = '<div class="discover-empty">'
-      + escapeHtml(I18n.t('integrations.empty')) + '</div>';
+    availableGrid.innerHTML = '<div class="integrations-empty">'
+      + '<div class="integrations-empty-title">' + escapeHtml(I18n.t('integrations.emptyTitle')) + '</div>'
+      + '<div class="integrations-empty-hint">' + escapeHtml(I18n.t('integrations.emptyHint')) + '</div>'
+      + '<button type="button" class="btn-secondary" data-action="integrations-ask">'
+      + escapeHtml(I18n.t('integrations.askAgentGeneric')) + '</button>'
+      + '</div>';
+    availableGrid.querySelector('[data-action="integrations-ask"]')?.addEventListener('click', () => {
+      switchTab('chat');
+      prefillChatPrompt('Connect a new tool for me — ');
+    });
   }
 }
 
@@ -165,12 +175,29 @@ function renderIntegrationCard(item) {
   const header = document.createElement('div');
   header.className = 'integration-card-header';
 
-  if (item.glyph) {
+  if (item.icon) {
+    // Real provider app mark (committed asset under /icons/integrations/),
+    // full-square artwork rounded by CSS.
+    const icon = document.createElement('img');
+    icon.className = 'integration-icon';
+    icon.src = item.icon;
+    icon.alt = '';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.loading = 'lazy';
+    header.appendChild(icon);
+  } else if (item.glyph) {
     const glyph = document.createElement('span');
     glyph.className = 'integration-glyph';
     glyph.setAttribute('aria-hidden', 'true');
     glyph.textContent = item.glyph;
     header.appendChild(glyph);
+  } else {
+    // Registry-only entries (custom tools/MCP servers) get a neutral chip.
+    const fallback = document.createElement('span');
+    fallback.className = 'integration-glyph';
+    fallback.setAttribute('aria-hidden', 'true');
+    fallback.textContent = (item.label || '?').charAt(0).toUpperCase();
+    header.appendChild(fallback);
   }
 
   const name = document.createElement('span');

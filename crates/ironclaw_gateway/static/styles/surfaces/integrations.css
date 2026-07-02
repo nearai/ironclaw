@@ -59,14 +59,51 @@
   min-width: 0;
 }
 
+.integrations-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--v2-space-2);
+  padding: var(--v2-space-8) var(--v2-space-4);
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--v2-radius-md);
+}
+
+.integrations-empty-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.integrations-empty-hint {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  max-width: 420px;
+  line-height: 1.5;
+  margin-bottom: var(--v2-space-2);
+}
+
+/* Real provider app marks: full-square App Store artwork, rounded here
+   so every icon crops identically (design-system radius-sm). */
+.integration-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
 .integration-glyph {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
-  border-radius: var(--radius);
+  border-radius: var(--v2-radius-sm);
   background: var(--accent-subtle);
   color: var(--accent);
   font-size: var(--text-base);

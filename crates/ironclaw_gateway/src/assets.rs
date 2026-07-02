@@ -178,6 +178,27 @@ pub const FONT_GEIST_MONO_VARIABLE: &[u8] =
 pub const FONT_GEIST_PIXEL_SQUARE: &[u8] =
     include_bytes!("../static/fonts/GeistPixel-Square.woff2");
 
+// ==================== Integration Icons ====================
+// Real provider app marks (App Store artwork, resized to 128px) for the
+// Integrations surface and setup wizard. Served under
+// `/icons/integrations/{name}.png`; the frontend applies the border-radius.
+
+/// Look up an embedded integration icon by provider id.
+pub fn integration_icon(name: &str) -> Option<&'static [u8]> {
+    Some(match name {
+        "gmail" => include_bytes!("../static/icons/integrations/gmail.png"),
+        "google_calendar" => include_bytes!("../static/icons/integrations/google_calendar.png"),
+        "google_sheets" => include_bytes!("../static/icons/integrations/google_sheets.png"),
+        "telegram" => include_bytes!("../static/icons/integrations/telegram.png"),
+        "slack" => include_bytes!("../static/icons/integrations/slack.png"),
+        "discord" => include_bytes!("../static/icons/integrations/discord.png"),
+        "whatsapp" => include_bytes!("../static/icons/integrations/whatsapp.png"),
+        "github" => include_bytes!("../static/icons/integrations/github.png"),
+        "linear" => include_bytes!("../static/icons/integrations/linear.png"),
+        _ => return None,
+    })
+}
+
 // ==================== Internationalization ====================
 
 /// i18n core library.

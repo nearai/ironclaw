@@ -58,6 +58,7 @@ const passthrough = [
   ['favicon.ico', 'favicon.ico'],
   ['i18n', 'i18n'],
   ['fonts', 'fonts'],
+  ['icons', 'icons'],
 ];
 for (const [src, dest] of passthrough) {
   cpSync(join(staticDir, src), join(distDir, dest), { recursive: true });

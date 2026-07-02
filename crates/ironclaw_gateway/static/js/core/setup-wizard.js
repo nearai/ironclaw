@@ -222,6 +222,7 @@ function loadNuxWizardChannels() {
           name: ch.name,
           label: ch.label,
           blurb: ch.blurb,
+          icon: ch.icon,
           kind: (registry && registry.kind) || (installed && installed.kind) || 'wasm_channel',
           installed,
           status: nuxChannelStatus(installed),
@@ -284,6 +285,16 @@ function renderNuxWizardChannelList(list, channels) {
   channels.forEach((channel) => {
     const row = document.createElement('div');
     row.className = 'nux-channel-row';
+
+    // Provider app mark (committed asset) next to the channel name.
+    if (channel.icon) {
+      const icon = document.createElement('img');
+      icon.className = 'nux-channel-icon';
+      icon.src = channel.icon;
+      icon.alt = '';
+      icon.setAttribute('aria-hidden', 'true');
+      row.appendChild(icon);
+    }
 
     const info = document.createElement('div');
     info.className = 'nux-channel-info';
