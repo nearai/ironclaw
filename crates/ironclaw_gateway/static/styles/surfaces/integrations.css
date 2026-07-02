@@ -132,7 +132,7 @@
   margin-left: auto;
   flex-shrink: 0;
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--bg-tertiary);
   color: var(--text-muted);
   font-size: 10px;
@@ -159,7 +159,7 @@
   font-size: var(--text-xs);
   font-weight: 600;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
 }
 
 .integration-badge.connected {

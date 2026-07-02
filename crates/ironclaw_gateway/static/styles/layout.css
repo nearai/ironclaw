@@ -38,7 +38,7 @@
   max-width: 320px;
   padding: 4px 9px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--bg-secondary);
   color: var(--text);
   display: inline-flex;
@@ -104,7 +104,7 @@
   padding: 6px 14px;
   background: var(--accent-subtle);
   border: 1px solid var(--accent-border-subtle);
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   color: var(--accent);
   font-size: var(--text-sm);
   font-weight: 500;

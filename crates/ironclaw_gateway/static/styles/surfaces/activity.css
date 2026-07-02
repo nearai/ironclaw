@@ -57,7 +57,7 @@
 .activity-tool-block {
   margin: 4px 0;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   overflow: hidden;
 }
 
@@ -65,7 +65,7 @@
   padding: 6px 10px;
   cursor: pointer;
   background: var(--bg-secondary);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
 }
 
@@ -93,7 +93,7 @@
 .activity-tool-output {
   padding: 8px 10px;
   margin: 0;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   overflow-x: auto;
   max-height: 200px;
   overflow-y: auto;
@@ -176,7 +176,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 .activity-toolbar select:focus {

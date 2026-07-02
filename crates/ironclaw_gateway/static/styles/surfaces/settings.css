@@ -181,7 +181,7 @@
   padding: 10px 12px;
   margin: 0 -12px;
   border-bottom: 1px solid rgba(255,255,255,0.04);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   gap: var(--space-4);
   max-height: 80px;
   overflow: hidden;
@@ -242,7 +242,7 @@
   height: 24px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: calc(var(--v2-radius-md) + 2px);
   cursor: pointer;
   transition: background 200ms ease, border-color 200ms ease;
   flex-shrink: 0;
@@ -255,7 +255,7 @@
   left: 2px;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   background: var(--text-secondary);
   transition: transform 200ms var(--ease-spring), background 200ms ease;
 }
@@ -277,7 +277,7 @@
 }
 
 .settings-saved-indicator {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--success);
   opacity: 0;
   transform: scale(0.5);
@@ -304,7 +304,7 @@
   border: 1px solid var(--warning-border);
   border-radius: var(--radius);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   margin: 8px 16px;
   animation: settingsFadeIn 0.25s ease forwards;
 }
@@ -316,7 +316,7 @@
 .restart-banner-btn {
   padding: 4px 12px;
   background: var(--warning);
-  color: #09090b;
+  color: var(--v2-inverse);
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
@@ -417,7 +417,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .generated-image-path {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   padding: 4px 8px;
   background: var(--bg-secondary);

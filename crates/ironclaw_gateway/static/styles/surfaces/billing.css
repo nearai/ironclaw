@@ -167,14 +167,14 @@
 
 .billing-usage-bar {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--hover-subtle);
   overflow: hidden;
 }
 
 .billing-usage-bar-fill {
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--accent);
   transition: width 0.4s ease;
 }
@@ -229,7 +229,7 @@
 .billing-spark-bar {
   width: 100%;
   max-width: 36px;
-  border-radius: 6px 6px 2px 2px;
+  border-radius: var(--v2-radius-xs) 6px 2px 2px;
   background: var(--accent-soft);
 }
 
@@ -272,7 +272,7 @@
   top: -9px;
   left: 14px;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--accent);
   color: var(--text-on-accent);
   font-family: var(--font-pixel);
@@ -377,7 +377,7 @@
   border-radius: var(--radius-xl, 20px);
   padding: 28px;
   text-align: center;
-  box-shadow: 0 40px 90px -40px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--v2-shadow-modal);
   animation: billing-reminder-in 0.25s var(--ease-out-expo);
 }
 

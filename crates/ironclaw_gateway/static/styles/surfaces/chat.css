@@ -147,7 +147,7 @@
   border: 1px solid var(--border);
   background: var(--bg-primary);
   color: var(--text-secondary);
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   font-size: var(--text-xs);
   padding: 2px 8px;
   opacity: 0;
@@ -231,7 +231,7 @@
 .message code {
   background: var(--code-bg);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--v2-radius-xs);
   font-size: var(--text-sm);
 }
 
@@ -293,7 +293,7 @@
   height: 12px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   animation: spin 0.6s linear infinite;
 }
 
@@ -343,7 +343,7 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
   margin: 4px 0;
-  border-radius: 3px;
+  border-radius: var(--v2-radius-xs);
 }
 
 .activity-skill-header {
@@ -377,7 +377,7 @@
 .activity-thinking-dot {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   background: var(--text-secondary);
   animation: thinkingPulse 1.4s ease-in-out infinite;
 }
@@ -467,7 +467,7 @@
   height: 12px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   animation: spin 0.6s linear infinite;
 }
 
@@ -773,10 +773,10 @@
 }
 
 .plan-status-badge {
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--v2-radius-md);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -810,7 +810,7 @@
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-size: 14px;
+  font-size: var(--v2-font-size-body);
 }
 
 .plan-step-text {
@@ -834,7 +834,7 @@
   height: 12px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   animation: plan-spin 0.8s linear infinite;
 }
 
@@ -856,7 +856,7 @@
   padding: 6px 12px;
   margin: 4px 0;
   font-size: 0.85em;
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
 }
 
 .tool-calls-header {
@@ -1085,7 +1085,7 @@
   width: 100%;
   padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   background: var(--bg);
   color: var(--text);
   font-size: var(--text-sm);
@@ -1222,7 +1222,7 @@
   padding: 6px 14px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--v2-radius-lg);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -1243,7 +1243,7 @@
   background: var(--accent);
   color: var(--text-on-accent);
   border: none;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -1474,7 +1474,7 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--v2-radius-xs);
   background: var(--border);
   color: var(--text-secondary);
   margin-right: 6px;
@@ -1497,7 +1497,7 @@
   font-weight: 700;
   background: var(--accent);
   color: var(--bg);
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   padding: 0 4px;
   margin-left: auto;
   flex-shrink: 0;
@@ -1620,7 +1620,7 @@
 .image-preview {
   width: 60px;
   height: 60px;
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   object-fit: cover;
   display: block;
 }
@@ -1631,7 +1631,7 @@
   right: -6px;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   background: var(--danger);
   color: var(--text-on-danger);
   border: none;
@@ -1662,7 +1662,7 @@
   width: min(100%, 512px);
   max-width: 512px;
   margin: 8px 0;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   overflow: hidden;
   border: 1px solid var(--border);
 }
@@ -1679,7 +1679,7 @@
   padding: 18px 16px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
   line-height: 1.4;
 }
 
@@ -1786,7 +1786,7 @@
 .flow-cascade-chip img {
   width: 15px;
   height: 15px;
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   object-fit: cover;
 }
 

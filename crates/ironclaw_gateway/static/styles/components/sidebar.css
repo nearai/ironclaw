@@ -74,7 +74,7 @@
   padding: 2px 4px;
   background: var(--bg);
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   font-family: inherit;
   font-size: 15px;
   font-weight: 500;
@@ -146,7 +146,7 @@
   font-size: 10px;
   color: var(--text-dimmed);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   padding: 1px 5px;
   line-height: 1.4;
 }
@@ -172,7 +172,7 @@
   padding: 8px 12px;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   color: var(--text-muted);
   font-size: var(--text-base);
   font-weight: 500;
@@ -186,7 +186,7 @@
 /* Nav labels use the pixel face like the landing nav links */
 .sidebar-nav-item .sidebar-label {
   font-family: var(--font-pixel);
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   text-transform: uppercase;
   letter-spacing: var(--v2-tracking-tag);
 }
@@ -223,10 +223,10 @@
   height: 18px;
   margin-left: auto;
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   background: var(--accent);
   color: var(--text-on-accent);
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   font-weight: 700;
   line-height: 1;
 }
@@ -288,7 +288,7 @@
   border: none;
   border-radius: var(--radius);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--v2-font-size-body);
   cursor: pointer;
   text-decoration: none;
   transition: background var(--transition-fast), color var(--transition-fast);
@@ -435,14 +435,14 @@
   padding: 3px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
 }
 
 .tasks-segment {
   padding: 5px 16px;
   background: none;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   font-weight: 500;

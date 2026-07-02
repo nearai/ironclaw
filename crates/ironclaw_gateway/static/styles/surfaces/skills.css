@@ -319,7 +319,7 @@
   background: none;
   border: none;
   color: var(--text-secondary);
-  font-size: 20px;
+  font-size: var(--v2-font-size-title);
   line-height: 1;
   cursor: pointer;
   padding: 2px 6px;

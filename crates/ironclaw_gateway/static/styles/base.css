@@ -179,7 +179,7 @@ body {
 
 .skeleton-bar {
   height: 12px;
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--hover-subtle) 50%, var(--bg-tertiary) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
@@ -254,7 +254,7 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   .modal {
     width: 100%;
     max-width: 100%;
-    border-radius: 12px 12px 0 0;
+    border-radius: calc(var(--v2-radius-md) + 2px) 12px 0 0;
     animation: bottomSheetSlideIn 300ms var(--ease-out-expo);
     max-height: 85vh;
     overflow-y: auto;

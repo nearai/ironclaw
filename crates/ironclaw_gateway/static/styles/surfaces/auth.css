@@ -31,7 +31,7 @@
 .auth-card-login {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--v2-radius-lg);
   padding: 28px 28px 24px;
   width: 100%;
   display: flex;

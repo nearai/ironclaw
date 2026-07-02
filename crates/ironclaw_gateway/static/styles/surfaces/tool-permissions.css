@@ -70,7 +70,7 @@
 .tool-default-badge {
   display: inline-block;
   padding: 2px 7px;
-  border-radius: 10px;
+  border-radius: var(--v2-radius-md);
   font-size: 0.7rem;
   background: var(--bg-tertiary);
   color: var(--text-muted);

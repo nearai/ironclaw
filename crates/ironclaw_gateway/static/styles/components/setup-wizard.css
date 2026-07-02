@@ -19,7 +19,7 @@
   flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--v2-radius-lg);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
@@ -55,7 +55,7 @@
   justify-content: center;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   border: 1px solid var(--border);
   font-size: var(--text-xs);
   font-weight: 600;
@@ -273,7 +273,7 @@
   font-size: 10px;
   font-weight: 500;
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
 }
 
 .nux-channel-badge.connected {

@@ -12,7 +12,7 @@
 .share-modal {
   background: var(--bg-primary, #1a1a2e);
   border: 1px solid var(--border, #333);
-  border-radius: 12px;
+  border-radius: calc(var(--v2-radius-md) + 2px);
   padding: 24px;
   width: 420px;
   max-width: 92vw;
@@ -25,7 +25,7 @@
   margin-bottom: 16px;
 }
 .share-title {
-  font-size: 16px;
+  font-size: var(--v2-font-size-body-lg);
   font-weight: 600;
   color: var(--text-primary, #eee);
 }
@@ -43,7 +43,7 @@
 }
 .share-preview {
   margin-bottom: 20px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   overflow: hidden;
   background: #111;
 }
@@ -60,7 +60,7 @@
 .share-btn {
   width: 44px;
   height: 44px;
-  border-radius: 10px;
+  border-radius: var(--v2-radius-md);
   border: 1px solid var(--border, #333);
   background: var(--bg-secondary, #222);
   color: var(--text-primary, #ddd);
@@ -82,7 +82,7 @@
 .share-facebook:hover { color: #1877f2; }
 .share-toast {
   text-align: center;
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
   color: var(--text-muted, #888);
   margin-top: 12px;
   height: 20px;
@@ -97,6 +97,6 @@
   .share-modal {
     width: 100%;
     max-width: 100%;
-    border-radius: 12px 12px 0 0;
+    border-radius: calc(var(--v2-radius-md) + 2px) 12px 0 0;
   }
 }

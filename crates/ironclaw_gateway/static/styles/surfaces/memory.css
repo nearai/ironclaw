@@ -251,7 +251,7 @@
 .memory-mode-btn {
   padding: 3px 10px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   background: transparent;
   color: var(--text-secondary);
   font-size: var(--v2-font-size-caption);
