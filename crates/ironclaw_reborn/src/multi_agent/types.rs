@@ -114,21 +114,39 @@ impl TaskResult {
 pub struct DelegationPlan {
     pub execute_directly: bool,
     pub subtasks: Vec<String>,
+    /// Human-readable explanation of why this decision was made.
+    #[serde(default)]
+    pub reason: String,
 }
 
 impl DelegationPlan {
-    pub fn execute_directly() -> Self {
+    /// Execute the task locally — no delegation.
+    pub fn local(reason: impl Into<String>) -> Self {
         Self {
             execute_directly: true,
             subtasks: Vec::new(),
+            reason: reason.into(),
         }
     }
 
-    pub fn delegate(subtasks: Vec<String>) -> Self {
+    /// Backward-compatible alias for `local`.
+    pub fn execute_directly() -> Self {
+        Self::local("direct execution")
+    }
+
+    /// Split into independent subtasks that run as delegated AgentRuns.
+    pub fn split(subtasks: Vec<String>, reason: impl Into<String>) -> Self {
         Self {
             execute_directly: false,
             subtasks,
+            reason: reason.into(),
         }
+    }
+
+    /// Backward-compatible alias for `split` (no reason string).
+    pub fn delegate(subtasks: Vec<String>) -> Self {
+        let n = subtasks.len();
+        Self::split(subtasks, format!("split into {n} independent tasks"))
     }
 }
 

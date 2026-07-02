@@ -14,73 +14,75 @@ pub struct HeuristicDelegationPlanner;
 impl DelegationPlanner for HeuristicDelegationPlanner {
     fn plan(&self, task: &Task, ctx: &AgentContext) -> DelegationPlan {
         if !ctx.can_delegate(task) {
-            return DelegationPlan::execute_directly();
+            return DelegationPlan::local(format!(
+                "depth {} reached max_depth {}",
+                task.depth, ctx.max_depth
+            ));
         }
 
         let normalized = task.description.trim();
         if normalized.is_empty() {
-            return DelegationPlan::execute_directly();
+            return DelegationPlan::local("empty task");
         }
 
-        if let Some(subtasks) = split_on_delimiters(normalized) {
+        if let Some((subtasks, delim)) = split_on_delimiters_with_delim(normalized) {
             if subtasks.len() > 1 {
-                return DelegationPlan::delegate(subtasks);
+                return DelegationPlan::split(
+                    subtasks.clone(),
+                    format!(
+                        "{} independent parts split on '{delim}'",
+                        subtasks.len()
+                    ),
+                );
             }
         }
 
         let words = normalized.split_whitespace().count();
         if words > 8 {
             let midpoint = words / 2;
-            let mut split = normalized.split_whitespace();
-            let first: Vec<_> = split.by_ref().take(midpoint).collect();
-            let second: Vec<_> = split.collect();
+            let mut iter = normalized.split_whitespace();
+            let first: Vec<_> = iter.by_ref().take(midpoint).collect();
+            let second: Vec<_> = iter.collect();
             if !first.is_empty() && !second.is_empty() {
-                return DelegationPlan::delegate(vec![
-                    first.join(" "),
-                    second.join(" "),
-                ]);
+                return DelegationPlan::split(
+                    vec![first.join(" "), second.join(" ")],
+                    format!("long task ({words} words) halved"),
+                );
             }
         }
 
-        DelegationPlan::execute_directly()
+        DelegationPlan::local(format!(
+            "simple task ({} words, no independent parts found)",
+            normalized.split_whitespace().count()
+        ))
     }
 }
 
-fn split_on_delimiters(description: &str) -> Option<Vec<String>> {
+fn split_on_delimiters_with_delim(description: &str) -> Option<(Vec<String>, &'static str)> {
     let lower = description.to_ascii_lowercase();
-    let delimiter = if lower.contains(';') {
-        ';'
-    } else if lower.contains(" and ") {
-        return split_on_and(description);
-    } else {
-        return None;
-    };
-
-    let parts = description
-        .split(delimiter)
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if parts.len() > 1 {
-        Some(parts)
-    } else {
-        None
+    if lower.contains(';') {
+        let parts: Vec<String> = description
+            .split(';')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if parts.len() > 1 {
+            return Some((parts, ";"));
+        }
     }
-}
-
-fn split_on_and(description: &str) -> Option<Vec<String>> {
-    let parts = description
-        .split(" and ")
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if parts.len() > 1 {
-        Some(parts)
-    } else {
-        None
+    if lower.contains(" and ") {
+        let parts: Vec<String> = description
+            .split(" and ")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if parts.len() > 1 {
+            return Some((parts, "and"));
+        }
     }
+    None
 }
 
 #[cfg(test)]

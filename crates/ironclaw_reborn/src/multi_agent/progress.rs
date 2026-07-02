@@ -127,7 +127,6 @@ fn render_execution_plan(
     report: &MultiAgentRunReport,
     c: &Palette,
 ) {
-    // Build parent → children map (sorted by creation time for stable output)
     let mut by_parent: HashMap<Option<String>, Vec<&AgentJob>> = HashMap::new();
     for job in &report.jobs {
         by_parent
@@ -138,13 +137,10 @@ fn render_execution_plan(
     for v in by_parent.values_mut() {
         v.sort_by_key(|j| j.created_at);
     }
-
-    // Render one level: we only go two levels deep (master + its children)
-    // to keep the tree compact. Deeper subtrees show recursion counts.
-    render_tree_node(buf, &by_parent, None, "", c);
+    render_job_node(buf, &by_parent, None, "", c);
 }
 
-fn render_tree_node(
+fn render_job_node(
     buf: &mut String,
     by_parent: &HashMap<Option<String>, Vec<&AgentJob>>,
     parent_id: Option<&str>,
@@ -156,91 +152,75 @@ fn render_tree_node(
         Some(v) => v,
         None => return,
     };
-
-    // For the root level we don't draw a branch; for nested we do.
     let root_level = parent_id.is_none();
-
-    if root_level {
-        // Print the master node header
-        if let Some(master) = children.iter().find(|j| j.agent_kind == AgentKind::Master) {
-            buf.push_str(&format!("{}\n", c.bold("MasterAgent")));
-            // Print local work label
-            let local_task = master
-                .result
-                .as_deref()
-                .unwrap_or(&master.task);
-            let local_short = truncate(local_task, 55);
-            buf.push_str(&format!(
-                "{}  {}\n",
-                c.dim("├── Local:"),
-                local_short,
-            ));
-            // Now render children of master
-            render_children_of(buf, by_parent, &master.id, c);
-        }
-    } else {
-        for (i, job) in children.iter().enumerate() {
-            let is_last = i == children.len() - 1;
-            let branch = if is_last { "└── " } else { "├── " };
-            let mark = status_mark(job.status);
-            let colored_mark = status_colored(mark, job.status, c);
-            let name = display_name(job);
-            let task = truncate(&job.task, 45);
-            let n_children = by_parent
-                .get(&Some(job.id.clone()))
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let sub_tag = if n_children > 0 {
-                format!("  {} sub-runs", n_children)
-            } else {
-                String::new()
-            };
-            buf.push_str(&format!(
-                "{prefix}{branch}{}: {} {}{}\n",
-                c.bold(&name),
-                task,
-                colored_mark,
-                c.dim(&sub_tag),
-            ));
-        }
-    }
-}
-
-fn render_children_of(
-    buf: &mut String,
-    by_parent: &HashMap<Option<String>, Vec<&AgentJob>>,
-    parent_id: &str,
-    c: &Palette,
-) {
-    let key = Some(parent_id.to_string());
-    let children = match by_parent.get(&key) {
-        Some(v) => v,
-        None => return,
-    };
 
     for (i, job) in children.iter().enumerate() {
         let is_last = i == children.len() - 1;
-        let branch = if is_last { "└── " } else { "├── " };
+        let branch = if root_level {
+            ""
+        } else if is_last {
+            "└── "
+        } else {
+            "├── "
+        };
+
         let mark = status_mark(job.status);
         let colored_mark = status_colored(mark, job.status, c);
         let name = display_name(job);
-        let task = truncate(&job.task, 45);
+        let task_short = truncate(&job.task, 50);
         let n_children = by_parent
             .get(&Some(job.id.clone()))
             .map(|v| v.len())
             .unwrap_or(0);
-        let depth_tag = if n_children > 0 {
-            format!("  {} delegated", n_children)
+
+        // Decision annotation (what the planner decided for this job)
+        let decision_tag = job
+            .plan_decision
+            .as_deref()
+            .map(|d| format!("  {}", c.dim(&format!("({d})"))))
+            .unwrap_or_default();
+
+        buf.push_str(&format!(
+            "{prefix}{branch}{} {colored_mark}{decision_tag}\n",
+            c.bold(&name),
+        ));
+
+        // Show the task on the indent continuation line
+        let cont = if root_level {
+            "    "
+        } else if is_last {
+            "    "
         } else {
-            String::new()
+            "│   "
         };
         buf.push_str(&format!(
-            "{branch}{}: {} {}{}\n",
-            c.bold(&name),
-            task,
-            colored_mark,
-            c.dim(&depth_tag),
+            "{prefix}{cont}{}  {}\n",
+            c.dim("task:"),
+            task_short,
         ));
+
+        // If this job delegated, note how many concurrent tasks were spawned
+        if n_children > 0 {
+            buf.push_str(&format!(
+                "{prefix}{cont}{}  {} concurrent runs  (depth {})\n",
+                c.dim("↳"),
+                1 + n_children, // local + delegated
+                job.depth + 1,
+            ));
+        }
+
+        // Recurse into children
+        let child_prefix = format!(
+            "{prefix}{}",
+            if root_level {
+                ""
+            } else if is_last {
+                "    "
+            } else {
+                "│   "
+            }
+        );
+        render_job_node(buf, by_parent, Some(&job.id), &child_prefix, c);
     }
 }
 

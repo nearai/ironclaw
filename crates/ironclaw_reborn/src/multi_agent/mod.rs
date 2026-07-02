@@ -324,7 +324,7 @@ mod tests {
         // 5. All AgentRun results are aggregated into one final response.
         assert!(report.final_summary.contains("successful node(s)"));
         let rendered = format_run_output(&report, true);
-        assert!(rendered.contains("Job tree:"));
-        assert!(rendered.contains("Final aggregated result:"));
+        assert!(rendered.contains("Execution Plan"));
+        assert!(rendered.contains("Final Result"));
     }
 }

@@ -51,6 +51,10 @@ pub struct AgentJob {
     pub claim_lease: Option<ClaimLease>,
     pub max_retries: u32,
     pub retry_count: u32,
+    /// The planning decision this AgentRun made: "local (reason)" or
+    /// "split: N tasks (reason)".  Set once during execution, never updated.
+    #[serde(default)]
+    pub plan_decision: Option<String>,
 }
 
 impl AgentJob {
@@ -78,6 +82,7 @@ impl AgentJob {
             claim_lease: None,
             max_retries,
             retry_count: 0,
+            plan_decision: None,
         }
     }
 
@@ -104,6 +109,7 @@ impl AgentJob {
             claim_lease: None,
             max_retries,
             retry_count: 0,
+            plan_decision: None,
         }
     }
 
