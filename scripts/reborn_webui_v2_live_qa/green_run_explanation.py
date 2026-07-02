@@ -42,7 +42,7 @@ class _CaseExplanation:
     text_excerpt_present: bool
     literal_required_text_matched: bool
     semantic_judge_used: bool
-    semantic_judge_reason: object
+    semantic_judge_reason: str | None
     semantic_judge_summary: dict[str, object] | None
 
     def success_reasons(self) -> list[str]:
@@ -133,6 +133,7 @@ def _explain_case(result: ProbeResult) -> _CaseExplanation:
     details = result.details if isinstance(result.details, dict) else {}
     required_text = _required_text_from_details(details.get("required_text"))
     text_excerpt = str(details.get("text_excerpt") or "")
+    semantic_judge_reason = _semantic_judge_reason(details)
     return _CaseExplanation(
         name=str(details.get("case") or result.mode.rsplit(":", 1)[-1]),
         mode=result.mode,
@@ -140,20 +141,51 @@ def _explain_case(result: ProbeResult) -> _CaseExplanation:
         blocked=bool(details.get("blocked")),
         required_text=required_text,
         text_excerpt_present=bool(text_excerpt),
-        literal_required_text_matched=bool(required_text)
-        and required_text_matches(text_excerpt, required_text),
-        semantic_judge_used=bool(details.get("semantic_judge_used")),
-        semantic_judge_reason=details.get("semantic_judge_reason"),
+        literal_required_text_matched=_literal_required_text_matched(
+            required_text=required_text,
+            text_excerpt=text_excerpt,
+            semantic_judge_reason=semantic_judge_reason,
+        ),
+        semantic_judge_used=(
+            bool(details.get("semantic_judge_used"))
+            or semantic_judge_reason == "semantic_judge_completed"
+        ),
+        semantic_judge_reason=semantic_judge_reason or None,
         semantic_judge_summary=_semantic_judge_summary(details),
     )
 
 
 def _required_text_from_details(value: object) -> list[str]:
     if isinstance(value, list):
-        return [str(item) for item in value if str(item)]
+        required_text: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item)
+            if text:
+                required_text.append(text)
+        return required_text
     if isinstance(value, str) and value:
         return [value]
     return []
+
+
+def _semantic_judge_reason(details: dict[str, object]) -> str:
+    reason = details.get("semantic_judge_reason")
+    return reason if isinstance(reason, str) else ""
+
+
+def _literal_required_text_matched(
+    *,
+    required_text: list[str],
+    text_excerpt: str,
+    semantic_judge_reason: str,
+) -> bool:
+    if semantic_judge_reason == "literal_required_text_matched":
+        return True
+    if semantic_judge_reason == "semantic_judge_completed":
+        return False
+    return bool(required_text) and required_text_matches(text_excerpt, required_text)
 
 
 def _semantic_judge_summary(details: dict[str, object]) -> dict[str, object] | None:

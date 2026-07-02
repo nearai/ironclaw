@@ -29,8 +29,8 @@ class GreenRunExplanationTests(unittest.TestCase):
                 latency_ms=1,
                 details={
                     "case": "literal_case",
-                    "required_text": ["routine"],
-                    "text_excerpt": "Routine created successfully.",
+                    "required_text": [None, "", "routine"],
+                    "text_excerpt": "Truncated excerpt without the matched word.",
                     "semantic_judge_used": False,
                     "semantic_judge_reason": "literal_required_text_matched",
                 },
@@ -44,7 +44,6 @@ class GreenRunExplanationTests(unittest.TestCase):
                     "case": "semantic_case",
                     "required_text": ["routine"],
                     "text_excerpt": "Schedule: every hour. Trigger ID: trigger-123.",
-                    "semantic_judge_used": True,
                     "semantic_judge_reason": "semantic_judge_completed",
                     "semantic_judge": {
                         "completed": True,
@@ -78,6 +77,9 @@ class GreenRunExplanationTests(unittest.TestCase):
         self.assertEqual(payload["successful_cases_using_semantic_judge"], 1)
         self.assertIn("All 3 cases were green", payload["why_things_were_green"])
         cases_by_name = {case["case"]: case for case in payload["cases"]}
+        self.assertEqual(cases_by_name["literal_case"]["required_text"], ["routine"])
+        self.assertTrue(cases_by_name["literal_case"]["literal_required_text_matched"])
+        self.assertTrue(cases_by_name["semantic_case"]["semantic_judge_used"])
         self.assertEqual(
             cases_by_name["literal_case"]["success_reasons"],
             ["literal_required_text_matched"],
@@ -122,6 +124,46 @@ class GreenRunExplanationTests(unittest.TestCase):
             payload["cases"][0]["success_reasons"],
             ["case_success_reason_unclassified"],
         )
+
+    def test_failed_case_updates_summary_and_message(self):
+        results = [
+            ProbeResult(
+                provider="test",
+                mode="live:passed_case",
+                success=True,
+                latency_ms=1,
+                details={
+                    "case": "passed_case",
+                    "required_text": ["routine"],
+                    "text_excerpt": "Routine created.",
+                },
+            ),
+            ProbeResult(
+                provider="test",
+                mode="live:failed_case",
+                success=False,
+                latency_ms=1,
+                details={
+                    "case": "failed_case",
+                    "error": "setup failed",
+                },
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            path = write_green_run_explanation(output_dir, results)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["total_cases"], 2)
+        self.assertEqual(payload["successful_cases"], 1)
+        self.assertEqual(payload["failed_cases"], 1)
+        self.assertIn(
+            "1 of 2 cases were green; 1 failed.",
+            payload["why_things_were_green"],
+        )
+        cases_by_name = {case["case"]: case for case in payload["cases"]}
+        self.assertEqual(cases_by_name["failed_case"]["success_reasons"], [])
 
 
 if __name__ == "__main__":
