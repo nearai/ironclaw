@@ -18,7 +18,6 @@ function applyEngineModeToTabs() {
   });
   var activeBtn = document.querySelector('.tab-bar button[data-tab].active');
   if (activeBtn && activeBtn.style.display === 'none') switchTab('chat');
-  updateTabIndicator();
 }
 
 function loadProjectsOverview() {
@@ -568,7 +567,7 @@ function applyMissionDetailUpdate(mission) {
   if (currentMissionData && currentMissionData.id === mission.id) {
     const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission);
     currentMissionData = mission;
-    if (currentTab === 'missions' && !currentEngineThreadDetail && shouldRerenderDetail) {
+    if (isTasksSurfaceActive('missions') && !currentEngineThreadDetail && shouldRerenderDetail) {
       renderMissionDetail(currentMissionData);
       return;
     }
@@ -597,7 +596,7 @@ function applyMissionDetailUpdate(mission) {
     });
   }
 
-  if (currentTab === 'missions' && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
+  if (isTasksSurfaceActive('missions') && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
     renderMissionsList(currentMissionList);
     return;
   }
@@ -715,7 +714,6 @@ function loadMissions() {
     var threadData = results[2];
     currentMissionList = listData.missions || [];
     activeWorkStore.rememberMissions(currentMissionList);
-    renderMissionsSummary(summary);
     renderMissionsList(currentMissionList);
     renderMissionsActivity(threadData.threads || []);
     enrichMissionProgress(currentMissionList);
@@ -730,22 +728,17 @@ function loadMissions() {
   });
 }
 
-function renderMissionsSummary(s) {
-  document.getElementById('missions-summary').innerHTML =
-    '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.total')) + '</span><span class="ms-summary-value">' + s.total + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.active')) + '</span><span class="ms-summary-value green">' + s.active + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.paused')) + '</span><span class="ms-summary-value amber">' + s.paused + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.completed')) + '</span><span class="ms-summary-value blue">' + s.completed + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.failed')) + '</span><span class="ms-summary-value red">' + s.failed + '</span></div>';
-}
-
+// Kanban board: one column per status with the count in the column header
+// (replaces the old count tiles + flat list). Cards open the task detail
+// sheet; statuses change through the sheet's pause/resume actions.
 function renderMissionsList(missions) {
-  var col = document.getElementById('missions-list-col');
+  var board = document.getElementById('tasks-kanban');
   var empty = document.getElementById('missions-empty');
   var body = document.getElementById('missions-body');
+  if (!board) return;
 
   if (!missions || missions.length === 0) {
-    if (col) col.innerHTML = '';
+    board.innerHTML = '';
     if (body) body.style.display = 'none';
     empty.style.display = 'block';
     return;
@@ -760,7 +753,6 @@ function renderMissionsList(missions) {
     else groups.Active.push(m);
   });
 
-  var html = '';
   var order = ['Active', 'Paused', 'Completed', 'Failed'];
   var labels = {
     Active: I18n.t('missions.summary.active'),
@@ -769,42 +761,42 @@ function renderMissionsList(missions) {
     Failed: I18n.t('missions.summary.failed')
   };
 
+  var html = '';
   order.forEach(function(status) {
     var list = groups[status];
-    if (!list.length) return;
+    html += '<div class="kanban-col" data-status="' + escapeHtml(status.toLowerCase()) + '">'
+      + '<div class="kanban-col-header">'
+      + '<span class="kanban-col-title">' + escapeHtml(labels[status]) + '</span>'
+      + '<span class="kanban-col-count">' + list.length + '</span>'
+      + '</div>'
+      + '<div class="kanban-col-cards">';
 
-    html += '<div class="ms-section-title">' + escapeHtml(labels[status]) + '</div>';
     list.forEach(function(m) {
-      var badgeClass = m.status === 'Active' ? 'in_progress'
-        : m.status === 'Completed' ? 'completed'
-        : m.status === 'Paused' ? 'pending' : 'failed';
       var progress = activeWorkStore.getMissionProgress(m.id);
       var liveHtml = progress
         ? '<span class="ms-live-tag"><span class="ms-live-dot"></span> Running</span>'
         : '';
-
-      html += '<div class="ms-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
-        + '<div class="ms-card-body">'
-        + '<div class="ms-card-head">'
-        + '<span class="ms-card-name">' + escapeHtml(m.name) + '</span>'
-        + '<span class="badge ' + badgeClass + '">' + escapeHtml(m.status) + '</span>'
-        + '</div>'
-        + '<div class="ms-card-goal">' + escapeHtml(m.goal) + '</div>'
-        + '<div class="ms-card-meta">'
-        + '<span>' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</span>'
-        + '<span>' + m.thread_count + ' threads</span>'
-        + '</div>'
-        + '</div>'
-        + '<div class="ms-card-right">'
+      html += '<div class="kanban-card" data-action="open-task-sheet" data-id="' + escapeHtml(m.id) + '" tabindex="0" role="button">'
+        + '<div class="kanban-card-head">'
+        + '<span class="kanban-card-icon" aria-hidden="true">' + taskIconSvg(m.name + ' ' + (m.goal || '')) + '</span>'
+        + '<span class="kanban-card-name">' + escapeHtml(m.name) + '</span>'
         + liveHtml
-        + '<div><div class="ms-card-threads-num">' + m.thread_count + '</div>'
-        + '<div class="ms-card-threads-label">threads</div></div>'
+        + '</div>'
+        + '<div class="kanban-card-goal">' + escapeHtml(m.goal || '') + '</div>'
+        + '<div class="kanban-card-meta">'
+        + '<span>' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</span>'
+        + '<span>' + m.thread_count + ' ' + escapeHtml(I18n.t('tasks.threads')) + '</span>'
         + '</div>'
         + '</div>';
     });
+
+    if (!list.length) {
+      html += '<div class="kanban-col-empty">' + escapeHtml(I18n.t('tasks.columnEmpty')) + '</div>';
+    }
+    html += '</div></div>';
   });
 
-  col.innerHTML = html;
+  board.innerHTML = html;
 }
 
 function renderMissionsActivity(threads) {
@@ -879,6 +871,7 @@ function openMissionDetail(id) {
       renderMissionDetailInCr(data.mission);
     } else {
       renderMissionDetail(currentMissionData);
+      if (typeof updateHash === 'function') updateHash();
     }
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
@@ -890,6 +883,7 @@ function closeMissionDetail() {
   currentMissionData = null;
   currentEngineThreadDetail = null;
   loadMissions();
+  if (typeof updateHash === 'function') updateHash();
 }
 
 function renderMissionRichBlock(text, extraClass) {
@@ -1361,7 +1355,7 @@ function refreshMissionView(missionId) {
     openMissionDetail(missionId);
   } else if (crCurrentProjectId) {
     drillIntoProject(crCurrentProjectId);
-  } else if (currentTab === 'missions') {
+  } else if (isTasksSurfaceActive('missions')) {
     loadMissions();
   }
 }

@@ -1,0 +1,580 @@
+/* ── Tasks surface: kanban board, detail sheet, floating chat heads ────── */
+
+/* Kanban board */
+
+.tasks-kanban {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.kanban-col {
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 10px;
+  min-height: 120px;
+}
+
+.kanban-col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 10px;
+}
+
+.kanban-col-title {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.kanban-col[data-status="active"] .kanban-col-title { color: var(--success); }
+.kanban-col[data-status="paused"] .kanban-col-title { color: var(--warning-text); }
+.kanban-col[data-status="failed"] .kanban-col-title { color: var(--danger); }
+
+.kanban-col-count {
+  min-width: 22px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--hover-subtle);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.kanban-col-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kanban-col-empty {
+  padding: 18px 8px;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-dimmed);
+}
+
+.kanban-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+
+.kanban-card:hover {
+  border-color: var(--accent-soft);
+  box-shadow: 0 6px 18px -12px rgba(0, 0, 0, 0.35);
+}
+
+.kanban-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.kanban-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.kanban-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.kanban-card-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  font-size: var(--text-base);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kanban-card-goal {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.kanban-card-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-dimmed);
+}
+
+.kanban-card-meta span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Board layout inside the missions pane: board on top, activity below. */
+
+#tasks-pane-missions .missions-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+@media (max-width: 1100px) {
+  .tasks-kanban {
+    grid-template-columns: repeat(2, minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .tasks-kanban {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Task detail sheet ── */
+
+#task-sheet-root .task-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 700;
+}
+
+.task-sheet {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -16px 0 48px -24px rgba(0, 0, 0, 0.4);
+  z-index: 701;
+  animation: task-sheet-in 0.25s var(--ease-out-expo);
+}
+
+/* Transform-only entrance: keeps the sheet visible even when a throttled
+   tab freezes the animation clock on its first frame. */
+@keyframes task-sheet-in {
+  from { transform: translateX(40px); }
+  to { transform: translateX(0); }
+}
+
+.task-sheet-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.task-sheet-header-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-sheet-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.task-sheet-titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-sheet-name {
+  font-weight: 500;
+  letter-spacing: var(--heading-tracking);
+  font-size: var(--text-base);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.task-sheet-action {
+  padding: 5px 10px;
+  background: var(--btn-secondary-bg);
+  border: 1px solid var(--btn-secondary-border);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.task-sheet-action:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.task-sheet-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.task-sheet-close:hover {
+  background: var(--hover-subtle);
+  color: var(--text);
+}
+
+.task-sheet-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 16px;
+  gap: 16px;
+}
+
+.task-sheet-section-label {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.task-sheet-section {
+  margin-bottom: 14px;
+}
+
+.task-sheet-goal,
+.task-sheet-trigger {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.task-sheet-empty {
+  font-size: var(--text-sm);
+  color: var(--text-dimmed);
+}
+
+.task-sheet-thread {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.task-sheet-thread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dimmed);
+}
+
+.task-sheet-thread-dot.running { background: var(--success); }
+.task-sheet-thread-dot.failed { background: var(--danger); }
+
+.task-sheet-thread-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Embedded chat preview fills the remaining sheet height. */
+.task-sheet-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 180px;
+  margin-bottom: 0;
+}
+
+/* ── Mini chat (sheet preview + chat head panel) ── */
+
+.task-mini-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.task-mini-chat-messages {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-chat-msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.task-chat-msg.assistant {
+  align-self: flex-start;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.task-chat-msg.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+}
+
+.task-mini-chat-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.task-mini-chat-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  outline: none;
+}
+
+.task-mini-chat-input:focus {
+  border-color: var(--accent-soft);
+}
+
+.task-mini-chat-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  background: var(--btn-primary-bg);
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+}
+
+.task-mini-chat-send:hover {
+  background: var(--btn-primary-bg-hover);
+}
+
+/* ── Floating chat heads ── */
+
+#chat-heads-root {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 650;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.chat-heads-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-head-bubble {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  background: var(--btn-primary-bg);
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.45);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.chat-head-bubble:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--btn-primary-shadow-hover);
+}
+
+.chat-head-bubble.expanded {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+.chat-head-dismiss {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.chat-head-bubble:hover .chat-head-dismiss {
+  display: flex;
+}
+
+.chat-head-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 36px));
+  height: 420px;
+  max-height: calc(100vh - 120px);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: chat-head-panel-in 0.2s var(--ease-out-expo);
+}
+
+@keyframes chat-head-panel-in {
+  from { transform: translateY(8px); }
+  to { transform: translateY(0); }
+}
+
+.chat-head-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-head-panel-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.chat-head-panel-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-head-panel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-head-panel-btn:hover {
+  background: var(--hover-subtle);
+  color: var(--text);
+}
+
+.chat-head-panel .task-mini-chat {
+  border: none;
+  border-radius: 0;
+  background: var(--bg);
+}
+
+/* Mobile: sheet becomes a full-screen modal. */
+@media (max-width: 768px) {
+  .task-sheet {
+    width: 100vw;
+    border-left: none;
+  }
+}
