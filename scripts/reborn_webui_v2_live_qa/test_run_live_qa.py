@@ -747,6 +747,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
             )
 
+    def test_semantic_judge_completion_content_handles_unexpected_shapes(self):
+        self.assertEqual(semantic_judge._completion_content(None), "")
+        self.assertEqual(semantic_judge._completion_content({"choices": "bad"}), "")
+        self.assertEqual(semantic_judge._completion_content({"choices": ["bad"]}), "")
+        self.assertEqual(
+            semantic_judge._completion_content({"choices": [{"message": "bad"}]}),
+            "",
+        )
+        self.assertEqual(
+            semantic_judge._completion_content(
+                {"choices": [{"message": {"content": '{"completed": true}'}}]}
+            ),
+            '{"completed": true}',
+        )
+
+    def test_semantic_judge_json_parser_handles_non_string_inputs(self):
+        self.assertIsNone(semantic_judge._parse_json_object(None))
+        self.assertIsNone(semantic_judge._parse_json_object(123))
+        self.assertEqual(
+            semantic_judge._parse_json_object('prefix {"completed": true} suffix'),
+            {"completed": True},
+        )
+
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))

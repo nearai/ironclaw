@@ -43,14 +43,10 @@ async def _judge_assistant_reply_completion(
             )
             response.raise_for_status()
             body = response.json()
+            content = _completion_content(body)
     except Exception as exc:
         return {"enabled": True, "error": str(exc)}
 
-    content = (
-        (((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-        if isinstance(body, dict)
-        else ""
-    )
     parsed = _parse_json_object(content)
     if not isinstance(parsed, dict):
         return {
@@ -170,17 +166,34 @@ def _judge_payload(
     }
 
 
-def _parse_json_object(text: str) -> object:
+def _completion_content(body: object) -> object:
+    if not isinstance(body, dict):
+        return ""
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return ""
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return message.get("content") or ""
+
+
+def _parse_json_object(text: object) -> object:
+    if not isinstance(text, str):
+        return None
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except Exception:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end <= start:
             return None
         try:
             return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
+        except Exception:
             return None
 
 
