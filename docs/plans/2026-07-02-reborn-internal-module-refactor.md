@@ -136,9 +136,12 @@ Known hazards (the complete risk surface):
 - **cfg gates:** `slack-v2-host-beta`, `openai-compat-beta`, `root-llm-provider`,
   compound gate on `nearai_login_serve`. Re-hang per inner `mod`; a misplaced parent
   gate silently drops a domain from non-beta builds.
-- **`bundled_skills`:** `include_str!(concat!(env!("OUT_DIR"), …))` + marker string
-  `ironclaw_reborn_composition_bundled_skill` + embedded JSON filenames are
-  behavior-load-bearing. Move the file; never rename these.
+- **`bundled_skills`:** the following are behavior-load-bearing — move the file, but
+  **never rename any of them** (verified against `build.rs` + `src/bundled_skills.rs`):
+  - the two `include_str!(concat!(env!("OUT_DIR"), …))` inputs written by `build.rs`:
+    `embedded_reborn_skill_summaries.json` and `embedded_reborn_skill_bundles.json`
+  - the install marker file `.ironclaw-reborn-bundled.json` and its owner string
+    `ironclaw_reborn_composition_bundled_skill` (compared on install for idempotency)
 - **`#[path]`:** `slack_serve/e2e_tests.rs` uses `#[path = "e2e_auth_challenge.rs"]`.
 - **Leaked-block extraction** (PRs 3,6,7,9,10) is code motion of private free functions
   out of runtime.rs/factory.rs — the only steps that are more than `mod`-path renames.
