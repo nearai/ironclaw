@@ -344,12 +344,15 @@ impl OAuthDcrProvider {
         )
         .encode()?;
         let redirect_uri = self.callback_redirect_uri(scope, flow_id, account_label)?;
+        // discover_authorization_server already rejects None/empty
+        // registration_endpoint, so this is defensive rather than reachable.
+        let registration_endpoint = metadata
+            .registration_endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(AuthProductError::BackendUnavailable)?;
         let registration = self
-            .register_client(
-                &scope.resource,
-                &metadata.registration_endpoint,
-                &redirect_uri,
-            )
+            .register_client(&scope.resource, registration_endpoint, &redirect_uri)
             .await?;
         let client_id = OAuthClientId::new(registration.client_id.clone())?;
         let authorization_endpoint =
@@ -449,18 +452,19 @@ impl OAuthDcrProvider {
                 DCR_RESPONSE_BODY_LIMIT,
             )
             .await?;
-        if metadata.registration_endpoint.trim().is_empty() {
+        let registration_endpoint = metadata
+            .registration_endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let Some(registration_endpoint) = registration_endpoint else {
             return Err(AuthProductError::BackendUnavailable);
-        }
+        };
         validate_endpoint_origin(
             &metadata.authorization_endpoint,
             &authorization_server_metadata,
         )?;
         validate_endpoint_origin(&metadata.token_endpoint, &authorization_server_metadata)?;
-        validate_endpoint_origin(
-            &metadata.registration_endpoint,
-            &authorization_server_metadata,
-        )?;
+        validate_endpoint_origin(registration_endpoint, &authorization_server_metadata)?;
         *self.metadata_cache.write().await = Some(CachedAuthorizationServerMetadata {
             metadata: metadata.clone(),
             expires_at: Instant::now() + Duration::from_secs(DCR_FLOW_TTL_SECONDS as u64),
@@ -1390,8 +1394,8 @@ mod tests {
             .expect("issuer fallback metadata");
 
         assert_eq!(
-            metadata.registration_endpoint,
-            "https://mcp.notion.com/register"
+            metadata.registration_endpoint.as_deref(),
+            Some("https://mcp.notion.com/register")
         );
     }
 
@@ -1404,6 +1408,25 @@ mod tests {
             .discover_authorization_server(&sample_resource_scope())
             .await
             .expect_err("empty registration endpoint must fail");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_authorization_server_missing_registration_endpoint_returns_backend_unavailable()
+     {
+        // RFC 8414 §2 makes registration_endpoint OPTIONAL; a spec-legal
+        // metadata document that omits the field entirely must still be
+        // rejected here since DCR cannot proceed without it.
+        let provider = test_provider(Arc::new(DcrDiscoveryEgress::missing_registration_endpoint()));
+
+        let error = provider
+            .discover_authorization_server(&sample_resource_scope())
+            .await
+            .expect_err("missing registration endpoint must fail");
 
         assert_eq!(
             error.code(),
@@ -1728,6 +1751,7 @@ mod tests {
         EmptyAuthorizationServers,
         ResourceMetadataFails,
         EmptyRegistrationEndpoint,
+        MissingRegistrationEndpoint,
     }
 
     #[derive(Debug)]
@@ -1751,6 +1775,12 @@ mod tests {
         fn empty_registration_endpoint() -> Self {
             Self {
                 case: DcrDiscoveryCase::EmptyRegistrationEndpoint,
+            }
+        }
+
+        fn missing_registration_endpoint() -> Self {
+            Self {
+                case: DcrDiscoveryCase::MissingRegistrationEndpoint,
             }
         }
     }
@@ -1793,6 +1823,20 @@ mod tests {
                 ) => (
                     200,
                     br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":""}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::MissingRegistrationEndpoint,
+                    "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+                ) => (
+                    200,
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::MissingRegistrationEndpoint,
+                    "https://oauth.notion.com/.well-known/oauth-authorization-server",
+                ) => (
+                    200,
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token"}"#.to_vec(),
                 ),
                 other => panic!("unexpected DCR discovery egress URL: {other:?}"),
             };
