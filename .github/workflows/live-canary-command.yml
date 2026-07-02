@@ -23,7 +23,7 @@ jobs:
         github.event.comment.body == '/canary'
         || startsWith(github.event.comment.body, '/canary ')
       )
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     steps:
       - name: Check commenter has write permission
         id: auth

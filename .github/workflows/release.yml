@@ -39,18 +39,26 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
-  push:
-    tags:
-      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
+  # Keep platform artifact builds out of routine CI for this fork. macOS,
+  # Windows, and ARM Linux still need GitHub-hosted images because the
+  # deployment target repo's self-hosted pool is Linux/X64 only; run them
+  # explicitly if we need deployment-target artifacts. Upstream IronClaw tag
+  # pushes will exercise the normal release matrix on upstream infrastructure.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing ironclaw release tag to build, for example ironclaw-v1.2.3"
+        required: true
+        type: string
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
+      tag: ${{ inputs.release_tag }}
+      tag-flag: ${{ format('--tag={0}', inputs.release_tag) }}
       publishing: ${{ !github.event.pull_request }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,7 +85,7 @@ jobs:
       - id: plan
         env:
           IS_PUSH: ${{ !github.event.pull_request }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ inputs.release_tag }}
         run: |
           if [ "$IS_PUSH" = "true" ]; then
             dist host --steps=create --tag="$REF_NAME" --output-format=json > plan-dist-manifest.json
@@ -115,6 +123,10 @@ jobs:
       # - 1 "global" task that builds universal installers
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+    # cargo-dist computes this per target. Keep the matrix runner here so
+    # macOS, Windows, and ARM Linux artifact jobs stay on GitHub-hosted images;
+    # x86 Linux entries may be moved to ci-release only after splitting the
+    # matrix by runner capability.
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container && matrix.container.image || null }}
     env:
@@ -221,7 +233,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -270,7 +282,7 @@ jobs:
     needs:
       - plan
     if: ${{ needs.plan.outputs.publishing == 'true' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -408,7 +420,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -491,7 +503,7 @@ jobs:
       - host
       - build-wasm-extensions
     if: ${{ always() && needs.host.result == 'success' && needs.build-wasm-extensions.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     permissions:
       contents: write
       pull-requests: write
@@ -568,7 +580,7 @@ jobs:
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-standard]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

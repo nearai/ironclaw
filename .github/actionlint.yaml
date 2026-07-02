@@ -1,0 +1,6 @@
+---
+self-hosted-runner:
+  labels:
+    - ci-release
+    - ci-sensitive
+    - ci-standard

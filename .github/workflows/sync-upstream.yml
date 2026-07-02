@@ -12,7 +12,7 @@ permissions:
 jobs:
   sync:
     if: github.repository == 'theredspoon/ironclaw'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     steps:
       - uses: actions/checkout@v6
         with:

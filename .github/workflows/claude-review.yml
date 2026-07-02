@@ -21,7 +21,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@claude review') &&
       github.event.comment.author_association == 'MEMBER'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     env:
       PR_NUMBER: ${{ github.event.issue.number }}
     steps:

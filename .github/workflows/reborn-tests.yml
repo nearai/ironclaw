@@ -50,7 +50,7 @@ env:
 jobs:
   changes:
     name: Detect Reborn test scope
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
@@ -86,7 +86,7 @@ jobs:
     name: Discover Reborn package crates
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
     steps:
@@ -167,7 +167,7 @@ jobs:
     name: Test ${{ matrix.package }}
     needs: [changes, package-matrix]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 30
     env:
       ANTHROPIC_API_KEY: ""
@@ -257,7 +257,7 @@ jobs:
     name: Reborn root tests (${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
@@ -331,7 +331,7 @@ jobs:
     name: Reborn group tests
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     # Group tests run sequentially in ONE job (build once, reuse artifacts), so
     # the budget must cover N suites at REBORN_GROUP_TEST_TIMEOUT each plus setup
     # — otherwise GitHub hard-kills the job before a hung suite reaches its own
@@ -405,7 +405,7 @@ jobs:
     name: Reborn WebUI v2 JS tests
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -435,7 +435,7 @@ jobs:
     name: Reborn QA recorded fixtures
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 20
     env:
       ANTHROPIC_API_KEY: ""
@@ -473,7 +473,7 @@ jobs:
 
   reborn-tests:
     name: Tests (Reborn)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always()
     needs:
       - changes

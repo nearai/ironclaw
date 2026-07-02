@@ -29,7 +29,7 @@ env:
 jobs:
   changes:
     name: Detect code changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_core_code: ${{ steps.non_diff.outputs.has_core_code || steps.diff.outputs.has_core_code }}
@@ -119,7 +119,7 @@ jobs:
 
   matrix-config:
     name: Configure matrix
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       test_matrix: ${{ steps.set.outputs.test_matrix }}
       windows_matrix: ${{ steps.set.outputs.windows_matrix }}
@@ -141,7 +141,7 @@ jobs:
     name: Tests (${{ matrix.name }})
     needs: [changes, matrix-config]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -200,7 +200,7 @@ jobs:
     name: Secret Store Contract Tests
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 15
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -231,7 +231,7 @@ jobs:
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -263,7 +263,7 @@ jobs:
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -337,7 +337,7 @@ jobs:
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_telegram_risk == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -365,7 +365,7 @@ jobs:
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_slack_risk == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -392,7 +392,7 @@ jobs:
 
   run-tests:
     name: Tests (Legacy)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always()
     needs:
       - changes
@@ -464,7 +464,7 @@ jobs:
 
   run-tests-compat:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always()
     needs:
       - run-tests

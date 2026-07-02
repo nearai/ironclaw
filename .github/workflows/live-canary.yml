@@ -81,7 +81,7 @@ jobs:
     name: Auth Smoke
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 60
     env:
       LANE: auth-smoke
@@ -112,7 +112,7 @@ jobs:
     name: Auth Full
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 75
     env:
       LANE: auth-full
@@ -143,7 +143,7 @@ jobs:
     name: Auth Channels
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 60
     env:
       LANE: auth-channels
@@ -174,7 +174,7 @@ jobs:
     name: Auth Live Seeded
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 75
     env:
       LANE: auth-live-seeded
@@ -263,7 +263,7 @@ jobs:
     name: Auth Browser Consent
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 90
     env:
       LANE: auth-browser-consent
@@ -364,7 +364,7 @@ jobs:
     name: Workflow Canary
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 30
     env:
       LANE: workflow-canary
@@ -419,7 +419,7 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' &&
       (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -458,7 +458,7 @@ jobs:
     name: Public Live Smoke
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 120
     env:
       LLM_BACKEND: anthropic
@@ -504,7 +504,7 @@ jobs:
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 120
     permissions:
       contents: read
@@ -761,7 +761,7 @@ jobs:
     name: Rotating Persona Live
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 180
     env:
       LLM_BACKEND: anthropic
@@ -815,9 +815,14 @@ jobs:
 
   private-oauth:
     name: Private OAuth Live
+    # Disabled in the deployment target repo. This lane validates upstream
+    # IronClaw's private Google Drive OAuth refresh flow using real credential
+    # material and a dedicated runner profile we do not operate here. Keep the
+    # job definition as documentation, but do not schedule it through
+    # ci-standard.
     if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')
-    runs-on: [self-hosted, ironclaw-live]
+      false && github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')
+    runs-on: [self-hosted, ci-sensitive]
     timeout-minutes: 120
     env:
       LANE: private-oauth
@@ -876,7 +881,7 @@ jobs:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
       github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -946,7 +951,7 @@ jobs:
     name: Release Public Full Live
     if: >
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'release-public-full'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 360
     env:
       LLM_BACKEND: anthropic
@@ -990,7 +995,7 @@ jobs:
     name: Upgrade Canary
     if: >
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1041,7 +1046,7 @@ jobs:
       - release-public-full
       - upgrade-canary
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

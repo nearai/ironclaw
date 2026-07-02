@@ -50,7 +50,7 @@ env:
 jobs:
   reborn-coverage:
     name: Reborn Coverage
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     # Generous backstop, not a tight bound: a cold-cache instrumented build of
     # the Reborn closure is heavy (no mold), so this only catches a runaway/hung
     # run — it sits well above any real build yet halves GitHub's 360-minute

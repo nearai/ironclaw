@@ -43,15 +43,17 @@ concurrency:
 jobs:
   build:
     name: Build pilot artifact
-    if: github.repository == 'enjimi/ironclaw'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/deployment-target'
+    # Release artifact builds use the release lane for its persistent cargo
+    # cache and to keep heavier packaging work off the standard validation pool.
     runs-on: [self-hosted, ci-release]
     steps:
       - name: Check out deployment source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
-          # Later steps fetch deployment-target again to verify source ancestry in
-          # this private repository.
+          # Later steps fetch deployment-target again to verify source ancestry
+          # in the deployment target repo.
           persist-credentials: true
 
       - name: Configure release cache
