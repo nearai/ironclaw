@@ -211,8 +211,11 @@ where
 /// through `ResourceScope::system()`) and owner-less thread scopes carry the
 /// `SYSTEM_RESERVED_ID` sentinel — control bytes, not path-safe — in the
 /// tenant and/or user segment. Map it to the harness's historical `_system`
-/// segment, mirroring production's `resource_scope_path_segment`
-/// (`invocation_mount_view`, ironclaw_reborn_composition).
+/// segment: this mirrors production's `resource_scope_path_segment`
+/// (`invocation_mount_view`, ironclaw_reborn_composition) only in SHAPE
+/// (sentinel-in, path-safe-segment-out) — production's actual segment value
+/// is `__system__`, not `_system`. Deliberately NOT switched to match, to
+/// avoid rewriting every existing harness fixture path; see `path_segment`.
 fn threads_mount_view(
     root_prefix: &str,
     scope: &ironclaw_host_api::ResourceScope,
@@ -228,8 +231,9 @@ fn threads_mount_view(
 }
 
 /// Path-safe segment for one scope axis: the `SYSTEM_RESERVED_ID` sentinel
-/// becomes the harness's historical `_system` segment; everything else is
-/// used verbatim (production's `resource_scope_path_segment` shape).
+/// becomes the harness's historical `_system` segment (NOT production's
+/// `__system__` value — see `threads_mount_view`); everything else is used
+/// verbatim, matching production's `resource_scope_path_segment` shape.
 fn path_segment(value: &str) -> &str {
     if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
         "_system"
