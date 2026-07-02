@@ -808,21 +808,25 @@ const DISABLED_CAPABILITY_IDS: &[&str] =
     &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
 
 /// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
-/// an interactive turn, but must not be able to create/remove/pause/resume
-/// triggers (a fire mutating the trigger fleet is exactly the reported "a
-/// routine that creates routines" bug). Read-only
-/// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
+/// an interactive turn, but must not be able to create a new trigger (a fire
+/// spawning more triggers is exactly the reported "a routine that creates
+/// routines" self-referential loop bug). `trigger_remove`/`trigger_pause`/
+/// `trigger_resume` are deliberately NOT denied here: a routine may
+/// legitimately need to manage the trigger fleet — pausing, resuming, or
+/// removing another trigger — to complete its task, and none of those three
+/// carry the unbounded-self-recreation risk `trigger_create` does. A fired
+/// trigger managing *itself* mid-run has not been separately verified
+/// against the poller's own settle write (see the capability-surface
+/// section of `docs/reborn/contracts/triggers.md`); this is a known
+/// follow-up, not a claim that self-mutation is proven safe. Read-only
+/// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] was already
 /// excluded from this list. Applied via
 /// [`ironclaw_loop_support::PerSurfaceCapabilityDenyDecorator`]'s per-surface
 /// deny list, scoped to
 /// [`crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`]
 /// only.
-const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
-    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
-];
+const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] =
+    &[ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID];
 
 struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
@@ -1296,7 +1300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_trigger_surface_excludes_mutators_interactive_includes_them() {
+    async fn scheduled_trigger_surface_excludes_create_interactive_includes_it() {
         // Test through the caller: drive the composed
         // DecoratingLoopCapabilityPortFactory + PerSurfaceCapabilityDenyDecorator
         // pipeline's `visible_capabilities()`, not `decorate()` in isolation.
@@ -1325,9 +1329,22 @@ mod tests {
             !scheduled_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()),
             "scheduled_trigger surface must exclude trigger_create: {scheduled_ids:?}"
         );
-        assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
-        assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
-        assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        // Pause/resume/remove stay available on a scheduled-trigger surface —
+        // a routine may need to manage the trigger fleet (including itself)
+        // to complete its task. Only trigger_create is denied, since that's
+        // the self-referential-creation-loop vector the deny-map exists for.
+        assert!(
+            scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()),
+            "trigger_remove must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
+        );
+        assert!(
+            scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()),
+            "trigger_pause must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
+        );
+        assert!(
+            scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()),
+            "trigger_resume must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
+        );
         assert!(
             scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()),
             "read-only trigger_list must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
@@ -1355,10 +1372,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_trigger_mutators_stay_denied_when_global_deny_list_is_emptied() {
+    async fn scheduled_trigger_create_stays_denied_when_global_deny_list_is_emptied() {
         // Regression for the footgun described in the plan: emptying
         // DISABLED_CAPABILITY_IDS (the documented spawn_subagent re-enable
-        // toggle) must never silently re-enable the trigger mutators for a
+        // toggle) must never silently re-enable trigger_create for a
         // scheduled fire.
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
@@ -1380,9 +1397,9 @@ mod tests {
             visible_capability_ids(&factory, &scheduled_trigger_run_context().await).await;
 
         assert!(!scheduled_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()));
-        assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
-        assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
-        assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
+        assert!(scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
+        assert!(scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
         assert!(scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
         // Global list was empty, so the previously-denied spawn_subagent
         // capability is now visible again (expected — this is what "emptying

@@ -451,14 +451,20 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   without `libsql` keep the existing in-memory repository behavior.
 - A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
   profile, not the interactive default. That profile's capability surface
-  denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
-  `trigger_resume` via a host-level per-surface-profile deny decorator
-  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_support`, composed in
-  `ironclaw_reborn::runtime`). Read-only `trigger_list` remains visible and
-  callable during a fire, so a routine can still inspect triggers. This
-  prevents a fired trigger's own run from creating or mutating the trigger
-  fleet — a malformed or self-referential routine prompt could otherwise
-  cause a fire to re-invoke `trigger_create` and spawn more triggers.
+  denies only `trigger_create` via a host-level per-surface-profile deny
+  decorator (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_support`,
+  composed in `ironclaw_reborn::runtime`). This prevents a fired trigger's
+  own run from creating more triggers — a malformed or self-referential
+  routine prompt could otherwise cause a fire to re-invoke `trigger_create`
+  in an unbounded loop.
+- `trigger_list`, `trigger_remove`, `trigger_pause`, and `trigger_resume`
+  all remain visible and callable during a fire. A routine may legitimately
+  need to manage the trigger fleet — including pausing, resuming, or
+  removing a trigger, possibly itself — to complete its task; none of the
+  three carry `trigger_create`'s unbounded-self-recreation risk. A fired
+  trigger removing or pausing *itself* mid-run has not been separately
+  verified against the poller's own settle write (`mark_fire_accepted` /
+  the completion write that sets `last_status`); this is a known follow-up.
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 
