@@ -2143,6 +2143,17 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
         }
         Ok(self.bindings.get(provider_user_id).cloned())
     }
+
+    async fn user_has_provider_binding(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        if provider != "slack" {
+            return Ok(false);
+        }
+        Ok(self.bindings.values().any(|bound| bound == user_id))
+    }
 }
 
 fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {

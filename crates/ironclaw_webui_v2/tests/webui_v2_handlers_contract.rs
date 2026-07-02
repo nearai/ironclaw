@@ -924,11 +924,11 @@ impl RebornServicesApi for StubServices {
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
                     title: "Slack account connection".to_string(),
-                    instructions: "Message the Slack app, then enter the code here.".to_string(),
+                    instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
                     input_placeholder: "Enter Slack pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
                     success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code.".to_string(),
+                    error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
                 },
                 command_aliases: vec!["slack".to_string()],
             }],
@@ -2676,7 +2676,11 @@ async fn list_connectable_channels_dispatches_through_facade() {
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Message the Slack app, then enter the code here."
+        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+    );
+    assert_eq!(
+        body["channels"][0]["action"]["error_message"],
+        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
     );
     assert_eq!(
         *services

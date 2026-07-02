@@ -179,7 +179,10 @@ impl From<SlackPersonalBindingPairingError> for SlackPersonalBindingPairingRoute
 impl IntoResponse for SlackPersonalBindingPairingRouteError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid or expired pairing code."),
+            Self::BadRequest => (
+                StatusCode::BAD_REQUEST,
+                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Slack pairing service is unavailable.",
@@ -248,6 +251,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Deliverable: an invalid/expired code must steer the user back to
+        // `/pair` (the only self-service recovery surface). The web pairing
+        // card renders this JSON `error` body verbatim, so the `/pair`
+        // instruction has to live in the route response, not only in the
+        // descriptor/i18n fallback copy.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"].as_str().unwrap();
+        assert_eq!(
+            message, "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+            "invalid-code redeem error must match the caller-facing recovery copy"
+        );
     }
 
     #[tokio::test]

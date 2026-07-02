@@ -899,11 +899,11 @@ registerPack("ar", {
   "pairing.error": "فشل الاقتران.",
   "pairing.none": "لا توجد طلبات اقتران معلّقة.",
   "pairing.slackTitle": "اتصال حساب Slack",
-  "pairing.slackInstructions": "أرسل رسالة إلى تطبيق Slack، ثم أدخل الرمز هنا.",
+  "pairing.slackInstructions": "أرسل رسالة إلى تطبيق IronClaw Reborn في Slack للحصول على رمز ربط، ثم الصقه هنا. تنتهي صلاحية الرموز خلال 10 دقائق. إذا كان الرمز غير صالح أو منتهي الصلاحية، فشغّل /pair في Slack للحصول على رمز جديد.",
   "pairing.slackPlaceholder": "أدخل رمز الاقتران Slack...",
   "pairing.connect": "اتصال",
   "pairing.slackSuccess": "حساب Slack متصل.",
-  "pairing.slackError": "رمز الاقتران Slack غير صالح أو منتهي الصلاحية.",
+  "pairing.slackError": "رمز اقتران Slack غير صالح أو منتهي الصلاحية. شغّل /pair في Slack للحصول على رمز جديد.",
 
   // Admin — tabs
   "admin.tab.dashboard": "لوحة التحكم",

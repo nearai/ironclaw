@@ -109,14 +109,15 @@ pub use inbound_turn::{
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
-    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
-    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleCommandKind,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
+    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
@@ -143,7 +144,7 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AutomationListRequest, AutomationProductFacade, CodexLoginStart,
+    AutomationListRequest, AutomationProductFacade, ChannelConnectionFacade, CodexLoginStart,
     ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
     FsMount, InboundAttachmentLander, InboundAttachmentReader, LlmActiveSelection,

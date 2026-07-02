@@ -227,6 +227,40 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     }
 }
 
+/// Per-user channel connection state. Returns, for the calling user, which
+/// channel extensions they have personally connected (e.g. Slack pairing).
+/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// Only channels that have a per-user connection concept appear in the map;
+/// absence means "no per-user connection concept for this channel".
+#[async_trait]
+pub trait ChannelConnectionFacade: Send + Sync {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticChannelConnectionFacade;
+
+#[async_trait]
+impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(std::collections::HashMap::new())
+    }
+}
+
 #[async_trait]
 pub trait OperatorStatusService: Send + Sync {
     async fn status(
@@ -2407,6 +2441,7 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2441,6 +2476,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2566,6 +2602,14 @@ impl RebornServices {
         connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     ) -> Self {
         self.connectable_channels_facade = connectable_channels_facade;
+        self
+    }
+
+    pub fn with_channel_connection_facade(
+        mut self,
+        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> Self {
+        self.channel_connection_facade = channel_connection_facade;
         self
     }
 
@@ -3858,6 +3902,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             caller,
         )
         .await
@@ -3963,7 +4008,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(

@@ -899,11 +899,11 @@ registerPack("pt-BR", {
   "pairing.error": "O emparelhamento falhou.",
   "pairing.none": "Não há solicitações de pareamento pendentes.",
   "pairing.slackTitle": "Conexão da conta Slack",
-  "pairing.slackInstructions": "Envie uma mensagem para o aplicativo Slack e insira o código aqui.",
+  "pairing.slackInstructions": "Envie uma mensagem para o app IronClaw Reborn no Slack para obter um código de pareamento e cole-o aqui. Os códigos expiram em 10 minutos. Se um código for inválido ou expirar, execute /pair no Slack para obter um novo.",
   "pairing.slackPlaceholder": "Insira o código de emparelhamento Slack…",
   "pairing.connect": "Conectar",
   "pairing.slackSuccess": "Conta Slack conectada.",
-  "pairing.slackError": "Código de emparelhamento Slack inválido ou expirado.",
+  "pairing.slackError": "Código de emparelhamento Slack inválido ou expirado. Execute /pair no Slack para obter um novo.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Painel",

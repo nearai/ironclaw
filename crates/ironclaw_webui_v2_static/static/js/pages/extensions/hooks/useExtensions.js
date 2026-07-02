@@ -100,16 +100,18 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, configureAfterInstall, onNeedsSetup, packageRef }) => {
+    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
-        setActionResult({
-          type: "success",
-          message:
-            res.message ||
+        const message = isChannelExtensionKind(kind)
+          ? `${displayName || "Channel"} installed. Connect the account using the setup panel below.`
+          : res.message ||
             res.instructions ||
             t("extensions.installedSuccess", {
               name: displayName || t("extensions.defaultName"),
-            }),
+            });
+        setActionResult({
+          type: "success",
+          message,
         });
         if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
           setActionResult({

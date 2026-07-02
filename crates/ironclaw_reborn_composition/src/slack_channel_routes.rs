@@ -448,6 +448,7 @@ pub struct SlackChannelRouteAdminRouteConfig {
     scope: SlackChannelRouteAdminScope,
     store: Arc<dyn SlackChannelRouteStore>,
     safety_layer: Arc<SafetyLayer>,
+    setup_activation: Option<Arc<dyn SlackChannelSetupActivation>>,
 }
 
 #[derive(Clone)]
@@ -466,6 +467,27 @@ enum SlackChannelRouteAdminScope {
         operator_user_id: UserId,
         setup_service: Arc<SlackSetupService>,
     },
+}
+
+#[async_trait]
+pub(crate) trait SlackChannelSetupActivation: Send + Sync {
+    async fn activate_slack_channel_after_setup_save(
+        &self,
+    ) -> Result<(), SlackChannelSetupActivationError>;
+}
+
+#[derive(Debug, Error)]
+#[error("Slack channel setup activation failed: {reason}")]
+pub(crate) struct SlackChannelSetupActivationError {
+    reason: String,
+}
+
+impl SlackChannelSetupActivationError {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
 }
 
 impl SlackChannelRouteAdminRouteConfig {
@@ -497,6 +519,7 @@ impl SlackChannelRouteAdminRouteConfig {
                 max_output_length: 16 * 1024,
                 injection_check_enabled: true,
             })),
+            setup_activation: None,
         }
     }
 
@@ -517,7 +540,16 @@ impl SlackChannelRouteAdminRouteConfig {
                 max_output_length: 16 * 1024,
                 injection_check_enabled: true,
             })),
+            setup_activation: None,
         }
+    }
+
+    pub(crate) fn with_setup_activation(
+        mut self,
+        setup_activation: Arc<dyn SlackChannelSetupActivation>,
+    ) -> Self {
+        self.setup_activation = Some(setup_activation);
+        self
     }
 
     fn setup_service(&self) -> Result<Arc<SlackSetupService>, SlackRouteError> {
@@ -527,6 +559,15 @@ impl SlackChannelRouteAdminRouteConfig {
             }
             SlackChannelRouteAdminScope::Static { .. } => Err(SlackRouteError::NotFound),
         }
+    }
+
+    async fn activate_slack_channel_after_setup_save(&self) -> Result<(), SlackRouteError> {
+        if let Some(setup_activation) = &self.setup_activation {
+            setup_activation
+                .activate_slack_channel_after_setup_save()
+                .await?;
+        }
+        Ok(())
     }
 
     pub(crate) fn with_allowed_subject_user_ids(
@@ -971,6 +1012,12 @@ impl From<SlackSetupError> for SlackRouteError {
                 Self::Unavailable
             }
         }
+    }
+}
+
+impl From<SlackChannelSetupActivationError> for SlackRouteError {
+    fn from(_error: SlackChannelSetupActivationError) -> Self {
+        Self::Unavailable
     }
 }
 
@@ -1484,6 +1531,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setup_admin_rolls_back_saved_setup_when_activation_fails() {
+        let setup_store = Arc::new(InMemorySlackSetupStore::default());
+        let config = dynamic_route_config(
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            setup_store.clone(),
+        )
+        .with_setup_activation(Arc::new(FailingSlackSetupActivation));
+        let mount = slack_channel_route_admin_route_mount(config);
+
+        let response = mount
+            .protected
+            .oneshot(request_to_path(
+                "PUT",
+                WEBUI_V2_CHANNELS_SLACK_SETUP_PATH,
+                r#"{
+                    "installation_id":"install_runtime",
+                    "team_id":"T0RUNTIME",
+                    "api_app_id":"A0RUNTIME",
+                    "bot_token":"xoxb-secret",
+                    "signing_secret":"slack-signing-secret"
+                }"#,
+                TENANT,
+                "user:admin",
+            ))
+            .await
+            .expect("setup save responds");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup store")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn route_admin_list_paginates_routes() {
         let store = Arc::new(InMemorySlackChannelRouteStore::new());
         let mount = slack_channel_route_admin_route_mount(route_config(store));
@@ -1862,6 +1947,25 @@ mod tests {
                 .write()
                 .map_err(|_| SlackSetupError::StoreUnavailable)? = Some(setup.clone());
             Ok(())
+        }
+
+        async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+            *self
+                .setup
+                .write()
+                .map_err(|_| SlackSetupError::StoreUnavailable)? = None;
+            Ok(())
+        }
+    }
+
+    struct FailingSlackSetupActivation;
+
+    #[async_trait]
+    impl SlackChannelSetupActivation for FailingSlackSetupActivation {
+        async fn activate_slack_channel_after_setup_save(
+            &self,
+        ) -> Result<(), SlackChannelSetupActivationError> {
+            Err(SlackChannelSetupActivationError::new("activation failed"))
         }
     }
 

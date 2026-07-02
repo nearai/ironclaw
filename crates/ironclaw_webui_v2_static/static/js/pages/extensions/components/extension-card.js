@@ -125,6 +125,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const configurePayload = {
     packageRef: ext.package_ref,
     displayName,
+    kind: ext.kind,
     active: ext.active,
     activationStatus: ext.activation_status,
     onboardingState: ext.onboarding_state,
@@ -321,6 +322,7 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
+                kind: entry.kind,
                 configureAfterInstall,
               })}
             disabled=${isBusy}

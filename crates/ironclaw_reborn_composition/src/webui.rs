@@ -8,13 +8,14 @@ use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -111,13 +112,14 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_connectable_channels(runtime, event_stream, None, Vec::new())
+    build_webui_services_with_connectable_channels(runtime, event_stream, None, None, Vec::new())
 }
 
 pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
+    channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
@@ -312,6 +314,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     }
     if let Some(connectable_channels) = connectable_channels {
         api = api.with_connectable_channels_facade(connectable_channels);
+    }
+    if let Some(channel_connection) = channel_connection {
+        api = api.with_channel_connection_facade(channel_connection);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
