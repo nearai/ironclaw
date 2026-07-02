@@ -882,7 +882,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::scheduler_permit_count;
+    use super::{SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, scheduler_permit_count};
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId};
     use ironclaw_host_runtime::{
@@ -1265,16 +1265,17 @@ mod tests {
         }
     }
 
+    /// Derives the test-driven mutator id list directly from the production
+    /// `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` constant rather than
+    /// re-listing the four capability ids by name. Hand-duplicating the list
+    /// here would let the unit tests below keep passing even if the
+    /// production const accidentally dropped one of the mutators — deriving
+    /// from the const closes that drift risk (PR #5515 review comment).
     fn scheduled_trigger_mutator_ids() -> Vec<CapabilityId> {
-        [
-            TRIGGER_CREATE_CAPABILITY_ID,
-            TRIGGER_REMOVE_CAPABILITY_ID,
-            TRIGGER_PAUSE_CAPABILITY_ID,
-            TRIGGER_RESUME_CAPABILITY_ID,
-        ]
-        .into_iter()
-        .map(|id| CapabilityId::new(id).expect("trigger mutator capability id is valid"))
-        .collect()
+        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS
+            .iter()
+            .map(|id| CapabilityId::new(*id).expect("trigger mutator capability id is valid"))
+            .collect()
     }
 
     async fn visible_capability_ids(
