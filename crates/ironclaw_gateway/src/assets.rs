@@ -195,6 +195,9 @@ pub fn integration_icon(name: &str) -> Option<&'static [u8]> {
         "whatsapp" => include_bytes!("../static/icons/integrations/whatsapp.png"),
         "github" => include_bytes!("../static/icons/integrations/github.png"),
         "linear" => include_bytes!("../static/icons/integrations/linear.png"),
+        "google_drive" => include_bytes!("../static/icons/integrations/google_drive.png"),
+        "google_docs" => include_bytes!("../static/icons/integrations/google_docs.png"),
+        "notion" => include_bytes!("../static/icons/integrations/notion.png"),
         _ => return None,
     })
 }
