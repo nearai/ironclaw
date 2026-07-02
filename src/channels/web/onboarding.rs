@@ -40,7 +40,7 @@ pub(crate) fn event_from_configure_result(
 ) -> AppEvent {
     let outcome = classify_configure_result(result);
     let state = match &outcome {
-        ConfigureFlowOutcome::PairingRequired { .. } => OnboardingStateDto::PairingRequired,
+        ConfigureFlowOutcome::PairingRequired => OnboardingStateDto::PairingRequired,
         ConfigureFlowOutcome::Ready => OnboardingStateDto::Ready,
         ConfigureFlowOutcome::AuthRequired => OnboardingStateDto::AuthRequired,
         ConfigureFlowOutcome::RetryAuth => OnboardingStateDto::Failed,
