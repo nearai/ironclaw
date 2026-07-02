@@ -1,7 +1,7 @@
 ---
 description: Triage open GitHub issues — split into bugs vs features, rank by severity/opportunity, and flag under-specified issues
 disable-model-invocation: true
-allowed-tools: Bash(gh issue list:*), Bash(gh issue view:*), Bash(gh api:*), Bash(git log:*), Read, Grep, Glob, Task
+allowed-tools: Bash(gh issue list:*), Bash(gh issue view:*), Bash(gh api:*), Bash(git log:*), Read, Grep, Glob, Agent
 argument-hint: "[--label=<filter>] [--milestone=<filter>]"
 ---
 

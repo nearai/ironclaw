@@ -1,7 +1,7 @@
 ---
 description: Classify all open PRs by module, review state, scope, and architectural impact — produces a prioritized triage dashboard
 disable-model-invocation: true
-allowed-tools: Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh api:*), Bash(gh pr checks:*), Bash(git log:*), Read, Grep, Glob, Task
+allowed-tools: Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh api:*), Bash(gh pr checks:*), Bash(git log:*), Read, Grep, Glob, Agent
 argument-hint: "[--label=<filter>] [--author=<filter>]"
 ---
 
@@ -31,13 +31,14 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **LLM & Inference** | `src/llm/` |
+| **Reborn stack (most current work)** | `crates/` (product_workflow, composition, webui_v2, turns, agent_loop, host_runtime, …) |
+| **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `src/agent/`, `src/skills/` |
 | **Tools** | `src/tools/`, `tools-src/` |
 | **Channels** | `src/channels/`, `channels-src/` |
 | **Storage & Memory** | `src/db/`, `src/workspace/`, `migrations/` |
 | **Security** | `src/safety/`, `src/secrets/` |
-| **Config & Setup** | `src/config.rs`, `src/setup/`, `src/cli/` |
+| **Config & Setup** | `src/config/`, `src/setup/`, `src/cli/`, `crates/ironclaw_reborn_config/` |
 | **Sandbox & Orchestration** | `src/sandbox/`, `src/orchestrator/`, `src/worker/` |
 | **Hooks & Extensions** | `src/hooks/`, `src/extensions/` |
 | **Context & History** | `src/context/`, `src/history/`, `src/estimation/`, `src/evaluation/` |

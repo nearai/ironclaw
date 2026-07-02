@@ -1,5 +1,7 @@
 # ironclaw_embeddings
 
+> **v1-only today.** Sole consumer is the root `ironclaw` crate — nothing Reborn-side is wired to this yet (Reborn memory has its own deliberately-separate `EmbeddingProvider` port in `ironclaw_memory_native`). Check consumers before building on it.
+
 Owns the shared embedding-provider trait, concrete provider impls, the LRU caching decorator, and the async factory used by everything in the workspace that needs vector embeddings.
 
 ## Responsibilities

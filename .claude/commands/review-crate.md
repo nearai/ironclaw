@@ -1,7 +1,7 @@
 ---
 description: Deep audit of the IronClaw crate for vulnerabilities, bugs, unfinished work, inconsistencies, and oversights
 disable-model-invocation: true
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo audit:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(wc:*), Read, Grep, Glob, Task
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo audit:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(wc:*), Read, Grep, Glob, Agent
 argument-hint: "[path/to/crate]"
 ---
 

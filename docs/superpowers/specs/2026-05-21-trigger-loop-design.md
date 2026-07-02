@@ -2,6 +2,8 @@
 
 **Date:** 2026-05-21
 **Status:** Design approved, revised after spec review
+
+> **Erratum (2026-07):** `TurnRunnerWorker` mentioned below was split in #5085 into `TurnRunScheduler` (`ironclaw_host_runtime`) + `RebornTurnRunExecutor` (`ironclaw_reborn`); `reborn-integration` has since merged to `main`.
 **Target architecture:** IronClaw Reborn (`crates/ironclaw_*`)
 **Target branch:** `reborn-integration` — the Reborn crates and contracts
 referenced below exist on `reborn-integration`, not on `staging`. Any review or

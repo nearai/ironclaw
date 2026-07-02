@@ -2,8 +2,7 @@
 
 Monty is the embedded Python interpreter used for Tier 1 (CodeAct) execution. It's a lightweight Rust-native Python implementation — not CPython — so it has a restricted feature set.
 
-**Source**: `git = "https://github.com/pydantic/monty.git", tag = "v0.0.16"`
-**Pinned at**: `v0.0.16` (2026-04-19)
+**Source**: `git = "https://github.com/pydantic/monty.git"` — see `Cargo.toml` for the authoritative tag (this doc's pin note has lagged before; the changelog table below stops at v0.0.16 while the pin has moved on, e.g. v0.0.18 as of 2026-07)
 
 ## Upgrade Process
 
