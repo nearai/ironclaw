@@ -96,9 +96,13 @@ fn repo_root() -> &'static Path {
 }
 
 /// Trust policy admitting the test-only `web-access` provider as first-party,
-/// mirroring `first_party_trust_policy()`/`github_first_party_trust_policy()`
-/// in `harness.rs`. The manifest path must match the `PackageSource::LocalManifest`
-/// key the host runtime derives from `web_access_extension_package()`'s root.
+/// kept aligned with the shape of `first_party_trust_policy()`/
+/// `github_first_party_trust_policy()` in `harness.rs` — a harness-local
+/// `AdminConfig` construction with a `web-access`-specific effect list, not a
+/// call into either function (the manifest, by contrast, is asset-backed —
+/// see `web_access_extension_package()` above). The manifest path must match
+/// the `PackageSource::LocalManifest` key the host runtime derives from
+/// `web_access_extension_package()`'s root.
 pub(super) fn web_access_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
         AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
@@ -112,8 +116,8 @@ pub(super) fn web_access_first_party_trust_policy() -> HarnessResult<HostTrustPo
     )])?)
 }
 
-/// Network policy restricted to the Exa MCP host, mirroring production's
-/// private `exa_mcp_network_policy()`
+/// Network policy restricted to the Exa MCP host, kept aligned with the
+/// production policy inputs from private `exa_mcp_network_policy()`
 /// (`crates/ironclaw_first_party_extensions/src/web_access.rs`, not `pub`) —
 /// re-declared here rather than imported.
 pub(super) fn exa_mcp_test_network_policy() -> NetworkPolicy {

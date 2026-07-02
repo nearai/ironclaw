@@ -26,6 +26,24 @@ const MCP_INIT_BODY: &[u8] =
     br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#;
 const MCP_NOTIF_BODY: &[u8] = br#"{"accepted":true}"#;
 
+/// Builds the `tools/call` JSON-RPC result body the scripted Exa MCP
+/// handshake's third leg returns:
+/// `{"result":{"content":[{"type":"text","text":"<content_text>"}]}}`. Both
+/// `web-access.search` and `web-access.get_content` MCP responses share this
+/// shape — only the text content differs — so every test scripts its third
+/// leg with `mcp_tool_call_result_body(..)` instead of hand-writing the JSON.
+fn mcp_tool_call_result_body(content_text: &str) -> Vec<u8> {
+    json!({
+        "result": {
+            "content": [
+                {"type": "text", "text": content_text}
+            ]
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
 /// `web-access.search` dispatches through the real `WebAccessExecutor` over
 /// the scripted Exa MCP handshake; the search result content surfaces back to
 /// the model as a tool result.
@@ -35,7 +53,10 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
-            b"{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Title: Tokio Async Runtime\\nURL: https://tokio.rs\\nText: Tokio is an async runtime for Rust providing IO, networking, and scheduling.\"}]}}".to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Tokio Async Runtime\nURL: https://tokio.rs\nText: Tokio is an async \
+                 runtime for Rust providing IO, networking, and scheduling.",
+            ),
         ])
         .script([
             RebornScriptedReply::tool_call(
@@ -87,7 +108,10 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
-            b"{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"# Example Domain\\nURL: https://example.com\\n\\nThis domain is for illustrative examples in documents.\"}]}}".to_vec(),
+            mcp_tool_call_result_body(
+                "# Example Domain\nURL: https://example.com\n\nThis domain is for illustrative \
+                 examples in documents.",
+            ),
         ])
         .script([
             RebornScriptedReply::tool_call(
@@ -138,7 +162,10 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
-            b"{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Title: Tokio Async Runtime\\nURL: https://tokio.rs\\nText: Tokio is an async runtime for Rust providing IO, networking, and scheduling.\"}]}}".to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Tokio Async Runtime\nURL: https://tokio.rs\nText: Tokio is an async \
+                 runtime for Rust providing IO, networking, and scheduling.",
+            ),
         ])
         .script([
             RebornScriptedReply::tool_call(
@@ -169,6 +196,55 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
     );
 }
 
+/// Guards `assert_egress_body_contains_any` against its OTHER error branch —
+/// when no captured egress request's URL matches `url_substr` at all (as
+/// opposed to matching the URL but missing the body substring, covered by
+/// `assert_egress_body_contains_any_fails_when_substring_absent` above).
+#[tokio::test]
+async fn assert_egress_body_contains_any_fails_when_url_absent() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Tokio Async Runtime\nURL: https://tokio.rs\nText: Tokio is an async \
+                 runtime for Rust providing IO, networking, and scheduling.",
+            ),
+        ])
+        .script([
+            RebornScriptedReply::tool_call(
+                "web-access.search",
+                json!({"query": "rust async runtimes"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("search the web for rust async runtimes")
+        .await
+        .expect("turn completes");
+
+    let err = harness
+        .assert_egress_body_contains_any("a-host-that-was-never-contacted.example", "anything")
+        .await
+        .expect_err(
+            "assert_egress_body_contains_any must fail when no captured egress request's URL \
+             matches url_substr at all",
+        );
+    // Pins the specific "no matching URL" branch (not just any `Err`) — the
+    // sibling substring-absent branch below it in the same function returns a
+    // differently worded `Err`, so this message check is what actually
+    // distinguishes the two failure paths.
+    assert!(
+        err.to_string()
+            .contains("no captured egress request matching url"),
+        "expected the no-matching-URL branch's error message, got: {err}"
+    );
+}
+
 /// Error path — `web-access.get_content` requests a URL the scripted Exa MCP
 /// response reports as failed to fetch. `WebAccessExecutor::fetch_content`
 /// treats an `"Error fetching <requested url>"` line in the MCP tool-call
@@ -177,15 +253,16 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
 /// `WebAccessTestHandler`'s error-mapping path (`dispatch` ->
 /// `web_access_test_error` -> `FirstPartyCapabilityError`) surfaces a real
 /// `WebAccessDispatchError` as a model-visible `Failed` tool error — the run
-/// reaches `Completed`, not a terminal `driver_unavailable` — rather than a
-/// dropped `Err` or a mis-mapped error class.
+/// is expected to reach `Completed` rather than a terminal `driver_unavailable`
+/// (implied here by the presence of a final reply) — rather than a dropped
+/// `Err` or a mis-mapped error class.
 #[tokio::test]
 async fn get_content_fetch_error_surfaces_recoverable_failed() {
     let harness = RebornIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
-            br#"{"result":{"content":[{"type":"text","text":"Error fetching https://example.com: 404 not found"}]}}"#.to_vec(),
+            mcp_tool_call_result_body("Error fetching https://example.com: 404 not found"),
         ])
         .script([
             RebornScriptedReply::tool_call(
