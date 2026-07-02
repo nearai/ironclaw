@@ -27,6 +27,13 @@ pub enum McpFactoryError {
 
 /// Create an `McpClient` from a server configuration, dispatching on the
 /// effective transport type.
+///
+/// Always produces a *user-scoped* client (`thread_id == None`). Thread-scoped
+/// clients are materialised lazily by `McpClientStore::resolve_for_thread`,
+/// which clones a user-scoped base via `McpClient::for_thread(uuid)`. Boot,
+/// CLI, and extension-activation paths never need to create a thread-scoped
+/// client directly — they create the user-scoped base; the agent dispatch
+/// path forks it per-Thread on demand.
 pub async fn create_client_from_config(
     mut server: McpServerConfig,
     session_manager: &Arc<McpSessionManager>,
@@ -84,6 +91,7 @@ pub async fn create_client_from_config(
                 secrets,
                 user_id,
                 Some(server),
+                None,
             ))
         }
         #[cfg(unix)]
@@ -105,6 +113,7 @@ pub async fn create_client_from_config(
                 secrets,
                 user_id,
                 Some(server),
+                None,
             ))
         }
         #[cfg(not(unix))]
@@ -123,6 +132,7 @@ pub async fn create_client_from_config(
                         Arc::clone(session_manager),
                         Arc::clone(secrets),
                         user_id,
+                        None,
                     ));
                 }
             }
@@ -133,7 +143,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
-                    .with_session_manager(Arc::clone(session_manager), user_id),
+                    .with_session_manager(Arc::clone(session_manager), user_id, None),
             );
             Ok(McpClient::new_with_transport(
                 validated_name.as_str(),
@@ -142,6 +152,7 @@ pub async fn create_client_from_config(
                 secrets,
                 user_id,
                 Some(server),
+                None,
             ))
         }
     }
@@ -407,7 +418,7 @@ mod tests {
         // Use the normalised server name (hyphens → underscores) that the factory applies.
         let normalised_name = McpServerName::new("session_test").expect("valid");
         session_manager
-            .get_or_create("test-user", &normalised_name, &url)
+            .get_or_create("test-user", &normalised_name, &url, None)
             .await;
 
         // Send a request through the client's transport to trigger session capture.
@@ -428,7 +439,7 @@ mod tests {
         // Verify the session manager captured the session ID from the response
         // under the same `(user_id, server_name)` key the transport wrote with.
         let captured = session_manager
-            .get_session_id("test-user", &normalised_name)
+            .get_session_id("test-user", &normalised_name, None)
             .await;
         assert_eq!(
             captured.as_deref(),
@@ -460,6 +471,32 @@ mod tests {
             client.server_name(),
             "my_mcp_server",
             "Hyphens in server name must be replaced with underscores"
+        );
+    }
+
+    /// `create_client_from_config` always produces a user-scoped client
+    /// (`thread_id == None`). Thread-scoped clients are materialised via
+    /// `McpClientStore::resolve_for_thread`, which forks the user-scoped
+    /// base through `McpClient::for_thread(uuid)`.
+    #[tokio::test]
+    async fn factory_produces_user_scoped_client() {
+        let server = McpServerConfig::new("svc", "http://localhost:9999");
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            None,
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed");
+
+        assert!(
+            client.thread_id().is_none(),
+            "factory must produce a user-scoped client (thread_id == None)"
         );
     }
 }

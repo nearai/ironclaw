@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use super::client::McpClient;
 use super::protocol::McpTool;
@@ -133,20 +134,41 @@ pub fn surface_signature(tools: &[McpTool]) -> String {
 }
 
 /// Composite key identifying an MCP client instance: the authenticating
-/// user plus the server name. Both fields participate in `Hash` / `Eq` so
-/// two users can hold active clients against the same server
-/// simultaneously without key collision.
+/// user plus the server name plus an optional Thread id. All fields
+/// participate in `Hash` / `Eq` so:
+/// - Two users can hold active clients against the same server simultaneously.
+/// - Two concurrent IronClaw Threads under one user activating the same server
+///   get distinct `Arc<McpClient>` instances (and thus distinct MCP protocol
+///   sessions), so any per-session state the upstream MCP server holds is
+///   partitioned per Thread, not shared across all of a user's Threads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct McpClientKey {
     pub user_id: String,
     pub server_name: String,
+    /// `None` = user-scoped (legacy); `Some(uuid)` = thread-scoped.
+    pub thread_id: Option<Uuid>,
 }
 
 impl McpClientKey {
+    /// Create a user-scoped key (no Thread axis).
     pub fn new(user_id: &str, server_name: &str) -> Self {
         Self {
             user_id: user_id.to_string(),
             server_name: server_name.to_string(),
+            thread_id: None,
+        }
+    }
+
+    /// Create a thread-scoped key.
+    ///
+    /// Two Threads under the same user activating the same server receive
+    /// distinct `Arc<McpClient>` instances because `thread_id` participates in
+    /// the `Hash`/`Eq` key.
+    pub fn new_for_thread(user_id: &str, server_name: &str, thread_id: Uuid) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            server_name: server_name.to_string(),
+            thread_id: Some(thread_id),
         }
     }
 }
@@ -191,6 +213,31 @@ impl McpClientStore {
         );
     }
 
+    /// Insert or replace the client for the given `McpClientKey`.
+    ///
+    /// Allows callers to provide a fully-constructed key (including optional
+    /// `thread_id`) without going through the `(user_id, server_name)` string pair.
+    pub async fn insert_with_key(
+        &self,
+        key: McpClientKey,
+        client: Arc<McpClient>,
+        surface: String,
+    ) {
+        self.clients
+            .write()
+            .await
+            .insert(key, McpClientEntry { client, surface });
+    }
+
+    /// Look up the client for the given `McpClientKey`.
+    pub async fn get_with_key(&self, key: &McpClientKey) -> Option<Arc<McpClient>> {
+        self.clients
+            .read()
+            .await
+            .get(key)
+            .map(|entry| entry.client.clone())
+    }
+
     /// Remove and return the client for `(user_id, server_name)`, if any.
     pub async fn remove(&self, user_id: &str, server_name: &str) -> Option<Arc<McpClient>> {
         self.clients
@@ -228,7 +275,90 @@ impl McpClientStore {
             .map(|entry| entry.client.clone())
     }
 
+    /// Resolve the right `McpClient` for the `(user, server, thread)` triple.
+    ///
+    /// - `thread_id == None` → returns the user-scoped base client (unchanged
+    ///   behaviour; CLI and boot paths take this route).
+    /// - `thread_id == Some(tid)` → returns the thread-scoped client if already
+    ///   cached; otherwise lazily materialises one by calling
+    ///   [`McpClient::for_thread`] on the user-scoped base. The materialised
+    ///   client is inserted into the store and returned as an `Arc<McpClient>`.
+    ///
+    /// Returns `None` only when the user-scoped base client for this server
+    /// has never been activated (i.e. `get(user, server)` would also be
+    /// `None`).
+    pub async fn resolve_for_thread(
+        &self,
+        user_id: &str,
+        server_name: &str,
+        thread_id: Option<Uuid>,
+    ) -> Option<Arc<McpClient>> {
+        let Some(tid) = thread_id else {
+            // No thread context → user-scoped lookup (backward compat).
+            return self.get(user_id, server_name).await;
+        };
+
+        let thread_key = McpClientKey::new_for_thread(user_id, server_name, tid);
+
+        // Fast path: already materialised.
+        {
+            let guard = self.clients.read().await;
+            if let Some(entry) = guard.get(&thread_key) {
+                return Some(entry.client.clone());
+            }
+        }
+
+        // Slow path: materialise from the user-scoped base.
+        // Acquire the write lock first so we atomically read the base,
+        // materialise the fork, and insert it — preventing a race where two
+        // concurrent callers both miss the fast-path and double-insert.
+        let mut guard = self.clients.write().await;
+
+        // Double-check under write lock in case another caller beat us.
+        if let Some(entry) = guard.get(&thread_key) {
+            return Some(entry.client.clone());
+        }
+
+        // Look up the base client under the write lock (still present).
+        let base = guard.get(&McpClientKey::new(user_id, server_name))?;
+        let surface = base.surface.clone();
+        let forked = Arc::new(base.client.for_thread(tid));
+        tracing::debug!(
+            user_id = %user_id,
+            server = %server_name,
+            thread_id = %tid,
+            "Materialised thread-scoped client fork"
+        );
+        guard.insert(
+            thread_key,
+            McpClientEntry {
+                client: forked.clone(),
+                surface,
+            },
+        );
+        Some(forked)
+    }
+
     /// Whether `(user_id, server_name)` has an active client.
+    /// Evict all thread-scoped client entries for the given thread UUID.
+    ///
+    /// Removes every `(user, server, thread_id)` entry that was lazily
+    /// materialised for `thread_id` via [`resolve_for_thread`], while leaving
+    /// user-scoped entries (`thread_id == None`) intact.
+    ///
+    /// # Wiring note
+    /// No production caller yet — the agent runtime does not currently emit
+    /// a "Thread terminated" event the store can subscribe to. The method
+    /// is provided so the memory-growth guard is in place once the
+    /// lifecycle hook exists; until then, thread-scoped entries
+    /// accumulate for the lifetime of the process.
+    pub async fn evict_thread(&self, thread_id: Uuid) {
+        self.clients
+            .write()
+            .await
+            .retain(|key, _| key.thread_id != Some(thread_id));
+    }
+
     pub async fn contains(&self, user_id: &str, server_name: &str) -> bool {
         self.clients
             .read()
@@ -508,6 +638,258 @@ mod tests {
                 .await
                 .is_none(),
             "same-user re-activation with a new surface is allowed (caller replaces their own entry)",
+        );
+    }
+    // ── Thread-axis partition tests ──────────────────────────────────────
+
+    /// Two distinct Threads under the same user activating the same server
+    /// must get distinct `Arc<McpClient>` instances. Without the `thread_id`
+    /// axis, the second Thread's activation would overwrite the first's entry,
+    /// sharing one `McpClient` and one MCP protocol session — defeating the
+    /// session-isolation guarantee `McpSessionKey.thread_id` provides.
+    #[tokio::test]
+    async fn distinct_threads_get_distinct_client_instances() {
+        use uuid::Uuid;
+        let store = McpClientStore::new();
+        let client_t1 = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client_t2 = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
+
+        let thread_1 = Uuid::from_u128(1);
+        let thread_2 = Uuid::from_u128(2);
+        let key1 = McpClientKey::new_for_thread("user-a", "notion", thread_1);
+        let key2 = McpClientKey::new_for_thread("user-a", "notion", thread_2);
+
+        store
+            .insert_with_key(key1.clone(), client_t1.clone(), "sig".into())
+            .await;
+        store
+            .insert_with_key(key2.clone(), client_t2.clone(), "sig".into())
+            .await;
+
+        let got1 = store.get_with_key(&key1).await.expect("thread 1 client");
+        let got2 = store.get_with_key(&key2).await.expect("thread 2 client");
+
+        assert!(
+            Arc::ptr_eq(&got1, &client_t1),
+            "Thread 1 must return its own McpClient"
+        );
+        assert!(
+            Arc::ptr_eq(&got2, &client_t2),
+            "Thread 2 must return its own McpClient"
+        );
+        assert!(
+            !Arc::ptr_eq(&got1, &got2),
+            "Thread 1 and Thread 2 must NOT share a McpClient instance"
+        );
+    }
+
+    /// A thread-scoped key and a user-scoped key with the same `(user, server)`
+    /// must coexist as distinct entries — the `None` / `Some` distinction on
+    /// `thread_id` must participate in the hash.
+    #[tokio::test]
+    async fn thread_scoped_and_user_scoped_keys_coexist() {
+        use uuid::Uuid;
+        let store = McpClientStore::new();
+        let client_user = Arc::new(McpClient::new_with_name("notion", "http://user.invalid"));
+        let client_thread = Arc::new(McpClient::new_with_name("notion", "http://thread.invalid"));
+
+        let thread_a = Uuid::from_u128(42);
+        let key_user = McpClientKey::new("user-a", "notion");
+        let key_thread = McpClientKey::new_for_thread("user-a", "notion", thread_a);
+
+        store
+            .insert_with_key(key_user.clone(), client_user.clone(), "sig".into())
+            .await;
+        store
+            .insert_with_key(key_thread.clone(), client_thread.clone(), "sig".into())
+            .await;
+
+        let got_user = store
+            .get_with_key(&key_user)
+            .await
+            .expect("user-scoped client");
+        let got_thread = store
+            .get_with_key(&key_thread)
+            .await
+            .expect("thread-scoped client");
+
+        assert!(
+            Arc::ptr_eq(&got_user, &client_user),
+            "user-scoped key must return the user-scoped client"
+        );
+        assert!(
+            Arc::ptr_eq(&got_thread, &client_thread),
+            "thread-scoped key must return the thread-scoped client"
+        );
+        assert!(
+            !Arc::ptr_eq(&got_user, &got_thread),
+            "user-scoped and thread-scoped clients must be distinct instances"
+        );
+        assert_eq!(
+            store.clients.read().await.len(),
+            2,
+            "both keys must exist as separate entries in the store"
+        );
+    }
+
+    // ── resolve_for_thread tests ───────────────────────────────────────────
+
+    /// `resolve_for_thread` with `None` returns the same `Arc<McpClient>` as
+    /// the plain `get` — backward-compatible user-scoped path unchanged.
+    #[tokio::test]
+    async fn resolve_for_thread_none_returns_user_scoped_client() {
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://base.invalid"));
+        store
+            .insert("user-a", "svc", base.clone(), "sig".into())
+            .await;
+
+        let got = store
+            .resolve_for_thread("user-a", "svc", None)
+            .await
+            .expect("must return base client for None thread_id");
+        assert!(
+            Arc::ptr_eq(&got, &base),
+            "None thread_id must return the user-scoped base client unchanged"
+        );
+    }
+
+    /// `resolve_for_thread` with two distinct thread UUIDs returns two distinct
+    /// `Arc<McpClient>` instances (different pointer identity).
+    #[tokio::test]
+    async fn resolve_for_thread_distinct_uuids_yield_distinct_clients() {
+        use uuid::Uuid;
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://base.invalid"));
+        store
+            .insert("user-a", "svc", base.clone(), "sig".into())
+            .await;
+
+        let tid_a = Uuid::from_u128(0xAAAA);
+        let tid_b = Uuid::from_u128(0xBBBB);
+
+        let got_a = store
+            .resolve_for_thread("user-a", "svc", Some(tid_a))
+            .await
+            .expect("thread A client");
+        let got_b = store
+            .resolve_for_thread("user-a", "svc", Some(tid_b))
+            .await
+            .expect("thread B client");
+
+        assert!(
+            !Arc::ptr_eq(&got_a, &got_b),
+            "distinct thread UUIDs must yield distinct client instances"
+        );
+        assert!(
+            !Arc::ptr_eq(&got_a, &base),
+            "thread-scoped client must be distinct from the user-scoped base"
+        );
+    }
+
+    /// The materialised thread-scoped client has `thread_id = Some(uuid)` and
+    /// fresh init state (the `initialized` OnceCell is not yet set).
+    #[tokio::test]
+    async fn resolve_for_thread_materialised_client_has_correct_thread_id() {
+        use uuid::Uuid;
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://base.invalid"));
+        store
+            .insert("user-a", "svc", base.clone(), "sig".into())
+            .await;
+
+        let tid = Uuid::from_u128(0xDEAD_BEEF);
+        let got = store
+            .resolve_for_thread("user-a", "svc", Some(tid))
+            .await
+            .expect("materialised client");
+
+        assert_eq!(
+            got.thread_id(),
+            Some(tid),
+            "materialised client must carry thread_id = Some(tid)"
+        );
+    }
+
+    /// A second call with the same thread UUID returns the *same* cached Arc —
+    /// we don't materialise a new client on every call.
+    #[tokio::test]
+    async fn resolve_for_thread_caches_materialised_client() {
+        use uuid::Uuid;
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://base.invalid"));
+        store
+            .insert("user-a", "svc", base.clone(), "sig".into())
+            .await;
+
+        let tid = Uuid::from_u128(0xCAFE);
+        let first = store
+            .resolve_for_thread("user-a", "svc", Some(tid))
+            .await
+            .expect("first call");
+        let second = store
+            .resolve_for_thread("user-a", "svc", Some(tid))
+            .await
+            .expect("second call");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeated calls with the same thread UUID must return the cached client"
+        );
+    }
+
+    // ── evict_thread tests ─────────────────────────────────────────────────
+
+    /// `evict_thread` removes all thread-scoped entries for `thread_id` while
+    /// leaving user-scoped and other-thread entries intact.
+    #[tokio::test]
+    async fn evict_thread_removes_only_matching_thread_entries() {
+        use crate::tools::mcp::McpClient;
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new("http://localhost:9099"));
+
+        let tid_a = Uuid::from_u128(0xAAAA);
+        let tid_b = Uuid::from_u128(0xBBBB);
+
+        // Insert a user-scoped entry and two thread-scoped forks.
+        store
+            .insert("alice", "svc", Arc::clone(&base), "sig-base".to_string())
+            .await;
+        let key_a = McpClientKey::new_for_thread("alice", "svc", tid_a);
+        let key_b = McpClientKey::new_for_thread("alice", "svc", tid_b);
+        store
+            .insert_with_key(key_a.clone(), Arc::clone(&base), "sig-a".to_string())
+            .await;
+        store
+            .insert_with_key(key_b.clone(), Arc::clone(&base), "sig-b".to_string())
+            .await;
+
+        assert!(
+            store.get_with_key(&key_a).await.is_some(),
+            "pre: tid_a present"
+        );
+        assert!(
+            store.get_with_key(&key_b).await.is_some(),
+            "pre: tid_b present"
+        );
+        assert!(
+            store.contains("alice", "svc").await,
+            "pre: user-scoped present"
+        );
+
+        store.evict_thread(tid_a).await;
+
+        assert!(
+            store.get_with_key(&key_a).await.is_none(),
+            "tid_a entry evicted"
+        );
+        assert!(
+            store.get_with_key(&key_b).await.is_some(),
+            "tid_b entry survives"
+        );
+        assert!(
+            store.contains("alice", "svc").await,
+            "user-scoped entry survives"
         );
     }
 }

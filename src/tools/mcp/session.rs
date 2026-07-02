@@ -1,45 +1,77 @@
 //! MCP session management.
 //!
 //! Manages Mcp-Session-Id headers for stateful connections to MCP servers.
-//! Each `(user, server)` pair has its own session that persists across
-//! requests.
+//! Each `(user, server)` or `(user, server, thread)` pair has its own
+//! session that persists across requests.
 //!
-//! Sessions are partitioned by `(user_id, server_name)` — **not** by server
-//! name alone. An MCP server issues a distinct `Mcp-Session-Id` for every
-//! authenticated client. If two users activate the same MCP server and the
-//! manager were keyed on server name only, the second user's session ID
-//! would overwrite the first user's; the first user's next request would
-//! then send the second user's `Mcp-Session-Id`, potentially accessing
-//! cross-tenant server-side state. Same shape as the MCP client-isolation
-//! bug in `McpClientStore` — see `.claude/rules/safety-and-sandbox.md`
-//! "Cache Keys Must Be Complete".
+//! Sessions are partitioned by `(user_id, server_name, thread_id)` so:
+//! - Two users activating the same server get distinct sessions (prevents
+//!   cross-tenant `Mcp-Session-Id` sharing).
+//! - Two concurrent IronClaw Threads under one user activating the same
+//!   server get distinct sessions, so an MCP server that binds state to
+//!   its `Mcp-Session-Id` (per-conversation rate limits, persistent
+//!   sessions, tenant scoping, etc.) sees one session per Thread, not
+//!   one session shared across all of a user's Threads.
+//!
+//! See `.claude/rules/safety-and-sandbox.md` "Cache Keys Must Be Complete"
+//! for the broader cache-key-completeness rationale.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use ironclaw_common::McpServerName;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
-/// Composite key for an MCP session. A given user holds one session per
-/// server; the same user across two different servers gets two distinct
-/// sessions; the same server across two different users also gets two
-/// distinct sessions.
+/// Composite key for an MCP session.
+///
+/// A given user holds one session per server per optional Thread:
+/// - `thread_id = None`: user-scoped session — the legacy default, used when
+///   the call is not rooted in an IronClaw Thread (test fixtures, CLI paths).
+/// - `thread_id = Some(uuid)`: thread-scoped session — issued when a
+///   dispatching Thread is known, ensuring that two concurrent Threads under
+///   one user never share a `Mcp-Session-Id` for the same server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct McpSessionKey {
     user_id: String,
     server_name: McpServerName,
+    /// `None` = user-scoped (legacy); `Some(uuid)` = thread-scoped.
+    thread_id: Option<Uuid>,
 }
 
 impl McpSessionKey {
+    /// Create a user-scoped session key (no Thread axis).
+    ///
+    /// Use this for call-paths that are not rooted in a specific IronClaw
+    /// Thread — e.g. CLI invocations, test fixtures, or shutdown cleanup.
+    /// Two calls with the same `(user, server)` will share a session.
     pub fn new(user_id: impl Into<String>, server_name: McpServerName) -> Self {
         Self {
             user_id: user_id.into(),
             server_name,
+            thread_id: None,
+        }
+    }
+
+    /// Create a thread-scoped session key.
+    ///
+    /// Use this when the caller is a specific IronClaw Thread. Two Threads
+    /// under the same user activating the same server will receive distinct
+    /// sessions because `thread_id` participates in the `Hash`/`Eq` key.
+    pub fn new_for_thread(
+        user_id: impl Into<String>,
+        server_name: McpServerName,
+        thread_id: Uuid,
+    ) -> Self {
+        Self {
+            user_id: user_id.into(),
+            server_name,
+            thread_id: Some(thread_id),
         }
     }
 }
 
-/// Session state for a single `(user, server)` MCP connection.
+/// Session state for a single `(user, server[, thread])` MCP connection.
 #[derive(Debug, Clone)]
 pub struct McpSession {
     /// Session ID returned by the server (via Mcp-Session-Id header).
@@ -91,7 +123,7 @@ impl McpSession {
     }
 }
 
-/// Manages MCP sessions across multiple `(user, server)` pairs.
+/// Manages MCP sessions across multiple `(user, server[, thread])` triples.
 ///
 /// Server names are typed via [`McpServerName`] so a free-form string can't
 /// bypass allowlist validation at the boundary. Callers convert raw strings
@@ -100,7 +132,7 @@ impl McpSession {
 /// bugs — matching the shape described in `.claude/rules/types.md` — a
 /// compile error rather than a runtime surprise.
 pub struct McpSessionManager {
-    /// Active sessions keyed by `(user_id, server_name)`.
+    /// Active sessions keyed by `(user_id, server_name, thread_id)`.
     sessions: RwLock<HashMap<McpSessionKey, McpSession>>,
 
     /// Maximum idle time before a session is considered stale (in seconds).
@@ -124,18 +156,22 @@ impl McpSessionManager {
         }
     }
 
-    fn key(user_id: &str, server_name: &McpServerName) -> McpSessionKey {
-        McpSessionKey::new(user_id, server_name.clone())
+    fn key(user_id: &str, server_name: &McpServerName, thread_id: Option<Uuid>) -> McpSessionKey {
+        match thread_id {
+            Some(tid) => McpSessionKey::new_for_thread(user_id, server_name.clone(), tid),
+            None => McpSessionKey::new(user_id, server_name.clone()),
+        }
     }
 
-    /// Get or create a session for `(user, server)`.
+    /// Get or create a session for `(user, server[, thread])`.
     pub async fn get_or_create(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         server_url: &str,
+        thread_id: Option<Uuid>,
     ) -> McpSession {
-        let key = Self::key(user_id, server_name);
+        let key = Self::key(user_id, server_name, thread_id);
         let mut sessions = self.sessions.write().await;
 
         if let Some(session) = sessions.get(&key) {
@@ -155,15 +191,16 @@ impl McpSessionManager {
         session
     }
 
-    /// Get the current session ID for `(user, server)`, if any.
+    /// Get the current session ID for `(user, server[, thread])`, if any.
     pub async fn get_session_id(
         &self,
         user_id: &str,
         server_name: &McpServerName,
+        thread_id: Option<Uuid>,
     ) -> Option<String> {
         let sessions = self.sessions.read().await;
         sessions
-            .get(&Self::key(user_id, server_name))
+            .get(&Self::key(user_id, server_name, thread_id))
             .and_then(|s| s.session_id.clone())
     }
 
@@ -173,50 +210,66 @@ impl McpSessionManager {
         user_id: &str,
         server_name: &McpServerName,
         session_id: Option<String>,
+        thread_id: Option<Uuid>,
     ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name)) {
+        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id)) {
             session.update_session_id(session_id);
         }
     }
 
     /// Mark a session as initialized.
-    pub async fn mark_initialized(&self, user_id: &str, server_name: &McpServerName) {
+    pub async fn mark_initialized(
+        &self,
+        user_id: &str,
+        server_name: &McpServerName,
+        thread_id: Option<Uuid>,
+    ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name)) {
+        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id)) {
             session.mark_initialized();
         }
     }
 
     /// Check if a session is initialized.
-    pub async fn is_initialized(&self, user_id: &str, server_name: &McpServerName) -> bool {
+    pub async fn is_initialized(
+        &self,
+        user_id: &str,
+        server_name: &McpServerName,
+        thread_id: Option<Uuid>,
+    ) -> bool {
         let sessions = self.sessions.read().await;
         sessions
-            .get(&Self::key(user_id, server_name))
+            .get(&Self::key(user_id, server_name, thread_id))
             .map(|s| s.initialized)
             .unwrap_or(false)
     }
 
     /// Touch a session to update its activity timestamp.
-    pub async fn touch(&self, user_id: &str, server_name: &McpServerName) {
+    pub async fn touch(&self, user_id: &str, server_name: &McpServerName, thread_id: Option<Uuid>) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name)) {
+        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id)) {
             session.touch();
         }
     }
 
     /// Terminate a session (e.g., on error or explicit disconnect).
-    pub async fn terminate(&self, user_id: &str, server_name: &McpServerName) {
+    pub async fn terminate(
+        &self,
+        user_id: &str,
+        server_name: &McpServerName,
+        thread_id: Option<Uuid>,
+    ) {
         let mut sessions = self.sessions.write().await;
-        sessions.remove(&Self::key(user_id, server_name));
+        sessions.remove(&Self::key(user_id, server_name, thread_id));
     }
 
-    /// Snapshot the active `(user, server)` pairs.
-    pub async fn active_sessions(&self) -> Vec<(String, McpServerName)> {
+    /// Snapshot the active `(user, server, thread_id)` triples.
+    pub async fn active_sessions(&self) -> Vec<(String, McpServerName, Option<Uuid>)> {
         let sessions = self.sessions.read().await;
         sessions
             .keys()
-            .map(|k| (k.user_id.clone(), k.server_name.clone()))
+            .map(|k| (k.user_id.clone(), k.server_name.clone(), k.thread_id))
             .collect()
     }
 
@@ -244,6 +297,10 @@ mod tests {
 
     fn sn(s: &str) -> McpServerName {
         McpServerName::new(s).expect("test name")
+    }
+
+    fn tid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
     }
 
     #[test]
@@ -287,18 +344,18 @@ mod tests {
 
         // First call creates a new session
         let session1 = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         assert!(session1.session_id.is_none());
 
         // Update the session ID
         manager
-            .update_session_id(USER_A, &notion, Some("session-abc".to_string()))
+            .update_session_id(USER_A, &notion, Some("session-abc".to_string()), None)
             .await;
 
         // Second call returns existing session with the ID
         let session2 = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         assert_eq!(session2.session_id, Some("session-abc".to_string()));
     }
@@ -309,18 +366,18 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         manager
-            .update_session_id(USER_A, &notion, Some("session-123".to_string()))
+            .update_session_id(USER_A, &notion, Some("session-123".to_string()), None)
             .await;
 
         // Terminate the session
-        manager.terminate(USER_A, &notion).await;
+        manager.terminate(USER_A, &notion, None).await;
 
         // Should create a fresh session now
         let session = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         assert!(session.session_id.is_none());
     }
@@ -331,14 +388,14 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
 
-        assert!(!manager.is_initialized(USER_A, &notion).await);
+        assert!(!manager.is_initialized(USER_A, &notion, None).await);
 
-        manager.mark_initialized(USER_A, &notion).await;
+        manager.mark_initialized(USER_A, &notion, None).await;
 
-        assert!(manager.is_initialized(USER_A, &notion).await);
+        assert!(manager.is_initialized(USER_A, &notion, None).await);
     }
 
     #[tokio::test]
@@ -348,20 +405,20 @@ mod tests {
         let github = sn("github");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         manager
-            .get_or_create(USER_A, &github, "https://mcp.github.com")
+            .get_or_create(USER_A, &github, "https://mcp.github.com", None)
             .await;
         manager
-            .get_or_create(USER_B, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None)
             .await;
 
         let pairs = manager.active_sessions().await;
         assert_eq!(pairs.len(), 3);
-        assert!(pairs.contains(&(USER_A.to_string(), notion.clone())));
-        assert!(pairs.contains(&(USER_A.to_string(), github.clone())));
-        assert!(pairs.contains(&(USER_B.to_string(), notion.clone())));
+        assert!(pairs.contains(&(USER_A.to_string(), notion.clone(), None)));
+        assert!(pairs.contains(&(USER_A.to_string(), github.clone(), None)));
+        assert!(pairs.contains(&(USER_B.to_string(), notion.clone(), None)));
     }
 
     /// Regression for the cross-tenant session-ID collision called out in
@@ -377,32 +434,37 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
             .await;
         manager
-            .get_or_create(USER_B, &notion, "https://mcp.notion.com")
+            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None)
             .await;
 
         manager
-            .update_session_id(USER_A, &notion, Some("session-a".to_string()))
+            .update_session_id(USER_A, &notion, Some("session-a".to_string()), None)
             .await;
         manager
-            .update_session_id(USER_B, &notion, Some("session-b".to_string()))
+            .update_session_id(USER_B, &notion, Some("session-b".to_string()), None)
             .await;
 
         assert_eq!(
-            manager.get_session_id(USER_A, &notion).await,
+            manager.get_session_id(USER_A, &notion, None).await,
             Some("session-a".to_string())
         );
         assert_eq!(
-            manager.get_session_id(USER_B, &notion).await,
+            manager.get_session_id(USER_B, &notion, None).await,
             Some("session-b".to_string())
         );
 
-        manager.terminate(USER_A, &notion).await;
-        assert!(manager.get_session_id(USER_A, &notion).await.is_none());
+        manager.terminate(USER_A, &notion, None).await;
+        assert!(
+            manager
+                .get_session_id(USER_A, &notion, None)
+                .await
+                .is_none()
+        );
         assert_eq!(
-            manager.get_session_id(USER_B, &notion).await,
+            manager.get_session_id(USER_B, &notion, None).await,
             Some("session-b".to_string()),
             "terminating user-A must not affect user-B's session"
         );
@@ -439,7 +501,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_session_id_nonexistent_returns_none() {
         let manager = McpSessionManager::new();
-        assert!(manager.get_session_id(USER_A, &sn("ghost")).await.is_none());
+        assert!(
+            manager
+                .get_session_id(USER_A, &sn("ghost"), None)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -447,7 +514,7 @@ mod tests {
         let manager = McpSessionManager::new();
         // Should not panic or create a session.
         manager
-            .update_session_id(USER_A, &sn("ghost"), Some("id".to_string()))
+            .update_session_id(USER_A, &sn("ghost"), Some("id".to_string()), None)
             .await;
         assert!(manager.active_sessions().await.is_empty());
     }
@@ -455,14 +522,14 @@ mod tests {
     #[tokio::test]
     async fn test_mark_initialized_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
-        manager.mark_initialized(USER_A, &sn("ghost")).await;
+        manager.mark_initialized(USER_A, &sn("ghost"), None).await;
         assert!(manager.active_sessions().await.is_empty());
     }
 
     #[tokio::test]
     async fn test_touch_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
-        manager.touch(USER_A, &sn("ghost")).await;
+        manager.touch(USER_A, &sn("ghost"), None).await;
         assert!(manager.active_sessions().await.is_empty());
     }
 
@@ -475,13 +542,13 @@ mod tests {
         let stale2 = sn("stale2");
 
         manager
-            .get_or_create(USER_A, &fresh, "https://fresh.example.com")
+            .get_or_create(USER_A, &fresh, "https://fresh.example.com", None)
             .await;
         manager
-            .get_or_create(USER_A, &stale1, "https://stale1.example.com")
+            .get_or_create(USER_A, &stale1, "https://stale1.example.com", None)
             .await;
         manager
-            .get_or_create(USER_A, &stale2, "https://stale2.example.com")
+            .get_or_create(USER_A, &stale2, "https://stale2.example.com", None)
             .await;
 
         // Push the two stale sessions into the past.
@@ -489,11 +556,11 @@ mod tests {
             let mut sessions = manager.sessions.write().await;
             let past = std::time::Instant::now() - std::time::Duration::from_secs(60);
             sessions
-                .get_mut(&McpSessionManager::key(USER_A, &stale1))
+                .get_mut(&McpSessionManager::key(USER_A, &stale1, None))
                 .unwrap()
                 .last_activity = past;
             sessions
-                .get_mut(&McpSessionManager::key(USER_A, &stale2))
+                .get_mut(&McpSessionManager::key(USER_A, &stale2, None))
                 .unwrap()
                 .last_activity = past;
         }
@@ -503,14 +570,14 @@ mod tests {
 
         let remaining = manager.active_sessions().await;
         assert_eq!(remaining.len(), 1);
-        assert!(remaining.contains(&(USER_A.to_string(), fresh.clone())));
+        assert!(remaining.contains(&(USER_A.to_string(), fresh.clone(), None)));
     }
 
     #[tokio::test]
     async fn test_terminate_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
         // Should not panic.
-        manager.terminate(USER_A, &sn("ghost")).await;
+        manager.terminate(USER_A, &sn("ghost"), None).await;
         assert!(manager.active_sessions().await.is_empty());
     }
 
@@ -519,5 +586,169 @@ mod tests {
         let manager = McpSessionManager::default();
         // Default should match new(), which uses 1800s idle timeout.
         assert_eq!(manager.max_idle_secs, 1800);
+    }
+
+    // ── Thread-axis partition tests ───────────────────────────────────────
+
+    /// Two `new_for_thread` keys with distinct `thread_id` must not collide:
+    /// Thread A and Thread B under the same user and same server get
+    /// independent MCP sessions.
+    #[tokio::test]
+    async fn test_distinct_thread_ids_do_not_collide() {
+        let manager = McpSessionManager::new();
+        let notion = sn("notion");
+        let thread_a = tid(1);
+        let thread_b = tid(2);
+
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .await;
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_b))
+            .await;
+
+        manager
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-thread-a".to_string()),
+                Some(thread_a),
+            )
+            .await;
+        manager
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-thread-b".to_string()),
+                Some(thread_b),
+            )
+            .await;
+
+        assert_eq!(
+            manager
+                .get_session_id(USER_A, &notion, Some(thread_a))
+                .await,
+            Some("sess-thread-a".to_string()),
+            "Thread A's session must not be overwritten by Thread B's update"
+        );
+        assert_eq!(
+            manager
+                .get_session_id(USER_A, &notion, Some(thread_b))
+                .await,
+            Some("sess-thread-b".to_string()),
+            "Thread B's session must be independent from Thread A"
+        );
+    }
+
+    /// `new` (None) and `new_for_thread` with the same `(user, server)` must
+    /// not collide: the user-scoped slot and a thread-scoped slot coexist.
+    #[tokio::test]
+    async fn test_none_and_some_thread_id_are_distinct_slots() {
+        let manager = McpSessionManager::new();
+        let notion = sn("notion");
+        let thread_a = tid(42);
+
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .await;
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .await;
+
+        manager
+            .update_session_id(USER_A, &notion, Some("sess-user-scoped".to_string()), None)
+            .await;
+        manager
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-thread-scoped".to_string()),
+                Some(thread_a),
+            )
+            .await;
+
+        assert_eq!(
+            manager.get_session_id(USER_A, &notion, None).await,
+            Some("sess-user-scoped".to_string()),
+            "user-scoped slot must be independent from the thread-scoped slot"
+        );
+        assert_eq!(
+            manager
+                .get_session_id(USER_A, &notion, Some(thread_a))
+                .await,
+            Some("sess-thread-scoped".to_string()),
+            "thread-scoped slot must be independent from the user-scoped slot"
+        );
+        // Confirm two distinct entries exist
+        assert_eq!(manager.active_sessions().await.len(), 2);
+    }
+
+    /// Same `(user, server, thread_id)` triple must collide — a round-trip
+    /// verify that the thread axis is keyed correctly.
+    #[tokio::test]
+    async fn test_same_triple_collides() {
+        let manager = McpSessionManager::new();
+        let notion = sn("notion");
+        let thread_a = tid(7);
+
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .await;
+        manager
+            .update_session_id(USER_A, &notion, Some("sess-v1".to_string()), Some(thread_a))
+            .await;
+
+        // Second get_or_create with the same triple must return the existing session.
+        let sess = manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .await;
+        assert_eq!(
+            sess.session_id,
+            Some("sess-v1".to_string()),
+            "identical (user, server, thread_id) must hit the same session slot"
+        );
+        assert_eq!(manager.active_sessions().await.len(), 1);
+    }
+
+    /// Terminating a thread-scoped session must not affect the user-scoped
+    /// session for the same `(user, server)`.
+    #[tokio::test]
+    async fn test_thread_terminate_does_not_affect_user_scoped() {
+        let manager = McpSessionManager::new();
+        let notion = sn("notion");
+        let thread_a = tid(99);
+
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .await;
+        manager
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .await;
+        manager
+            .update_session_id(USER_A, &notion, Some("sess-user".to_string()), None)
+            .await;
+        manager
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-thread".to_string()),
+                Some(thread_a),
+            )
+            .await;
+
+        manager.terminate(USER_A, &notion, Some(thread_a)).await;
+
+        assert!(
+            manager
+                .get_session_id(USER_A, &notion, Some(thread_a))
+                .await
+                .is_none(),
+            "thread-scoped session must be removed"
+        );
+        assert_eq!(
+            manager.get_session_id(USER_A, &notion, None).await,
+            Some("sess-user".to_string()),
+            "user-scoped session must survive thread termination"
+        );
     }
 }

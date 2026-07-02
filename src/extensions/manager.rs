@@ -9199,6 +9199,7 @@ mod tests {
             None,
             "default",
             None,
+            None,
         ));
         let client_b = Arc::new(McpClient::new_with_transport(
             "notion",
@@ -9209,6 +9210,7 @@ mod tests {
             None,
             None,
             "default",
+            None,
             None,
         ));
 

@@ -13,6 +13,7 @@ use crate::tools::mcp::protocol::{McpRequest, McpResponse};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
 use crate::tools::tool::ToolError;
+use uuid::Uuid;
 
 /// MCP transport that communicates with a server over HTTP.
 ///
@@ -28,6 +29,8 @@ pub struct HttpMcpTransport {
     session_manager: Option<Arc<McpSessionManager>>,
     session_user_id: Option<String>,
     custom_headers: HashMap<String, String>,
+    /// Thread ID passed through to `McpSessionManager` for thread-scoped keys.
+    session_thread_id: Option<Uuid>,
 }
 
 impl HttpMcpTransport {
@@ -65,17 +68,23 @@ impl HttpMcpTransport {
             session_manager: None,
             session_user_id: None,
             custom_headers: HashMap::new(),
+            session_thread_id: None,
         }
     }
 
     /// Attach a session manager for Mcp-Session-Id tracking.
+    ///
+    /// `thread_id` partitions the session key by Thread so two concurrent
+    /// Threads under the same user and server get distinct `Mcp-Session-Id` slots.
     pub fn with_session_manager(
         mut self,
         session_manager: Arc<McpSessionManager>,
         user_id: impl Into<String>,
+        thread_id: Option<Uuid>,
     ) -> Self {
         self.session_manager = Some(session_manager);
         self.session_user_id = Some(user_id.into());
+        self.session_thread_id = thread_id;
         self
     }
 
@@ -166,7 +175,12 @@ impl McpTransport for HttpMcpTransport {
                 )));
             }
             session_manager
-                .update_session_id(user_id, &self.server_name, Some(session_id.to_string()))
+                .update_session_id(
+                    user_id,
+                    &self.server_name,
+                    Some(session_id.to_string()),
+                    self.session_thread_id,
+                )
                 .await;
         }
 
@@ -424,6 +438,15 @@ mod tests {
         assert!(transport.custom_headers.is_empty());
     }
 
+    #[test]
+    fn test_with_custom_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".to_string(), "value".to_string());
+        let transport =
+            HttpMcpTransport::new("http://localhost:8080", "test").with_custom_headers(headers);
+        assert_eq!(transport.custom_headers.get("X-Custom").unwrap(), "value");
+    }
+
     /// Regression for Copilot review comment 3108156275: `HttpMcpTransport::new`
     /// previously wrapped the caller-provided `server_name` with
     /// `McpServerName::from_trusted`, bypassing the allowlist validator.
@@ -462,17 +485,8 @@ mod tests {
     fn test_with_session_manager() {
         let session_manager = Arc::new(McpSessionManager::new());
         let transport = HttpMcpTransport::new("http://localhost:8080", "test")
-            .with_session_manager(session_manager.clone(), "user-a");
+            .with_session_manager(session_manager.clone(), "user-a", None);
         assert!(transport.session_manager().is_some());
-    }
-
-    #[test]
-    fn test_with_custom_headers() {
-        let mut headers = HashMap::new();
-        headers.insert("X-Custom".to_string(), "value".to_string());
-        let transport =
-            HttpMcpTransport::new("http://localhost:8080", "test").with_custom_headers(headers);
-        assert_eq!(transport.custom_headers.get("X-Custom").unwrap(), "value");
     }
 
     // -- Wire-level echo server tests -----------------------------------------
@@ -603,8 +617,11 @@ mod tests {
         });
 
         let session_manager = Arc::new(McpSessionManager::new());
-        let transport = HttpMcpTransport::new(&url, "invalidsession")
-            .with_session_manager(Arc::clone(&session_manager), "user-a");
+        let transport = HttpMcpTransport::new(&url, "invalidsession").with_session_manager(
+            Arc::clone(&session_manager),
+            "user-a",
+            None,
+        );
         let request = McpRequest::initialize(1);
 
         let error = transport.send(&request, &HashMap::new()).await.unwrap_err();
@@ -612,7 +629,11 @@ mod tests {
         assert!(error.to_string().contains("invalid session id"));
         assert_eq!(
             session_manager
-                .get_session_id("user-a", &McpServerName::new("invalidsession").unwrap())
+                .get_session_id(
+                    "user-a",
+                    &McpServerName::new("invalidsession").unwrap(),
+                    None
+                )
                 .await,
             None
         );
@@ -646,17 +667,22 @@ mod tests {
         let session_manager = Arc::new(McpSessionManager::new());
         let server_name = McpServerName::new("errorsession").unwrap();
         session_manager
-            .get_or_create("user-a", &server_name, &url)
+            .get_or_create("user-a", &server_name, &url, None)
             .await;
-        let transport = HttpMcpTransport::new(&url, "errorsession")
-            .with_session_manager(Arc::clone(&session_manager), "user-a");
+        let transport = HttpMcpTransport::new(&url, "errorsession").with_session_manager(
+            Arc::clone(&session_manager),
+            "user-a",
+            None,
+        );
         let request = McpRequest::initialize(1);
 
         let error = transport.send(&request, &HashMap::new()).await.unwrap_err();
 
         assert!(error.to_string().contains("500"));
         assert_eq!(
-            session_manager.get_session_id("user-a", &server_name).await,
+            session_manager
+                .get_session_id("user-a", &server_name, None)
+                .await,
             None
         );
     }
@@ -690,13 +716,13 @@ mod tests {
     async fn test_wire_custom_auth_preserved_when_no_per_request_auth() {
         let (url, _handle) = spawn_echo_server().await;
 
-        let custom = HashMap::from([(
+        let transport = HttpMcpTransport::new(&url, "echo-test");
+
+        // Authorization from McpClient.build_request_headers is passed as per-request header.
+        let per_request = HashMap::from([(
             "authorization".to_string(),
             "Bearer custom-token".to_string(),
         )]);
-        let transport = HttpMcpTransport::new(&url, "echo-test").with_custom_headers(custom);
-
-        let per_request = HashMap::new(); // no per-request auth
         let request = McpRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(1),
