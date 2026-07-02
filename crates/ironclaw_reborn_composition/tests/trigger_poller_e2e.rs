@@ -117,17 +117,17 @@ impl HostManagedModelGateway for RecordingGateway {
 /// through it here exercises the *real* `PerSurfaceCapabilityDenyDecorator` /
 /// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
 ///
-/// `register_provider_tool_call`'s default `provider_tool_call_capability_ids`
-/// resolves a provider tool name to a capability id by searching
-/// `self.tool_definitions()` — the same list-then-filter path the model's
-/// tool list is built from. `CapabilitySurfaceDenyFilter::tool_definitions()`
-/// (composed from the fix's scheduled_trigger deny set) removes
-/// `builtin.trigger_create` from that list, so on this surface the name
-/// lookup itself comes up empty and registration fails closed with
+/// `CapabilitySurfaceDenyFilter::register_provider_tool_call` resolves the
+/// provider tool call to a capability id via its OWN
+/// `provider_tool_call_capability_ids` override (delegating to `inner` so
+/// deferred/disclosed tools still resolve — see #5149's progressive tool
+/// disclosure), then scope-checks the resolved id against its deny set
+/// before ever building a candidate. `builtin.trigger_create` is on the
+/// fix's scheduled_trigger deny set, so that scope check fails closed with
 /// `AgentLoopHostErrorKind::InvalidInvocation` /
-/// "provider tool call is outside the visible capability surface" — before
-/// any capability-id-keyed deny check even runs. `builtin.trigger_list` stays
-/// in the list (verified directly against `tool_definitions()` while
+/// "provider tool call targets a disabled capability" — registration never
+/// reaches `inner.register_provider_tool_call`. `builtin.trigger_list` stays
+/// permitted (verified directly against `tool_definitions()` while
 /// developing this test), matching the fix's read-only carve-out.
 ///
 /// If registration succeeds (capability visible + permitted), the resulting
@@ -1320,29 +1320,28 @@ async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
     );
 
     // Core assertion, mechanism-level: the surface must deny the registration
-    // itself. `builtin.trigger_create` is missing from `tool_definitions()`
-    // on the scheduled_trigger surface (the fix's `PerSurfaceCapabilityDenyDecorator`
-    // / `CapabilitySurfaceDenyFilter`), so the provider-tool-name -> capability-id
-    // lookup `register_provider_tool_call` performs against that same list
-    // comes up empty and fails closed — see `SelfCreateAttemptGateway`'s doc
-    // comment for the exact call chain.
+    // itself. `builtin.trigger_create` is on the scheduled_trigger deny set
+    // (the fix's `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter`),
+    // so `register_provider_tool_call`'s own scope check on the resolved
+    // capability id fails closed before a candidate is ever built — see
+    // `SelfCreateAttemptGateway`'s doc comment for the exact call chain.
     //
     // GUARD AGAINST FALSE-PASS: pre-fix (before commit 1d83e6f), the
-    // scheduled_trigger capability surface did not exclude
-    // `builtin.trigger_create` from `tool_definitions()`, so the name lookup
-    // above would succeed and `capabilities.register_provider_tool_call(...)`
-    // inside the gateway would return `Ok(candidate)` — with a REAL,
-    // run-scoped staged input, because `register_provider_tool_call` is the
-    // exact path a native provider tool call uses to stage its arguments
-    // through the run's real `LocalDevCapabilityIo`. The loop would then
-    // actually dispatch `trigger_create` against that staged input and the
-    // marker trigger asserted absent below WOULD exist. A revert of 1d83e6f
-    // turns this `assert_eq!` into a `Some(Ok(()))` and the marker-absence
-    // assertion into a failure — both catch the regression independently.
+    // scheduled_trigger capability surface did not deny `builtin.trigger_create`
+    // at all, so the scope check above would pass and
+    // `capabilities.register_provider_tool_call(...)` inside the gateway
+    // would return `Ok(candidate)` — with a REAL, run-scoped staged input,
+    // because `register_provider_tool_call` is the exact path a native
+    // provider tool call uses to stage its arguments through the run's real
+    // `LocalDevCapabilityIo`. The loop would then actually dispatch
+    // `trigger_create` against that staged input and the marker trigger
+    // asserted absent below WOULD exist. A revert of 1d83e6f turns this
+    // `assert_eq!` into a `Some(Ok(()))` and the marker-absence assertion
+    // into a failure — both catch the regression independently.
     assert_eq!(
         registration_outcome,
         Some(Err(
-            "provider tool call is outside the visible capability surface".to_string()
+            "provider tool call targets a disabled capability".to_string()
         )),
         "expected the scheduled_trigger surface to deny the trigger_create \
          registration attempt made from inside the fired run"
