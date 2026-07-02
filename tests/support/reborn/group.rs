@@ -357,13 +357,6 @@ impl RebornIntegrationGroup {
     pub(crate) fn user_profile_source_for_test(&self) -> &Arc<dyn HostUserProfileSource> {
         &self.shared.user_profile_source
     }
-
-    /// The in-memory turn-lifecycle sink installed via
-    /// `.with_turn_event_sink()` (C-TRACECAP seam), if this group opted in.
-    /// `None` when the group did not call `.with_turn_event_sink()`.
-    pub(crate) fn turn_event_sink_for_test(&self) -> Option<&Arc<InMemoryTurnEventSink>> {
-        self.shared.turn_event_sink.as_ref()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,8 +448,10 @@ impl RebornIntegrationGroupBuilder {
     /// seam production wires via `subscribe_best_effort` in `build_default_planned_runtime_inner`,
     /// `crates/ironclaw_reborn/src/runtime.rs:613-619`) into the group's ONE planned
     /// runtime (C-TRACECAP). Read the recorded events back with
-    /// [`RebornIntegrationGroup::turn_event_sink_for_test`] or, for a single-shot
-    /// harness, [`RebornIntegrationHarness::recorded_turn_events`].
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read path;
+    /// it slices `[baseline_turn_event_count..]` so a group thread never sees a
+    /// sibling thread's events. Deliberately no raw group-level sink accessor:
+    /// one would bypass that slicing and reintroduce cross-thread bleed.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
         self
