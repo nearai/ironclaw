@@ -44,7 +44,7 @@ pub use driver::{
     AgentLoopDriverRunRequest,
 };
 pub use host::{
-    AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
+    AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
     AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply,
     AuthResumeApprovalIdentity, BatchPolicyKind, BeginAssistantDraft, CapabilityApprovalResume,
     CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
