@@ -526,7 +526,121 @@ git commit -m "test(ironclaw_reborn): prove final-answer nudge fires for real sc
 
 ---
 
+### Task 9: Flat product-level integration test — nudge fires through real `submit_turn`
+
+**Added mid-execution** (user request, after Tasks 1–8 were planned): Tasks 6–7
+prove the nudge fires at the `PlannedDriver`/executor tier with a real
+resolved profile. This task proves it one layer up — through the actual
+production `submit_turn` entry point (product workflow → turn coordinator →
+scheduler → agent loop → real `LlmProviderModelGateway` decorator chain →
+scripted model), using `RebornIntegrationHarness` per
+`tests/support/reborn/CLAUDE.md`. Not a `reborn_group_*` test: the group
+harness (e.g. `tests/reborn_group_extensions/`) exists for scenarios needing
+**multiple threads over shared state** (its own doc comment: "an extension
+installed by thread A is visible to thread B because both share the same
+underlying store"). This scenario is single-thread, single-turn — per
+`tests/support/reborn/CLAUDE.md` ("A scenario that submits + asserts in one
+thread belongs in a flat `tests/reborn_integration_*.rs` test as always"),
+the correct analog is a flat test, not a group.
+
+**Feasibility, checked before writing this task:**
+- `RebornIntegrationHarness` has no run-profile override — `submit_turn` always
+  goes through the real `SubmitTurnRequest { requested_run_profile: None, .. }`
+  path (`crates/ironclaw_reborn_composition/src/runtime.rs:2064`), which
+  resolves to `planned_default` by default — so a plain
+  `RebornIntegrationHarness::test_default()` already exercises the profile
+  Task 2 enabled nudges for, with no special wiring.
+- `CapabilityProgress::NoChange` (the signal the no-progress/repetition
+  detector needs) is computed generically in production code from real
+  capability output, not something only test mocks can fabricate:
+  `crates/ironclaw_agent_loop/src/executor/capabilities.rs:1288-1309` compares
+  the output digest of a call against previously-seen digests for the same
+  call signature — a second identical `builtin.echo` call naturally produces
+  `NoChange`, exactly mirroring Task 6/7's driver-tier scripted
+  `ScriptedCapabilityOutcome::completed_no_change`.
+- `builtin.echo` takes `{"message": "..."}` (confirmed via
+  `tests/reborn_qa_routines.rs:463` and `tests/e2e/mock_llm.py:149`) and is
+  enabled via `.with_builtin_http_tools()` on the harness builder.
+
+**Files:**
+- Create: `tests/reborn_integration_nudge_final_answer.rs`
+
+**Interfaces:**
+- Consumes: `RebornIntegrationHarness::test_default()`, `.with_builtin_http_tools()`,
+  `RebornScriptedReply::{tool_call, text}`, `.submit_turn(text)`,
+  `.assert_reply_contains(text)` — all from `tests/support/reborn/` per its
+  `CLAUDE.md` (`build → submit_turn → assert` shape, include boilerplate from
+  `tests/reborn_integration_greeting.rs`).
+
+- [ ] **Step 1: Write the test — starting shape**
+
+Create `tests/reborn_integration_nudge_final_answer.rs`. Copy the two
+mandatory `#[path]`/`mod` include lines from `tests/reborn_integration_greeting.rs`
+(per `tests/support/reborn/CLAUDE.md`) at the top, then:
+
+```rust
+use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::reply::RebornScriptedReply;
+
+#[tokio::test]
+async fn no_progress_repeated_echo_completes_via_final_answer_nudge() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call("builtin.echo", serde_json::json!({"message": "same"})),
+            RebornScriptedReply::tool_call("builtin.echo", serde_json::json!({"message": "same"})),
+            RebornScriptedReply::tool_call("builtin.echo", serde_json::json!({"message": "same"})),
+            RebornScriptedReply::tool_call("builtin.echo", serde_json::json!({"message": "same"})),
+            RebornScriptedReply::text("final answer synthesized via nudge"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("say the same thing four times").await.expect("turn completes");
+    h.assert_reply_contains("final answer synthesized via nudge").await.expect("reply finalized");
+}
+```
+
+This mirrors Task 6/7's driver-tier script (4 identical calls to trigger the
+repetition/no-progress detector, then a 5th scripted reply for the nudge's
+tool-free call) at the product-level tier. **This starting shape is a
+best-effort based on the feasibility check above, not verified by running
+`cargo test`** — unlike every other task in this plan. If the run behaves
+differently than expected (e.g. the repetition detector needs a different
+call count, the harness needs an additional scripted turn, or the assertion
+needs adjusting), iterate the same way Task 6 did: read the actual test
+output, trace it against `crates/ironclaw_agent_loop/src/strategies/stop.rs`'s
+`DefaultStopConditionStrategy` (repetition_threshold=3, repetition_window=5,
+defaults at stop.rs:254-266) and `crates/ironclaw_agent_loop/src/executor/loop_exit.rs`'s
+`try_final_answer_nudge`, and adjust the script/assertions to match reality.
+Document any deviation in the report the same way Task 6 did.
+
+- [ ] **Step 2: Run the test, iterate until it passes for the right reason**
+
+Run: `cargo test --test reborn_integration_nudge_final_answer`
+
+If it fails, do not guess blindly — read the failure (does the reply not
+contain the marker? does the turn not complete? does `submit_turn` itself
+error?) and adjust. If after reasonable iteration the scenario cannot be
+made to pass without a production-code change (which would be out of scope —
+this task should only need test-side adjustments, since Tasks 1–7 already
+prove the production mechanism works), report BLOCKED with the specifics
+rather than guessing further.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/reborn_integration_nudge_final_answer.rs
+git commit -m "test(reborn): prove final-answer nudge fires through real submit_turn path"
+```
+
+---
+
 ### Task 8: Full verification gate
+
+**Note:** run this task's steps twice — once after Task 7 (already done), and
+once more after Task 9 lands, since Task 9 adds a new test file that also
+needs to pass fmt/clippy/the full suite.
 
 **Files:** none (verification only).
 
