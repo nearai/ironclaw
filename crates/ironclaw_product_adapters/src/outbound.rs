@@ -963,10 +963,10 @@ pub enum AuthPromptChallengeKind {
     /// unconfigured, the URL may be absent so UI can still render an
     /// OAuth-specific unavailable state instead of the generic auth fallback.
     ///
-    /// Wire value is `oauth_relay`; the legacy `oauth_url` value is still
-    /// accepted (serde alias) so persisted gates / in-flight events keep
-    /// deserializing.
-    #[serde(rename = "oauth_relay", alias = "oauth_url")]
+    /// Wire value is `oauth_relay`. The challenge kind is always re-derived at
+    /// projection time from the persisted credential setup, never deserialized
+    /// back from the wire, so no legacy alias is needed.
+    #[serde(rename = "oauth_relay")]
     OAuthUrl,
     /// User pastes a secret string into the chat form. Covers a GitHub PAT, an
     /// API key, AND a channel pairing code (e.g. Slack): the interaction
@@ -974,9 +974,8 @@ pub enum AuthPromptChallengeKind {
     /// route, which rides in `connection` context (present for channel pairing,
     /// absent for a stored-credential secret).
     ///
-    /// Wire value is `paste_secret`; the legacy `manual_token` value is still
-    /// accepted (serde alias).
-    #[serde(rename = "paste_secret", alias = "manual_token")]
+    /// Wire value is `paste_secret`.
+    #[serde(rename = "paste_secret")]
     ManualToken,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
@@ -1638,19 +1637,6 @@ mod tests {
                 serde_json::from_str(&serialized).expect("deserialize challenge kind");
             assert_eq!(decoded, variant);
         }
-    }
-
-    #[test]
-    fn auth_prompt_challenge_kind_accepts_legacy_wire_aliases() {
-        // Persisted gates / in-flight events written before the rename still
-        // carry the old wire values; the serde aliases must keep deserializing
-        // them so a rollout does not reject historical rows.
-        let oauth: AuthPromptChallengeKind =
-            serde_json::from_str("\"oauth_url\"").expect("legacy oauth_url deserializes");
-        assert_eq!(oauth, AuthPromptChallengeKind::OAuthUrl);
-        let paste: AuthPromptChallengeKind =
-            serde_json::from_str("\"manual_token\"").expect("legacy manual_token deserializes");
-        assert_eq!(paste, AuthPromptChallengeKind::ManualToken);
     }
 
     #[test]
