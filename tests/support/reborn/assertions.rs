@@ -229,15 +229,25 @@ impl RebornIntegrationHarness {
             .thread_harness
             .history(self.binding.thread_id.clone())
             .await?;
-        Ok(history
+        history
             .iter()
             .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
             .filter_map(|message| message.content.as_deref())
-            .filter_map(|content| {
-                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
+            .map(|content| {
+                // Fail loud on a decode error rather than silently dropping the
+                // message (.claude/rules/error-handling.md) — a malformed
+                // envelope must surface as its own diagnosis, not degrade into a
+                // misleading "not found" from the caller.
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| envelope.safe_summary.as_str().to_string())
+                    .map_err(|err| {
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {content}"
+                        )
+                        .into()
+                    })
             })
-            .map(|envelope| envelope.safe_summary.as_str().to_string())
-            .collect())
+            .collect()
     }
 
     pub async fn assert_tool_error(
