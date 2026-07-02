@@ -172,6 +172,10 @@ fn chat_sse_stream(
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
                                 if state.is_empty() {
+                                    // Runtime projections can publish terminal run status before
+                                    // the finalized assistant text reaches the stream. Keep
+                                    // draining so chat SSE does not close with an empty
+                                    // completed response.
                                     continue;
                                 }
                                 yield Ok(chat_finish_event(&public_id, created, &model));

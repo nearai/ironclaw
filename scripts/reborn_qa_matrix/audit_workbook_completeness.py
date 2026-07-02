@@ -7,7 +7,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from zipfile import ZipFile
 
 import report_coverage
 
@@ -51,21 +50,19 @@ DEFAULT_SCOPE_TOKENS = (
 
 
 def _records(workbook_path: Path, sheet_name: str) -> list[dict[str, str]]:
-    with ZipFile(workbook_path) as xlsx:
-        rows = report_coverage._sheet_rows(xlsx, sheet_name)
-    if not rows:
-        return []
-    headers = rows[0]
-    records: list[dict[str, str]] = []
-    for row in rows[1:]:
-        if not row or not row[0]:
-            continue
-        records.append(report_coverage._row_record(headers, row))
-    return records
+    return report_coverage.workbook_sheet_records(workbook_path, sheet_name)
 
 
 def _in_scope(feature: dict[str, str], scope_tokens: tuple[str, ...]) -> bool:
-    haystack = " ".join(str(value or "") for value in feature.values()).lower()
+    scope_fields = (
+        "Feature ID",
+        "Feature Name",
+        "User Story",
+        "Expected Behaviour",
+        "Validation Rules",
+        "Dependencies",
+    )
+    haystack = " ".join(str(feature.get(field) or "") for field in scope_fields).lower()
     return any(token.lower() in haystack for token in scope_tokens)
 
 

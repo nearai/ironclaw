@@ -99,7 +99,7 @@ class ReportCoverageTests(unittest.TestCase):
                     [
                         "REBCLI-777-TC-01",
                         "REBCLI-777",
-                        "External-existing coverage",
+                        "External-existing coverage - served route contract",
                         "nearai/ironclaw#5348 owns this browser workflow",
                     ],
                     [

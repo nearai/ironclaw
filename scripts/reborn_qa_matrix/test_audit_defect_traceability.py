@@ -211,6 +211,35 @@ class AuditDefectTraceabilityTests(unittest.TestCase):
                 0,
             )
 
+    def test_prefix_colliding_test_ids_do_not_share_defect_linkage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[
+                    list(audit_workbook_completeness.REQUIRED_FEATURE_COLUMNS),
+                    _feature("REBCLI-055"),
+                ],
+                test_rows=[
+                    TEST_COLUMNS,
+                    _test_row("REBCLI-055-TC-1", "REBCLI-055"),
+                    _test_row("REBCLI-055-TC-18", "REBCLI-055"),
+                ],
+                defect_rows=[
+                    DEFECT_COLUMNS,
+                    _defect("DEF-053", "REBCLI-055", "REBCLI-055-TC-18"),
+                ],
+            )
+
+            report = audit_defect_traceability.build_audit(workbook_path)
+
+            self.assertEqual(report["documented_non_passing_test_count"], 1)
+            self.assertEqual(report["undocumented_non_passing_test_count"], 1)
+            self.assertEqual(
+                report["undocumented_non_passing_tests"][0]["test_id"],
+                "REBCLI-055-TC-1",
+            )
+
     def test_missing_defect_fields_and_open_high_defects_are_reported(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "matrix.xlsx"

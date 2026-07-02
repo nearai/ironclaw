@@ -285,6 +285,32 @@ class AuditExecutionEvidenceTests(unittest.TestCase):
                 "REBCLI-001-TC-01",
             )
 
+    def test_stale_pr_detection_uses_number_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[
+                    list(audit_workbook_completeness.REQUIRED_FEATURE_COLUMNS),
+                    _feature("REBCLI-001"),
+                ],
+                test_rows=[
+                    TEST_COLUMNS,
+                    _test_row(
+                        "REBCLI-001-TC-01",
+                        "REBCLI-001",
+                        status="External-existing coverage",
+                        actual="External-existing browser coverage",
+                        notes="Covered by nearai/ironclaw#15348 unrelated workflow.",
+                    ),
+                ],
+            )
+
+            report = audit_execution_evidence.build_audit(workbook_path)
+
+            self.assertEqual(report["missing_external_reference_count"], 0)
+            self.assertEqual(report["stale_external_reference_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,7 @@ def _read(path: Path) -> str:
 
 def _workbook_feature_text(workbook_path: Path) -> str:
     with ZipFile(workbook_path) as xlsx:
-        rows = report_coverage._sheet_rows(xlsx, "Feature Inventory")
+        rows = report_coverage.sheet_rows(xlsx, "Feature Inventory")
     return "\n".join(" ".join(cell for cell in row if cell) for row in rows[1:]).lower()
 
 
@@ -72,6 +72,8 @@ def browser_routes(repo_root: Path) -> list[Surface]:
                 keywords=_route_keywords(route),
             )
         )
+    if not surfaces:
+        raise RuntimeError(f"no WebUI browser routes extracted from {app_js}")
     return surfaces
 
 
@@ -93,6 +95,8 @@ def _descriptor_patterns(path: Path, *, kind: str, repo_root: Path) -> list[Surf
                 keywords=_api_keywords(name, pattern),
             )
         )
+    if not surfaces:
+        raise RuntimeError(f"no {kind} descriptors extracted from {path}")
     return surfaces
 
 

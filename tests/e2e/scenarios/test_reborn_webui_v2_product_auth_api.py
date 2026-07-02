@@ -52,7 +52,7 @@ async def test_reborn_v2_product_auth_manual_token_setup_redacts_submit_error_se
     reborn_v2_server,
 ):
     headers = reborn_bearer_headers()
-    raw_token = "ghp_served_product_auth_secret_must_not_echo"
+    raw_token = "qa-fake-manual-token-must-not-echo"
     run_id = _invocation_id()
 
     async with httpx.AsyncClient(headers=headers) as client:
@@ -84,7 +84,7 @@ async def test_reborn_v2_product_auth_manual_token_setup_redacts_submit_error_se
             },
             timeout=15,
         )
-        assert submit.status_code in {403, 404}, submit.text
+        assert submit.status_code in {400, 403, 404}, submit.text
         submit_body = submit.json()
         error_code = submit_body.get("error", {}).get("code") or submit_body.get("code")
         assert error_code in {

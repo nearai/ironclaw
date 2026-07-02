@@ -100,10 +100,14 @@ def _sheet_rows(xlsx: ZipFile, sheet_name: str) -> list[list[str]]:
     return rows
 
 
+def sheet_rows(xlsx: ZipFile, sheet_name: str) -> list[list[str]]:
+    return _sheet_rows(xlsx, sheet_name)
+
+
 def workbook_ids(workbook_path: Path) -> tuple[set[str], set[str]]:
     with ZipFile(workbook_path) as xlsx:
-        feature_rows = _sheet_rows(xlsx, "Feature Inventory")
-        test_rows = _sheet_rows(xlsx, "Test Cases")
+        feature_rows = sheet_rows(xlsx, "Feature Inventory")
+        test_rows = sheet_rows(xlsx, "Test Cases")
     feature_ids = {
         row[0]
         for row in feature_rows[1:]
@@ -126,9 +130,22 @@ def _row_record(headers: list[str], row: list[str]) -> dict[str, str]:
     }
 
 
+def row_record(headers: list[str], row: list[str]) -> dict[str, str]:
+    return _row_record(headers, row)
+
+
+def workbook_sheet_records(workbook_path: Path, sheet_name: str) -> list[dict[str, str]]:
+    with ZipFile(workbook_path) as xlsx:
+        rows = sheet_rows(xlsx, sheet_name)
+    if not rows:
+        return []
+    headers = rows[0]
+    return [row_record(headers, row) for row in rows[1:] if row and row[0]]
+
+
 def workbook_test_records(workbook_path: Path) -> dict[str, dict[str, str]]:
     with ZipFile(workbook_path) as xlsx:
-        test_rows = _sheet_rows(xlsx, "Test Cases")
+        test_rows = sheet_rows(xlsx, "Test Cases")
     if not test_rows:
         return {}
     headers = test_rows[0]
@@ -136,13 +153,13 @@ def workbook_test_records(workbook_path: Path) -> dict[str, dict[str, str]]:
     for row in test_rows[1:]:
         if not row or not TEST_ID_RE.fullmatch(row[0] or ""):
             continue
-        records[row[0]] = _row_record(headers, row)
+        records[row[0]] = row_record(headers, row)
     return records
 
 
 def workbook_feature_records(workbook_path: Path) -> dict[str, dict[str, str]]:
     with ZipFile(workbook_path) as xlsx:
-        feature_rows = _sheet_rows(xlsx, "Feature Inventory")
+        feature_rows = sheet_rows(xlsx, "Feature Inventory")
     if not feature_rows:
         return {}
     headers = feature_rows[0]
@@ -150,7 +167,7 @@ def workbook_feature_records(workbook_path: Path) -> dict[str, dict[str, str]]:
     for row in feature_rows[1:]:
         if not row or not FEATURE_ID_RE.fullmatch(row[0] or ""):
             continue
-        records[row[0]] = _row_record(headers, row)
+        records[row[0]] = row_record(headers, row)
     return records
 
 
@@ -167,7 +184,7 @@ def _external_existing_ids(records: dict[str, dict[str, str]]) -> set[str]:
     return {
         test_id
         for test_id, record in records.items()
-        if (record.get("Status") or "").lower() == "external-existing coverage"
+        if (record.get("Status") or "").lower().startswith("external-existing")
     }
 
 

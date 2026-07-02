@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -68,6 +69,11 @@ def _row_text(row: dict[str, str]) -> str:
     return " ".join(str(value or "") for value in row.values())
 
 
+def _contains_test_id(row: dict[str, str], test_id: str) -> bool:
+    pattern = re.compile(rf"(?<![A-Z0-9-]){re.escape(test_id)}(?![A-Z0-9-])")
+    return bool(pattern.search(_row_text(row).upper()))
+
+
 def build_audit(
     workbook_path: Path,
     *,
@@ -111,7 +117,8 @@ def build_audit(
         defect_rows_by_test_id[test_id] = [
             defect
             for defect in defects
-            if defect.get("Feature ID", "") == feature_id and test_id in _row_text(defect)
+            if defect.get("Feature ID", "") == feature_id
+            and _contains_test_id(defect, test_id)
         ]
 
     undocumented_non_passing_tests = [

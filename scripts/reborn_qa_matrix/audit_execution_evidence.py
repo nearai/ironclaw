@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -19,17 +20,37 @@ REQUIRED_EXECUTION_COLUMNS = (
 )
 
 PASSED_STATUSES = ("passed",)
-EXTERNAL_STATUSES = ("external-existing coverage",)
+EXTERNAL_STATUS_PREFIXES = ("external-existing",)
 BLOCKED_PREFIXES = ("blocked",)
 STALE_EXTERNAL_ONLY_PR = "5348"
 CURRENT_EXTERNAL_SPLIT_PR_REFS = ("5371", "5372", "5373", "5374", "5375", "5376")
+GITHUB_PR_REF_RE = re.compile(r"\bnearai/ironclaw#\d+\b")
+PR_REF_RE = re.compile(r"\bpr\s*#\s*\d+\b")
+CI_REF_RE = re.compile(r"\bci\b")
+GITHUB_ACTION_REF_RE = re.compile(r"\bgithub actions?\b")
+
+
+def _contains_pr_number(evidence: str, pr_number: str) -> bool:
+    return bool(re.search(rf"(?<!\d){re.escape(pr_number)}(?!\d)", evidence))
+
+
+def _has_external_reference(evidence: str) -> bool:
+    return any(
+        pattern.search(evidence)
+        for pattern in (
+            GITHUB_PR_REF_RE,
+            PR_REF_RE,
+            CI_REF_RE,
+            GITHUB_ACTION_REF_RE,
+        )
+    )
 
 
 def _status_class(status: str) -> str:
     normalized = status.strip().lower()
     if normalized in PASSED_STATUSES:
         return "passed"
-    if normalized in EXTERNAL_STATUSES:
+    if normalized.startswith(EXTERNAL_STATUS_PREFIXES):
         return "external_existing"
     if normalized.startswith(BLOCKED_PREFIXES):
         return "blocked"
@@ -105,12 +126,7 @@ def build_audit(
                 ]
             )
             normalized_evidence = external_evidence.lower()
-            if not (
-                "nearai/ironclaw#" in normalized_evidence
-                or " pr #" in normalized_evidence
-                or " ci" in normalized_evidence
-                or "github action" in normalized_evidence
-            ):
+            if not _has_external_reference(normalized_evidence):
                 missing_external_references.append(
                     {
                         "test_id": test_id,
@@ -119,10 +135,11 @@ def build_audit(
                     }
                 )
             if (
-                STALE_EXTERNAL_ONLY_PR in normalized_evidence
+                _contains_pr_number(normalized_evidence, STALE_EXTERNAL_ONLY_PR)
                 and "superseded" not in normalized_evidence
                 and not any(
-                    ref in normalized_evidence for ref in CURRENT_EXTERNAL_SPLIT_PR_REFS
+                    _contains_pr_number(normalized_evidence, ref)
+                    for ref in CURRENT_EXTERNAL_SPLIT_PR_REFS
                 )
             ):
                 stale_external_references.append(

@@ -42,11 +42,12 @@ use ironclaw_reborn_openai_compat::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
     OpenAiCompatHttpError, OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer,
     OpenAiCompatRefStore, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
-    OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
+    OpenAiCompatRouteSurface, OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseId,
+    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
+    OpenAiResponseProjection, OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    openai_compat_routes,
 };
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
@@ -363,15 +364,15 @@ impl OpenAiCompatRuntimeProjectionStreamer {
     async fn finalized_response_envelope(
         &self,
         request: &OpenAiResponseProjectionStreamRequest,
-        submitted_run_id: &str,
+        submitted_run_ref: &OpenAiCompatTurnRunRef,
     ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
         self.finalized_stream_envelope(
-            "response",
+            OpenAiCompatRouteSurface::ResponsesApi,
             request.public_id.as_str(),
             &request.actor_scope,
             &request.projection_subscription,
             request.after_cursor.as_ref(),
-            submitted_run_id,
+            submitted_run_ref,
         )
         .await
     }
@@ -379,30 +380,36 @@ impl OpenAiCompatRuntimeProjectionStreamer {
     async fn finalized_chat_envelope(
         &self,
         request: &OpenAiChatProjectionStreamRequest,
-        submitted_run_id: &str,
+        submitted_run_ref: &OpenAiCompatTurnRunRef,
     ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
         self.finalized_stream_envelope(
-            "chat",
+            OpenAiCompatRouteSurface::ChatCompletions,
             request.public_id.as_str(),
             &request.actor_scope,
             &request.projection_subscription,
             request.after_cursor.as_ref(),
-            submitted_run_id,
+            submitted_run_ref,
         )
         .await
     }
 
     async fn finalized_stream_envelope(
         &self,
-        surface: &str,
+        surface: OpenAiCompatRouteSurface,
         public_id: &str,
         actor_scope: &ironclaw_reborn_openai_compat::OpenAiCompatActorScope,
         projection_subscription: &ProjectionSubscriptionRequest,
         after_cursor: Option<&ProjectionCursor>,
-        submitted_run_id: &str,
+        submitted_run_ref: &OpenAiCompatTurnRunRef,
     ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        let surface_key = match surface {
+            OpenAiCompatRouteSurface::ChatCompletions => "chat",
+            OpenAiCompatRouteSurface::ResponsesApi | OpenAiCompatRouteSurface::ResponsesV1 => {
+                "response"
+            }
+        };
         let final_cursor =
-            ProjectionCursor::new(format!("openai-compat:{surface}:{public_id}:final"))?;
+            ProjectionCursor::new(format!("openai-compat:{surface_key}:{public_id}:final"))?;
         if after_cursor == Some(&final_cursor) {
             return Ok(None);
         }
@@ -413,7 +420,7 @@ impl OpenAiCompatRuntimeProjectionStreamer {
             .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                 scope: thread_scope,
                 thread_id: projection_subscription.scope.thread_id.clone(),
-                turn_run_id: submitted_run_id.to_string(),
+                turn_run_id: submitted_run_ref.as_str().to_string(),
             })
             .await
             .map_err(map_thread_read_error)?
@@ -421,13 +428,12 @@ impl OpenAiCompatRuntimeProjectionStreamer {
             return Ok(None);
         };
 
-        let turn_run_id =
-            TurnRunId::parse(submitted_run_id).map_err(|_| OpenAiCompatHttpError::internal())?;
+        let turn_run_id = parse_turn_run_id(submitted_run_ref.as_str())?;
         let adapter_id = ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)?;
         let installation_id = AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID)?;
         let target = ProductOutboundTarget::new(
             ReplyTargetBindingRef::new(format!("reply:openai-compat:{public_id}"))
-                .map_err(|_| OpenAiCompatHttpError::internal())?,
+                .map_err(map_reply_target_binding_error)?,
             ExternalConversationRef::new(
                 None,
                 projection_subscription.scope.thread_id.to_string(),
@@ -460,7 +466,8 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
         &self,
         request: OpenAiChatProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_ref = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_id = parse_turn_run_id(submitted_run_ref.as_str())?;
         let mut subscription = request.projection_subscription.clone();
         subscription.after_cursor = request.after_cursor.clone();
         let mut events = self
@@ -469,9 +476,7 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
             .await
             .map_err(OpenAiCompatHttpError::from)?;
         let already_has_final = events.iter().any(|event| match event.payload() {
-            ProductOutboundPayload::FinalReply(view) => {
-                view.turn_run_id.to_string() == submitted_run_id
-            }
+            ProductOutboundPayload::FinalReply(view) => view.turn_run_id == submitted_run_id,
             _ => false,
         });
         let terminal_status = response_status_from_projection_events(&events, &submitted_run_id);
@@ -482,7 +487,7 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
             );
         if should_append_final
             && let Some(envelope) = self
-                .finalized_chat_envelope(&request, &submitted_run_id)
+                .finalized_chat_envelope(&request, &submitted_run_ref)
                 .await?
         {
             events.push(envelope);
@@ -494,7 +499,8 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
         &self,
         request: OpenAiResponseProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_ref = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_id = parse_turn_run_id(submitted_run_ref.as_str())?;
         let mut subscription = request.projection_subscription.clone();
         subscription.after_cursor = request.after_cursor.clone();
         let mut events = self
@@ -503,9 +509,7 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
             .await
             .map_err(OpenAiCompatHttpError::from)?;
         let already_has_final = events.iter().any(|event| match event.payload() {
-            ProductOutboundPayload::FinalReply(view) => {
-                view.turn_run_id.to_string() == submitted_run_id
-            }
+            ProductOutboundPayload::FinalReply(view) => view.turn_run_id == submitted_run_id,
             _ => false,
         });
         let terminal_status = response_status_from_projection_events(&events, &submitted_run_id);
@@ -516,7 +520,7 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
             );
         if should_append_final
             && let Some(envelope) = self
-                .finalized_response_envelope(&request, &submitted_run_id)
+                .finalized_response_envelope(&request, &submitted_run_ref)
                 .await?
         {
             events.push(envelope);
@@ -878,8 +882,9 @@ impl OpenAiResponsesThreadProjectionReader {
         } else {
             run_blocked_external_tool_from_projection_events(&events, submitted_run_id)
         };
+        let submitted_turn_run_id = parse_turn_run_id(submitted_run_id)?;
         Ok(ProjectedResponseStatusRead {
-            status: response_status_from_projection_events(&events, submitted_run_id),
+            status: response_status_from_projection_events(&events, &submitted_turn_run_id),
             blocked_external_tool,
             next_cursor,
         })
@@ -1017,7 +1022,8 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         // The run id is read from the response's bound refs (the mapping is
         // bound before the wait). A create carries the accepted ack too, but an
         // external-tool resume reuses the parked run with no new ack.
-        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_ref = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_id = submitted_run_ref.as_str().to_string();
         let mut projection_after_cursor = request.projection_read.after_cursor.clone();
         let pending_external_tool_fallback_at =
             tokio::time::Instant::now() + OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY;
@@ -1130,7 +1136,8 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         &self,
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
-        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_ref = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let submitted_run_id = submitted_run_ref.as_str().to_string();
         let mut projection = self
             .read_run_output(
                 &request.projection_read,
@@ -1206,7 +1213,7 @@ struct ProjectedResponseStatusRead {
 
 fn turn_run_ref_from_openai_mapping(
     mapping: &OpenAiCompatResourceMapping,
-) -> Result<String, OpenAiCompatHttpError> {
+) -> Result<OpenAiCompatTurnRunRef, OpenAiCompatHttpError> {
     let OpenAiCompatResourceBinding::Bound { internal_refs } = &mapping.binding else {
         return Err(OpenAiCompatHttpError::conflict(Some(
             "response_id".to_string(),
@@ -1217,12 +1224,12 @@ fn turn_run_ref_from_openai_mapping(
             "response_id".to_string(),
         )));
     };
-    Ok(turn_run_ref.as_str().to_string())
+    Ok(turn_run_ref.clone())
 }
 
 fn response_status_from_projection_events(
     events: &[ProductOutboundEnvelope],
-    submitted_run_id: &str,
+    submitted_run_id: &TurnRunId,
 ) -> Option<OpenAiResponseStatus> {
     events.iter().rev().find_map(|event| match event.payload() {
         ProductOutboundPayload::ProjectionSnapshot { state }
@@ -1241,12 +1248,10 @@ fn response_status_from_projection_events(
 
 fn response_status_from_projection_state(
     state: &ProductProjectionState,
-    submitted_run_id: &str,
+    submitted_run_id: &TurnRunId,
 ) -> Option<OpenAiResponseStatus> {
     state.items.iter().rev().find_map(|item| match item {
-        ProductProjectionItem::RunStatus { run_id, status, .. }
-            if run_id.to_string() == submitted_run_id =>
-        {
+        ProductProjectionItem::RunStatus { run_id, status, .. } if run_id == submitted_run_id => {
             response_status_from_projection_run_status(status)
         }
         ProductProjectionItem::Text { .. }
@@ -1304,7 +1309,15 @@ fn run_status_wire_from_projection_state(
 }
 
 fn parse_turn_run_id(raw: &str) -> Result<TurnRunId, OpenAiCompatHttpError> {
-    TurnRunId::parse(raw).map_err(|_| OpenAiCompatHttpError::internal())
+    TurnRunId::parse(raw).map_err(|error| {
+        tracing::warn!(%error, "invalid OpenAI-compatible turn run ref");
+        OpenAiCompatHttpError::internal()
+    })
+}
+
+fn map_reply_target_binding_error(error: String) -> OpenAiCompatHttpError {
+    tracing::warn!(%error, "invalid OpenAI-compatible reply target binding ref");
+    OpenAiCompatHttpError::internal()
 }
 
 fn map_catalog_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {

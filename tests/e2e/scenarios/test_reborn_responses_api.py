@@ -6,11 +6,12 @@ import os
 import signal
 import socket
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
-from helpers import REBORN_V2_AUTH_TOKEN, wait_for_ready
+from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_ready
 
 USER_ID = "reborn-responses-e2e-user"
 PROFILE = "local-dev"
@@ -180,7 +181,7 @@ async def reborn_responses_client(reborn_responses_server):
 
 
 async def create_response(
-    client: httpx.AsyncClient, path: str = "/v1/responses", **payload
+    client: httpx.AsyncClient, path: str = "/v1/responses", **payload: Any
 ) -> dict:
     body = {"model": "mock-model", **payload}
     response = await client.post(path, json=body)
@@ -188,7 +189,7 @@ async def create_response(
     return response.json()
 
 
-async def create_chat_completion(client: httpx.AsyncClient, **payload) -> dict:
+async def create_chat_completion(client: httpx.AsyncClient, **payload: Any) -> dict:
     body = {"model": "mock-model", **payload}
     response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 200, response.text
@@ -386,20 +387,27 @@ async def test_reborn_chat_completions_idempotency_replay_and_conflict_served(
 
 
 async def test_reborn_chat_completions_streaming_raw_sse_served(
-    reborn_responses_client,
+    reborn_responses_server,
 ):
-    async with reborn_responses_client.stream(
-        "POST",
-        "/v1/chat/completions",
+    async with sse_stream(
+        reborn_responses_server,
+        path="/v1/chat/completions",
+        method="POST",
+        token=REBORN_V2_AUTH_TOKEN,
+        headers={"Content-Type": "application/json"},
         json={
             "model": "mock-model",
             "messages": [{"role": "user", "content": "Say hi"}],
             "stream": True,
         },
     ) as response:
-        assert response.status_code == 200
+        assert response.status == 200
         raw = ""
-        async for line in response.aiter_lines():
+        while True:
+            line = (await response.content.readline()).decode(
+                "utf-8",
+                errors="replace",
+            ).rstrip("\r\n")
             raw += line + "\n"
             if line == "data: [DONE]":
                 break

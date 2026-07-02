@@ -6,13 +6,12 @@ contract proxies to caller-facing coverage through a real
 the browser suites; this file focuses on served SSE and control routes.
 """
 
-import asyncio
 import json
 
 import aiohttp
 import httpx
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import client_action_id, create_thread, reborn_bearer_headers
 
 pytest_plugins = ["reborn_webui_harness"]
@@ -28,33 +27,6 @@ async def _submit_message(client: httpx.AsyncClient, base_url: str, thread_id: s
     return response.json()
 
 
-async def _read_sse_json_event(response, *, timeout: float = 45.0) -> dict:
-    event_name = None
-    event_id = None
-    async with asyncio.timeout(timeout):
-        while True:
-            raw = await response.content.readline()
-            assert raw, "SSE stream closed before an event arrived"
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                event_name = None
-                event_id = None
-                continue
-            if line.startswith("event:"):
-                event_name = line.removeprefix("event:").strip()
-                continue
-            if line.startswith("id:"):
-                event_id = line.removeprefix("id:").strip()
-                continue
-            if line.startswith("data:"):
-                payload = json.loads(line.removeprefix("data:").strip())
-                if payload.get("type") == "keep_alive":
-                    continue
-                payload["_event"] = event_name
-                payload["_id"] = event_id
-                return payload
-
-
 async def test_reborn_v2_sse_stream_accepts_bearer_served(
     reborn_v2_server,
 ):
@@ -62,26 +34,28 @@ async def test_reborn_v2_sse_stream_accepts_bearer_served(
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await create_thread(client, reborn_v2_server)
 
-    client_timeout = aiohttp.ClientTimeout(total=45, sock_read=45)
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
-        async with session.get(
-            events_url,
-            headers={
-                "Accept": "text/event-stream",
-                "Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
-            },
-        ) as bearer_response:
-            assert bearer_response.status == 200
+    async with sse_stream(
+        reborn_v2_server,
+        path=f"/api/webchat/v2/threads/{thread_id}/events",
+        token=REBORN_V2_AUTH_TOKEN,
+        timeout=45,
+    ) as bearer_response:
+        assert bearer_response.status == 200
 
-            async with httpx.AsyncClient(headers=headers) as client:
-                submitted = await _submit_message(client, reborn_v2_server, thread_id)
+        async with httpx.AsyncClient(headers=headers) as client:
+            submitted = await _submit_message(client, reborn_v2_server, thread_id)
 
-            event = await _read_sse_json_event(bearer_response)
-            assert event.get("cursor"), event
-            event_json = json.dumps(event)
-            assert thread_id in event_json
-            assert submitted["run_id"] in event_json
+        line = await wait_for_sse_line(
+            bearer_response,
+            predicate=lambda value: value.startswith("data:")
+            and '"type":"keep_alive"' not in value,
+            timeout=45,
+        )
+        event = json.loads(line.removeprefix("data:").strip())
+        assert event.get("cursor"), event
+        event_json = json.dumps(event)
+        assert thread_id in event_json
+        assert submitted["run_id"] in event_json
 
 
 async def test_reborn_v2_sse_auth_scope_and_capacity_served(reborn_v2_server):

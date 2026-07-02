@@ -83,6 +83,7 @@ async def test_reborn_v2_llm_provider_config_round_trip_served(
         models_body = models.json()
         assert models_body["ok"] is True
         assert "mock-model" in models_body["models"]
+        assert "qa-provider-secret" not in models.text
 
         probe = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/llm/test-connection",
@@ -91,6 +92,7 @@ async def test_reborn_v2_llm_provider_config_round_trip_served(
         )
         probe.raise_for_status()
         assert probe.json()["ok"] is True
+        assert "qa-provider-secret" not in probe.text
 
         active = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/llm/active",

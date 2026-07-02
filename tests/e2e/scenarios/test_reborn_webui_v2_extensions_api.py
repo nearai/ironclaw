@@ -68,61 +68,57 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
         assert install_body["success"] is True
         assert isinstance(install_body["message"], str)
 
-        installed_list = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/extensions",
-            timeout=15,
-        )
-        installed_list.raise_for_status()
-        installed = next(
-            extension
-            for extension in installed_list.json()["extensions"]
-            if extension["package_ref"]["id"] == "web-access"
-        )
-        assert installed["display_name"] == "Web Access"
-        assert installed["kind"] == "first_party"
-        assert installed["has_auth"] is False
-        assert installed["needs_setup"] in {False, True}
-        assert installed["activation_status"] in {"installed", "configured", "active"}
+        try:
+            installed_list = await client.get(
+                f"{reborn_v2_server}/api/webchat/v2/extensions",
+                timeout=15,
+            )
+            installed_list.raise_for_status()
+            installed = next(
+                extension
+                for extension in installed_list.json()["extensions"]
+                if extension["package_ref"]["id"] == "web-access"
+            )
+            assert installed["display_name"] == "Web Access"
+            assert installed["kind"] == "first_party"
+            assert installed["has_auth"] is False
+            assert installed["needs_setup"] in {False, True}
+            assert installed["activation_status"] in {"installed", "configured", "active"}
 
-        setup = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",
-            timeout=15,
-        )
-        setup.raise_for_status()
-        setup_body = setup.json()
-        assert setup_body["package_ref"] == WEB_ACCESS_PACKAGE_REF
-        assert setup_body["phase"] in {"installed", "configured", "active"}
-        assert isinstance(setup_body.get("blockers", []), list)
+            setup = await client.get(
+                f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",
+                timeout=15,
+            )
+            setup.raise_for_status()
+            setup_body = setup.json()
+            assert setup_body["package_ref"] == WEB_ACCESS_PACKAGE_REF
+            assert setup_body["phase"] in {"installed", "configured", "active"}
+            assert isinstance(setup_body.get("blockers", []), list)
 
-        activate = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/activate",
-            timeout=15,
-        )
-        activate.raise_for_status()
-        activate_body = activate.json()
-        assert activate_body["success"] is True
-        assert activate_body.get("activated") in {True, False, None}
+            activate = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/activate",
+                timeout=15,
+            )
+            activate.raise_for_status()
+            activate_body = activate.json()
+            assert activate_body["success"] is True
+            assert activate_body.get("activated") in {True, False, None}
 
-        active_list = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/extensions",
-            timeout=15,
-        )
-        active_list.raise_for_status()
-        active = next(
-            extension
-            for extension in active_list.json()["extensions"]
-            if extension["package_ref"]["id"] == "web-access"
-        )
-        assert active["active"] is True
-        assert active["activation_status"] == "active"
-        assert "web-access.search" in active.get("tools", [])
-
-        remove = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/remove",
-            timeout=15,
-        )
-        remove.raise_for_status()
-        assert remove.json()["success"] is True
+            active_list = await client.get(
+                f"{reborn_v2_server}/api/webchat/v2/extensions",
+                timeout=15,
+            )
+            active_list.raise_for_status()
+            active = next(
+                extension
+                for extension in active_list.json()["extensions"]
+                if extension["package_ref"]["id"] == "web-access"
+            )
+            assert active["active"] is True
+            assert active["activation_status"] == "active"
+            assert "web-access.search" in active.get("tools", [])
+        finally:
+            await _remove_web_access_if_present(client, reborn_v2_server)
 
         final_list = await client.get(
             f"{reborn_v2_server}/api/webchat/v2/extensions",

@@ -73,6 +73,7 @@ class CaseSpec:
     category: str
     qa_matrix_test_ids: list[str]
     commands: list[CommandSpec]
+    coverage_source: str = "matrix_only_or_new"
     default_enabled: bool = True
     notes: str = ""
 
@@ -390,11 +391,11 @@ def _test_ids_for(cases: list[CaseSpec]) -> list[str]:
 
 
 def _case_has_matrix_only_command(case: CaseSpec) -> bool:
-    return bool(case.commands)
+    return case.coverage_source == "matrix_only_or_new" and bool(case.commands)
 
 
 def _case_existing_ci_only(case: CaseSpec) -> bool:
-    return False
+    return case.coverage_source == "existing_ci_only"
 
 
 def _commands_for_case(case: CaseSpec) -> list[CommandSpec]:
@@ -402,7 +403,18 @@ def _commands_for_case(case: CaseSpec) -> list[CommandSpec]:
 
 
 def _removed_existing_ci_commands(case: CaseSpec) -> list[dict[str, str | None]]:
-    return []
+    if not _case_existing_ci_only(case):
+        return []
+    return [
+        {
+            "name": command.name,
+            "description": command.description,
+            "command": render_command(command),
+            "coverage_source": case.coverage_source,
+            "existing_ci_coverage": "owned_by_existing_ci",
+        }
+        for command in case.commands
+    ]
 
 
 def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
@@ -433,6 +445,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "category": spec.category,
                 "qa_matrix_test_ids": spec.qa_matrix_test_ids,
                 "default_enabled": spec.default_enabled,
+                "coverage_source": spec.coverage_source,
                 "mode": MODE,
                 "notes": spec.notes,
                 "commands": [
@@ -440,8 +453,12 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                         "name": command.name,
                         "description": command.description,
                         "command": render_command(command),
-                        "coverage_source": "matrix_only_or_new",
-                        "existing_ci_coverage": None,
+                        "coverage_source": spec.coverage_source,
+                        "existing_ci_coverage": (
+                            None
+                            if spec.coverage_source == "matrix_only_or_new"
+                            else "owned_by_existing_ci"
+                        ),
                     }
                     for command in _commands_for_case(spec)
                 ],
@@ -460,6 +477,7 @@ def run_command(
     *,
     output_dir: Path,
     case_name: str,
+    coverage_source: str,
     timeout_seconds: int,
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -473,8 +491,12 @@ def run_command(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "dry_run": dry_run,
-        "coverage_source": "matrix_only_or_new",
-        "existing_ci_coverage": None,
+        "coverage_source": coverage_source,
+        "existing_ci_coverage": (
+            None
+            if coverage_source == "matrix_only_or_new"
+            else "owned_by_existing_ci"
+        ),
     }
     if dry_run:
         stdout_log.write_text("", encoding="utf-8")
@@ -544,6 +566,12 @@ def run_case(
                     "success": False,
                     "skipped": True,
                     "reason": "previous command failed",
+                    "coverage_source": case.coverage_source,
+                    "existing_ci_coverage": (
+                        None
+                        if case.coverage_source == "matrix_only_or_new"
+                        else "owned_by_existing_ci"
+                    ),
                 }
             )
             continue
@@ -551,6 +579,7 @@ def run_case(
             command,
             output_dir=output_dir,
             case_name=case.name,
+            coverage_source=case.coverage_source,
             timeout_seconds=timeout_seconds,
             dry_run=dry_run,
         )
