@@ -3,14 +3,18 @@
 //! Proves the cancel path end-to-end at the int tier: the model call parks at
 //! the vendor-SDK seam, the test cancels the in-flight run, releases the park,
 //! and the run reaches `TurnStatus::Cancelled` (not `Completed`). Exercises the
-//! parking provider (`park_model`), `cancel_run`, and — via the wired
-//! `cancellation_factory` — the coordinator's synchronous cancel fan-out.
+//! parking provider (`park_model`) and `cancel_run`. Cancellation is observed
+//! by the loop-driver host's own default `TurnStateRunCancellationFactory`
+//! (`group.rs` leaves the optional `cancellation_factory` as `None`), not a
+//! wired coordinator fan-out.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;
 #[allow(dead_code)]
 mod support;
+
+use std::time::Duration;
 
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
@@ -32,7 +36,9 @@ async fn cancels_a_parked_mid_turn_run() {
         .submit_turn_async("do a long thing")
         .await
         .expect("turn submitted");
-    gate.wait_until_parked().await;
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
+        .await
+        .expect("model call parks before the timeout");
 
     // Cancel while parked, then release so the loop resumes and observes the
     // cancellation at its next checkpoint.

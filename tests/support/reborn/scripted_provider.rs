@@ -57,6 +57,14 @@ pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>
 /// receiver is already awaiting, so `release()` may run before or after the
 /// provider reaches its `await` without racing. The first model call parks; a
 /// second call (if any) delegates immediately.
+///
+/// The `take()`-based single-shot design is deliberate and idempotent: a second
+/// `park()` (e.g. from a retry/failover hop in the real `ironclaw_llm` decorator
+/// chain this provider sits under) finds its channel already consumed and
+/// returns immediately rather than blocking. A plain `Notify` pair would
+/// *deadlock* that second `park()` — `Notify` stores only one permit, so once
+/// the single `release` permit is consumed there is nothing left to wake a
+/// second waiter.
 #[derive(Clone)]
 pub struct ParkingModelGate(Arc<ParkingState>);
 
