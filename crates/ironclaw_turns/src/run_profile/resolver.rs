@@ -228,11 +228,6 @@ impl RunProfileDefinition {
         self
     }
 
-    pub fn with_driver_specific_nudges(mut self, enabled: bool) -> Self {
-        self.steering_policy.allow_driver_specific_nudges = enabled;
-        self
-    }
-
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
@@ -658,15 +653,5 @@ mod tests {
             PersonalContextPolicy::Excluded
         );
         assert_ne!(direct.resolution_fingerprint, shared.resolution_fingerprint);
-    }
-
-    #[test]
-    fn driver_specific_nudges_builder_toggles_steering_policy() {
-        let default_profile = interactive_profile();
-        assert!(!default_profile.steering_policy.allow_driver_specific_nudges);
-
-        let nudged = interactive_profile().with_driver_specific_nudges(true);
-        let snapshot = nudged.resolve(&RunProfileResolutionRequest::interactive_default());
-        assert!(snapshot.steering_policy.allow_driver_specific_nudges);
     }
 }
