@@ -355,6 +355,8 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
         tenant_id: TenantId::new(TENANT).expect("tenant"),
         user_directory: Arc::new(DistinctUserDirectory),
         operator_secret: SecretString::from("operator-secret".to_string()),
+        session_epoch: None,
+        session_user_access_validator: None,
         base_url: "https://gateway.example".to_string(),
         providers: vec![QueueProvider::new(profiles) as Arc<dyn OAuthProvider>],
         env_authenticator,

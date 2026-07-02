@@ -17,11 +17,15 @@ use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
 };
-use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
+use ironclaw_reborn_webui_ingress::{
+    SessionUserAccessValidator, SignedSessionLoginConfig, build_signed_session_login,
+};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
-use crate::commands::user_directory::{LocalTriggerAccessBootstrap, WebuiUserDirectory};
+use crate::commands::user_directory::{
+    LocalTriggerAccessBootstrap, LocalTriggerSessionAccessValidator, WebuiUserDirectory,
+};
 
 /// The composed WebChat v2 auth surface: the authenticator the protected
 /// routes verify bearers with, plus the optional public login-route mount
@@ -37,6 +41,7 @@ pub(crate) struct WebuiAuthSurface {
 /// admitted user's access row is seeded under. `serve.rs` opens the store once
 /// through the active runtime profile so SSO and trigger-poller wiring share
 /// the same backend.
+#[derive(Clone)]
 pub(crate) struct LocalTriggerAccessBootstrapConfig {
     pub(crate) store: Arc<dyn LocalTriggerAccessStore>,
     pub(crate) tenant_id: TenantId,
@@ -89,21 +94,30 @@ pub(crate) async fn build_webui_auth_surface(
              resolver (no local-runtime substrate); refusing to start"
         )
     })?;
+    let local_trigger_access = local_trigger_access.ok_or_else(|| {
+        anyhow!(
+            "WebChat v2 SSO is configured but the runtime exposes no local access \
+             store; refusing to mint signed sessions without an access validator"
+        )
+    })?;
+    let session_epoch = sso.session_epoch;
 
     let mut user_directory = WebuiUserDirectory::new(
         identity_resolver,
         tenant_id.clone(),
         sso.allowed_email_domains,
     );
-    if let Some(config) = local_trigger_access {
-        user_directory =
-            user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config));
-    }
+    user_directory = user_directory
+        .with_local_trigger_access(local_trigger_access_bootstrap(local_trigger_access.clone()));
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
         tenant_id,
         user_directory: Arc::new(user_directory),
         operator_secret: session_signing_secret,
+        session_epoch,
+        session_user_access_validator: Some(local_trigger_session_access_validator(
+            local_trigger_access,
+        )),
         base_url: sso.base_url,
         providers: sso.providers,
         env_authenticator,
@@ -130,6 +144,20 @@ fn local_trigger_access_bootstrap(
         project_id,
     } = config;
     LocalTriggerAccessBootstrap::new(store, tenant_id, agent_id, project_id)
+}
+
+fn local_trigger_session_access_validator(
+    config: LocalTriggerAccessBootstrapConfig,
+) -> Arc<dyn SessionUserAccessValidator> {
+    let LocalTriggerAccessBootstrapConfig {
+        store,
+        tenant_id,
+        agent_id,
+        project_id,
+    } = config;
+    Arc::new(LocalTriggerSessionAccessValidator::new(
+        store, tenant_id, agent_id, project_id,
+    ))
 }
 
 #[cfg(test)]
@@ -190,6 +218,7 @@ mod tests {
             providers: Vec::new(),
             base_url: "https://app.example.com".to_string(),
             allowed_email_domains: vec!["example.com".to_string()],
+            session_epoch: None,
         };
 
         let result = build_webui_auth_surface(
@@ -237,6 +266,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sso_without_local_access_store_fails_closed() {
+        let sso = SsoStartupConfig {
+            providers: vec![Arc::new(StubProvider(
+                OAuthProviderName::new("google").expect("provider name"),
+            ))],
+            base_url: "https://app.example".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+            session_epoch: None,
+        };
+
+        let result = build_webui_auth_surface(
+            Some(sso),
+            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+                &TenantId::new("sso-missing-access-tenant").expect("tenant"),
+            )),
+            TenantId::new("sso-missing-access-tenant").expect("tenant"),
+            SecretString::from("operator-session-secret".to_string()),
+            Arc::new(RejectingAuth),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("configured SSO with no access validator must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("access validator"),
+            "startup error must name the missing access validator, got: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn sso_with_local_trigger_access_bootstrap_builds_surface() {
         // SSO configured with a local-trigger-access bootstrap: the surface
         // must attach the per-login seeder to the admission adapter and mount
@@ -254,6 +316,7 @@ mod tests {
             ))],
             base_url: "https://app.example".to_string(),
             allowed_email_domains: vec!["example.com".to_string()],
+            session_epoch: None,
         };
 
         let surface = build_webui_auth_surface(

@@ -27,6 +27,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+const WEBUI_SESSION_EPOCH_ENV: &str = "IRONCLAW_REBORN_WEBUI_SESSION_EPOCH";
 
 #[cfg(test)]
 pub(crate) static WEBUI_BASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -44,6 +45,10 @@ pub(crate) struct SsoStartupConfig {
     /// startup fails when providers are configured but this is empty, so
     /// it is never empty here in practice.
     pub(crate) allowed_email_domains: Vec<String>,
+    /// Optional deployment epoch for signed WebUI sessions. Changing this
+    /// value invalidates previously minted browser tokens without rotating the
+    /// operator secret.
+    pub(crate) session_epoch: Option<String>,
 }
 
 /// Resolve the SSO startup config from environment, applying all
@@ -76,6 +81,7 @@ pub(crate) fn sso_startup_config_from_env(
         providers,
         base_url,
         allowed_email_domains,
+        session_epoch: non_empty_env(WEBUI_SESSION_EPOCH_ENV),
     }))
 }
 
@@ -441,6 +447,7 @@ mod tests {
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
         WEBUI_BASE_URL_ENV,
+        WEBUI_SESSION_EPOCH_ENV,
         "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
     ];
 
@@ -597,6 +604,7 @@ mod tests {
             );
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
+            std::env::set_var(WEBUI_SESSION_EPOCH_ENV, " deploy-2026-07-02 ");
         }
 
         let resolved = sso_startup_config_from_env(addr("0.0.0.0:8080"))
@@ -606,6 +614,11 @@ mod tests {
         assert_eq!(
             resolved.base_url, "https://configured.example",
             "explicit WebUI base URL must become the SSO callback base URL"
+        );
+        assert_eq!(
+            resolved.session_epoch.as_deref(),
+            Some("deploy-2026-07-02"),
+            "configured session epoch should be trimmed and carried into signed-session wiring",
         );
 
         clear_sso_env();
