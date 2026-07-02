@@ -14,6 +14,17 @@
 - `turn_scheduler.rs` owns scheduler-backed run concurrency. It does not own the
   canonical loop tick or product inbound serialization.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
+  Capability-surface authorization is on the pre-model hot path: a single turn
+  rebuilds the surface several times, and each build runs the dispatch authorizer
+  per capability. In production that authorizer issues uncached, often
+  cross-region settings reads, so this work must stay fanned out, never a serial
+  per-capability `await` loop — `visible_capabilities` evaluates candidates
+  concurrently with bounded fan-out (`SURFACE_AUTHORIZATION_CONCURRENCY`) for the
+  unbounded surface, keeping the serial early-stop path only when a
+  `max_capabilities` ceiling is set. Do not reintroduce a serial authorization
+  loop for the unbounded surface; the
+  `visible_surface_authorizes_capabilities_concurrently` guardrail in
+  `tests/tool_surface_contract.rs` fails if it regresses.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.
 - Production wiring must reject local-only runtime policy shapes, not just require

@@ -1321,6 +1321,51 @@ async fn visible_surface_max_capabilities_stops_authorization_after_limit() {
     assert_eq!(authorizer.call_count(), 1);
 }
 
+/// Performance guardrail (#5284 follow-up): the per-capability authorization a
+/// surface build performs is I/O-bound (uncached, often cross-region settings
+/// reads). A single Reborn turn rebuilds the surface several times, so doing
+/// these reads serially turns N capabilities into N * RTT of pre-model latency.
+/// This pins that the unbounded surface build fans authorization out
+/// concurrently. It fails if the build regresses to a serial per-capability
+/// loop (max in flight collapses to 1).
+#[tokio::test]
+async fn visible_surface_authorizes_capabilities_concurrently() {
+    const CAP_COUNT: usize = 6;
+    let registry = registry_from_manifests([(PARALLEL_PROBE_MANIFEST, "/system/extensions/probe")]);
+    let probe = Arc::new(ConcurrencyProbeAuthorizer::default());
+    let runtime = runtime_with(registry, probe.clone());
+    let context = context_with_grant_entries((0..CAP_COUNT).map(|index| {
+        (
+            capability_id(&format!("probe.cap{index}")),
+            vec![EffectKind::DispatchCapability],
+        )
+    }));
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            vec![("probe", vec![EffectKind::DispatchCapability])],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        surface.capabilities.len(),
+        CAP_COUNT,
+        "all probe capabilities should be visible"
+    );
+    // CAP_COUNT (6) <= SURFACE_AUTHORIZATION_CONCURRENCY (16) and each probe
+    // holds its slot for 25ms, so all candidates are expected in flight at once.
+    // Require at least half so a serial regression (max == 1) or a sharply
+    // reduced fan-out both fail, while staying robust to scheduler jitter.
+    assert!(
+        probe.max_in_flight() >= CAP_COUNT / 2,
+        "surface-build authorization must fan out concurrently, not run one serial \
+         cross-region read at a time; observed max in flight = {}",
+        probe.max_in_flight()
+    );
+}
+
 #[tokio::test]
 async fn visible_surface_can_hide_approval_required_capabilities_by_policy() {
     let registry = registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]);
@@ -2155,6 +2200,98 @@ impl TrustAwareCapabilityDispatchAuthorizer for PanicAuthorizer {
         }
     }
 }
+
+/// Records the peak number of `authorize_dispatch_with_trust` calls in flight at
+/// once, so a test can prove the surface build fans authorization out
+/// concurrently instead of issuing one serial cross-region read at a time.
+#[derive(Default)]
+struct ConcurrencyProbeAuthorizer {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl ConcurrencyProbeAuthorizer {
+    fn max_in_flight(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ConcurrencyProbeAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        let in_flight = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(in_flight, Ordering::SeqCst);
+        // Hold the slot long enough that concurrent calls observably overlap; a
+        // serial loop never exceeds one in flight regardless of the delay.
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Decision::Allow {
+            obligations: Obligations::empty(),
+        }
+    }
+}
+
+/// Six model-visible dispatch-only capabilities under one provider, used to
+/// observe authorization fan-out during a single surface build.
+const PARALLEL_PROBE_MANIFEST: &str = r#"
+id = "probe"
+name = "Probe"
+version = "0.1.0"
+description = "Concurrency probe extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "probe.wasm"
+
+[[capabilities]]
+id = "probe.cap0"
+description = "Probe capability 0"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+
+[[capabilities]]
+id = "probe.cap1"
+description = "Probe capability 1"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+
+[[capabilities]]
+id = "probe.cap2"
+description = "Probe capability 2"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+
+[[capabilities]]
+id = "probe.cap3"
+description = "Probe capability 3"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+
+[[capabilities]]
+id = "probe.cap4"
+description = "Probe capability 4"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+
+[[capabilities]]
+id = "probe.cap5"
+description = "Probe capability 5"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
 
 const HOT_CAPABILITY_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "echo"
