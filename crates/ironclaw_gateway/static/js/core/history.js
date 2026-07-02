@@ -823,6 +823,10 @@ function switchTab(tab) {
   });
   applyAriaAttributes();
   updateTopbarTitle(tab);
+  // The Workspace editor owns its own top row (file bar), so the global
+  // topbar is suppressed there — the editor sits flush with the page top.
+  // Mobile keeps the topbar (it carries the sidebar toggle).
+  document.querySelector('.app-main')?.classList.toggle('no-topbar', tab === 'memory');
   if (window.innerWidth <= 768) closeMobileSidebar();
 
   if (tab === 'memory') {

@@ -40,11 +40,33 @@ function renderTree() {
   renderNodes(memoryTreeState, container, 0);
 }
 
+// Small inline file-type icons (lucide-style strokes) for the tree.
+function memoryFileIconSvg(node) {
+  const stroke = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  if (node.is_dir) {
+    return node.expanded
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
+  }
+  const name = String(node.name || '').toLowerCase();
+  if (name.endsWith('.md')) {
+    return '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>';
+  }
+  if (name.endsWith('.csv') || name.endsWith('.tsv')) {
+    return '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>';
+  }
+  if (name.endsWith('.json') || name.endsWith('.js') || name.endsWith('.toml') || name.endsWith('.yaml') || name.endsWith('.yml')) {
+    return '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+  }
+  return '<svg width="14" height="14" viewBox="0 0 24 24" ' + stroke + '><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>';
+}
+
 function renderNodes(nodes, container, depth) {
   for (const node of nodes) {
     const row = document.createElement('div');
-    row.className = 'tree-row';
-    row.style.paddingLeft = (depth * 16 + 8) + 'px';
+    row.className = 'tree-row'
+      + (!node.is_dir && node.path === currentMemoryPath ? ' active' : '');
+    row.style.paddingLeft = (depth * 14 + 8) + 'px';
     row.tabIndex = 0;
     row.setAttribute('role', 'treeitem');
 
@@ -52,28 +74,30 @@ function renderNodes(nodes, container, depth) {
       row.setAttribute('aria-expanded', node.expanded ? 'true' : 'false');
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
-      arrow.textContent = '\u25B6';
+      arrow.textContent = '\u25B8';
       row.appendChild(arrow);
+    } else {
+      const spacer = document.createElement('span');
+      spacer.className = 'expand-arrow-spacer';
+      row.appendChild(spacer);
+    }
 
-      const label = document.createElement('span');
-      label.className = 'tree-label dir';
-      label.textContent = node.name;
-      row.appendChild(label);
+    const icon = document.createElement('span');
+    icon.className = 'tree-icon' + (node.is_dir ? ' dir' : '');
+    icon.innerHTML = memoryFileIconSvg(node);
+    row.appendChild(icon);
 
+    const label = document.createElement('span');
+    label.className = 'tree-label ' + (node.is_dir ? 'dir' : 'file');
+    label.textContent = node.name;
+    row.appendChild(label);
+
+    if (node.is_dir) {
       row.addEventListener('click', () => toggleExpand(node));
       row.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(node); }
       });
     } else {
-      const spacer = document.createElement('span');
-      spacer.className = 'expand-arrow-spacer';
-      row.appendChild(spacer);
-
-      const label = document.createElement('span');
-      label.className = 'tree-label file';
-      label.textContent = node.name;
-      row.appendChild(label);
-
       row.addEventListener('click', () => readMemoryFile(node.path));
       row.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); readMemoryFile(node.path); }
@@ -123,59 +147,107 @@ function toggleExpand(node) {
 function readMemoryFile(path) {
   currentMemoryPath = path;
   updateHash();
-  // Update breadcrumb
   document.getElementById('memory-breadcrumb-path').innerHTML = buildBreadcrumb(path);
-  document.getElementById('memory-edit-btn').style.display = 'inline-block';
 
   // Exit edit mode if active
   cancelMemoryEdit();
 
   apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
     currentMemoryContent = data.content;
-    const viewer = document.getElementById('memory-viewer');
-    // Render markdown if it's a .md file
-    if (path.endsWith('.md')) {
-      viewer.innerHTML = '<div class="memory-rendered">' + renderMarkdown(data.content) + '</div>';
-      viewer.classList.add('rendered');
-    } else {
-      viewer.textContent = data.content;
-      viewer.classList.remove('rendered');
-    }
+    renderMemoryViewer(path, data.content);
+    document.getElementById('memory-edit-btn').style.display = '';
+    renderTree(); // refresh active-row highlight
   }).catch((err) => {
     currentMemoryContent = null;
-    document.getElementById('memory-viewer').innerHTML = '<div class="empty">Error: ' + escapeHtml(err.message) + '</div>';
+    document.getElementById('memory-viewer').innerHTML = '<div class="memory-welcome"><div class="memory-welcome-title">' + escapeHtml(err.message) + '</div></div>';
   });
+}
+
+function renderMemoryViewer(path, content) {
+  const viewer = document.getElementById('memory-viewer');
+  if (path.endsWith('.md')) {
+    viewer.innerHTML = '<div class="memory-rendered">' + renderMarkdown(content) + '</div>';
+    viewer.classList.add('rendered');
+  } else {
+    viewer.textContent = content;
+    viewer.classList.remove('rendered');
+  }
+}
+
+// --- Edit / preview mode ---
+//
+// View mode:   viewer + [Edit]
+// Edit mode:   textarea + [Save] [Cancel]; .md files additionally get an
+//              Edit/Preview segmented toggle (preview renders the draft).
+let _memoryEditing = false;
+let _memoryPreviewingDraft = false;
+
+function syncMemoryFilebar() {
+  const isMd = !!currentMemoryPath && currentMemoryPath.endsWith('.md');
+  document.getElementById('memory-edit-btn').style.display =
+    !_memoryEditing && currentMemoryPath ? '' : 'none';
+  document.getElementById('memory-save-btn').style.display = _memoryEditing ? '' : 'none';
+  document.getElementById('memory-cancel-btn').style.display = _memoryEditing ? '' : 'none';
+  const toggle = document.getElementById('memory-mode-toggle');
+  toggle.style.display = _memoryEditing && isMd ? '' : 'none';
+  if (_memoryEditing && isMd) {
+    document.getElementById('memory-mode-edit').classList.toggle('active', !_memoryPreviewingDraft);
+    document.getElementById('memory-mode-preview').classList.toggle('active', _memoryPreviewingDraft);
+  }
+  document.getElementById('memory-viewer').style.display =
+    _memoryEditing && !_memoryPreviewingDraft ? 'none' : '';
+  document.getElementById('memory-editor').style.display =
+    _memoryEditing && !_memoryPreviewingDraft ? 'flex' : 'none';
 }
 
 function startMemoryEdit() {
   if (!currentMemoryPath || currentMemoryContent === null) return;
-  document.getElementById('memory-viewer').style.display = 'none';
-  const editor = document.getElementById('memory-editor');
-  editor.style.display = 'flex';
+  _memoryEditing = true;
+  _memoryPreviewingDraft = false;
   const textarea = document.getElementById('memory-edit-textarea');
   textarea.value = currentMemoryContent;
+  syncMemoryFilebar();
   textarea.focus();
 }
 
 function cancelMemoryEdit() {
-  document.getElementById('memory-viewer').style.display = '';
-  document.getElementById('memory-editor').style.display = 'none';
+  _memoryEditing = false;
+  _memoryPreviewingDraft = false;
+  if (currentMemoryPath && currentMemoryContent !== null) {
+    renderMemoryViewer(currentMemoryPath, currentMemoryContent);
+  }
+  syncMemoryFilebar();
 }
 
 function saveMemoryEdit() {
   if (!currentMemoryPath) return;
-  const content = document.getElementById('memory-edit-textarea').value;
+  const textarea = document.getElementById('memory-edit-textarea');
+  const content = textarea.value;
   apiFetch('/api/memory/write', {
     method: 'POST',
     body: { path: currentMemoryPath, content: content },
   }).then(() => {
     showToast(I18n.t('memory.savedPath', { path: currentMemoryPath }), 'success');
-    cancelMemoryEdit();
+    _memoryEditing = false;
+    _memoryPreviewingDraft = false;
     readMemoryFile(currentMemoryPath);
   }).catch((err) => {
     showToast(I18n.t('memory.saveFailed', { message: err.message }), 'error');
   });
 }
+
+// Draft preview toggle (edit mode, .md only).
+document.getElementById('memory-mode-preview')?.addEventListener('click', () => {
+  if (!_memoryEditing) return;
+  _memoryPreviewingDraft = true;
+  renderMemoryViewer(currentMemoryPath, document.getElementById('memory-edit-textarea').value);
+  syncMemoryFilebar();
+});
+document.getElementById('memory-mode-edit')?.addEventListener('click', () => {
+  if (!_memoryEditing) return;
+  _memoryPreviewingDraft = false;
+  syncMemoryFilebar();
+});
 
 function buildBreadcrumb(path) {
   const parts = path.split('/');

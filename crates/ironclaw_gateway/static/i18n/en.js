@@ -287,12 +287,14 @@ I18n.register('en', {
   'thread.untitled': 'New chat',
   
   // Memory Tab
-  'memory.searchPlaceholder': 'Search memory...',
+  'memory.searchPlaceholder': 'Search workspace...',
   'memory.workspace': 'workspace',
   'memory.edit': 'Edit',
+  'memory.preview': 'Preview',
   'memory.save': 'Save',
   'memory.cancel': 'Cancel',
-  'memory.selectFile': 'Select a file to view content',
+  'memory.selectFile': 'Select a file to view its contents',
+  'memory.selectFileHint': 'This is your agent\u2019s working memory \u2014 it reads these files on every turn.',
   
   // Jobs Tab
   'jobs.summary': 'Jobs summary',

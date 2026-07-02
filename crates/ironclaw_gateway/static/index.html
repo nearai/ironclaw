@@ -416,29 +416,40 @@
       </div>
     </div>
 
-    <!-- Memory Tab -->
+    <!-- Memory Tab — VSCode-style workspace editor: file tree + search on
+         the left, a slim file bar (breadcrumb + edit/preview controls) on
+         top of the editor pane. The global topbar is suppressed for this
+         tab (see switchTab) so the file bar IS the top of the page. -->
     <div class="tab-panel" id="tab-memory">
       <div class="memory-container">
         <div class="memory-sidebar">
-          <div class="search-box">
-            <input type="text" id="memory-search" data-i18n="memory.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search memory...">
+          <div class="memory-search-box">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="memory-search" data-i18n="memory.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search workspace...">
           </div>
-          <div class="memory-tree" id="memory-tree"></div>
+          <div class="memory-tree" id="memory-tree" role="tree"></div>
         </div>
         <div class="memory-content">
-          <div class="memory-breadcrumb" id="memory-breadcrumb">
-            <span id="memory-breadcrumb-path">workspace /</span>
-            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" data-i18n="memory.edit">Edit</button>
+          <div class="memory-filebar" id="memory-breadcrumb">
+            <span class="memory-filebar-path" id="memory-breadcrumb-path"><span class="memory-filebar-root">workspace</span></span>
+            <div class="memory-filebar-actions">
+              <div class="memory-mode-toggle" id="memory-mode-toggle" style="display:none" role="tablist">
+                <button type="button" class="memory-mode-btn" id="memory-mode-edit" data-i18n="memory.edit">Edit</button>
+                <button type="button" class="memory-mode-btn active" id="memory-mode-preview" data-i18n="memory.preview">Preview</button>
+              </div>
+              <button class="memory-action-btn" id="memory-edit-btn" style="display:none" data-i18n="memory.edit">Edit</button>
+              <button class="memory-action-btn primary" id="memory-save-btn" style="display:none" data-i18n="memory.save">Save</button>
+              <button class="memory-action-btn" id="memory-cancel-btn" style="display:none" data-i18n="memory.cancel">Cancel</button>
+            </div>
           </div>
           <div class="memory-viewer" id="memory-viewer">
-            <div class="empty" data-i18n="memory.selectFile">Select a file to view its contents</div>
+            <div class="memory-welcome">
+              <div class="memory-welcome-title" data-i18n="memory.selectFile">Select a file to view its contents</div>
+              <div class="memory-welcome-hint" data-i18n="memory.selectFileHint">This is your agent's working memory — it reads these files on every turn.</div>
+            </div>
           </div>
           <div class="memory-editor" id="memory-editor" style="display:none">
-            <textarea id="memory-edit-textarea"></textarea>
-            <div class="memory-editor-actions">
-              <button class="btn-save" id="memory-save-btn" data-i18n="memory.save">Save</button>
-              <button class="btn-cancel-edit" id="memory-cancel-btn" data-i18n="memory.cancel">Cancel</button>
-            </div>
+            <textarea id="memory-edit-textarea" spellcheck="false"></textarea>
           </div>
         </div>
       </div>

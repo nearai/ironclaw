@@ -413,6 +413,44 @@ window.NUX_BILLING = {
     return false;
   }
 
+  // Workspace files backing the Workspace editor (implied: the gateway's
+  // memory store, ~/.ironclaw/workspace). In-memory; writes persist for
+  // the session so the editor round-trips.
+  var MEMORY_FILES = {
+    'README.md': '# Workspace\n\nThis is your agent\u2019s working memory \u2014 notes it keeps, preferences it learns, and files it produces while working for you.\n\n- **profile.md** \u2014 who you are, how you like things done\n- **preferences.md** \u2014 standing instructions the agent honors\n- **notes/** \u2014 running notes from tasks and conversations\n- **reports/** \u2014 artifacts the agent generates on a schedule\n\nEdit anything here \u2014 the agent reads this on every turn.',
+    'profile.md': '# Profile\n\n- **Name:** Demo User\n- **Timezone:** America/Los_Angeles\n- **Work hours:** 9:00\u201318:00, no meetings before 10:00\n- **Team:** Priya (design), Marcus (infra), Dana (growth)\n\n## Communication\n\n- Keep summaries under five bullets.\n- Prefer direct answers over hedging.',
+    'preferences.md': '# Standing preferences\n\n1. Deliver the morning briefing at **9:00** sharp.\n2. Never auto-send email \u2014 draft and ask.\n3. Alert me on Telegram for anything urgent after hours.\n4. Weekly spend cap: **$20** without checking in.',
+    'notes/meetings.md': '# Meeting notes\n\n## 2026-07-01 \u2014 Growth sync\n\n- Signups +12% WoW; activation flat.\n- Dana to run onboarding experiment; agent to report daily.\n\n## 2026-06-28 \u2014 Infra review\n\n- Migration to the new queue done; watch p99 this week.',
+    'notes/ideas.md': '# Ideas backlog\n\n- Auto-label GitHub issues by component.\n- Weekly "what changed" digest for the whole workspace.\n- Invoice parser \u2192 Sheets pipeline (waiting on Sheets access).',
+    'reports/2026-07-01-briefing.md': '# Morning briefing \u2014 July 1\n\n**Calendar:** 2 meetings (Growth sync 10:00, 1:1 with Priya 14:00)\n\n**Email:** 3 actionable \u2014 MSA redlines (Maya), Stripe invoice, recruiting slot\n\n**Tasks:** keyword monitor quiet; deploy watcher all green.',
+    'data/kpis.csv': 'week,signups,activation,revenue\n2026-06-08,412,0.38,8210\n2026-06-15,455,0.39,8630\n2026-06-22,491,0.37,9120\n2026-06-29,548,0.41,9880',
+  };
+
+  // Directory listing over the flat MEMORY_FILES map.
+  function memoryList(dirPath) {
+    var prefix = dirPath ? dirPath.replace(/\/$/, '') + '/' : '';
+    var dirs = {};
+    var files = [];
+    Object.keys(MEMORY_FILES).forEach(function(p) {
+      if (prefix && p.indexOf(prefix) !== 0) return;
+      var rest = p.slice(prefix.length);
+      if (!prefix && rest.indexOf('/') !== -1) {
+        dirs[rest.split('/')[0]] = true;
+        return;
+      }
+      if (prefix && rest.indexOf('/') !== -1) {
+        dirs[rest.split('/')[0]] = true;
+        return;
+      }
+      files.push({ name: rest, path: p, is_dir: false });
+    });
+    var entries = Object.keys(dirs).sort().map(function(d) {
+      return { name: d, path: prefix + d, is_dir: true };
+    });
+    files.sort(function(a, b) { return a.name.localeCompare(b.name); });
+    return entries.concat(files);
+  }
+
   // Human-friendly thread title from the first message (implied: the real
   // backend titles threads via a cheap LLM pass after the first turn; the
   // mock approximates it deterministically). Collapses whitespace, strips
@@ -1100,20 +1138,41 @@ window.NUX_BILLING = {
     if (path === '/api/routines/summary') return { total: 0 };
     if (path.indexOf('/api/routines') === 0) return { routines: [] };
 
-    // ---- memory ----
+    // ---- memory / workspace files ----
+    // Implied: GET /api/memory/list?path= -> { entries: [{name, path, is_dir}] }
+    //          GET /api/memory/read?path= -> { content, path }
+    //          POST /api/memory/write { path, content }
+    //          POST /api/memory/search { query, limit } -> { results: [{path, content}] }
     if (path.indexOf('/api/memory/list') === 0) {
-      return {
-        entries: [
-          { name: 'profile.md', path: 'profile.md', is_dir: false },
-          { name: 'preferences.md', path: 'preferences.md', is_dir: false },
-        ],
-      };
+      var listParams = new URLSearchParams(path.split('?')[1] || '');
+      var dirPath = listParams.get('path') || '';
+      return { entries: memoryList(dirPath) };
     }
     if (path.indexOf('/api/memory/read') === 0) {
-      return { content: '# Demo memory\n\nThis workspace runs on mock data — memory writes are not persisted.', path: 'profile.md' };
+      var readParams = new URLSearchParams(path.split('?')[1] || '');
+      var filePath = readParams.get('path') || '';
+      var content = MEMORY_FILES[filePath];
+      if (content === undefined) {
+        return { __status: 404, body: { error: 'no such file: ' + filePath } };
+      }
+      return { content: content, path: filePath };
     }
-    if (path === '/api/memory/search') return { results: [] };
-    if (path === '/api/memory/write') return { success: true };
+    if (path === '/api/memory/search') {
+      var memQuery = String((body && body.query) || '').toLowerCase();
+      var results = [];
+      if (memQuery) {
+        Object.keys(MEMORY_FILES).forEach(function(p) {
+          if ((p + ' ' + MEMORY_FILES[p]).toLowerCase().indexOf(memQuery) !== -1) {
+            results.push({ path: p, content: MEMORY_FILES[p] });
+          }
+        });
+      }
+      return { results: results.slice(0, (body && body.limit) || 20) };
+    }
+    if (path === '/api/memory/write') {
+      if (body && body.path) MEMORY_FILES[body.path] = String(body.content || '');
+      return { success: true };
+    }
 
     // ---- settings / tokens / llm / logs / traces ----
     if (path === '/api/settings/tools') return { tools: [] };
