@@ -1,5 +1,6 @@
 name: Nightly Deep CI
 
+# CI sweep trigger: comment-only changes here exercise broad PR risk scopes.
 # This workflow intentionally reuses the Legacy Tests workflow instead of
 # duplicating job definitions here. The called .github/workflows/test.yml
 # workflow runs the legacy deterministic deep suite:

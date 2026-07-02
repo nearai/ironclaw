@@ -1,5 +1,7 @@
 name: IronClaw Stress
 
+# CI sweep trigger: comment-only changes here exercise stress PR filters.
+
 on:
   pull_request:
     paths:

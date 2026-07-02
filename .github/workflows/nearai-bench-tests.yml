@@ -8,6 +8,8 @@
 # dispatcher's parsing logic can't ship without surfacing the diff.
 #
 # Filed in response to serrrfirat's Medium/tests finding on #3808.
+#
+# CI sweep trigger: comment-only changes here exercise benchmark parser tests.
 
 name: nearai-bench dispatcher tests
 
