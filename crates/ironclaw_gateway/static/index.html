@@ -395,23 +395,17 @@
       </div>
     </div>
 
-    <!-- Billing Tab (MOCK: client-side credits/plan state, see billing.js) -->
+    <!-- Billing Tab (MOCK: client-side credits/plan state, see billing.js).
+         The page name lives in the top bar only (Linear pattern). -->
     <div class="tab-panel" id="tab-billing">
       <div class="billing-surface">
-        <div class="surface-heading">
-          <div class="surface-subtitle" data-i18n="billing.subtitle">Your plan, credits, and usage — all in one place.</div>
-        </div>
         <div id="billing-container"></div>
       </div>
     </div>
 
-    <!-- Discover Tab (unified marketplace) -->
+    <!-- Discover Tab (unified marketplace). Single title in the top bar. -->
     <div class="tab-panel" id="tab-discover">
       <div class="discover-container">
-        <div class="discover-header">
-          <div class="discover-title" data-i18n="discover.title">Discover</div>
-          <div class="discover-subtitle" data-i18n="discover.subtitle">Channels, tools, and skills for your agent — or just ask it to build what's missing.</div>
-        </div>
         <div class="discover-toolbar">
           <div class="discover-search">
             <input type="text" id="discover-search-input" data-i18n="discover.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search channels, tools, MCP servers, skills...">
@@ -450,13 +444,10 @@
       </div>
     </div>
 
-    <!-- Tasks Tab (missions + jobs in one surface). The surface keeps only
-         the subtitle — the "Tasks" title lives in the top bar. -->
+    <!-- Tasks Tab (missions + jobs in one surface). The "Tasks" title
+         lives in the top bar only; the header row carries the segments. -->
     <div class="tab-panel" id="tab-tasks">
       <div class="tasks-header">
-        <div class="surface-heading">
-          <div class="surface-subtitle" data-i18n="tasks.subtitle">Everything your agent is working on — recurring missions and one-off jobs.</div>
-        </div>
         <div class="tasks-segments" role="tablist">
           <button class="tasks-segment active" data-tasks-segment="missions" data-i18n="tab.missions">Missions</button>
           <button class="tasks-segment" data-tasks-segment="jobs" data-i18n="tab.jobs">Jobs</button>
@@ -501,10 +492,6 @@
          the onboarding handoff — see js/surfaces/integrations.js) -->
     <div class="tab-panel" id="tab-integrations">
       <div class="integrations-container">
-        <div class="surface-heading">
-          <div class="surface-title" data-i18n="integrations.title">Integrations</div>
-          <div class="surface-subtitle" data-i18n="integrations.subtitle">Connect the tools your agent works with — email, chat, calendars, and more.</div>
-        </div>
         <div class="integrations-connected-section" id="integrations-connected-section" style="display:none">
           <h3 data-i18n="integrations.connected">Connected</h3>
           <div class="integrations-grid" id="integrations-connected-grid"></div>
