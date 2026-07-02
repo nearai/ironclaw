@@ -15,6 +15,14 @@ default = []
 # Compile the fail-closed axum route fragment. Host composition still owns
 # listener binding, auth middleware, CORS, body/rate limits, and mounting.
 openai-compat-beta = ["dep:async-stream", "dep:axum", "dep:futures-core"]
+# Durable filesystem-backed OpenAiCompatRefStore (folded in from the former
+# `ironclaw_reborn_openai_compat_storage` crate). `storage` pulls the universal
+# filesystem port; `libsql`/`postgres` additionally compile the concrete-backend
+# convenience wrappers. Contract-only consumers stay on `default` and carry no
+# `ironclaw_filesystem` dependency.
+storage = ["dep:ironclaw_filesystem"]
+libsql = ["storage", "ironclaw_filesystem/libsql"]
+postgres = ["storage", "ironclaw_filesystem/postgres"]
 
 [dependencies]
 async-trait = "0.1"
@@ -22,6 +30,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +46,10 @@ futures-core = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
+# Force `storage` on for this crate's own test builds so the folded-in
+# ref-store contract suite (from ironclaw_reborn_openai_compat_storage) runs
+# under a bare `cargo test -p ironclaw_reborn_openai_compat`.
+ironclaw_reborn_openai_compat = { path = ".", features = ["storage"] }
 http = "1"
 http-body-util = "0.1"
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }

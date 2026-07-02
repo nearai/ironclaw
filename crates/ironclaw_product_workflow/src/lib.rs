@@ -37,6 +37,12 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+// Durable filesystem-backed idempotency ledger (folded in from the former
+// `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
+// facade surface stays free of the `ironclaw_filesystem` dependency unless a
+// consumer opts into a durable backend.
+#[cfg(feature = "storage")]
+mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
@@ -103,6 +109,12 @@ pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, rejecting_reborn_services_error,
 };
+#[cfg(feature = "storage")]
+pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
+#[cfg(feature = "libsql")]
+pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
+#[cfg(feature = "postgres")]
+pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,

@@ -16,6 +16,14 @@ default = []
 # FakeIdempotencyLedger, etc.). Off by default so production binaries don't carry
 # the fake state machinery; downstream crates enable it from `[dev-dependencies]`.
 test-support = ["ironclaw_product_adapters/test-support"]
+# Durable filesystem-backed IdempotencyLedger (folded in from the former
+# `ironclaw_product_workflow_storage` crate). `storage` pulls the universal
+# filesystem port; `libsql`/`postgres` additionally compile the concrete-backend
+# convenience wrappers. Contract-only consumers stay on `default` and carry no
+# `ironclaw_filesystem` dependency.
+storage = ["dep:ironclaw_filesystem"]
+libsql = ["storage", "ironclaw_filesystem/libsql"]
+postgres = ["storage", "ironclaw_filesystem/postgres"]
 
 [dependencies]
 async-trait = "0.1"
@@ -24,6 +32,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
@@ -55,10 +64,16 @@ ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_trust = { path = "../ironclaw_trust" }
-ironclaw_product_workflow = { path = ".", features = ["test-support"] }
+ironclaw_product_workflow = { path = ".", features = ["test-support", "storage"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0", features = ["test-support"] }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+# Durable-ledger contract test (folded in from ironclaw_product_workflow_storage)
+# drives the libSQL/Postgres RootFilesystem backends directly; the Postgres leg
+# builds its own pool. libSQL leg runs embedded; Postgres leg needs a DB URL.
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }

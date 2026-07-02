@@ -151,7 +151,8 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_count(n)` — exact count of captured egress requests.
 - `assert_egress_url_order(&[substrings])` — URLs in call order, each containing the matching substring; also checks count.
 - `assert_egress_method_order(&[methods])` — HTTP methods in call order (case-insensitive).
-- `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
+- `assert_egress_body_contains(url_substr, body_substr)` — body of the (first) captured egress request whose URL contains the substring.
+- `assert_egress_body_contains_any(url_substr, body_substr)` — body of ANY (not just the first) captured egress request whose URL contains the substring; for a multi-request handshake where every leg shares one URL (e.g. web-access's Exa MCP `initialize`/`notifications/initialized`/`tools/call` sequence) and only one leg's body carries the substring under test. Prefer `assert_egress_body_contains` whenever `url_substr` matches exactly one request.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
@@ -376,6 +377,19 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Distinct actors per thread (E-MULTIUSER)
+
+`g.thread(conv).with_actor_id("some-actor")` resolves that thread's binding
+under a DISTINCT actor instead of the default `HARNESS_ACTOR_ID` — both at
+the build-time binding probe and at every `submit_turn` for that thread, so
+probe and submit always resolve the same binding/owner. The group's one
+shared runtime resolves each turn's thread by the run's own owner
+(production's `ThreadScopeResolver::resolve_for_turn` over the harness's
+per-op `/threads` mount), so two actors' threads coexist over one
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 

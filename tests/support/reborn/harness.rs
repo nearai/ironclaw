@@ -41,6 +41,7 @@ use ironclaw_filesystem::{
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
     ScopedFilesystem, StorageClass,
 };
+use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
@@ -155,6 +156,7 @@ use super::{
         build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
         mcp_loopback_network_policy, mock_mcp_extension_package,
     },
+    harness_web_access,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
     session_thread::RebornThreadHarness,
@@ -2590,6 +2592,66 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
+    /// C-WEBACCESS: wires the real first-party `web-access.search` /
+    /// `web-access.get_content` capabilities via the production
+    /// `register_bundled_web_access_first_party_handlers` registration
+    /// (`harness_web_access.rs`), which dispatches through the same
+    /// `WebAccessExecutor` production composition uses. Unlike
+    /// `github_issue_tools`, no credential-injecting authorizer is needed —
+    /// web-access declares zero `runtime_credentials` — so this wires the
+    /// plain default `GrantAuthorizer`.
+    ///
+    /// The three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`) all target the same URL, so script it via
+    /// `RecordingRuntimeHttpEgress::push_response_body` (FIFO), not the keyed
+    /// matcher — see [`install_web_access_responses`](Self::install_web_access_responses),
+    /// called from `RebornIntegrationHarnessBuilder::build` before the harness
+    /// is returned.
+    pub(crate) async fn web_access_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(harness_web_access::web_access_extension_package()?)?;
+        let runtime = harness_web_access::local_dev_host_runtime_with_web_access(
+            storage_root,
+            registry,
+            Arc::clone(&http_egress),
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![
+                CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            network_policy: harness_web_access::exa_mcp_test_network_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(harness_web_access::WEB_ACCESS_PROVIDER_ID)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-web-access-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: Some(http_egress),
+            network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
+        })
+    }
+
     fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
@@ -2620,6 +2682,30 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Install FIFO response bodies (C-WEBACCESS) onto the recording runtime
+    /// HTTP egress, consumed in call order ahead of the default body. Mirrors
+    /// [`install_http_responses`](Self::install_http_responses)'s shape but for
+    /// the web-access backend's `push_response_body` FIFO queue rather than the
+    /// keyed matcher — the three-leg Exa MCP handshake (`initialize` →
+    /// `notifications/initialized` → `tools/call`) all target the same
+    /// URL/method/capability, so only the FIFO queue can script them
+    /// independently. Errors if this harness wired no recording egress. Called
+    /// from `RebornIntegrationHarnessBuilder::build` (build-time only — no
+    /// post-build mutation).
+    pub(crate) fn install_web_access_responses(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let egress = self
+            .http_egress
+            .as_ref()
+            .ok_or("web-access host runtime has no recording egress wired")?;
+        for body in bodies {
+            egress.push_response_body(body);
+        }
+        Ok(())
     }
 
     /// Snapshot of every command string recorded by the inert process port
@@ -3395,6 +3481,12 @@ pub(crate) fn local_dev_root_filesystem(
             HostPath::from_path_buf(github_support::asset_root()),
         )?;
     }
+    if mounts.web_access_assets {
+        local.mount_local(
+            VirtualPath::new("/system/extensions/web-access")?,
+            HostPath::from_path_buf(harness_web_access::asset_root()),
+        )?;
+    }
 
     let local = Arc::new(local);
     let mut root = CompositeRootFilesystem::new();
@@ -3415,6 +3507,20 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
+                BackendKind::LocalFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ExtensionPackage,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            Arc::clone(&local),
+        )?;
+    }
+    if mounts.web_access_assets {
+        root.mount(
+            local_dev_mount_descriptor(
+                "/system/extensions/web-access",
+                "local-dev-web-access-assets",
                 BackendKind::LocalFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
@@ -3445,6 +3551,7 @@ pub(crate) fn local_dev_root_filesystem(
 #[derive(Clone, Copy)]
 pub(crate) struct LocalDevRootMounts {
     github_assets: bool,
+    web_access_assets: bool,
     memory: bool,
 }
 
@@ -3452,6 +3559,7 @@ impl LocalDevRootMounts {
     pub(crate) fn core_builtins() -> Self {
         Self {
             github_assets: false,
+            web_access_assets: false,
             memory: true,
         }
     }
@@ -3459,6 +3567,15 @@ impl LocalDevRootMounts {
     fn github_assets() -> Self {
         Self {
             github_assets: true,
+            web_access_assets: false,
+            memory: false,
+        }
+    }
+
+    pub(crate) fn web_access_assets() -> Self {
+        Self {
+            github_assets: false,
+            web_access_assets: true,
             memory: false,
         }
     }
@@ -3783,6 +3900,16 @@ impl RecordingRuntimeHttpEgress {
         responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
     ) {
         self.scripted.lock().unwrap().extend(responses);
+    }
+
+    /// Enqueue one FIFO response body (C-WEBACCESS), consumed in call order
+    /// ahead of `default_body`. Mirrors `install_scripted`'s shape but for the
+    /// plain FIFO queue rather than keyed matchers — used to script the
+    /// three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`), which all target the same URL/method/capability and so
+    /// cannot be told apart by the keyed matcher.
+    pub(crate) fn push_response_body(&self, body: Vec<u8>) {
+        self.response_bodies.lock().unwrap().push_back(body);
     }
 }
 

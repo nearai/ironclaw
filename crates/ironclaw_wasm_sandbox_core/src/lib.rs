@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
-use ironclaw_wasm_limiter::WasmResourceLimiter;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+pub use ironclaw_wasm_limiter::WasmResourceLimiter;
 pub use wasmtime_wasi::{WasiCtxView as MinimalWasiCtxView, WasiView as MinimalWasiView};
 
 /// Runtime-specific store data exposes the shared v1-style limiter to Wasmtime.
@@ -203,6 +203,16 @@ mod tests {
         assert_eq!(limiter.instances(), 10);
         assert_eq!(limiter.tables(), 10);
         assert_eq!(limiter.memories(), 10);
+    }
+
+    #[test]
+    fn limiter_reexport_preserves_bookkeeping_accessors() {
+        let mut limiter = WasmResourceLimiter::new(128 * 1024);
+        assert_eq!(limiter.memory_limit(), 128 * 1024);
+        assert_eq!(limiter.memory_used(), 0);
+
+        assert!(limiter.memory_growing(0, 32 * 1024, None).unwrap());
+        assert_eq!(limiter.memory_used(), 32 * 1024);
     }
 
     /// Regression: the epoch ticker thread must observe `Weak::upgrade() ==

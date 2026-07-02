@@ -43,6 +43,7 @@ use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_threads::ThreadScope;
+use ironclaw_turns::run_profile::InstructionSafetyContext;
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -50,11 +51,9 @@ use ironclaw_turns::{
     TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
+use super::capability_backend::{MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode};
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
-use super::harness::{
-    HarnessCapabilityRecorder, HarnessTurnBackend, HostRuntimeCapabilityHarness,
-    RecordedCapabilityResult,
-};
+use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
@@ -93,32 +92,6 @@ pub enum StorageMode {
     LibSql,
 }
 
-/// Provider id prefix used by every mock-MCP test capability and assertion.
-/// One owner for the string — the `MockMcp` variant and `assert_mcp_tool_called`
-/// both derive their ids from this constant.
-const MOCK_MCP_PROVIDER_ID: &str = "mock-mcp";
-
-/// Selects the capability backend the integration harness wires.
-enum RebornCapabilityBackend {
-    /// Echo recorder: records capability invocations, executes nothing. Default —
-    /// a text-only turn invokes no tool.
-    Echo,
-    /// Real first-party tool runtime (`builtin.http` + friends) with the recording
-    /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
-    BuiltinHttpTools,
-    /// Real MCP runtime wired to a loopback mock MCP server (slice 6 §3.6).
-    /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
-    /// the mock server; no real credentials or network policy are required.
-    MockMcp { mcp_url: String },
-    /// GitHub first-party WASM capabilities with a `GithubHarnessAuthorizer`
-    /// that attaches an `InjectCredentialAccountOnce` obligation, so a dispatched
-    /// `github.*` tool call gets a synthetic access token injected onto the
-    /// outbound request (T0-SECRET-INJECT). The credential lands on the recorded
-    /// **network** egress (`assert_network_egress_header_contains`); the runtime
-    /// egress recorder is inert for this wiring — see that assertion's docs.
-    GithubIssueTools,
-}
-
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
 /// (no post-build mutation), matching the existing harness's construction-time
 /// queue.
@@ -127,7 +100,9 @@ pub struct RebornIntegrationHarnessBuilder {
     replies: Vec<RebornScriptedReply>,
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
+    web_access_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
+    safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
     /// of a `bool` + `Option` so the modes are mutually exclusive by
     /// construction — the last shell-selecting builder method wins, and a live
@@ -136,21 +111,6 @@ pub struct RebornIntegrationHarnessBuilder {
     /// E-GATEWAY: when set, the model call parks until released, enabling a
     /// mid-turn cancel test. Threaded into the degenerate one-thread group.
     park_gate: Option<ParkingModelGate>,
-}
-
-/// Which process port the built `BuiltinHttpTools` runtime installs for
-/// `builtin.shell`. These are mutually exclusive; the builder holds exactly one.
-#[derive(Debug, Clone, Default)]
-enum ShellMode {
-    /// Slice 5 default: the inert `RecordingProcessPort` records the command and
-    /// spawns no OS process.
-    #[default]
-    Inert,
-    /// The real `LocalHostProcessPort` runs a (hermetic) command for real.
-    Live,
-    /// The inert recording port returns a scripted result (error-path coverage):
-    /// a non-zero exit code or a `run_command` error.
-    Scripted(ScriptedProcessResult),
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -166,6 +126,17 @@ impl RebornIntegrationHarnessBuilder {
     /// test on-disk durability via `assert_reply_persists_after_reopen`.
     pub fn storage(mut self, mode: StorageMode) -> Self {
         self.storage = mode;
+        self
+    }
+
+    /// Wire a model-visible instruction-safety banner (`InstructionSafetyContext`)
+    /// into the harness's underlying group. Rendered verbatim as a `system`-role
+    /// prompt message ahead of any per-turn instructions; read back via
+    /// `assert_system_prompt_contains`. Defaults to `None` (no banner, matching
+    /// today's behavior) — see `tests/support/reborn/group.rs`'s
+    /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
+    pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
+        self.safety_context = Some(ctx);
         self
     }
 
@@ -252,6 +223,24 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire the real first-party `web-access.search` / `web-access.get_content`
+    /// capabilities (C-WEBACCESS). `response_bodies` scripts the three-leg Exa
+    /// MCP handshake (`initialize` → `notifications/initialized` → `tools/call`)
+    /// in call order — all three legs target the same URL/method/capability, so
+    /// they cannot be told apart by the keyed HTTP matcher and are instead
+    /// installed onto the recording egress's FIFO queue at build time. Script
+    /// the model with
+    /// `RebornScriptedReply::tool_call("web-access.search", json!({"query": ...}))`
+    /// followed by a trailing text turn.
+    pub fn with_web_access_tools(
+        mut self,
+        response_bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::WebAccessTools;
+        self.web_access_response_bodies = response_bodies.into_iter().collect();
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
@@ -285,51 +274,24 @@ impl RebornIntegrationHarnessBuilder {
         // Echo by default (records, executes nothing — a text reply invokes no
         // tool). Builtin/MCP swap in the real first-party runtime. (Live approval
         // stores are a group-only backend; see `RebornIntegrationGroup::live_approvals`.)
-        let group_capability = match self.capability {
-            RebornCapabilityBackend::Echo => GroupCapability::Recording,
-            RebornCapabilityBackend::BuiltinHttpTools => {
-                // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
-                // `Inert`/`Scripted` both use the inert RecordingProcessPort (the
-                // latter with a canned result installed below).
-                let host_runtime = match self.shell_mode {
-                    ShellMode::Live => {
-                        HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
-                    }
-                    ShellMode::Inert | ShellMode::Scripted(_) => {
-                        HostRuntimeCapabilityHarness::core_builtin_tools().await?
-                    }
-                };
-                host_runtime.install_http_responses(self.keyed_http_responses)?;
-                if let ShellMode::Scripted(scripted_process) = self.shell_mode {
-                    host_runtime.install_process_script(scripted_process)?;
-                }
-                GroupCapability::HostRuntime(Arc::new(host_runtime))
-            }
-            RebornCapabilityBackend::MockMcp { mcp_url } => {
-                // Slice 6: real MCP runtime backed by the loopback mock server.
-                let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
-                    &mcp_url,
-                    MOCK_MCP_PROVIDER_ID,
-                    &format!("{MOCK_MCP_PROVIDER_ID}.search"),
-                )
-                .await?;
-                GroupCapability::HostRuntime(Arc::new(host_runtime))
-            }
-            RebornCapabilityBackend::GithubIssueTools => {
-                // T0-SECRET-INJECT: GitHub WASM caps behind `GithubHarnessAuthorizer`
-                // (InjectCredentialAccountOnce). No approval gate / user alignment —
-                // the authorizer allows every dispatch outright.
-                let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
-                GroupCapability::HostRuntime(Arc::new(host_runtime))
-            }
-        };
+        let group_capability = self
+            .capability
+            .install(
+                self.shell_mode,
+                self.keyed_http_responses,
+                self.web_access_response_bodies,
+            )
+            .await?;
 
         // Routed through the group/thread builder (one assembly path for both
         // groups and single-shot harnesses). A single-shot harness is a
         // degenerate one-thread group and submits as the default
         // `HARNESS_ACTOR_ID`.
-        let group: RebornIntegrationGroup = RebornIntegrationGroup::builder()
-            .storage(self.storage)
+        let mut group_builder = RebornIntegrationGroup::builder().storage(self.storage);
+        if let Some(ctx) = self.safety_context {
+            group_builder = group_builder.safety_context(ctx);
+        }
+        let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
         group
@@ -347,6 +309,27 @@ pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
     pub(crate) workflow: DefaultProductWorkflow,
     pub(crate) conversation_id: String,
+    /// External (raw, pre-resolution) actor id every submit for this thread is
+    /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
+    /// `with_actor_id` (the E-MULTIUSER seam) carries its distinct actor here
+    /// so submit-time envelopes resolve the SAME binding (and owner scope) as
+    /// the build-time probe.
+    ///
+    /// NOT redundant with `binding.actor_user_id`: the binding's field is a
+    /// one-way SHA-256-derived opaque `UserId` (`user_id_for_binding` /
+    /// `scoped_id`, product_workflow.rs), while `verified_text_envelope_with_trigger`
+    /// (called by both the build-time probe and every submit) needs the raw,
+    /// pre-hash external actor-id string to compute the SAME `binding_path`
+    /// hash the probe persisted under. Substituting `binding.actor_user_id`
+    /// here would make submit resolve a *different*, unrelated binding (new
+    /// `actor_user_id`/`subject_user_id`, same `thread_id` since that hash is
+    /// actor-independent) instead of reusing this harness's own — silently
+    /// breaking every `submit_turn`/`submit_turn_async` call, not just the
+    /// multi-actor scenario. `binding.actor_user_id` IS the right source of
+    /// truth for `resume_run`'s `TurnActor` (an already-resolved identity, no
+    /// envelope round-trip involved) — that is a materially different use
+    /// case from this field's.
+    pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
@@ -401,7 +384,9 @@ impl RebornIntegrationHarness {
             replies: Vec::new(),
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
+            web_access_response_bodies: Vec::new(),
             storage: StorageMode::default(),
+            safety_context: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
         }
@@ -421,7 +406,7 @@ impl RebornIntegrationHarness {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
-            HARNESS_ACTOR_ID,
+            &self.actor_id,
             &self.conversation_id,
             text,
             ProductTriggerReason::DirectChat,

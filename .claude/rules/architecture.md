@@ -146,19 +146,21 @@ because each layer catches a different failure mode.
 
 | Smell | Pre-commit script | CI / clippy | Code review | Agent-facing (this file) |
 |---|---|---|---|---|
-| 1. `too_many_arguments` allow | yes — count + annotation grep | clippy default already fires | required | yes |
-| 2. `Option<Arc<…>>` + `with_*` | yes — paired-pattern grep | — | required | yes |
+| 1. `too_many_arguments` allow | planned (not yet implemented) | clippy default already fires | required | yes |
+| 2. `Option<Arc<…>>` + `with_*` | planned (not yet implemented) | — | required | yes |
 | 3. Re-derived identity | — (heuristic) | — | required | yes |
-| 4. Duplicate dispatch | partial — known-method grep | — | required | yes |
-| 5. File size | yes — `wc -l` on staged | — | informational | yes |
+| 4. Duplicate dispatch | planned (not yet implemented) | — | required | yes |
+| 5. File size | planned (not yet implemented) | — | informational | yes |
 
 ### Why this split
 
-- **Pre-commit catches the mechanical patterns.** A regex on staged
-  diffs is enough for #1 (annotation grep), #2 (paired patterns),
-  and #5 (line count). These are cheap, deterministic, and run on
-  every commit. Add to `scripts/pre-commit-safety.sh` as Check #10
-  (`ARCH-SPRAWL`) following the existing format.
+- **Pre-commit should catch the mechanical patterns once implemented.** A regex
+  on staged diffs is enough for #1 (annotation grep), #2 (paired patterns), and
+  #5 (line count). These are cheap and deterministic; the plan is to add them to
+  `scripts/pre-commit-safety.sh` as an `ARCH-SPRAWL` check. **Status: NOT yet
+  implemented** — verify with:
+  `grep -n ARCH-SPRAWL scripts/pre-commit-safety.sh`), so review is
+  currently the only enforcement for these smells.
 - **CI / clippy catches what compilers can express.** clippy already
   emits `too_many_arguments`. The rule is "don't silence it without
   a plan link." No new CI check needed; existing default works once
