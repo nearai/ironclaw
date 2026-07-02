@@ -93,6 +93,11 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
+from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
+    _compact_json,
+    _judge_assistant_reply_completion,
+    _semantic_judge_passed,
+)
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _append_slack_channel_route,
     _append_slack_channel_route_if_configured,
@@ -1050,161 +1055,6 @@ async def _wait_for_assistant_reply(
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
-
-
-async def _judge_assistant_reply_completion(
-    *,
-    marker: str | None,
-    required_text: list[str],
-    assistant_text: str,
-    main_text: str,
-    semantic_goal: str | None,
-) -> dict[str, object] | None:
-    if not _env_flag_enabled("REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE", default=True):
-        return {"enabled": False, "reason": "disabled"}
-    api_key_env = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_API_KEY_ENV",
-        os.environ.get(
-            "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
-            "NEARAI_API_KEY"
-            if os.environ.get("NEARAI_API_KEY") or os.environ.get("NEARAI_API_KEY_PATH")
-            else "LIVE_OPENAI_COMPATIBLE_API_KEY",
-        ),
-    )
-    api_key = env_secret(api_key_env)
-    if not api_key:
-        return {"enabled": False, "reason": f"{api_key_env} unset"}
-    base_url = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_BASE_URL",
-        os.environ.get(
-            "REBORN_WEBUI_V2_LIVE_QA_LLM_BASE_URL",
-            os.environ.get("LIVE_OPENAI_COMPATIBLE_BASE_URL", "https://cloud-api.near.ai/v1"),
-        ),
-    ).rstrip("/")
-    model = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MODEL",
-        os.environ.get(
-            "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
-            os.environ.get("LIVE_OPENAI_COMPATIBLE_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
-        ),
-    )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 500,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict semantic verifier for a live WebUI QA canary. "
-                    "Return JSON only. Judge only whether the visible assistant response "
-                    "semantically satisfies the natural-language expectation. Do not infer "
-                    "external side effects, database writes, tool calls, delivery, auth, or "
-                    "capability execution unless the text explicitly says so. If an exact "
-                    "marker is required and missing, completed must be false."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "task_prompt": semantic_goal or "",
-                        "exact_marker_required": marker,
-                        "literal_required_text": required_text,
-                        "assistant_response": assistant_text[-4000:],
-                        "page_excerpt": main_text[-2000:],
-                        "required_json_schema": {
-                            "completed": "boolean",
-                            "confidence": "number from 0 to 1",
-                            "reason": "short string",
-                            "evidence": "array of short strings",
-                            "missing": "array of short strings",
-                        },
-                    },
-                    sort_keys=True,
-                ),
-            },
-        ],
-    }
-    try:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            response.raise_for_status()
-            body = response.json()
-    except Exception as exc:
-        return {"enabled": True, "error": str(exc)}
-    content = (
-        (((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-        if isinstance(body, dict)
-        else ""
-    )
-    parsed = _parse_json_object(content)
-    if not isinstance(parsed, dict):
-        return {
-            "enabled": True,
-            "error": "judge response was not a JSON object",
-            "response_excerpt": str(content)[-500:],
-        }
-    parsed["enabled"] = True
-    return parsed
-
-
-def _semantic_judge_passed(result: dict[str, object] | None) -> bool:
-    if not result or result.get("completed") is not True:
-        return False
-    try:
-        confidence = float(result.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    try:
-        threshold = float(
-            os.environ.get("REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MIN_CONFIDENCE", "0.75")
-        )
-    except ValueError:
-        threshold = 0.75
-    return confidence >= threshold
-
-
-def _parse_json_object(text: str) -> object:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-
-
-def _env_flag_enabled(name: str, *, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _compact_json(value: object) -> str:
-    if value is None:
-        return "null"
-    try:
-        encoded = json.dumps(value, sort_keys=True)
-    except TypeError:
-        encoded = repr(value)
-    if len(encoded) > 1000:
-        return f"{encoded[:1000]}..."
-    return encoded
 
 
 def _required_text_matches(text: str, required_text: list[str]) -> bool:

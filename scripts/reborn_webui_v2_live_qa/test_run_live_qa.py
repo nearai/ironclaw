@@ -24,8 +24,10 @@ from unittest.mock import patch
 
 if __package__:
     from . import run_live_qa
+    from . import semantic_judge
 else:
     import run_live_qa
+    import semantic_judge
 
 
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
@@ -36,6 +38,46 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_home=Path("/tmp/reborn-home"),
             env={},
         )
+
+    def _fake_assistant_reply_page(self, response_text: str):
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return response_text
+
+            async def all_inner_texts(self):
+                return [response_text]
+
+        class FakeMain:
+            async def inner_text(self, **_kwargs):
+                return response_text
+
+        class FakePage:
+            def locator(self, selector):
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "main":
+                    return FakeMain()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        return FakePage()
 
     def test_dismiss_visible_connect_action_clicks_only_visible_card(self):
         class FakeDismiss:
@@ -622,43 +664,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Trigger ID: trigger-123"
         )
 
-        class FakeApprove:
-            @property
-            def last(self):
-                return self
-
-            async def is_visible(self, **_kwargs):
-                return False
-
-        class FakeAssistantBlocks:
-            @property
-            def last(self):
-                return self
-
-            async def count(self):
-                return 1
-
-            async def inner_text(self, **_kwargs):
-                return response_text
-
-            async def all_inner_texts(self):
-                return [response_text]
-
-        class FakeMain:
-            async def inner_text(self, **_kwargs):
-                return response_text
-
-        class FakePage:
-            def locator(self, selector):
-                if selector == "[data-testid='msg-assistant']":
-                    return FakeAssistantBlocks()
-                if selector == "main":
-                    return FakeMain()
-                raise AssertionError(f"unexpected selector: {selector}")
-
-            def get_by_role(self, _role, **_kwargs):
-                return FakeApprove()
-
         captured: dict[str, object] = {}
 
         async def fake_judge(**kwargs):
@@ -682,7 +687,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             text = asyncio.run(
                 run_live_qa._wait_for_assistant_reply(
-                    FakePage(),
+                    self._fake_assistant_reply_page(response_text),
                     marker=None,
                     required_text=["routine"],
                     timeout=0.001,
@@ -696,43 +701,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_wait_for_assistant_reply_does_not_judge_missing_marker(self):
         response_text = "The routine has been created. Trigger ID: trigger-123"
-
-        class FakeApprove:
-            @property
-            def last(self):
-                return self
-
-            async def is_visible(self, **_kwargs):
-                return False
-
-        class FakeAssistantBlocks:
-            @property
-            def last(self):
-                return self
-
-            async def count(self):
-                return 1
-
-            async def inner_text(self, **_kwargs):
-                return response_text
-
-            async def all_inner_texts(self):
-                return [response_text]
-
-        class FakeMain:
-            async def inner_text(self, **_kwargs):
-                return response_text
-
-        class FakePage:
-            def locator(self, selector):
-                if selector == "[data-testid='msg-assistant']":
-                    return FakeAssistantBlocks()
-                if selector == "main":
-                    return FakeMain()
-                raise AssertionError(f"unexpected selector: {selector}")
-
-            def get_by_role(self, _role, **_kwargs):
-                return FakeApprove()
 
         async def fail_if_called(**_kwargs):
             raise AssertionError("semantic judge should not run when marker is missing")
@@ -751,12 +719,33 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "marker='REBORN_QA_DONE'"):
                 asyncio.run(
                     run_live_qa._wait_for_assistant_reply(
-                        FakePage(),
+                        self._fake_assistant_reply_page(response_text),
                         marker="REBORN_QA_DONE",
                         required_text=["routine"],
                         timeout=0.001,
                     )
                 )
+
+    def test_semantic_judge_passed_respects_confidence_threshold(self):
+        with patch.dict(
+            os.environ,
+            {"REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MIN_CONFIDENCE": "0.9"},
+        ):
+            self.assertTrue(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": True, "confidence": 0.9}
+                )
+            )
+            self.assertFalse(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": True, "confidence": 0.89}
+                )
+            )
+            self.assertFalse(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": False, "confidence": 1.0}
+                )
+            )
 
     def test_slack_delivery_target_dm_detection(self):
         self.assertTrue(run_live_qa._slack_delivery_target_is_dm("D12345"))
