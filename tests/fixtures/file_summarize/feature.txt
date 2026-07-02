@@ -1,0 +1,18 @@
+Rate Limiter Module — Feature Description
+
+The rate limiter module provides a sliding-window algorithm that restricts
+the number of tool calls any single agent session can make within a given
+time interval. It operates on a per-user, per-tool-name basis, using an
+in-memory HashMap backed by an optional Redis store for cross-process
+coordination.
+
+Key behaviors:
+- Default window: 60 seconds
+- Default limit: 100 calls per window
+- Burst allowance: up to 10 calls above the limit for short durations
+- Configurable via RATE_LIMIT_WINDOW_SECS and RATE_LIMIT_MAX_CALLS env vars
+
+The module exposes a single async function: check_and_record(user_id, tool_name).
+It returns Ok(()) if the call is within quota or Err(RateLimitExceeded) if not.
+Callers must not cache the result; every call must pass through the limiter
+to keep the sliding window accurate.
