@@ -834,6 +834,22 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
+    /// [`deny_gate`](Self::deny_gate) (approval gates, which resolve a persisted request in the
+    /// local-dev approval store), auth gates have no such store entry — there is nothing to
+    /// resolve — so this resumes directly with `GateResumeDisposition::Denied`. The executor's
+    /// `short_circuit_denied_resume` then surfaces a model-visible gate-declined failure for the
+    /// parked capability instead of re-dispatching it (which would re-block on the still-missing
+    /// credential → infinite loop).
+    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+        )
+        .await
+    }
+
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
     /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
