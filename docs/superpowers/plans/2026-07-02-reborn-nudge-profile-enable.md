@@ -329,6 +329,7 @@ git commit -m "docs(ironclaw_agent_loop): correct stale off-in-production nudge 
 
 **Interfaces:**
 - Consumes: `default_planned_run_profile_resolver()` (already imported in this file, from `ironclaw_reborn::planned_driver_factory`), `PlannedDriver::default_from_registry`, `MockAgentLoopDriverHost::builder()`, `ScenarioScript::same_calls_repeated`, `ScriptedCapabilityOutcome::{completed, completed_no_change}` (new import needed), the existing `run_request` helper (line 39) and `LoopRunContext::new` pattern already used by `planned_driver_live_default_smoke` (line 143).
+- Produces: `fn no_progress_script() -> ScenarioScript` and `fn assert_completed_via_nudge(exit: LoopExit, host: &MockAgentLoopDriverHost)` — Task 7 reuses both instead of duplicating the scenario/assertion.
 
 - [ ] **Step 1: Add the missing import**
 
@@ -356,7 +357,43 @@ use ironclaw_agent_loop::{
 };
 ```
 
-- [ ] **Step 2: Write the test**
+- [ ] **Step 2: Add two shared test helpers**
+
+Task 7 needs the identical no-progress script and completion assertion. Rather than copy-pasting ~15 lines into each of the two new tests (this file already extracts repeated setup into helpers — see `run_request`, `resume_request`, `run_context_for_driver` near the top), add these two small free functions once, right after the existing `run_context_for_driver` helper (which currently ends at line 92):
+
+```rust
+/// Scripted no-progress scenario: 4 repeated identical calls, the last
+/// reporting no change — proven to drive `NoProgressDetected` through the
+/// full strategy pipeline (mirrors
+/// `safety_nets.rs::repeated_signature_stops_after_rendered_warning_and_no_progress_result`).
+fn no_progress_script() -> ScenarioScript {
+    ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
+        vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+        vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+        vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+        vec![ScriptedCapabilityOutcome::completed_no_change(
+            "result:repeat-4",
+        )],
+    ])
+}
+
+/// Asserts a no-progress run resolved via the final-answer nudge: one extra
+/// tool-free model call on top of the 4 scripted repeats, and a completed
+/// (not failed) exit.
+fn assert_completed_via_nudge(exit: LoopExit, host: &MockAgentLoopDriverHost) {
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "no-progress exit should complete via the final-answer nudge, got {exit:?}"
+    );
+    assert_eq!(
+        host.model_call_count(),
+        5,
+        "4 repeated calls + 1 tool-free nudge call"
+    );
+}
+```
+
+- [ ] **Step 3: Write the test**
 
 Add this test to the bottom of the `#[tokio::test]` section of `crates/ironclaw_reborn/tests/planned_driver_e2e.rs` (e.g. right after `planned_driver_live_default_smoke`, which ends at line 175):
 
@@ -383,18 +420,9 @@ async fn planned_default_profile_completes_via_final_answer_nudge() {
         base_context.run_id,
         resolved.clone(),
     );
-    let script =
-        ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
-            vec![ScriptedCapabilityOutcome::completed_no_change(
-                "result:repeat-4",
-            )],
-        ]);
     let (host, _) = MockAgentLoopDriverHost::builder()
         .run_context(context)
-        .script(script)
+        .script(no_progress_script())
         .build();
     let request = run_request(&driver, &host);
 
@@ -403,26 +431,18 @@ async fn planned_default_profile_completes_via_final_answer_nudge() {
         .await
         .expect("planned driver run should succeed");
 
-    assert!(
-        matches!(exit, LoopExit::Completed(_)),
-        "no-progress exit should complete via the final-answer nudge, got {exit:?}"
-    );
-    assert_eq!(
-        host.model_call_count(),
-        5,
-        "4 repeated calls + 1 tool-free nudge call"
-    );
+    assert_completed_via_nudge(exit, &host);
 }
 ```
 
 This reuses the exact scripted no-progress scenario already proven to drive `NoProgressDetected` through the full strategy pipeline in `crates/ironclaw_agent_loop/tests/safety_nets.rs::repeated_signature_stops_after_rendered_warning_and_no_progress_result` (4 repeated `demo.echo` calls, the last reporting `completed_no_change`), but swaps in the real production-resolved `planned_default` profile instead of the default synthetic test context — so this is a "test through the caller" proof that the flag set in real profile resolution actually reaches and fires `try_final_answer_nudge`, not just that the struct field is `true` in isolation.
 
-- [ ] **Step 3: Run the test**
+- [ ] **Step 4: Run the test**
 
 Run: `cargo test -p ironclaw_reborn planned_default_profile_completes_via_final_answer_nudge`
 Expected: PASS — Tasks 1–2 already enabled the flag, so this is a same-session confirmation test, not a red/green cycle. If it fails, check first whether the exit is `Failed(NoProgressDetected)` with `model_call_count() == 4` (nudge did not fire — re-check Task 2 landed) vs a compile error (import or helper usage mismatch).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/ironclaw_reborn/tests/planned_driver_e2e.rs
@@ -437,7 +457,7 @@ git commit -m "test(ironclaw_reborn): prove final-answer nudge fires for real pl
 - Modify: `crates/ironclaw_reborn/tests/planned_driver_e2e.rs`
 
 **Interfaces:**
-- Consumes: same as Task 6, plus `ironclaw_turns::RunProfileId::scheduled_trigger()` and `ironclaw_turns::RunProfileRequest::new(..)` (both fully-qualified, matching this file's existing style at line 210).
+- Consumes: same as Task 6, including the `no_progress_script()` / `assert_completed_via_nudge(..)` helpers added in Task 6 Step 2, plus `ironclaw_turns::RunProfileId::scheduled_trigger()` and `ironclaw_turns::RunProfileRequest::new(..)` (both fully-qualified, matching this file's existing style at line 210).
 
 - [ ] **Step 1: Write the test**
 
@@ -477,18 +497,9 @@ async fn scheduled_trigger_profile_completes_via_final_answer_nudge() {
         base_context.run_id,
         resolved.clone(),
     );
-    let script =
-        ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
-            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
-            vec![ScriptedCapabilityOutcome::completed_no_change(
-                "result:repeat-4",
-            )],
-        ]);
     let (host, _) = MockAgentLoopDriverHost::builder()
         .run_context(context)
-        .script(script)
+        .script(no_progress_script())
         .build();
     let request = run_request(&driver, &host);
 
@@ -497,22 +508,14 @@ async fn scheduled_trigger_profile_completes_via_final_answer_nudge() {
         .await
         .expect("planned driver run should succeed");
 
-    assert!(
-        matches!(exit, LoopExit::Completed(_)),
-        "no-progress exit should complete via the final-answer nudge, got {exit:?}"
-    );
-    assert_eq!(
-        host.model_call_count(),
-        5,
-        "4 repeated calls + 1 tool-free nudge call"
-    );
+    assert_completed_via_nudge(exit, &host);
 }
 ```
 
 - [ ] **Step 2: Run the test**
 
 Run: `cargo test -p ironclaw_reborn scheduled_trigger_profile_completes_via_final_answer_nudge`
-Expected: PASS — same reasoning as Task 6 Step 3.
+Expected: PASS — same reasoning as Task 6 Step 4.
 
 - [ ] **Step 3: Commit**
 
