@@ -59,7 +59,7 @@ export function AutomationsList({
 
         <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
           <div
-            className="inline-flex h-9 max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] p-0.5"
+            className="inline-flex h-8 max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] p-0.5"
             role="group"
             aria-label=${t("automations.filterLabel")}
           >
@@ -70,7 +70,7 @@ export function AutomationsList({
                 aria-pressed=${filter === item.value}
                 onClick=${() => onFilterChange(item.value)}
                 className=${cn(
-                  "shrink-0 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] font-medium leading-none transition-colors",
+                  "shrink-0 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium leading-none transition-colors",
                   filter === item.value
                     ? "bg-[var(--v2-surface)] text-[var(--v2-text-strong)] shadow-sm"
                     : "text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
@@ -81,7 +81,7 @@ export function AutomationsList({
             `)}
           </div>
           <label
-            className="inline-flex h-9 shrink-0 items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] pl-3 focus-within:border-[var(--v2-accent)]"
+            className="inline-flex h-8 shrink-0 items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] pl-3 focus-within:border-[var(--v2-accent)]"
           >
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
               ${t("automations.sort.label")}

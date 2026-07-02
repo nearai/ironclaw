@@ -347,7 +347,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         html`
           <span
             role="alert"
-            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-red-300"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-danger-text)]"
           >
             <${Icon} name="close" className="h-3 w-3" />
             ${t("automations.delivery.saveFailed")}

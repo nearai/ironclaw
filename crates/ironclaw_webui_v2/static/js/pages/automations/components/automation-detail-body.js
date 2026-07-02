@@ -18,9 +18,9 @@ function MetaItem({ label, value, tone }) {
       <div
         className=${cn(
           "mt-2 min-w-0 break-words text-sm text-iron-100",
-          tone === "success" && "text-emerald-200",
-          tone === "danger" && "text-red-200",
-          tone === "info" && "text-sky-200"
+          tone === "success" && "text-[var(--v2-positive-text)]",
+          tone === "danger" && "text-[var(--v2-danger-text)]",
+          tone === "info" && "text-[var(--v2-info-text)]"
         )}
       >
         ${value || "—"}

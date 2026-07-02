@@ -46,7 +46,8 @@ function AutomationId({ id }) {
         className=${cn(
           "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--v2-panel-border)] text-iron-400",
           "hover:border-white/20 hover:text-iron-200",
-          copied && "border-emerald-400/40 text-emerald-300"
+          copied &&
+            "border-[color-mix(in_srgb,var(--v2-positive-text)_40%,transparent)] text-[var(--v2-positive-text)]"
         )}
       >
         <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />

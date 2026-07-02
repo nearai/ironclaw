@@ -507,14 +507,14 @@ export function summarizeRuns(runs) {
   return counts;
 }
 
-// Solid fill classes for the proportion bar + legend dots, paired with the
-// text tones above so the bar, the dots, and the chip labels all read as the
-// same status colour.
+// Solid fill classes for the proportion bar + legend dots. One canonical
+// semantic token per status (design system PR #5563) so the bar, the dots,
+// the row status text, and the Badge pills all resolve to the same colour.
 const RUN_BAR_TONE = {
-  ok: "bg-emerald-400",
-  error: "bg-red-400",
-  running: "bg-sky-400",
-  unknown: "bg-iron-500",
+  ok: "bg-[var(--v2-positive-text)]",
+  error: "bg-[var(--v2-danger-text)]",
+  running: "bg-[var(--v2-info-text)]",
+  unknown: "bg-[var(--v2-text-faint)]",
 };
 
 // Ordered, non-empty status buckets for the recent-run summary chips. Kept in
@@ -525,10 +525,30 @@ const RUN_BAR_TONE = {
 export function runStatusBreakdown(runs) {
   const counts = summarizeRuns(runs);
   return [
-    { key: "ok", tone: "text-emerald-300", barClass: RUN_BAR_TONE.ok, count: counts.ok },
-    { key: "error", tone: "text-red-300", barClass: RUN_BAR_TONE.error, count: counts.error },
-    { key: "running", tone: "text-sky-300", barClass: RUN_BAR_TONE.running, count: counts.running },
-    { key: "unknown", tone: "text-iron-400", barClass: RUN_BAR_TONE.unknown, count: counts.unknown },
+    {
+      key: "ok",
+      tone: "text-[var(--v2-positive-text)]",
+      barClass: RUN_BAR_TONE.ok,
+      count: counts.ok,
+    },
+    {
+      key: "error",
+      tone: "text-[var(--v2-danger-text)]",
+      barClass: RUN_BAR_TONE.error,
+      count: counts.error,
+    },
+    {
+      key: "running",
+      tone: "text-[var(--v2-info-text)]",
+      barClass: RUN_BAR_TONE.running,
+      count: counts.running,
+    },
+    {
+      key: "unknown",
+      tone: "text-[var(--v2-text-muted)]",
+      barClass: RUN_BAR_TONE.unknown,
+      count: counts.unknown,
+    },
   ].filter((part) => part.count > 0);
 }
 

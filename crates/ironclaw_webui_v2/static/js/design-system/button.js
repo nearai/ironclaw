@@ -35,12 +35,15 @@ const BASE =
 
 /* ── Size classes ──────────────────────────────────────────────────── */
 
+// Compact, Linear-like density (design review): buttons sit at 32/36/40px
+// instead of the previous 36/44–50/54px so control rows read as chrome, not
+// content. Radii step down with the heights (8/10/12px).
 const SIZES = {
-  sm:      "h-9 rounded-[10px] px-3 text-xs",
-  md:      "min-h-[44px] rounded-[14px] px-3.5 text-[13px] md:min-h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg:      "min-h-[54px] rounded-[18px] px-6 text-base",
-  icon:    "h-[44px] w-[44px] rounded-[14px] md:h-[50px] md:w-[50px] md:rounded-[16px]",
-  "icon-sm": "h-9 w-9 rounded-[10px]",
+  sm:      "h-8 rounded-[8px] px-2.5 text-xs",
+  md:      "h-9 rounded-[10px] px-3.5 text-[13px]",
+  lg:      "h-10 rounded-[12px] px-5 text-sm",
+  icon:    "h-9 w-9 rounded-[10px]",
+  "icon-sm": "h-8 w-8 rounded-[8px]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */

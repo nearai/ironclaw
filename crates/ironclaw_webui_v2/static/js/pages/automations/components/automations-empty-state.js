@@ -54,7 +54,7 @@ function ExamplePrompt({ promptKey }) {
         className=${cn(
           "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--v2-panel-border)] text-iron-300 hover:text-iron-100 hover:border-white/20",
           "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
-          copied && "text-emerald-300"
+          copied && "text-[var(--v2-positive-text)]"
         )}
       >
         <${Icon} name=${copied ? "check" : "copy"} className="h-4 w-4" />

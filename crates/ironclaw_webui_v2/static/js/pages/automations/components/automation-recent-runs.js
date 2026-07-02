@@ -50,18 +50,22 @@ export function RunDots({ runs = [] }) {
             className=${cn(
               "h-2.5 w-2.5 rounded-full ring-1 ring-inset transition-opacity",
               // Recent completions read as a solid dot; once they age past a day
-              // they fade to a translucent fill behind a coloured ring.
+              // they fade to a translucent fill behind a coloured ring. Colours
+              // come from the canonical status tokens so the dots match the
+              // proportion bar, row status text, and Badge pills exactly.
               run.status === "ok" &&
                 (stale
-                  ? "bg-emerald-400/20 ring-emerald-400/50"
-                  : "bg-emerald-400 ring-emerald-300/40"),
+                  ? "bg-[color-mix(in_srgb,var(--v2-positive-text)_20%,transparent)] ring-[color-mix(in_srgb,var(--v2-positive-text)_50%,transparent)]"
+                  : "bg-[var(--v2-positive-text)] ring-[color-mix(in_srgb,var(--v2-positive-text)_40%,transparent)]"),
               run.status === "error" &&
                 (stale
-                  ? "bg-red-400/20 ring-red-400/50"
-                  : "bg-red-400 ring-red-300/40"),
+                  ? "bg-[color-mix(in_srgb,var(--v2-danger-text)_20%,transparent)] ring-[color-mix(in_srgb,var(--v2-danger-text)_50%,transparent)]"
+                  : "bg-[var(--v2-danger-text)] ring-[color-mix(in_srgb,var(--v2-danger-text)_40%,transparent)]"),
               // In-progress runs oscillate their opacity so live work is obvious.
-              run.status === "running" && "bg-sky-400 ring-sky-300/60 animate-pulse",
-              run.status === "unknown" && "bg-iron-600 ring-iron-500/40",
+              run.status === "running" &&
+                "bg-[var(--v2-info-text)] ring-[color-mix(in_srgb,var(--v2-info-text)_60%,transparent)] animate-pulse",
+              run.status === "unknown" &&
+                "bg-[var(--v2-text-faint)] ring-[color-mix(in_srgb,var(--v2-text-faint)_40%,transparent)]",
               stale && "opacity-50"
             )}
           />
@@ -95,12 +99,12 @@ export function RunHistorySummary({ runs = [], className = "" }) {
 
   const rateTone =
     view.successRate == null
-      ? "text-iron-300"
+      ? "text-[var(--v2-text-muted)]"
       : view.successRate >= 90
-        ? "text-emerald-300"
+        ? "text-[var(--v2-positive-text)]"
         : view.successRate >= 50
-          ? "text-amber-300"
-          : "text-red-300";
+          ? "text-[var(--v2-warning-text)]"
+          : "text-[var(--v2-danger-text)]";
 
   return html`
     <div
@@ -110,23 +114,30 @@ export function RunHistorySummary({ runs = [], className = "" }) {
       )}
     >
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-medium text-iron-100">
-          ${view.total}${" "}
-          <span className="font-normal text-iron-400">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-lg font-semibold tabular-nums leading-none text-iron-100">
+            ${view.total}
+          </span>
+          <span className="text-xs font-medium text-[var(--v2-text-muted)]">
             ${t("automations.runs.countLabel")}
           </span>
-        </span>
+        </div>
         ${view.successRate != null &&
-        html`<span
-          className=${cn("text-sm font-semibold tabular-nums", rateTone)}
-          title=${view.successRateText}
-        >
-          ${view.successRate}%
-        </span>`}
+        html`<div className="flex items-baseline gap-1.5">
+          <span
+            className=${cn("text-lg font-semibold tabular-nums leading-none", rateTone)}
+            title=${view.successRateText}
+          >
+            ${view.successRate}%
+          </span>
+          <span className="text-xs font-medium text-[var(--v2-text-muted)]">
+            ${t("automations.detail.successRate")}
+          </span>
+        </div>`}
       </div>
 
       <div
-        className="mt-2.5 flex h-2.5 w-full overflow-hidden rounded-full bg-[var(--v2-surface-muted)]"
+        className="mt-3 flex h-2 w-full overflow-hidden rounded-full bg-[var(--v2-surface-muted)]"
         role="img"
         aria-label=${view.successRateText || view.totalText}
       >
@@ -140,13 +151,16 @@ export function RunHistorySummary({ runs = [], className = "" }) {
         )}
       </div>
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
         ${view.chips.map(
           (chip) => html`<span
             key=${chip.key}
-            className="inline-flex items-center gap-1.5 text-xs text-iron-300"
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--v2-text)]"
           >
-            <span className=${cn("h-1.5 w-1.5 rounded-full", chip.barClass)} />
+            <span
+              aria-hidden="true"
+              className=${cn("h-2 w-2 shrink-0 rounded-full", chip.barClass)}
+            />
             ${chip.text}
           </span>`
         )}
