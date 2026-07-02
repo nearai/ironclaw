@@ -396,28 +396,115 @@ pub fn format_run_output(report: &MultiAgentRunReport, show_progress: bool) -> S
         buf.push('\n');
     }
 
-    // ── Final Result ──────────────────────────────────────────────────────────
-    buf.push_str(&format!("{}\n\n", rule("Final Result", &c)));
-
-    // Root result summary
-    let root_summary = report
-        .root_result
-        .child_results
+    // ── Agent Answers ─────────────────────────────────────────────────────────
+    // Collect every job that produced output, sorted depth-first so the master
+    // comes first and sub-agents follow in creation order.
+    let mut answered: Vec<&AgentJob> = report
+        .jobs
         .iter()
-        .map(|r| format!("  • {}", trunc(&r.summary, 64)))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .filter(|j| j.result.is_some() || j.error.is_some())
+        .collect();
+    answered.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.created_at.cmp(&b.created_at)));
 
-    if !root_summary.is_empty() {
-        buf.push_str(&root_summary);
-        buf.push('\n');
-        buf.push('\n');
+    if !answered.is_empty() {
+        buf.push_str(&format!("{}\n\n", rule("Agent Answers", &c)));
+        for (idx, job) in answered.iter().enumerate() {
+            let short_id = &job.id[..job.id.len().min(8)];
+            let label = match job.agent_kind {
+                AgentKind::Master => c.magenta(&format!("MasterAgent [{}]", short_id)),
+                AgentKind::SubAgent => c.cyan(&format!("AgentRun    [{}]", short_id)),
+            };
+            let depth_tag = if job.depth > 0 {
+                c.dim(&format!("  (depth {})", job.depth))
+            } else {
+                String::new()
+            };
+
+            buf.push_str(&format!("  {} {}{}\n", c.bold("▸"), label, depth_tag));
+            buf.push_str(&format!(
+                "  {}  {}\n",
+                c.dim("task:"),
+                c.dim(&job.task),
+            ));
+
+            if let Some(result) = &job.result {
+                // Wrap long results at ~66 chars so they're readable in any terminal
+                let wrapped = word_wrap(result, 66);
+                for line in wrapped.lines() {
+                    buf.push_str(&format!("  {}  {}\n", c.dim("    "), line));
+                }
+            }
+            if let Some(error) = &job.error {
+                buf.push_str(&format!(
+                    "  {}  {}\n",
+                    c.dim("error:"),
+                    c.red(error),
+                ));
+            }
+
+            if idx < answered.len() - 1 {
+                buf.push_str(&format!("  {}\n", c.dim(&"·".repeat(WIDTH - 4))));
+            }
+            buf.push('\n');
+        }
     }
 
-    buf.push_str(&format!("  {}\n", c.bold(&report.final_summary)));
+    // ── Summary ───────────────────────────────────────────────────────────────
+    buf.push_str(&format!("{}\n\n", rule("Summary", &c)));
+
+    let completed = report
+        .jobs
+        .iter()
+        .filter(|j| j.status == AgentStatus::Complete)
+        .count();
+    let failed = report
+        .jobs
+        .iter()
+        .filter(|j| j.status == AgentStatus::Failed || j.status == AgentStatus::Cancelled)
+        .count();
+
+    buf.push_str(&format!(
+        "  {} AgentRun(s) completed  ·  {} failed  ·  wall time {}\n",
+        c.green(&completed.to_string()),
+        if failed > 0 {
+            c.red(&failed.to_string())
+        } else {
+            c.dim("0")
+        },
+        c.bold(&fmt_ms(wall_ms)),
+    ));
     buf.push('\n');
 
     buf
+}
+
+/// Wrap `text` at `max_cols` characters, preserving existing newlines.
+fn word_wrap(text: &str, max_cols: usize) -> String {
+    let mut out = String::new();
+    for para in text.split('\n') {
+        if para.len() <= max_cols {
+            out.push_str(para);
+            out.push('\n');
+            continue;
+        }
+        let mut line_len = 0usize;
+        for word in para.split_whitespace() {
+            if line_len == 0 {
+                out.push_str(word);
+                line_len = word.len();
+            } else if line_len + 1 + word.len() > max_cols {
+                out.push('\n');
+                out.push_str(word);
+                line_len = word.len();
+            } else {
+                out.push(' ');
+                out.push_str(word);
+                line_len += 1 + word.len();
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Legacy verbose format — retained for tests and tooling that import it
