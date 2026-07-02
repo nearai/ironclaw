@@ -60,10 +60,30 @@ jobs:
       - name: Install OpenWiki
         run: npm install --global openwiki
 
-      # openwiki reads files as raw bytes and attaches binaries as media/document
-      # content blocks that the LLM API rejects. It has no ignore config, so strip
-      # non-text assets from this ephemeral checkout (the real repo is untouched;
-      # binaries carry no documentation value).
+      # openwiki bug (langchain-ai/openwiki#33): the bundled deepagents read-tool maps
+      # any unmapped/extensionless file (Makefile, Dockerfile, LICENSE, *.lock, ...) to
+      # application/octet-stream and sends it as a base64 `document` block, which the
+      # Anthropic Messages API rejects (only application/pdf allowed) -> 400 mid-run.
+      # Workaround from the issue: fall back to text/plain instead of octet-stream.
+      - name: Patch deepagents MIME fallback (openwiki#33 workaround)
+        run: |
+          B="$(npm root -g)/openwiki/node_modules/deepagents/dist"
+          patched=0
+          for f in "$B"/*.js "$B"/*.cjs; do
+            [ -f "$f" ] || continue
+            if grep -q 'toLocaleLowerCase()] || "application/octet-stream"' "$f"; then
+              sed -i 's#toLocaleLowerCase()\] || "application/octet-stream"#toLocaleLowerCase()] || "text/plain"#g' "$f"
+              patched=$((patched+1))
+            fi
+          done
+          echo "patched ${patched} deepagents bundle file(s): octet-stream -> text/plain"
+          if [ "${patched}" -eq 0 ]; then
+            echo "::warning::openwiki#33 patch matched nothing — deepagents bundle layout may have changed; run may 400 on extensionless files"
+          fi
+
+      # Real binaries (.png/.pdf/.xlsx/...) are ALSO sent as document blocks and only
+      # application/pdf is accepted, so strip them from this ephemeral checkout too
+      # (the real repo is untouched; binaries carry no documentation value).
       - name: Strip binary assets openwiki must not attach
         run: |
           find . -type f \( \
