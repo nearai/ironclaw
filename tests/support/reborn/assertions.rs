@@ -1,6 +1,6 @@
-//! Egress + tool-result assertions for [`RebornIntegrationHarness`] — the
-//! canonical, richer egress-assertion API (design §3.3 `assertions.rs`, §3.6
-//! P1 ergonomics).
+//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`]
+//! — the canonical, richer egress-assertion API (design §3.3 `assertions.rs`,
+//! §3.6 P1 ergonomics).
 //!
 //! Slice 2 co-located three asserts in `builder.rs`
 //! (`assert_reply_contains`/`assert_tool_invoked`/`assert_egress_request_matching`,
@@ -11,9 +11,18 @@
 //! `pub(super)` accessors on the harness (`captured_egress_requests` /
 //! `captured_capability_results`) rather than re-reaching internals.
 //!
-//! All of these assert over the SAME captured `RecordingRuntimeHttpEgress`
-//! request log slice 2 wired — there is one egress-assertion API, not a parallel
-//! one (the O-egress MCP/OAuth interceptor folds its per-URL needs in here).
+//! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
+//! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
+//! over the SAME captured `RecordingRuntimeHttpEgress` request log slice 2 wired
+//! — there is one runtime-lane egress-assertion API, not a parallel one (the
+//! O-egress MCP/OAuth interceptor folds its per-URL needs in here). The one
+//! exception is `assert_network_egress_header_contains`, which reads the
+//! recording *network* egress lane — required for the T0-SECRET-INJECT
+//! credential-injection proof, whose harness routes through the host egress
+//! pipeline over the network recorder (see that method's docs for why).
+//! `assert_system_prompt_contains` reads a different capture source — the
+//! scripted `TraceLlm`'s captured requests, via the harness's
+//! `captured_system_prompts` accessor.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
@@ -24,6 +33,31 @@
 use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The two model-visible tool-error outcome classes a capability can surface
+/// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
+/// can render the SAME reason token (e.g. `policy_denied` is both
+/// `CapabilityFailureKind::PolicyDenied` and the `Denied` reason), so
+/// [`assert_tool_error`](RebornIntegrationHarness::assert_tool_error) takes the
+/// class as a typed argument rather than trusting a needle prefix — the class is
+/// then discriminated structurally, not by convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorClass {
+    Failed,
+    Denied,
+}
+
+impl ToolErrorClass {
+    /// The `safe_summary` prefix the executor writes for this class — see
+    /// `capability_{failed,denied}_summary` in
+    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    fn summary_prefix(self) -> &'static str {
+        match self {
+            Self::Failed => "capability failed with ",
+            Self::Denied => "capability denied with ",
+        }
+    }
+}
 
 impl RebornIntegrationHarness {
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
@@ -112,6 +146,155 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert some model-visible `System`-role prompt captured across all
+    /// requests captured by the harness so far contains `text`. Reads the
+    /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
+    /// proves prompt-injected content (safety banners, skill instructions,
+    /// profile lines) actually reached the model.
+    pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.iter().any(|prompt| prompt.contains(text)) {
+            return Ok(());
+        }
+        let seen: Vec<String> = prompts
+            .iter()
+            .map(|prompt| match prompt.char_indices().nth(200) {
+                Some((cutoff, _)) => format!("{}...[truncated]", &prompt[..cutoff]),
+                None => prompt.clone(),
+            })
+            .collect();
+        Err(format!(
+            "no captured system prompt containing {text:?}; saw {} system message(s): {seen:?}",
+            prompts.len()
+        )
+        .into())
+    }
+
+    /// Assert a model-visible tool error of `class` carrying `reason` was
+    /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
+    /// reads the in-process recorder, populated only on the *Completed* write
+    /// path), a `Failed`/`Denied` capability outcome is persisted through a
+    /// different pipeline — `append_capability_result_ref` →
+    /// `append_tool_result_reference` — as a `MessageKind::ToolResultReference`
+    /// message whose `content` is the JSON-serialized `ToolResultReferenceEnvelope`.
+    /// Reaching this state at all (rather than a terminal `driver_unavailable`)
+    /// also proves the failure was a recoverable, model-visible tool error.
+    ///
+    /// This parses the envelope and checks its **`safe_summary` field** — NOT a
+    /// raw-JSON substring — so `reason` cannot match incidentally inside
+    /// `model_observation`/`result_ref`, and JSON escaping can't skew the match.
+    /// The summary reads `"capability <failed|denied> with <token>: …"`; the
+    /// assertion requires the summary to start with [`class`](ToolErrorClass)'s
+    /// prefix AND contain `reason`. `class` therefore discriminates
+    /// Failed-vs-Denied structurally: a regression that flips one into the other
+    /// fails even when both classes render the same `reason` token (e.g.
+    /// `policy_denied`).
+    ///
+    /// **Scans the full thread history, not baseline-sliced** (unlike the
+    /// sibling `assert_egress_*`/`assert_tool_result_contains`, which slice
+    /// `[baseline..]` off the shared in-process recorder). Every current caller
+    /// is a single-turn, single-tool-call harness, so there is at most one
+    /// `ToolResultReference` message and no earlier-thread bleed-through is
+    /// reachable. A future multi-turn or group-thread reuse of this assertion
+    /// MUST add baseline scoping first (thread a `baseline_history_len` through
+    /// harness construction, mirroring `baseline_egress_count` etc.) — do not
+    /// assume this helper is safe to reuse as-is once a thread has more than one
+    /// turn.
+    pub async fn assert_tool_error(
+        &self,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        let summaries: Vec<String> = history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| {
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
+            })
+            .map(|envelope| envelope.safe_summary.as_str().to_string())
+            .collect();
+        let prefix = class.summary_prefix();
+        if summaries
+            .iter()
+            .any(|summary| summary.starts_with(prefix) && summary.contains(reason))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no persisted tool-error summary of class {class:?} with reason {reason:?}; saw {summaries:?}"
+        )
+        .into())
+    }
+
+    /// Assert that any captured **network** egress request whose URL
+    /// contains `url_substr` carried a header named `header_name`
+    /// (case-insensitive) whose value contains `value_substr`. This is the
+    /// credential-injection-on-the-wire proof for T0-SECRET-INJECT: a
+    /// host-injected `Authorization: Bearer <token>` lands on the outbound
+    /// request only after the egress pipeline's `apply_credential_injections`
+    /// step, which the recording network egress captures.
+    ///
+    /// **Why the network lane, not the runtime lane:** the GitHub WASM harness
+    /// (`with_github_issue_tools`) wires its recording `RuntimeHttpEgress` and
+    /// then calls `try_with_host_http_egress`, which overwrites the runtime port
+    /// with the host egress pipeline over the recording *network* egress. So the
+    /// injected request flows through the network recorder, and the runtime-lane
+    /// `assert_egress_*` family (which reads `runtime_http_requests()`) is inert
+    /// for this wiring. Assert here instead.
+    ///
+    /// Checks only the `[baseline_network_count..]` delta so a group thread never
+    /// spuriously matches a prior thread's request (R2), mirroring the runtime-lane
+    /// `assert_egress_*` family's baseline discipline even though no group
+    /// constructor wires `GithubIssueTools` today.
+    pub async fn assert_network_egress_header_contains(
+        &self,
+        url_substr: &str,
+        header_name: &str,
+        value_substr: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.captured_network_requests();
+        let mut matching = requests
+            .iter()
+            .filter(|r| r.url.contains(url_substr))
+            .peekable();
+        if matching.peek().is_none() {
+            let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+            return Err(format!(
+                "no captured network egress request matching url {url_substr:?}; saw {seen:?}"
+            )
+            .into());
+        }
+        let mut first_seen: Option<Vec<&str>> = None;
+        for request in matching {
+            if request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case(header_name) && value.contains(value_substr)
+            }) {
+                return Ok(());
+            }
+            if first_seen.is_none() {
+                first_seen = Some(
+                    request
+                        .headers
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect(),
+                );
+            }
+        }
+        let seen = first_seen.unwrap_or_default();
+        Err(format!(
+            "no network egress request matching url {url_substr:?} has header {header_name:?} \
+             with the expected value (redacted, not logged); header names present (first \
+             matching request): {seen:?}"
+        )
+        .into())
+    }
+
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed
     /// scripted body actually surfaced back to the model as a tool result.
@@ -129,6 +312,36 @@ impl RebornIntegrationHarness {
             .collect();
         Err(format!(
             "no recorded capability result containing {needle:?}; saw results for {seen:?}"
+        )
+        .into())
+    }
+
+    /// Return the parsed JSON `output` of the MOST RECENT recorded capability
+    /// result for `capability_id` (baseline-sliced to this thread's turns).
+    ///
+    /// Unlike `assert_tool_result_contains`, this returns the value so a test can
+    /// read a server-minted field — e.g. the `trigger_id` a `builtin.trigger_create`
+    /// dispatch mints, which a static script cannot know ahead of time and which
+    /// later `trigger_pause`/`resume`/`remove` turns must reference. Errors (never
+    /// silently returns `Null`) when no result for `capability_id` was recorded.
+    pub async fn tool_result_output(
+        &self,
+        capability_id: &str,
+    ) -> HarnessResult<serde_json::Value> {
+        let results = self.captured_capability_results();
+        if let Some(result) = results
+            .iter()
+            .rev()
+            .find(|result| result.capability_id.as_str() == capability_id)
+        {
+            return Ok(result.output.clone());
+        }
+        let seen: Vec<String> = results
+            .iter()
+            .map(|result| result.capability_id.as_str().to_string())
+            .collect();
+        Err(format!(
+            "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
         )
         .into())
     }

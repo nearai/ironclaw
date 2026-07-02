@@ -35,6 +35,8 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
 };
+use ironclaw_llm::Role;
+use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
@@ -52,9 +54,11 @@ use super::harness::{
     RecordedCapabilityResult,
 };
 use super::http_matcher::ScriptedHttpResponse;
+use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
+use crate::support::trace_llm::TraceLlm;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -103,6 +107,13 @@ enum RebornCapabilityBackend {
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
     MockMcp { mcp_url: String },
+    /// GitHub first-party WASM capabilities with a `GithubHarnessAuthorizer`
+    /// that attaches an `InjectCredentialAccountOnce` obligation, so a dispatched
+    /// `github.*` tool call gets a synthetic access token injected onto the
+    /// outbound request (T0-SECRET-INJECT). The credential lands on the recorded
+    /// **network** egress (`assert_network_egress_header_contains`); the runtime
+    /// egress recorder is inert for this wiring — see that assertion's docs.
+    GithubIssueTools,
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -114,9 +125,26 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     storage: StorageMode,
-    /// Slice 5: when `true`, the `BuiltinHttpTools` backend uses the real
-    /// `LocalHostProcessPort` instead of the inert `RecordingProcessPort`.
-    live_shell: bool,
+    /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
+    /// of a `bool` + `Option` so the modes are mutually exclusive by
+    /// construction — the last shell-selecting builder method wins, and a live
+    /// runtime can never carry a stale scripted result.
+    shell_mode: ShellMode,
+}
+
+/// Which process port the built `BuiltinHttpTools` runtime installs for
+/// `builtin.shell`. These are mutually exclusive; the builder holds exactly one.
+#[derive(Debug, Clone, Default)]
+enum ShellMode {
+    /// Slice 5 default: the inert `RecordingProcessPort` records the command and
+    /// spawns no OS process.
+    #[default]
+    Inert,
+    /// The real `LocalHostProcessPort` runs a (hermetic) command for real.
+    Live,
+    /// The inert recording port returns a scripted result (error-path coverage):
+    /// a non-zero exit code or a `run_command` error.
+    Scripted(ScriptedProcessResult),
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -154,7 +182,27 @@ impl RebornIntegrationHarnessBuilder {
     /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_live_shell(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
-        self.live_shell = true;
+        self.shell_mode = ShellMode::Live;
+        self
+    }
+
+    /// Script the inert recording process port so `builtin.shell` returns a
+    /// non-zero exit code (error-path coverage). The tool still surfaces a
+    /// *Completed* result carrying `exit_code`/`success: false`. Implies
+    /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::ExitCode(exit_code));
+        self
+    }
+
+    /// Script the inert recording process port so `builtin.shell` returns a
+    /// timeout error (`RuntimeProcessError::Timeout`), which the tool maps to a
+    /// recoverable model-visible `Failed{Resource}` capability error. Implies
+    /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_shell_timeout(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::Timeout);
         self
     }
 
@@ -170,6 +218,23 @@ impl RebornIntegrationHarnessBuilder {
     ) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.keyed_http_responses = responses.into_iter().collect();
+        self
+    }
+
+    /// Wire the GitHub first-party WASM capabilities behind a
+    /// `GithubHarnessAuthorizer`, which allows every dispatch with an
+    /// `InjectCredentialAccountOnce` obligation. A scripted `github.*` tool call
+    /// then executes the real WASM module, whose outbound HTTP request has a
+    /// synthetic `Authorization: Bearer <token>` credential injected by the host
+    /// egress pipeline before it reaches the recording network egress. Proves
+    /// credential injection reaches the wire (T0-SECRET-INJECT).
+    ///
+    /// Script the model with
+    /// `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
+    /// followed by a `RebornScriptedReply::text(..)` turn, then assert with
+    /// [`assert_network_egress_header_contains`](RebornIntegrationHarness::assert_network_egress_header_contains).
+    pub fn with_github_issue_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
         self
     }
 
@@ -194,7 +259,7 @@ impl RebornIntegrationHarnessBuilder {
     /// the scripted provider, and start the planned runtime.
     ///
     /// Routes through an internal, degenerate one-thread `RebornIntegrationGroup`
-    /// (matching this builder's capability/storage/live_shell/keyed_http_responses
+    /// (matching this builder's capability/storage/shell_mode/keyed_http_responses
     /// selections) so there is exactly ONE assembly path for both groups and
     /// single-shot harnesses (design §3: no de-facto fork). Behavior is
     /// byte-identical to the old inline build — existing tests are unaffected
@@ -210,13 +275,20 @@ impl RebornIntegrationHarnessBuilder {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
                 // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
-                // the default recording path uses the inert RecordingProcessPort.
-                let host_runtime = if self.live_shell {
-                    HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
-                } else {
-                    HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                // `Inert`/`Scripted` both use the inert RecordingProcessPort (the
+                // latter with a canned result installed below).
+                let host_runtime = match self.shell_mode {
+                    ShellMode::Live => {
+                        HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
+                    }
+                    ShellMode::Inert | ShellMode::Scripted(_) => {
+                        HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                    }
                 };
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
+                if let ShellMode::Scripted(scripted_process) = self.shell_mode {
+                    host_runtime.install_process_script(scripted_process)?;
+                }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
@@ -229,8 +301,19 @@ impl RebornIntegrationHarnessBuilder {
                 .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
+            RebornCapabilityBackend::GithubIssueTools => {
+                // T0-SECRET-INJECT: GitHub WASM caps behind `GithubHarnessAuthorizer`
+                // (InjectCredentialAccountOnce). No approval gate / user alignment —
+                // the authorizer allows every dispatch outright.
+                let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
         };
 
+        // Routed through the group/thread builder (one assembly path for both
+        // groups and single-shot harnesses). A single-shot harness is a
+        // degenerate one-thread group and submits as the default
+        // `HARNESS_ACTOR_ID`.
         let group: RebornIntegrationGroup = RebornIntegrationGroup::builder()
             .storage(self.storage)
             .build_with_capability(group_capability)
@@ -259,6 +342,12 @@ pub struct RebornIntegrationHarness {
     pub(crate) coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) event_seq: AtomicU64,
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
+    /// The concrete scripted `TraceLlm` retained before it was upcast to
+    /// `dyn LlmProvider` in the per-thread gateway build. Its
+    /// `captured_requests()` lets assertions inspect the model-visible prompt
+    /// (system-prompt injection: safety banners, skill instructions, profile
+    /// lines). Read via `captured_system_prompts()`.
+    pub(crate) scripted_llm: Arc<TraceLlm>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -275,6 +364,8 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_result_count: usize,
     /// Recorded-process-command count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_process_count: usize,
+    /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
+    pub(crate) baseline_network_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -291,7 +382,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
-            live_shell: false,
+            shell_mode: ShellMode::default(),
         }
     }
 
@@ -341,6 +432,26 @@ impl RebornIntegrationHarness {
             .ok_or("blocked approval run missing gate ref")?;
         if !gate_ref.as_str().starts_with("gate:approval-") {
             return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
+        }
+        Ok((run_id, gate_ref))
+    }
+
+    /// Submit a user turn and wait until it blocks on an **auth** gate, returning
+    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
+    /// capability whose credential account resolves to `AuthRequired` blocks here
+    /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
+    pub async fn submit_turn_until_auth_blocked(
+        &self,
+        text: &str,
+    ) -> HarnessResult<(TurnRunId, GateRef)> {
+        let run_id = self.submit_turn_async(text).await?;
+        let state = self
+            .wait_for_status(run_id, TurnStatus::BlockedAuth)
+            .await?;
+        let gate_ref = state.gate_ref.ok_or("blocked auth run missing gate ref")?;
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
         Ok((run_id, gate_ref))
     }
@@ -465,6 +576,34 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_egress_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         let all = self.capability_recorder.runtime_http_requests();
         all[self.baseline_egress_count..].to_vec()
+    }
+
+    /// Every `System`-role prompt the model saw across the captured requests, in
+    /// call order. Reads the scripted `TraceLlm` retained before the
+    /// `dyn LlmProvider` upcast (`scripted_llm`). Empty until the first turn is
+    /// submitted. Read by `assert_system_prompt_contains` in `assertions.rs`.
+    ///
+    /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
+    /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
+    /// not a group-shared recorder, so it only ever holds this thread's requests.
+    pub(super) fn captured_system_prompts(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::System))
+            .map(|message| message.content)
+            .collect()
+    }
+
+    /// Snapshot of the captured **network** egress requests for this thread only
+    /// (`[baseline_network_count..]` delta), in call order. Read by
+    /// `assert_network_egress_header_contains` (assertions.rs) — the T0-SECRET-INJECT
+    /// credential-injection assertion, which observes a different recorder lane
+    /// than `captured_egress_requests` (see that assertion's docs for why).
+    pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
+        let mut all = self.capability_recorder.network_http_requests();
+        all.split_off(self.baseline_network_count)
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process

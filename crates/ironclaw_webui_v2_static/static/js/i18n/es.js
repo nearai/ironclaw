@@ -42,6 +42,19 @@ registerPack("es", {
   // Header
   "header.signOut": "Cerrar sesión",
 
+  // Notifications
+  "notifications.open": "Abrir notificaciones",
+  "notifications.close": "Cerrar notificaciones",
+  "notifications.title": "Notificaciones",
+  "notifications.emptyTitle": "Sin notificaciones",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "Todo al día",
+  "notifications.unreadCount": "{count} nuevas",
+  "notifications.unread": "Sin leer",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "en línea",
   "status.offline": "sin conexión",

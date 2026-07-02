@@ -561,6 +561,30 @@ impl RebornServices {
             .and_then(|rt| rt.extension_management.as_ref())
             .map(|em| em.installation_store_for_test())
     }
+
+    /// Test-support access to the local-dev memory filesystem that backs the
+    /// user-profile source (E-PROFILE seam). This is the raw `RootFilesystem`
+    /// that `MemoryBackedUserProfileSource` reads `context/profile.json` from and
+    /// that the `profile_set` capability writes through, enabling a profile
+    /// write→read-back round-trip at the integration tier. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_profile_filesystem_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_filesystem::RootFilesystem>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.extension_filesystem)
+            as Arc<dyn ironclaw_filesystem::RootFilesystem>)
+    }
+
+    /// Test-support access to the local-dev project service backing the synthetic
+    /// `project_create` capability (E-PROJ seam). Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.project_service))
+    }
 }
 
 #[cfg(feature = "test-support")]

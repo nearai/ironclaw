@@ -42,6 +42,19 @@ registerPack("de", {
   // Header
   "header.signOut": "Abmelden",
 
+  // Notifications
+  "notifications.open": "Benachrichtigungen öffnen",
+  "notifications.close": "Benachrichtigungen schließen",
+  "notifications.title": "Benachrichtigungen",
+  "notifications.emptyTitle": "Keine Benachrichtigungen",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "Alles erledigt",
+  "notifications.unreadCount": "{count} neu",
+  "notifications.unread": "Ungelesen",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "online",
   "status.offline": "offline",

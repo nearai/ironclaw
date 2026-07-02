@@ -42,6 +42,19 @@ registerPack("ar", {
   // Header
   "header.signOut": "تسجيل الخروج",
 
+  // Notifications
+  "notifications.open": "فتح الإشعارات",
+  "notifications.close": "إغلاق الإشعارات",
+  "notifications.title": "الإشعارات",
+  "notifications.emptyTitle": "لا توجد إشعارات",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "تمت متابعة كل شيء",
+  "notifications.unreadCount": "{count} جديد",
+  "notifications.unread": "غير مقروء",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "متصل",
   "status.offline": "غير متصل",

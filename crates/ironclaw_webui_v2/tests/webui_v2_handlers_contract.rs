@@ -252,6 +252,7 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
@@ -729,8 +730,9 @@ impl RebornServicesApi for StubServices {
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
+        request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        self.list_threads_calls.lock().expect("lock").push(request);
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
@@ -2043,6 +2045,33 @@ async fn list_automations_forwards_query_limits_to_facade() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
     assert_eq!(calls[0].run_limit, Some(7));
+}
+
+#[tokio::test]
+async fn list_threads_forwards_needs_approval_filter() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads?limit=12&needs_approval=true&candidate_thread_id=thread-active")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.list_threads_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, Some(12));
+    assert_eq!(
+        calls[0].candidate_thread_id.as_deref(),
+        Some("thread-active")
+    );
+    assert!(calls[0].needs_approval);
 }
 
 #[tokio::test]

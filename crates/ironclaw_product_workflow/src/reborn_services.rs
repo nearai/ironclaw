@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -45,13 +46,13 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -577,6 +578,41 @@ pub struct TriggerRunThreadScope {
     /// `creator_user_id` stored on the trigger record, which equals
     /// `owner_user_id` in the stored thread scope.
     pub creator_user_id: UserId,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationNotificationTitle(String);
+
+impl AutomationNotificationTitle {
+    const MAX_CHARS: usize = 120;
+
+    fn from_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let sanitized = trimmed
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(Self::MAX_CHARS)
+            .collect::<String>();
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(Self(sanitized.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutomationApprovalThreadCandidate {
+    thread_id: ThreadId,
+    title: Option<AutomationNotificationTitle>,
 }
 
 #[async_trait]
@@ -3691,7 +3727,8 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        self.list_visible_threads_for_scope(scope, request).await
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
     }
 
     async fn list_automations(
@@ -4256,8 +4293,22 @@ impl RebornServices {
         &self,
         scope: ThreadScope,
         request: WebUiListThreadsRequest,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         let visible_limit = clamp_thread_list_limit(request.limit);
+        let needs_approval = request.needs_approval;
+        if needs_approval {
+            return tokio::time::timeout(
+                NOTIFICATION_APPROVAL_QUERY_TIMEOUT,
+                self.list_automation_threads_needing_approval(
+                    caller,
+                    visible_limit,
+                    request.candidate_thread_id,
+                ),
+            )
+            .await
+            .map_err(|_| notification_approval_timeout_error())?;
+        }
         let fetch_limit = visible_limit
             .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
             .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
@@ -4289,12 +4340,12 @@ impl RebornServices {
                 })
                 .await
                 .map_err(map_thread_error)?;
-            visible_threads.extend(
-                response
-                    .threads
-                    .into_iter()
-                    .filter(|thread| !is_automation_trigger_thread(thread)),
-            );
+            for thread in response.threads {
+                if is_automation_trigger_thread(&thread) {
+                    continue;
+                }
+                visible_threads.push(thread);
+            }
             next_cursor = response.next_cursor;
             let Some(next) = next_cursor.clone() else {
                 break;
@@ -4321,6 +4372,220 @@ impl RebornServices {
             threads: visible_threads,
             next_cursor,
         })
+    }
+
+    async fn list_automation_threads_needing_approval(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        visible_limit: usize,
+        candidate_thread_id: Option<String>,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let automations = self
+            .automation_facade
+            .list_automations(
+                bound_caller.clone(),
+                AutomationListRequest {
+                    limit: NOTIFICATION_APPROVAL_AUTOMATION_LIMIT,
+                    run_limit: NOTIFICATION_APPROVAL_RUN_LIMIT,
+                    include_completed: true,
+                },
+            )
+            .await?;
+
+        let mut candidate_seen = HashSet::new();
+        let mut candidates = Vec::with_capacity(NOTIFICATION_APPROVAL_CANDIDATE_LIMIT);
+        for automation in &automations {
+            let title = AutomationNotificationTitle::from_name(&automation.name);
+            for run in &automation.recent_runs {
+                if let Some(thread_id) = &run.thread_id {
+                    if candidate_seen.insert(thread_id.clone()) {
+                        candidates.push(AutomationApprovalThreadCandidate {
+                            thread_id: thread_id.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                        break;
+                    }
+                }
+            }
+            if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                break;
+            }
+        }
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let record = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(record) = record {
+                    threads.push(record);
+                }
+            }
+        }
+        for candidate in candidates {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            if !seen.insert(candidate.thread_id.clone()) {
+                continue;
+            }
+            let Some(record) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    candidate.thread_id,
+                    candidate.title,
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn automation_run_thread_record(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        automation_title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.automation_run_thread_record_for_scope(
+            caller,
+            bound_caller,
+            thread_id,
+            trigger_scope,
+            automation_title,
+        )
+        .await
+    }
+
+    async fn automation_run_thread_record_for_scope(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        trigger_scope: TriggerRunThreadScope,
+        title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let true_agent_id = trigger_scope
+            .agent_id
+            .clone()
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let creator_user_id = trigger_scope.creator_user_id.clone();
+
+        let approval_turn_scope = TurnScope::new(
+            caller.tenant_id.clone(),
+            true_agent_id.clone(),
+            trigger_scope.project_id.clone(),
+            thread_id.clone(),
+        );
+        let run_actor = TurnActor::new(creator_user_id.clone());
+        if !self
+            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
+            .await?
+        {
+            return Ok(None);
+        }
+
+        let mut record = None;
+        for owner_user_id in [Some(creator_user_id.clone()), None] {
+            let thread_turn_scope = TurnScope::new_with_owner(
+                caller.tenant_id.clone(),
+                true_agent_id.clone(),
+                trigger_scope.project_id.clone(),
+                thread_id.clone(),
+                owner_user_id,
+            );
+            let thread_scope = thread_scope_from_turn_scope(
+                &thread_turn_scope,
+                thread_turn_scope.explicit_owner_user_id().cloned(),
+            )?;
+            match self
+                .thread_service
+                .read_thread(ThreadHistoryRequest {
+                    scope: thread_scope,
+                    thread_id: thread_turn_scope.thread_id.clone(),
+                })
+                .await
+            {
+                Ok(found) => {
+                    record = Some(found);
+                    break;
+                }
+                Err(
+                    SessionThreadError::UnknownThread { .. }
+                    | SessionThreadError::ThreadScopeMismatch { .. },
+                ) => {}
+                Err(error) => return Err(map_ownership_probe_error(error)),
+            }
+        }
+        let Some(mut record) = record else {
+            return Ok(None);
+        };
+        if record
+            .title
+            .as_ref()
+            .is_none_or(|title| title.trim().is_empty())
+            && let Some(title) = title.as_ref()
+        {
+            record.title = Some(title.as_str().to_string());
+        }
+        Ok(Some(record))
+    }
+
+    async fn thread_scope_has_pending_approval(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<bool, RebornServicesError> {
+        let pending = self
+            .approval_interactions
+            .list_pending(ListPendingApprovalsRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        Ok(!pending.approvals.is_empty())
     }
 
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
@@ -5500,6 +5765,10 @@ const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
 const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
 const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
+const NOTIFICATION_APPROVAL_AUTOMATION_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_RUN_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_CANDIDATE_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -5524,6 +5793,10 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
+}
+
+fn notification_approval_timeout_error() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
 }
 
 /// Wire shape of the opaque timeline cursor. The browser does not need

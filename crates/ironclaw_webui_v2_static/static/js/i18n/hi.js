@@ -42,6 +42,19 @@ registerPack("hi", {
   // Header
   "header.signOut": "साइन आउट",
 
+  // Notifications
+  "notifications.open": "सूचनाएं खोलें",
+  "notifications.close": "सूचनाएं बंद करें",
+  "notifications.title": "सूचनाएं",
+  "notifications.emptyTitle": "कोई सूचना नहीं",
+  "notifications.emptyDescription": "Messages that need your approval will appear here.",
+  "notifications.allCaughtUp": "सब देख लिया गया",
+  "notifications.unreadCount": "{count} नई",
+  "notifications.unread": "अपठित",
+  "notifications.approval.title": "Approval required",
+  "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
+
   // Status
   "status.online": "ऑनलाइन",
   "status.offline": "ऑफलाइन",

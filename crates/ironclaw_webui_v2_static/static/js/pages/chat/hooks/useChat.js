@@ -5,9 +5,9 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
-import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
+import { touchThreadInCache, upsertThreadInCache } from "../lib/thread-cache.js";
 import {
   addPending,
   recordAcceptedMessageRef,
@@ -54,14 +54,6 @@ function approvalGatePendingSendError() {
   );
   error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
   return error;
-}
-
-function threadNeedsSidebarRefresh(threadId) {
-  const cached = queryClient.getQueryData?.(["threads"]);
-  const threads = cached?.threads;
-  if (!Array.isArray(threads)) return true;
-  const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
-  return !thread?.title;
 }
 
 function busyNoticeKey(threadId, gate) {
@@ -440,7 +432,7 @@ export function useChat(threadId) {
 
       if (!sendThreadId) {
         const created = await createThreadRequest();
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
+        upsertThreadInCache(created?.thread);
         sendThreadId = created?.thread?.thread_id;
         if (!sendThreadId) {
           throw new Error("createThread returned no thread_id");
@@ -510,11 +502,12 @@ export function useChat(threadId) {
           content,
           attachments: wireAttachments,
         });
-        // Refresh the sidebar only while the cached entry is missing
-        // or title-less. Once the first-message title has appeared,
-        // repeated sends do not need to refetch the whole thread list.
-        if (threadNeedsSidebarRefresh(sendThreadId)) {
-          queryClient.invalidateQueries({ queryKey: ["threads"] });
+        if (response?.outcome !== "rejected_busy") {
+          touchThreadInCache({
+            threadId: response?.thread_id || sendThreadId,
+            messageContent: renderContent,
+            updatedAt: pendingRecord.timestamp,
+          });
         }
         let runSettledBeforeResponse = false;
         if (response?.run_id && shouldTrackLocalRun) {

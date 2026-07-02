@@ -165,7 +165,11 @@ const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 // `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
 // `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
 // lives in the crate that owns the *concrete type* and can see the trait.
-struct MemoryBackedUserProfileSourceAdapter(MemoryBackedUserProfileSource);
+//
+// `pub(crate)` so the `test_support::build_user_profile_source_for_test`
+// forwarder can reuse this single adapter instead of duplicating the orphan-rule
+// workaround in the test harness.
+pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUserProfileSource);
 
 #[async_trait::async_trait]
 impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
@@ -351,6 +355,8 @@ mod production;
 mod runtime_turn_scheduler;
 mod skills;
 
+#[cfg(feature = "test-support")]
+pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
 #[cfg(test)]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
@@ -819,6 +825,32 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
+/// Test-support forwarder for the `project_create` synthetic-capability wrap
+/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
+/// without widening any production type's visibility; mirrors the
+/// approval-gate-evidence forwarder above.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_project_create_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_project_create_capability_for_test(
+        inner,
+        project_service,
+        fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(
@@ -905,7 +937,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
             .runs
             .iter()
             .filter(|run| {
-                run.scope == turn_scope
+                run.scope.same_thread(&turn_scope)
                     && run.status == TurnStatus::BlockedApproval
                     && run.gate_ref.is_some()
                     && snapshot_run_actor_matches(&snapshot, run, &actor)
@@ -938,7 +970,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
             .runs
             .iter()
             .find(|run| {
-                run.scope == turn_scope
+                run.scope.same_thread(&turn_scope)
                     && run.status == TurnStatus::BlockedApproval
                     && run.gate_ref.as_ref() == Some(gate_ref)
                     && snapshot_run_actor_matches(&snapshot, run, &actor)
@@ -957,7 +989,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
                     && checkpoint
                         .scope
                         .as_ref()
-                        .is_none_or(|stored| stored == &turn_scope)
+                        .is_none_or(|stored| stored.same_thread(&turn_scope))
             })
             .filter_map(|checkpoint| {
                 snapshot
@@ -965,7 +997,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
                     .iter()
                     .find(|run| {
                         run.run_id == checkpoint.run_id
-                            && run.scope == turn_scope
+                            && run.scope.same_thread(&turn_scope)
                             && snapshot_run_actor_matches(&snapshot, run, &actor)
                     })
                     .map(|run| run.run_id)
@@ -982,10 +1014,9 @@ fn snapshot_run_actor_matches(
     run: &TurnRunRecord,
     actor: &TurnActor,
 ) -> bool {
-    snapshot
-        .turns
-        .iter()
-        .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
+    snapshot.turns.iter().any(|turn| {
+        turn.turn_id == run.turn_id && turn.scope.same_thread(&run.scope) && turn.actor == *actor
+    })
 }
 
 // Only referenced by the durable filesystem snapshot path (async `Result`);

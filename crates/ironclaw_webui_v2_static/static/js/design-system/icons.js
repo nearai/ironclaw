@@ -7,6 +7,10 @@ const paths = {
 
   bolt: html`<path d="M13 2.8 5.8 13h5.1L10 21.2 18.2 10h-5.4L13 2.8Z" />`,
 
+  bell: html`<path d="M6.8 10.3a5.2 5.2 0 0 1 10.4 0v3.1l1.8 3.1H5l1.8-3.1v-3.1Z" /><path d="M9.7 19a2.5 2.5 0 0 0 4.6 0" />`,
+
+  bookOpen: html`<path d="M4.5 5.5h5.2a3.2 3.2 0 0 1 3.2 3.2v10.8a3.8 3.8 0 0 0-3.2-1.7H4.5V5.5Z" /><path d="M19.5 5.5h-5.2a3.2 3.2 0 0 0-3.2 3.2v10.8a3.8 3.8 0 0 1 3.2-1.7h5.2V5.5Z" /><path d="M7.5 9h2.2M7.5 12h2.2M16.3 9h.2M16.3 12h.2" />`,
+
   calendar: html`<path d="M6.5 4.5v3M17.5 4.5v3" /><path
       d="M4.5 7h15v12.5h-15V7Z"
     /><path d="M4.5 10.5h15" /><path d="M8 14h.1M12 14h.1M16 14h.1M8 17h.1M12 17h.1" />`,
@@ -50,6 +54,10 @@ const paths = {
   list: html`<path d="M8.5 6.5h11M8.5 12h11M8.5 17.5h11" /><path
       d="M4.5 6.5h.1M4.5 12h.1M4.5 17.5h.1"
     />`,
+
+  logs: html`<path d="M4.5 5.5h15v13h-15v-13Z" /><path
+      d="m7.5 10 2 2-2 2"
+    /><path d="M11.5 14h4.5" />`,
 
   lock: html`<path d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10" /><path
       d="M5.5 10h13v10.5h-13V10Z"
@@ -99,6 +107,8 @@ const paths = {
   tool: html`<path
     d="M15.3 4.4a4.5 4.5 0 0 0-5.7 5.7L4.8 15a2.7 2.7 0 1 0 3.8 3.8l4.9-4.8a4.5 4.5 0 0 0 5.7-5.7l-3.3 3.3-3.2-3.2 2.6-4Z"
   />`,
+
+  terminal: html`<path d="M4.5 5.5h15v13h-15v-13Z" /><path d="m7.5 9.2 2.4 2.3-2.4 2.3" /><path d="M11.8 14h4.7" />`,
 
   trash: html`<path d="M5.5 7h13" /><path d="M9.5 7V4.5h5V7" /><path
       d="M7.2 7 8 20h8l.8-13"

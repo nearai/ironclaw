@@ -647,7 +647,7 @@ impl InMemoryTurnStateStore {
             .records
             .values()
             .filter(|record| {
-                record.scope == *scope
+                record.scope.same_thread(scope)
                     && record.actor == *actor
                     && record.status.get() == TurnStatus::BlockedApproval
                     && record.gate_ref.is_some()
@@ -669,7 +669,7 @@ impl InMemoryTurnStateStore {
             .records
             .values()
             .find(|record| {
-                record.scope == *scope
+                record.scope.same_thread(scope)
                     && record.actor == *actor
                     && record.status.get() == TurnStatus::BlockedApproval
                     && record.gate_ref.as_ref() == Some(gate_ref)
@@ -688,13 +688,13 @@ impl InMemoryTurnStateStore {
                     && checkpoint
                         .scope
                         .as_ref()
-                        .is_none_or(|stored| stored == scope)
+                        .is_none_or(|stored| stored.same_thread(scope))
             })
             .filter_map(|checkpoint| {
                 inner
                     .records
                     .get(&checkpoint.run_id)
-                    .filter(|record| record.scope == *scope && record.actor == *actor)
+                    .filter(|record| record.scope.same_thread(scope) && record.actor == *actor)
                     .map(|record| record.run_id)
             })
             .collect::<Vec<_>>();
