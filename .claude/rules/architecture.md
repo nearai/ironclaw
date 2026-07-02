@@ -149,16 +149,16 @@ because each layer catches a different failure mode.
 | 1. `too_many_arguments` allow | yes — `ARCH-SPRAWL` annotation grep | clippy default already fires | required | yes |
 | 2. `Option<Arc<…>>` + `with_*` | yes — `ARCH-SPRAWL` paired-pattern grep | — | required | yes |
 | 3. Re-derived identity | — (heuristic) | — | required | yes |
-| 4. Duplicate dispatch | partial — `ARCH-SPRAWL` known-method grep | — | required | yes |
+| 4. Duplicate dispatch | partial — `ARCH-SPRAWL` repeated known-method grep | — | required | yes |
 | 5. File size | yes — `ARCH-SPRAWL` `wc -l` on changed files | — | informational | yes |
 
 ### Why this split
 
 - **Pre-commit catches the mechanical patterns.** `scripts/pre-commit-safety.sh`
-  runs an `ARCH-SPRAWL` check for #1 (annotation grep), #2 (paired patterns),
-  #4 (known downstream-call smoke alarms), and #5 (line count). These are cheap,
-  deterministic, and run on every commit. #3 stays review-only because identity
-  re-derivation requires semantic code reading.
+  runs an `ARCH-SPRAWL` check for #1 (annotation grep), #2 (paired field/builder
+  patterns), #4 (repeated known downstream-call smoke alarms), and #5 (line
+  count). These are cheap, deterministic, and run on every commit. #3 stays
+  review-only because identity re-derivation requires semantic code reading.
 - **CI / clippy catches what compilers can express.** clippy already
   emits `too_many_arguments`. The rule is "don't silence it without
   a plan link." No new CI check needed; existing default works once

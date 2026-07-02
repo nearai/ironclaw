@@ -257,6 +257,15 @@ diff_for_file() {
     fi
 }
 
+file_content_for_file() {
+    local f="$1"
+    if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+        git show ":$f" 2>/dev/null || true
+    else
+        cat "$f" 2>/dev/null || true
+    fi
+}
+
 # 1. Unsafe UTF-8 byte slicing: &s[..N] or &s[..some_var] on strings
 #    Safe patterns: is_char_boundary, char_indices, // safety:
 if echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | grep -q .; then
@@ -519,19 +528,54 @@ fi
 OPTIONAL_ARC_EXEMPT_RE=$(arch_exempt_re "optional_arc")
 OPTIONAL_ARC_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$OPTIONAL_ARC_EXEMPT_RE" '
     function flush() {
-        if (file != "" && has_optional_arc && has_with_builder && !has_exempt) print file
+        if (file != "" && has_pair && !has_exempt) print file
+    }
+    function reset_hunk() {
+        delete fields
+        delete field_added
+        delete builders
+        delete builder_added
+        has_pair = 0
+        has_exempt = 0
+    }
+    function mark_field(name, added) {
+        fields[name] = 1
+        if (added) field_added[name] = 1
+        if (builders[name] && (added || builder_added[name])) has_pair = 1
+    }
+    function mark_builder(name, added) {
+        builders[name] = 1
+        if (added) builder_added[name] = 1
+        if (fields[name] && (added || field_added[name])) has_pair = 1
+    }
+    function option_field(line) {
+        sub(/^\+[[:space:]]*/, "", line)
+        sub(/^[[:space:]]*/, "", line)
+        sub(/^pub(\([^)]*\))?[[:space:]]+/, "", line)
+        sub(/[[:space:]]*:.*$/, "", line)
+        return line
+    }
+    function builder_name(line) {
+        sub(/^.*fn[[:space:]]+with_/, "", line)
+        sub(/[[:space:]]*\(.*/, "", line)
+        return line
     }
     /^\+\+\+ b\// {
         flush()
         file = substr($0, 7)
-        has_optional_arc = 0
-        has_with_builder = 0
-        has_exempt = 0
+        reset_hunk()
         next
     }
     /^\+\+\+ / { flush(); file = ""; next }
-    /^[+ ].*Option<Arc</ { has_optional_arc = 1 }
-    /^[+ ].*fn[[:space:]]+with_[A-Za-z0-9_]*[[:space:]]*\(/ { has_with_builder = 1 }
+    /^@@ / { flush(); reset_hunk(); next }
+    /^[+ ].*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*Option<Arc/ {
+        field = option_field($0)
+        mark_field(field, $0 ~ /^\+/)
+    }
+    /^[+ ].*fn[[:space:]]+with_[A-Za-z0-9_]*[[:space:]]*\(/ {
+        builder = builder_name($0)
+        mark_builder(builder, $0 ~ /^\+/)
+    }
     /^[+ ].*arch-exempt:/ && $0 ~ exempt { has_exempt = 1 }
     END { flush() }
 ')
@@ -542,9 +586,21 @@ fi
 
 PARALLEL_DISPATCH_EXEMPT_RE=$(arch_exempt_re "parallel_dispatch")
 PARALLEL_DISPATCH_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$PARALLEL_DISPATCH_EXEMPT_RE" '
-    /^(\+\+\+|---|@@)/ { prev = ""; next }
+    function call_key(line) {
+        if (line ~ /dispatcher\.dispatch[[:space:]]*\(/) return "dispatcher.dispatch"
+        if (line ~ /effects\.execute_action[[:space:]]*\(/) return "effects.execute_action"
+        if (match(line, /safety_layer\.scan_[A-Za-z0-9_]*[[:space:]]*\(/)) return substr(line, RSTART, RLENGTH)
+        return ""
+    }
+    /^\+\+\+ b\// { prev = ""; hunk_exempt = 0; file = substr($0, 7); next }
+    /^(---|@@)/ { prev = ""; hunk_exempt = 0; next }
     /^\+/ {
-        if ($0 ~ /(effects\.execute_action|safety_layer\.scan_[A-Za-z0-9_]*|dispatcher\.dispatch)[[:space:]]*\(/ && prev !~ exempt && $0 !~ exempt) {
+        if ($0 ~ exempt) hunk_exempt = 1
+        key = call_key($0)
+        if (key != "") {
+            seen[file SUBSEP key]++
+        }
+        if (key != "" && seen[file SUBSEP key] > 1 && !hunk_exempt && prev !~ exempt && $0 !~ exempt) {
             print $0
         }
         prev = $0
@@ -553,7 +609,7 @@ PARALLEL_DISPATCH_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="
     /^ / { prev = $0; next }
 ')
 if [ -n "$PARALLEL_DISPATCH_HITS" ]; then
-    warn "ARCH-SPRAWL" "New known dispatcher/executor/safety call site requires '// arch-exempt: parallel_dispatch, <reason>, plan #NNNN' or a single-gateway refactor."
+    warn "ARCH-SPRAWL" "Repeated known dispatcher/executor/safety call sites in the same file require '// arch-exempt: parallel_dispatch, <reason>, plan #NNNN' or a single-gateway refactor."
     printf '%s\n' "$PARALLEL_DISPATCH_HITS" | head -5 | sed 's/^/    /'
 fi
 
@@ -565,12 +621,12 @@ for f in $CHANGED_FILES; do
         *) continue ;;
     esac
     [ -f "$f" ] || continue
-    line_count=$(wc -l < "$f" | tr -d ' ')
+    line_count=$(file_content_for_file "$f" | wc -l | tr -d ' ')
     [ "${line_count:-0}" -gt 1500 ] || continue
     file_diff=$(diff_for_file "$f")
     added_count=$(printf '%s\n' "$file_diff" | awk '/^\+/ && !/^\+\+\+ / { count++ } END { print count + 0 }')
     [ "${added_count:-0}" -gt 0 ] || continue
-    if ! grep -Eq "$LARGE_FILE_EXEMPT_RE" "$f"; then
+    if ! file_content_for_file "$f" | grep -Eq "$LARGE_FILE_EXEMPT_RE"; then
         LARGE_FILE_HITS="${LARGE_FILE_HITS}    ${f} (${line_count} lines, +${added_count})
 "
     fi
