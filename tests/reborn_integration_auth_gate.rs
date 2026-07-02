@@ -95,22 +95,14 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
     // The discriminating proof: no `Failed{Backend}` tool-error was persisted
     // for this capability. Mutation-verified — see the module doc above — a
     // `Failed{Backend, "resume requires run_state"}` result only exists when
-    // the deny short-circuit was bypassed and re-dispatched. Match the
-    // SPECIFIC not-found message (not any `Err`) so a harness-level bug (e.g.
-    // a history-read failure) can't masquerade as a pass.
-    let leaked_redispatch = harness
-        .assert_tool_error(ToolErrorClass::Failed, "backend")
-        .await;
-    match &leaked_redispatch {
-        Err(err)
-            if err.to_string().contains(
-                "no persisted tool-error summary of class Failed with reason \"backend\"",
-            ) => {}
-        other => panic!(
-            "expected no persisted Failed{{Backend}} tool-error for github.create_issue (a \
-             leaked re-dispatch); got {other:?} instead of the expected not-found error"
-        ),
-    }
+    // the deny short-circuit was bypassed and re-dispatched.
+    harness
+        .assert_no_tool_error(ToolErrorClass::Failed, "backend")
+        .await
+        .expect(
+            "expected no persisted Failed{Backend} tool-error for github.create_issue (a leaked \
+             re-dispatch)",
+        );
 
     // Positive proof of the CORRECT outcome: `short_circuit_denied_resume`
     // (capabilities.rs ~1149) persists its raw planner summary via

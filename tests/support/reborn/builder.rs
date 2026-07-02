@@ -811,6 +811,14 @@ impl RebornIntegrationHarness {
     /// Approve a blocked approval gate and resume the run (the user-approves path).
     /// Resolves the persisted approval request to an issued lease, then resumes the
     /// run so the originally-gated capability re-dispatches and the turn completes.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .approve_local_dev_gate(gate_ref)
@@ -819,7 +827,7 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             None,
-            ResumeTurnPrecondition::AnyBlockedGate,
+            ResumeTurnPrecondition::BlockedApprovalGate,
         )
         .await
     }
@@ -828,6 +836,14 @@ impl RebornIntegrationHarness {
     /// Resolves the persisted request to `Denied` (no lease) and resumes with
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
     /// authorization failure to the model rather than re-dispatching the gate.
+    ///
+    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
+    /// precondition `ApprovalInteractionService` uses for its production
+    /// approval-resume path. That precondition is enforced server-side
+    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
+    /// stale or wrong (non-approval) gate ref fails the resume with
+    /// `TurnError::InvalidTransition` instead of silently resuming whatever
+    /// gate class happens to be blocked.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_local_dev_gate(gate_ref)
@@ -836,7 +852,7 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
-            ResumeTurnPrecondition::AnyBlockedGate,
+            ResumeTurnPrecondition::BlockedApprovalGate,
         )
         .await
     }
@@ -849,9 +865,10 @@ impl RebornIntegrationHarness {
     /// parked capability instead of re-dispatching it (which would re-block on the still-missing
     /// credential → infinite loop).
     ///
-    /// Unlike `deny_gate`, which resumes with `ResumeTurnPrecondition::AnyBlockedGate`, this
-    /// resumes with `ResumeTurnPrecondition::BlockedAuthGate` — the same precondition
-    /// `AuthInteractionService` uses for its production auth-resume path. That precondition is
+    /// Like `deny_gate` (which resumes with its own gate-class-specific
+    /// `ResumeTurnPrecondition::BlockedApprovalGate`), this resumes with a
+    /// gate-class-specific precondition — `ResumeTurnPrecondition::BlockedAuthGate` — the same
+    /// precondition `AuthInteractionService` uses for its production auth-resume path. That precondition is
     /// enforced server-side (`resume_turn_once` requires `record.status == BlockedAuth`), so a
     /// stale or wrong (non-auth) gate ref fails the resume with `TurnError::InvalidTransition`
     /// instead of silently resuming whatever gate class happens to be blocked. A client-side
