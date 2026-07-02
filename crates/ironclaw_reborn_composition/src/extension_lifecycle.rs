@@ -125,7 +125,7 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
     let mut files = Vec::new();
     let mut total_bytes = 0usize;
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| {
+        let entry = archive.by_index(index).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("uploaded tool bundle has a corrupt entry: {error}"),
             }
