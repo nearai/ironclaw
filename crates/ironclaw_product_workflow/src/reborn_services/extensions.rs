@@ -282,6 +282,7 @@ fn extension_info(
     };
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+    let install_scope = installed.install_scope;
     let summary = installed.summary;
     let kind = extension_kind(&summary).to_string();
     RebornExtensionInfo {
@@ -303,6 +304,7 @@ fn extension_info(
         version: Some(summary.version),
         onboarding_state: onboarding.state,
         onboarding: onboarding.onboarding,
+        install_scope,
     }
 }
 
@@ -437,6 +439,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -476,6 +479,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = UnavailableCredentials;
@@ -500,6 +504,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_without_browser_setup_credentials(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -529,6 +534,7 @@ mod tests {
                 .map(|index| LifecycleInstalledExtensionSummary {
                     summary: summary_with_onboarding_for(&format!("fixture-{index}")),
                     phase: LifecyclePhase::Active,
+                    install_scope: None,
                 })
                 .collect(),
         };
@@ -607,6 +613,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
 
@@ -639,6 +646,7 @@ mod tests {
             installed: LifecycleInstalledExtensionSummary {
                 summary: installed_summary,
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
             registry: vec![
                 search_extension_summary(registry_installed_summary),
@@ -934,6 +942,7 @@ mod tests {
                     extensions: vec![LifecycleInstalledExtensionSummary {
                         summary: summary_with_onboarding(),
                         phase: LifecyclePhase::Installed,
+                        install_scope: None,
                     }],
                     count: 1,
                 }),

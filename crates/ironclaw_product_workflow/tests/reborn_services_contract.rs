@@ -847,6 +847,7 @@ impl RecordingLifecycleFacade {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Configured,
+                install_scope: None,
             }],
             count: 1,
         })
@@ -4868,6 +4869,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
                 Some(onboarding_fixture()),
             ),
             phase: LifecyclePhase::Installed,
+            install_scope: None,
         },
     }));
 
@@ -8078,8 +8080,14 @@ struct StaticOperatorToolCatalogForTest {
     tools: Vec<RebornOperatorToolInfo>,
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(
+        &self,
+        _caller: &ironclaw_host_api::UserId,
+    ) -> Vec<RebornOperatorToolInfo> {
+        // Ownership filtering is exercised by the composition-tier catalog
+        // test; this static catalog is caller-agnostic on purpose.
         self.tools.clone()
     }
 }

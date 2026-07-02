@@ -285,10 +285,14 @@ mod tests {
         )
     }
 
-    fn lifecycle_context(label: &str) -> LifecycleProductContext {
+    /// #5459 P1: lifecycle context acting AS the runtime's tenant operator, so
+    /// test installs are tenant-shared and visible to every surface user —
+    /// what these runtime-surface tests always meant. A `lifecycle_context`
+    /// user would now produce a PRIVATE install invisible to the run's user.
+    fn operator_lifecycle_context(label: &str, operator: &UserId) -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            user_id: UserId::new(format!("user-{label}")).expect("user id"),
+            user_id: operator.clone(),
             agent_id: None,
             project_id: None,
         })
@@ -530,6 +534,13 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        // #5459 P1: install AS the runtime's tenant operator so the extensions
+        // are tenant-shared (what these surface tests always meant) — a
+        // non-operator context would now produce a private install invisible
+        // to the run's surface user.
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -539,9 +550,17 @@ mod tests {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
                     .expect("valid extension ref");
+            let operator_context = |label: &str| {
+                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                    tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+                    user_id: operator.clone(),
+                    agent_id: None,
+                    project_id: None,
+                })
+            };
             facade
                 .execute(
-                    lifecycle_context(extension_id),
+                    operator_context(extension_id),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
@@ -551,7 +570,7 @@ mod tests {
             if matches!(extension_state, GsuiteExtensionState::Activated) {
                 facade
                     .execute(
-                        lifecycle_context(extension_id),
+                        operator_context(extension_id),
                         LifecycleProductAction::ExtensionActivate { package_ref },
                     )
                     .await
@@ -2993,6 +3012,9 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
+            let operator = extension_management
+                .tenant_operator_user_id_for_test()
+                .clone();
             let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
@@ -3002,7 +3024,7 @@ mod tests {
                 .expect("valid github ref");
             facade
                 .execute(
-                    lifecycle_context("github-install"),
+                    operator_lifecycle_context("github-install", &operator),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
@@ -3011,7 +3033,7 @@ mod tests {
                 .expect("install github extension");
             facade
                 .execute(
-                    lifecycle_context("github-activate"),
+                    operator_lifecycle_context("github-activate", &operator),
                     LifecycleProductAction::ExtensionActivate { package_ref },
                 )
                 .await
@@ -3113,6 +3135,9 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -3122,7 +3147,7 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                lifecycle_context("github-live-install"),
+                operator_lifecycle_context("github-live-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -3131,7 +3156,7 @@ mod tests {
             .expect("install github extension");
         facade
             .execute(
-                lifecycle_context("github-live-activate"),
+                operator_lifecycle_context("github-live-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },
             )
             .await
@@ -3321,6 +3346,9 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -3330,7 +3358,7 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                lifecycle_context("mid-response-install"),
+                operator_lifecycle_context("mid-response-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -3339,7 +3367,7 @@ mod tests {
             .expect("install github extension");
         facade
             .execute(
-                lifecycle_context("mid-response-activate"),
+                operator_lifecycle_context("mid-response-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },
             )
             .await

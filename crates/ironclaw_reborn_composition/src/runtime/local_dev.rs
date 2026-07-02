@@ -924,6 +924,14 @@ fn local_dev_visible_capability_request(
     inputs: LocalDevVisibleCapabilityInputs<'_>,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
+    // Resolved BEFORE grant minting: extension grants are filtered per caller
+    // (#5459 P1 — user-private installs mint grants only for their owner).
+    let user_id = run_context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
+        .unwrap_or_else(|| fallback_user_id.clone());
     let mut grants = inputs.policy.builtin_grants(
         &extension_id,
         inputs.workspace_mounts,
@@ -933,13 +941,7 @@ fn local_dev_visible_capability_request(
     );
     grants
         .grants
-        .extend(inputs.extension_surface.grants(&extension_id));
-    let user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+        .extend(inputs.extension_surface.grants(&extension_id, &user_id));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -974,7 +976,7 @@ fn local_dev_visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
-    provider_trust.extend(inputs.extension_surface.provider_trust());
+    provider_trust.extend(inputs.extension_surface.provider_trust(&context.user_id));
 
     Ok(HostVisibleCapabilityRequest::new(
         context,

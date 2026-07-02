@@ -1395,6 +1395,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         extension_installation_store,
         extension_lifecycle_service,
         active_extensions,
+        // #5459 P1: the base owner is the tenant operator in local-dev —
+        // their installs are tenant-shared, everyone else's are private.
+        nearai_mcp_owner_scope.user_id.clone(),
     ));
     let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
@@ -5227,7 +5230,10 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(gmail_ref.clone())
+            .install(
+                gmail_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Gmail");
         extension_management
@@ -5238,7 +5244,10 @@ mod tests {
             .await
             .expect("activate Gmail");
         extension_management
-            .install(calendar_ref.clone())
+            .install(
+                calendar_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Google Calendar");
         extension_management
@@ -5365,7 +5374,10 @@ mod tests {
         assert!(capability_ids.contains(&"notion.notion-get-self"));
 
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -5421,7 +5433,10 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(web_access_ref.clone())
+            .install(
+                web_access_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Web Access");
         extension_management
@@ -5826,7 +5841,10 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -5941,7 +5959,10 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Discovered);
@@ -6076,7 +6097,10 @@ mod tests {
             .as_ref()
             .expect("extension management");
         extension_management
-            .remove(nearai_ref.clone())
+            .remove(
+                nearai_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("disable NEAR AI MCP extension");
         let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
@@ -6099,7 +6123,10 @@ mod tests {
             crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
