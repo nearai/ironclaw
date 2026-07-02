@@ -1,4 +1,6 @@
 function switchSettingsSubtab(subtab) {
+  // Skills is a first-class surface now; old deep links land there.
+  if (subtab === 'skills') { switchTab('skills'); return; }
   currentSettingsSubtab = subtab;
   document.querySelectorAll('.settings-subtab').forEach(function(b) {
     b.classList.toggle('active', b.getAttribute('data-settings-subtab') === subtab);
@@ -31,7 +33,6 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'networking') loadNetworkingSettings();
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
-  else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
   else if (subtab === 'trace-commons') loadTraceCommonsCredits();

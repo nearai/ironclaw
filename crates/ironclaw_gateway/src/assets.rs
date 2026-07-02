@@ -86,6 +86,8 @@ pub const STYLE_CSS: &str = concat!(
     "\n",
     include_str!("../static/styles/layout.css"),
     "\n",
+    include_str!("../static/styles/components/sidebar.css"),
+    "\n",
     include_str!("../static/styles/components/topbar.css"),
     "\n",
     include_str!("../static/styles/components/markdown.css"),

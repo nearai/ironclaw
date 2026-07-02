@@ -38,6 +38,29 @@ function shortModelName(model) {
   return m;
 }
 
+// Show the active model on the chat surface. Click pre-fills the existing
+// /model slash command so switching stays a chat interaction, not a menu.
+function updateChatModelChip(model, backend) {
+  var chip = document.getElementById('chat-model-chip');
+  if (!chip) return;
+  if (!model) {
+    chip.style.display = 'none';
+    return;
+  }
+  chip.textContent = shortModelName(model) + (backend ? ' \u00b7 ' + backend : '');
+  chip.style.display = '';
+  if (!chip.dataset.wired) {
+    chip.dataset.wired = 'true';
+    chip.addEventListener('click', function() {
+      var input = document.getElementById('chat-input');
+      if (!input || input.disabled) return;
+      input.value = '/model ';
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+    });
+  }
+}
+
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
     // Single canonical wire field: `engine_v2_enabled`. Reading two
@@ -68,6 +91,10 @@ function fetchGatewayStatus() {
 
     activeWorkStore.setEngineV2Enabled(enabled);
     refreshPersistentActivityBar();
+
+    // Surface the active model in the chat workspace (the backend may
+    // auto-route between models, so show what's live, not a static config).
+    updateChatModelChip(data.llm_model, data.llm_backend);
 
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;

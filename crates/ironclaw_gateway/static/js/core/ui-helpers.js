@@ -32,13 +32,174 @@ function showToast(message, type) {
   }, 4000);
 }
 
-// --- Welcome Card (Phase 4.2) ---
+// --- Instance name (sidebar brand row) ---
+//
+// MOCK: the workspace instance name is client-side only for now — persisted
+// in localStorage, no backend field. Click the name in the sidebar header to
+// rename inline.
+
+const INSTANCE_NAME_KEY = 'ironclaw-instance-name';
+
+function getInstanceName() {
+  try {
+    const stored = (localStorage.getItem(INSTANCE_NAME_KEY) || '').trim();
+    if (stored) return stored.slice(0, 40);
+  } catch (e) {}
+  return 'IronClaw';
+}
+
+function applyInstanceName() {
+  const text = document.getElementById('instance-name-text');
+  if (text) text.textContent = getInstanceName();
+  if (typeof updateTopbarTitle === 'function') updateTopbarTitle();
+}
+
+function startInstanceRename() {
+  const btn = document.getElementById('instance-name-btn');
+  if (!btn || btn.querySelector('.instance-name-input')) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'instance-name-input';
+  input.maxLength = 40;
+  input.value = getInstanceName();
+  btn.style.display = 'none';
+  btn.parentNode.insertBefore(input, btn);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    if (save) {
+      const value = input.value.trim().slice(0, 40);
+      try {
+        if (value) localStorage.setItem(INSTANCE_NAME_KEY, value);
+        else localStorage.removeItem(INSTANCE_NAME_KEY);
+      } catch (e) {}
+    }
+    input.remove();
+    btn.style.display = '';
+    applyInstanceName();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+document.getElementById('instance-name-btn')?.addEventListener('click', () => startInstanceRename());
+applyInstanceName();
+
+// --- Agent home / welcome card ---
+//
+// The empty chat state is the agent's home: it leads with what the agent can
+// do (use-case quick-starts, capability-demonstrating prompts) and the state
+// of its connections, instead of generic feature chips. Everything routes
+// through chat — config surfaces stay out of the way.
+
+function prefillChatPrompt(text) {
+  const input = document.getElementById('chat-input');
+  if (!input || input.disabled || !text) return;
+  input.value = text;
+  // Reuse the input pipeline so autosize + send-button state stay in sync.
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+}
+
+// Derive 3-5 immediately actionable suggestions from the onboarding handoff
+// (?usecase= + ?integrations= → sessionStorage, see landing.js). Each entry is
+// { label, prompt }: the label renders on the chip, clicking fills the
+// composer with the prompt (never auto-sends).
+function getHandoffSuggestions() {
+  const useCases = (typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [];
+  const useCaseId = typeof getHandoffUseCaseId === 'function' ? getHandoffUseCaseId() : null;
+  const connected = typeof getHandoffConnectedIntegrations === 'function'
+    ? getHandoffConnectedIntegrations()
+    : [];
+  if (!useCaseId && connected.length === 0) return [];
+
+  const suggestions = [];
+  const seen = new Set();
+  const push = (useCase) => {
+    if (!useCase || seen.has(useCase.id) || suggestions.length >= 5) return;
+    seen.add(useCase.id);
+    suggestions.push({ label: useCase.title, prompt: useCase.prompt });
+  };
+
+  // 1. The use case picked during onboarding leads.
+  const picked = useCases.find((u) => u.id === useCaseId) || null;
+  push(picked);
+
+  // 2. Use cases powered by the integrations the user connected.
+  connected.forEach((id) => {
+    useCases
+      .filter((u) => (u.integrations || []).indexOf(id) !== -1)
+      .forEach(push);
+  });
+
+  // 3. Pad with same-category neighbours so there are at least 3 chips.
+  if (picked && suggestions.length < 3) {
+    useCases.filter((u) => u.category === picked.category).forEach(push);
+  }
+  if (suggestions.length < 3) {
+    useCases.forEach(push);
+  }
+  return suggestions.slice(0, 5);
+}
+
+// One coherent suggestion set for the empty state: use-case-aware handoff
+// suggestions lead when onboarding params exist, padded from the curated
+// use-case gallery. Always 4-5 chips, each pre-fills the composer.
+function getWelcomeSuggestions() {
+  const out = [];
+  const seen = new Set();
+  const add = (label, prompt) => {
+    if (!label || !prompt || seen.has(label) || out.length >= 5) return;
+    seen.add(label);
+    out.push({ label: label, prompt: prompt });
+  };
+  getHandoffSuggestions().forEach((s) => add(s.label, s.prompt));
+  ((typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [])
+    .forEach((u) => add(u.title, u.prompt));
+  return out;
+}
+
+// First-run setup checklist progress (MOCK: session-scoped, purely visual).
+const NUX_CHECKLIST_DONE_KEY = 'ironclaw_nux_checklist_done';
+
+function getChecklistDone() {
+  try {
+    const raw = sessionStorage.getItem(NUX_CHECKLIST_DONE_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function markChecklistDone(id) {
+  const done = getChecklistDone();
+  done.add(id);
+  try { sessionStorage.setItem(NUX_CHECKLIST_DONE_KEY, JSON.stringify([...done])); } catch (e) {}
+}
+
+const WELCOME_CLAW_SVG =
+  '<svg viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">'
+  + '<path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z"/></svg>';
 
 function showWelcomeCard() {
   const container = document.getElementById('chat-messages');
   if (!container || container.querySelector('.welcome-card')) return;
   const card = document.createElement('div');
   card.className = 'welcome-card';
+
+  // Hero: the claw glyph on a soft blue radial disc, above the headline.
+  const hero = document.createElement('div');
+  hero.className = 'welcome-hero';
+  hero.setAttribute('aria-hidden', 'true');
+  hero.innerHTML = WELCOME_CLAW_SVG;
+  card.appendChild(hero);
 
   const heading = document.createElement('h2');
   heading.className = 'welcome-heading';
@@ -50,27 +211,97 @@ function showWelcomeCard() {
   desc.textContent = I18n.t('welcome.description');
   card.appendChild(desc);
 
-  const chips = document.createElement('div');
-  chips.className = 'welcome-chips';
+  // ONE coherent suggestion group (4-5 chips, use-case-aware when the
+  // onboarding handoff provided params). Pre-fills the composer, never
+  // auto-sends.
+  const suggestions = getWelcomeSuggestions();
+  if (suggestions.length > 0) {
+    const chips = document.createElement('div');
+    chips.className = 'welcome-chips';
+    suggestions.forEach((s) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'welcome-chip';
+      chip.textContent = s.label;
+      chip.title = s.prompt;
+      chip.addEventListener('click', () => prefillChatPrompt(s.prompt));
+      chips.appendChild(chip);
+    });
+    card.appendChild(chips);
+  }
 
-  const suggestions = [
-    { key: 'welcome.runTool', fallback: 'Run a tool' },
-    { key: 'welcome.checkJobs', fallback: 'Check job status' },
-    { key: 'welcome.searchMemory', fallback: 'Search memory' },
-    { key: 'welcome.manageRoutines', fallback: 'Manage routines' },
-    { key: 'welcome.systemStatus', fallback: 'System status' },
-    { key: 'welcome.writeCode', fallback: 'Write code' },
-  ];
-  suggestions.forEach(({ key, fallback }) => {
-    const chip = document.createElement('button');
-    chip.className = 'welcome-chip';
-    chip.textContent = I18n.t(key) || fallback;
-    chip.addEventListener('click', () => sendSuggestion(chip));
-    chips.appendChild(chip);
-  });
+  // Setup is an inline task from the agent (MOCK: client-authored message,
+  // not a real engine turn) — replaces the old "Set up your agent" button.
+  card.appendChild(buildWelcomeAgentSetup(suggestions));
 
-  card.appendChild(chips);
   container.appendChild(card);
+}
+
+// Agent-authored first-run message with a small actionable checklist.
+// MOCK: rendered client-side; completion state is session-scoped and purely
+// cosmetic (see NUX_CHECKLIST_DONE_KEY).
+function buildWelcomeAgentSetup(suggestions) {
+  const wrap = document.createElement('div');
+  wrap.className = 'welcome-agent-msg';
+
+  const avatar = document.createElement('span');
+  avatar.className = 'welcome-agent-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.innerHTML = WELCOME_CLAW_SVG;
+  wrap.appendChild(avatar);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'welcome-agent-bubble';
+
+  const intro = document.createElement('p');
+  intro.className = 'welcome-agent-text';
+  intro.textContent = I18n.t('welcome.agentSetupIntro');
+  bubble.appendChild(intro);
+
+  const items = [
+    {
+      id: 'channel',
+      label: I18n.t('welcome.checkChannel'),
+      run: () => openNuxSetupWizard(),
+    },
+    {
+      id: 'task',
+      label: I18n.t('welcome.checkFirstTask'),
+      run: () => {
+        const first = suggestions && suggestions[0];
+        if (first) prefillChatPrompt(first.prompt);
+      },
+    },
+    {
+      id: 'integrations',
+      label: I18n.t('welcome.checkIntegrations'),
+      run: () => switchTab('integrations'),
+    },
+  ];
+
+  const list = document.createElement('div');
+  list.className = 'welcome-checklist';
+  const done = getChecklistDone();
+  items.forEach((item) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'welcome-check-item' + (done.has(item.id) ? ' done' : '');
+    btn.innerHTML =
+      '<span class="welcome-check-circle" aria-hidden="true">'
+      + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      + '</span>'
+      + '<span class="welcome-check-label">' + escapeHtml(item.label) + '</span>';
+    btn.addEventListener('click', () => {
+      markChecklistDone(item.id);
+      btn.classList.add('done');
+      item.run();
+    });
+    list.appendChild(btn);
+  });
+  bubble.appendChild(list);
+
+  wrap.appendChild(bubble);
+  return wrap;
 }
 
 function renderEmptyState({ icon, title, hint, action }) {
@@ -181,6 +412,9 @@ function closeModals() {
   // Close restart confirmation modal
   const restartModal = document.getElementById('restart-confirm-modal');
   if (restartModal) restartModal.style.display = 'none';
+
+  // Close the mobile sidebar drawer
+  closeMobileSidebar();
 }
 
 // --- ARIA Accessibility (Phase 5.2) ---
@@ -252,8 +486,13 @@ document.getElementById('restart-btn').addEventListener('click', () => triggerRe
 // Bug #3082 recovery affordances on the progress modal.
 document.getElementById('restart-refresh-btn').addEventListener('click', () => window.location.reload());
 document.getElementById('restart-dismiss-btn').addEventListener('click', () => dismissRestartLoader());
-document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
-document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('thread-new-btn').addEventListener('click', () => {
+  if (currentTab !== 'chat') switchTab('chat');
+  createNewThread();
+});
+document.getElementById('sidebar-collapse-btn')?.addEventListener('click', () => toggleSidebarCollapsed());
+document.getElementById('mobile-sidebar-btn')?.addEventListener('click', () => openMobileSidebar());
+document.getElementById('sidebar-scrim')?.addEventListener('click', () => closeMobileSidebar());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
@@ -270,15 +509,48 @@ document.getElementById('settings-export-btn').addEventListener('click', () => e
 document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
 document.getElementById('settings-back-btn')?.addEventListener('click', () => settingsBack());
 
-// --- Mobile: close thread sidebar on outside click ---
-document.addEventListener('click', function(e) {
-  const sidebar = document.getElementById('thread-sidebar');
-  if (sidebar && sidebar.classList.contains('expanded-mobile') &&
-      !sidebar.contains(e.target)) {
-    sidebar.classList.remove('expanded-mobile');
-    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+// --- "Just ask the agent" affordance ---
+// Config surfaces exist 'just in case'; the canonical way to do anything is
+// to ask the agent in chat. This hint teaches that behavior exactly where
+// users would otherwise start clicking through menus.
+
+function createAskAgentHint(labelKey, prompt) {
+  const hint = document.createElement('button');
+  hint.type = 'button';
+  hint.className = 'ask-agent-hint';
+
+  const glyph = document.createElement('span');
+  glyph.className = 'ask-agent-hint-glyph';
+  glyph.setAttribute('aria-hidden', 'true');
+  glyph.textContent = '\u25C6';
+  hint.appendChild(glyph);
+
+  const text = document.createElement('span');
+  text.textContent = I18n.t(labelKey);
+  hint.appendChild(text);
+
+  hint.addEventListener('click', () => {
+    switchTab('chat');
+    prefillChatPrompt(prompt);
+  });
+  return hint;
+}
+
+(function injectAskAgentHints() {
+  const discoverHeader = document.querySelector('#tab-discover .discover-header');
+  if (discoverHeader) {
+    discoverHeader.appendChild(
+      createAskAgentHint('askAgent.discover', 'Connect Gmail for me')
+    );
   }
-});
+  const settingsToolbar = document.querySelector('#tab-settings .settings-toolbar');
+  if (settingsToolbar) {
+    settingsToolbar.parentNode.insertBefore(
+      createAskAgentHint('askAgent.settings', 'What settings can I change by just asking you?'),
+      settingsToolbar
+    );
+  }
+})();
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 

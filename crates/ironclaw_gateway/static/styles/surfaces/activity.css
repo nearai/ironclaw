@@ -100,6 +100,12 @@
   background: var(--bg);
 }
 
+.activity-tool-output.activity-tool-output-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-family: inherit;
+}
+
 .activity-input-bar {
   display: flex;
   gap: var(--space-2);

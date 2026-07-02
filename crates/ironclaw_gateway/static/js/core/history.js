@@ -484,8 +484,10 @@ function loadThreads() {
 
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even
-    // when the URL does not carry an explicit thread hash.
-    if (!currentThreadId) {
+    // when the URL does not carry an explicit thread hash. Skipped when the
+    // user deep-linked to another surface (switchThread forces the chat tab,
+    // which would stomp e.g. #/tasks/missions/<id> on reload).
+    if (!currentThreadId && currentTab === 'chat') {
       const activeThreadId = data.active_thread || null;
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
         const activeThread = threads.find(t => t.id === activeThreadId);
@@ -558,13 +560,12 @@ function switchThread(threadId) {
   processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
+  if (currentTab !== 'chat') switchTab('chat');
   loadHistory();
   loadThreads();
   updateHash();
   if (window.innerWidth <= 768) {
-    const sidebar = document.getElementById('thread-sidebar');
-    sidebar.classList.remove('expanded-mobile');
-    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+    closeMobileSidebar();
   }
 }
 
@@ -582,20 +583,40 @@ function createNewThread() {
   });
 }
 
-function toggleThreadSidebar() {
-  const sidebar = document.getElementById('thread-sidebar');
-  const isMobile = window.innerWidth <= 768;
-  if (isMobile) {
-    sidebar.classList.toggle('expanded-mobile');
-  } else {
-    sidebar.classList.toggle('collapsed');
-  }
-  const btn = document.getElementById('thread-toggle-btn');
-  const isOpen = isMobile
-    ? sidebar.classList.contains('expanded-mobile')
-    : !sidebar.classList.contains('collapsed');
-  btn.innerHTML = isOpen ? '&laquo;' : '&raquo;';
+// --- App sidebar (collapse rail on desktop, overlay drawer on mobile) ---
+
+const SIDEBAR_COLLAPSED_KEY = 'ironclaw-sidebar-collapsed';
+
+function toggleSidebarCollapsed() {
+  const sidebar = document.getElementById('app-sidebar');
+  if (!sidebar) return;
+  const collapsed = sidebar.classList.toggle('collapsed');
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch (e) {}
 }
+
+function openMobileSidebar() {
+  const sidebar = document.getElementById('app-sidebar');
+  const scrim = document.getElementById('sidebar-scrim');
+  if (sidebar) sidebar.classList.add('mobile-open');
+  if (scrim) scrim.classList.add('visible');
+}
+
+function closeMobileSidebar() {
+  const sidebar = document.getElementById('app-sidebar');
+  const scrim = document.getElementById('sidebar-scrim');
+  if (sidebar) sidebar.classList.remove('mobile-open');
+  if (scrim) scrim.classList.remove('visible');
+}
+
+// Restore persisted collapse state on load (desktop only).
+(function restoreSidebarCollapsed() {
+  try {
+    if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
+      const sidebar = document.getElementById('app-sidebar');
+      if (sidebar) sidebar.classList.add('collapsed');
+    }
+  } catch (e) {}
+})();
 
 // Chat input auto-resize and keyboard handling
 const chatInput = document.getElementById('chat-input');
@@ -738,8 +759,52 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
   });
 });
 
+// Missions and Jobs share the first-class "Tasks" surface as segments.
+// Legacy callers (hash routes, active-work chips, widget layouts) still pass
+// 'jobs' / 'missions'; switchTab folds them into 'tasks' below.
+let currentTasksSegment = 'missions';
+
+// True when the Tasks surface is open on the given segment ('jobs'/'missions').
+// Used by SSE refresh paths that used to check `currentTab === 'jobs'` etc.
+function isTasksSurfaceActive(segment) {
+  return currentTab === 'tasks' && currentTasksSegment === segment;
+}
+
+function switchTasksSegment(segment, options) {
+  if (segment !== 'jobs' && segment !== 'missions') return;
+  currentTasksSegment = segment;
+  document.querySelectorAll('.tasks-segment').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-tasks-segment') === segment);
+  });
+  document.querySelectorAll('.tasks-pane').forEach((p) => {
+    p.classList.toggle('active', p.id === 'tasks-pane-' + segment);
+  });
+  if (!options || options.load !== false) {
+    if (segment === 'jobs') loadJobs();
+    else loadMissions();
+  }
+}
+
+document.querySelectorAll('.tasks-segment').forEach((btn) => {
+  btn.addEventListener('click', () => switchTasksSegment(btn.getAttribute('data-tasks-segment')));
+});
+
+function updateTopbarTitle(tab) {
+  const el = document.getElementById('main-topbar-title');
+  if (!el) return;
+  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  const label = activeBtn ? activeBtn.textContent.trim() : '';
+  const fallback = typeof getInstanceName === 'function' ? getInstanceName() : 'IronClaw';
+  el.textContent = label || fallback;
+}
+
 function switchTab(tab) {
   tab = normalizeTabForEngineMode(tab);
+  // Jobs/missions fold into the Tasks surface (segment per legacy tab).
+  if (tab === 'jobs' || tab === 'missions') {
+    switchTasksSegment(tab, { load: false });
+    tab = 'tasks';
+  }
   currentTab = tab;
   // NOTE: this function takes a `tab` argument that may originate from
   // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
@@ -757,13 +822,22 @@ function switchTab(tab) {
     p.classList.toggle('active', p.id === 'tab-' + tab);
   });
   applyAriaAttributes();
+  updateTopbarTitle(tab);
+  if (window.innerWidth <= 768) closeMobileSidebar();
 
   if (tab === 'memory') {
     loadMemoryTree();
     // Auto-open README.md on first visit (no file selected yet)
     if (!currentMemoryPath) readMemoryFile('README.md');
   }
-  if (tab === 'jobs') loadJobs();
+  if (tab === 'discover') loadDiscover();
+  if (tab === 'integrations') loadIntegrations();
+  if (tab === 'skills') loadSkills();
+  if (tab === 'billing') renderBillingSurface();
+  if (tab === 'tasks') {
+    if (currentTasksSegment === 'jobs') loadJobs();
+    else loadMissions();
+  }
   if (tab === 'projects') {
     loadProjectsOverview();
   } else if (crCurrentProjectId) {
@@ -771,7 +845,6 @@ function switchTab(tab) {
     // the Projects tab so widgets don't keep running in the background.
     crBackToOverview();
   }
-  if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -780,25 +853,7 @@ function switchTab(tab) {
   } else {
     stopPairingPoll();
   }
-  updateTabIndicator();
   updateHash();
 }
-
-function updateTabIndicator() {
-  const indicator = document.getElementById('tab-indicator');
-  if (!indicator) return;
-  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
-  if (!activeBtn) {
-    indicator.style.width = '0';
-    return;
-  }
-  const bar = activeBtn.closest('.tab-bar');
-  const barRect = bar.getBoundingClientRect();
-  const btnRect = activeBtn.getBoundingClientRect();
-  indicator.style.left = (btnRect.left - barRect.left) + 'px';
-  indicator.style.width = btnRect.width + 'px';
-}
-
-window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---

@@ -575,7 +575,7 @@ function connectSSE(lastEventIdOverride) {
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
       // Auto-refresh job list when on jobs tab (debounced)
-      if ((evtType === 'job_result' || evtType === 'job_status') && currentTab === 'jobs' && !currentJobId) {
+      if ((evtType === 'job_result' || evtType === 'job_status') && isTasksSurfaceActive('jobs') && !currentJobId) {
         clearTimeout(jobListRefreshTimer);
         jobListRefreshTimer = setTimeout(loadJobs, 200);
       }

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>IronClaw</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Brand fonts (Geist) are self-hosted under /fonts/ and declared in theme.css -->
+  <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/GeistPixel-Square.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/debug-panel.css">
@@ -32,28 +32,46 @@
   <script src="/debug-init.js"></script>
 </head>
 <body>
-  <!-- Auth Screen -->
+  <!-- Landing / Auth Screen -->
   <div id="auth-screen">
-    <div class="auth-card-login">
-      <div class="auth-brand">
-        <h1 data-i18n="auth.title">IronClaw</h1>
-        <p class="auth-tagline" data-i18n="auth.tagline">Secure AI Assistant</p>
-      </div>
-      <div id="auth-social" style="display:none">
-        <div class="auth-social-buttons">
-          <button id="auth-google-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.google">Sign in with Google</button>
-          <button id="auth-github-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.github">Sign in with GitHub</button>
-          <button id="auth-apple-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.apple">Sign in with Apple</button>
-          <button id="auth-near-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.near">Sign in with NEAR</button>
+    <div class="landing">
+      <div class="landing-hero">
+        <div class="auth-brand">
+          <h1 data-i18n="auth.title">IronClaw</h1>
+          <p class="landing-headline" data-i18n="landing.headline">Your always-on AI assistant</p>
+          <p class="landing-subhead" data-i18n="landing.subhead">IronClaw takes the busywork off your plate — email, updates, monitoring, scheduling — securely, on your terms, anywhere you chat.</p>
         </div>
-        <div class="auth-divider" id="auth-token-divider" style="display:none"><span data-i18n="auth.social.tokenDivider">or use a token</span></div>
+        <div class="auth-card-login">
+          <div id="auth-social" style="display:none">
+            <div class="auth-social-buttons">
+              <button id="auth-google-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.google">Sign in with Google</button>
+              <button id="auth-github-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.github">Sign in with GitHub</button>
+              <button id="auth-apple-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.apple">Sign in with Apple</button>
+              <button id="auth-near-btn" class="auth-social-btn" style="display:none" data-i18n="auth.social.near">Sign in with NEAR</button>
+            </div>
+            <div class="auth-divider" id="auth-token-divider" style="display:none"><span data-i18n="auth.social.tokenDivider">or use a token</span></div>
+          </div>
+          <div class="auth-form" id="auth-token-form" style="display:none">
+            <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
+            <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token">
+            <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
+            <details class="auth-token-help">
+              <summary data-i18n="auth.tokenHelpTitle">Where do I find my token?</summary>
+              <ul>
+                <li data-i18n="auth.tokenHelpLocal">Running locally: it's printed in your terminal when IronClaw starts (or whatever you set GATEWAY_AUTH_TOKEN to).</li>
+                <li data-i18n="auth.tokenHelpHosted">Hosted on NEAR AI Cloud: open your instance from agent.near.ai and you're signed in automatically — no token needed.</li>
+                <li data-i18n="auth.tokenHelpApi">Need a token for scripts or the API? Sign in, open the account menu, and create one under "API tokens".</li>
+              </ul>
+            </details>
+          </div>
+          <div id="auth-error"></div>
+        </div>
       </div>
-      <div class="auth-form" id="auth-token-form" style="display:none">
-        <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
-        <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token">
-        <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
+      <div class="landing-showcase">
+        <div class="landing-showcase-header" data-i18n="landing.showcaseTitle">What will you hand off first?</div>
+        <div class="landing-usecase-grid" id="landing-usecases"></div>
+        <p class="landing-showcase-hint" data-i18n="landing.showcaseHint">Pick one to start with — your agent will set it up with you right after you sign in.</p>
       </div>
-      <div id="auth-error"></div>
     </div>
   </div>
 
@@ -123,7 +141,9 @@
           Are you sure you want to restart the IronClaw instance? This will gracefully restart the process.
         </p>
         <div class="restart-modal-warning">
-          <span class="restart-modal-warning-icon">⚠️</span>
+          <span class="restart-modal-warning-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </span>
           <p data-i18n="restart.warning">Any in-progress jobs may be interrupted. The restart will complete within a few seconds.</p>
         </div>
       </div>
@@ -162,92 +182,171 @@
   </div>
 
   <!-- Main App (hidden until authenticated) -->
+  <!-- ChatGPT-style shell: collapsible left sidebar (nav + conversations +
+       account) beside a clean main pane with a minimal top bar. The sidebar
+       nav keeps the legacy `tab-bar` class so the existing switchTab router
+       (`.tab-bar button[data-tab]`) keeps working unchanged. -->
   <div id="app">
-    <!-- Tab Bar -->
-    <div class="tab-bar">
-      <div class="tab-indicator" id="tab-indicator"></div>
-      <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
-      <button data-tab="memory" data-i18n="tab.memory">Workspace</button>
-      <button data-tab="projects" data-v2-only data-i18n="tab.projects">Projects</button>
-      <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
-      <button data-tab="missions" data-i18n="tab.missions">Missions</button>
-      <button data-tab="routines" data-v1-only data-tab-role="routines" data-i18n="tab.routines">Routines</button>
-      <button data-tab="settings" data-i18n="tab.settings">Settings</button>
-      <div class="spacer"></div>
-      <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
-
-      <a class="status-logs-btn docs-link-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer" data-i18n="tab.docs" title="Docs">Docs</a>
-
-      <!-- Language Switcher -->
-      <div class="language-switcher">
-        <button class="language-btn" id="language-btn" type="button" title="Switch Language"
-          aria-label="Switch language" aria-haspopup="true" aria-expanded="false" aria-controls="language-menu">🌐</button>
-        <div class="language-menu" id="language-menu" style="display: none;">
-          <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
-          <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
-          <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
-        </div>
-      </div>
-      <button class="theme-toggle-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
-        <svg class="theme-icon icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
+    <aside class="app-sidebar" id="app-sidebar">
+      <div class="sidebar-header">
+        <!-- Claw glyph from the IronClaw logo, cropped to its exact bounding
+             box (the full wordmark would bleed in otherwise). -->
+        <svg class="sidebar-logo" viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">
+          <path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z" />
         </svg>
-        <svg class="theme-icon icon-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-        </svg>
-        <svg class="theme-icon icon-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
-      </button>
-      <span id="theme-announce" class="sr-only" aria-live="polite"></span>
-      <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
-        <span id="tee-shield-label" data-i18n="status.teeVerified">TEE Verified</span>
-        <div class="tee-popover" id="tee-popover"></div>
-      </div>
-      <div class="user-account" id="user-account">
-        <button class="user-avatar-btn" id="user-avatar-btn" title="Account" aria-label="Account menu" data-i18n="auth.accountMenu" data-i18n-attr="aria-label">
-          <span id="user-avatar-initials" class="user-avatar-initials">?</span>
-          <img id="user-avatar-img" class="user-avatar-img" alt="" referrerpolicy="no-referrer" hidden>
-          <div class="user-avatar-dot" id="sse-dot"></div>
+        <!-- Customizable instance name (MOCK: persisted in localStorage,
+             click to rename inline — see initInstanceName in ui-helpers.js). -->
+        <button class="sidebar-brand-name" id="instance-name-btn" type="button"
+          data-i18n="sidebar.renameInstance" data-i18n-attr="title" title="Rename this instance">
+          <span id="instance-name-text">IronClaw</span>
+          <svg class="instance-rename-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         </button>
-        <div class="user-dropdown" id="user-dropdown" style="display:none">
-          <div class="user-dropdown-header">
-            <div class="user-dropdown-name" id="user-dropdown-name"></div>
-            <div class="user-dropdown-email" id="user-dropdown-email"></div>
-            <div class="user-dropdown-role" id="user-dropdown-role"></div>
-          </div>
-          <div class="user-dropdown-divider"></div>
-          <div class="user-dropdown-gateway" id="gateway-popover"></div>
-          <div class="user-dropdown-divider"></div>
-          <button class="user-dropdown-item user-dropdown-logout" id="user-logout-btn" data-i18n="auth.signOut">Sign out</button>
-        </div>
+        <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" type="button"
+          data-i18n="sidebar.collapse" data-i18n-attr="title" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        </button>
       </div>
-      <button class="restart-btn" id="restart-btn" data-i18n="status.restartTooltip"
-        data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
-        <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M23 4v6h-6"></path>
-          <path d="M1 20v-6h6"></path>
-          <path d="M3.51 9a9 9 0 0114.85-3.36M20.49 15a9 9 0 01-14.85 3.36"></path>
-        </svg>
-        <span data-i18n="status.restart">Restart</span>
+      <button class="sidebar-new-chat" id="thread-new-btn" type="button"
+        data-i18n="chat.newThread" data-i18n-attr="title" title="New chat (Ctrl/Cmd+N)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        <span class="sidebar-label" data-i18n="sidebar.newChat">New chat</span>
       </button>
-    </div>
-    <!-- Chat Tab -->
-    <div class="tab-panel active" id="tab-chat">
-      <div class="thread-sidebar" id="thread-sidebar">
-        <div class="threads-section-header">
-          <span data-i18n="chat.conversations">Conversations</span>
-          <div class="spacer"></div>
-          <button class="thread-new-btn" id="thread-new-btn" data-i18n="chat.newThread" data-i18n-attr="title"
-            title="New thread (Ctrl/Cmd+N)">+</button>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" data-i18n="chat.toggleSidebar"
-            data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
-        </div>
+      <nav class="sidebar-nav tab-bar" id="sidebar-nav">
+        <button class="sidebar-nav-item active" data-tab="chat">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          <span class="sidebar-label" data-i18n="tab.chat">Chat</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="tasks">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3.5 17 1.5 1.5L8 15.5"/><line x1="13" y1="8" x2="21" y2="8"/><line x1="13" y1="17" x2="21" y2="17"/></svg>
+          <span class="sidebar-label" data-i18n="tab.tasks">Tasks</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="integrations">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M12 17v5"/><path d="M5 8h14a1 1 0 0 1 1 1v3a6 6 0 0 1-6 6h-4a6 6 0 0 1-6-6V9a1 1 0 0 1 1-1z"/></svg>
+          <span class="sidebar-label" data-i18n="tab.integrations">Integrations</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="skills">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+          <span class="sidebar-label" data-i18n="tab.skills">Skills</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="discover">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+          <span class="sidebar-label" data-i18n="tab.discover">Discover</span>
+        </button>
+        <div class="sidebar-nav-divider" aria-hidden="true"></div>
+        <button class="sidebar-nav-item" data-tab="memory">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="sidebar-label" data-i18n="tab.memory">Workspace</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="projects" data-v2-only>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+          <span class="sidebar-label" data-i18n="tab.projects">Projects</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="routines" data-v1-only data-tab-role="routines">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+          <span class="sidebar-label" data-i18n="tab.routines">Routines</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="logs">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          <span class="sidebar-label" data-i18n="tab.logs">Logs</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span class="sidebar-label" data-i18n="tab.settings">Settings</span>
+        </button>
+        <button class="sidebar-nav-item" data-tab="billing">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+          <span class="sidebar-label" data-i18n="tab.billing">Billing</span>
+        </button>
+      </nav>
+      <div class="sidebar-threads">
+        <div class="sidebar-threads-header"><span data-i18n="sidebar.conversations">Chats</span></div>
         <div class="thread-list" id="thread-list"></div>
       </div>
+      <!-- MOCK credits ring (see js/core/billing.js): remaining vs total,
+           decrements per agent message, click opens Billing. -->
+      <button class="sidebar-credits" id="sidebar-credits" type="button"></button>
+      <div class="sidebar-footer">
+        <a class="sidebar-footer-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer"
+          data-i18n="tab.docs" data-i18n-attr="title" title="Docs" aria-label="Docs">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+        </a>
+        <!-- Language Switcher -->
+        <div class="language-switcher">
+          <button class="language-btn sidebar-footer-btn" id="language-btn" type="button" title="Switch Language"
+            aria-label="Switch language" aria-haspopup="true" aria-expanded="false" aria-controls="language-menu">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </button>
+          <div class="language-menu" id="language-menu" style="display: none;">
+            <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
+            <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
+            <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
+          </div>
+        </div>
+        <button class="theme-toggle-btn sidebar-footer-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+          <svg class="theme-icon icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+          <svg class="theme-icon icon-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          <svg class="theme-icon icon-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+        </button>
+        <span id="theme-announce" class="sr-only" aria-live="polite"></span>
+        <div class="sidebar-footer-spacer"></div>
+        <div class="user-account" id="user-account">
+          <button class="user-avatar-btn" id="user-avatar-btn" title="Account" aria-label="Account menu" data-i18n="auth.accountMenu" data-i18n-attr="aria-label">
+            <span id="user-avatar-initials" class="user-avatar-initials">?</span>
+            <img id="user-avatar-img" class="user-avatar-img" alt="" referrerpolicy="no-referrer" hidden>
+            <div class="user-avatar-dot" id="sse-dot"></div>
+          </button>
+          <div class="user-dropdown" id="user-dropdown" style="display:none">
+            <div class="user-dropdown-header">
+              <div class="user-dropdown-name" id="user-dropdown-name"></div>
+              <div class="user-dropdown-email" id="user-dropdown-email"></div>
+              <div class="user-dropdown-role" id="user-dropdown-role"></div>
+            </div>
+            <div class="user-dropdown-divider"></div>
+            <div class="user-dropdown-gateway" id="gateway-popover"></div>
+            <div class="user-dropdown-divider"></div>
+            <button class="user-dropdown-item" id="user-tokens-btn" data-i18n="tokens.menuItem">API tokens</button>
+            <div class="user-dropdown-divider"></div>
+            <button class="user-dropdown-item user-dropdown-logout" id="user-logout-btn" data-i18n="auth.signOut">Sign out</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+    <div class="app-main">
+      <header class="main-topbar">
+        <button class="topbar-menu-btn" id="mobile-sidebar-btn" type="button"
+          data-i18n="sidebar.openMenu" data-i18n-attr="aria-label" aria-label="Open menu">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+        </button>
+        <div class="main-topbar-title" id="main-topbar-title">IronClaw</div>
+        <div class="spacer"></div>
+        <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <span id="tee-shield-label" data-i18n="status.teeVerified">TEE Verified</span>
+          <div class="tee-popover" id="tee-popover"></div>
+        </div>
+        <button class="restart-btn" id="restart-btn" data-i18n="status.restartTooltip"
+          data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
+          <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6"></path>
+            <path d="M1 20v-6h6"></path>
+            <path d="M3.51 9a9 9 0 0114.85-3.36M20.49 15a9 9 0 01-14.85 3.36"></path>
+          </svg>
+          <span data-i18n="status.restart">Restart</span>
+        </button>
+      </header>
+      <!-- Active-work strip: chips for running jobs/missions (engine v2) -->
+      <div class="active-work-strip" id="active-work-strip" hidden></div>
+    <!-- Chat Tab -->
+    <div class="tab-panel active" id="tab-chat">
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
         <button class="scroll-to-bottom-btn" id="scroll-to-bottom-btn" style="display:none"
@@ -264,9 +363,49 @@
           </div>
           <input type="file" id="image-file-input" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.json,.xml,.rtf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.ogg,.wav,.m4a,.mp4,.aac,.flac,.webm" multiple style="display:none">
           <button id="attach-btn" class="attach-btn" data-i18n="chat.attachFiles" data-i18n-attr="title" title="Attach files"
-            aria-label="Attach files">&#x1F4CE;</button>
+            aria-label="Attach files">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <!-- Voice input is mocked for now: the control ships disabled with a
+               "coming soon" tooltip so the composer reads complete. -->
+          <button id="voice-btn" class="voice-btn" type="button" disabled
+            data-i18n="chat.voiceComingSoon" data-i18n-attr="title" title="Voice chat coming soon"
+            aria-label="Voice chat coming soon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+          </button>
           <button id="send-btn" data-i18n="chat.send">Send</button>
         </div>
+        <div class="chat-statusbar">
+          <button id="chat-model-chip" class="chat-model-chip" type="button" style="display:none"
+            data-i18n="chat.modelChipTitle" data-i18n-attr="title" title="Active model — click to switch with /model"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Billing Tab (MOCK: client-side credits/plan state, see billing.js) -->
+    <div class="tab-panel" id="tab-billing">
+      <div class="billing-surface">
+        <div class="surface-heading">
+          <div class="surface-subtitle" data-i18n="billing.subtitle">Your plan, credits, and usage — all in one place.</div>
+        </div>
+        <div id="billing-container"></div>
+      </div>
+    </div>
+
+    <!-- Discover Tab (unified marketplace) -->
+    <div class="tab-panel" id="tab-discover">
+      <div class="discover-container">
+        <div class="discover-header">
+          <div class="discover-title" data-i18n="discover.title">Discover</div>
+          <div class="discover-subtitle" data-i18n="discover.subtitle">Channels, tools, and skills for your agent — or just ask it to build what's missing.</div>
+        </div>
+        <div class="discover-toolbar">
+          <div class="discover-search">
+            <input type="text" id="discover-search-input" data-i18n="discover.searchPlaceholder" data-i18n-attr="placeholder" placeholder="Search channels, tools, MCP servers, skills...">
+          </div>
+          <div class="discover-categories" id="discover-categories"></div>
+        </div>
+        <div class="discover-grid" id="discover-grid"></div>
       </div>
     </div>
 
@@ -298,24 +437,103 @@
       </div>
     </div>
 
-    <!-- Jobs Tab -->
-    <div class="tab-panel" id="tab-jobs">
-      <div class="jobs-container">
-        <div class="jobs-summary" id="jobs-summary"></div>
-        <table class="jobs-table" id="jobs-table">
-          <thead>
-            <tr>
-              <th data-i18n="jobs.id">ID</th>
-              <th data-i18n="jobs.title">Title</th>
-              <th data-i18n="jobs.source">Source</th>
-              <th data-i18n="jobs.status">Status</th>
-              <th data-i18n="jobs.created">Created</th>
-              <th data-i18n="jobs.actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody id="jobs-tbody"></tbody>
-        </table>
-        <div class="empty-state" id="jobs-empty" style="display:none" data-i18n="jobs.empty">No jobs found</div>
+    <!-- Tasks Tab (missions + jobs in one surface). The surface keeps only
+         the subtitle — the "Tasks" title lives in the top bar. -->
+    <div class="tab-panel" id="tab-tasks">
+      <div class="tasks-header">
+        <div class="surface-heading">
+          <div class="surface-subtitle" data-i18n="tasks.subtitle">Everything your agent is working on — recurring missions and one-off jobs.</div>
+        </div>
+        <div class="tasks-segments" role="tablist">
+          <button class="tasks-segment active" data-tasks-segment="missions" data-i18n="tab.missions">Missions</button>
+          <button class="tasks-segment" data-tasks-segment="jobs" data-i18n="tab.jobs">Jobs</button>
+        </div>
+      </div>
+      <div class="tasks-pane active" id="tasks-pane-missions">
+        <div class="missions-container">
+          <!-- Kanban board: one column per status, headers carry the counts
+               (replaces the old count tiles + single list). -->
+          <div class="missions-body" id="missions-body">
+            <div class="tasks-kanban" id="tasks-kanban"></div>
+            <div class="missions-activity-col" id="missions-activity-col"></div>
+          </div>
+          <div class="empty-state" id="missions-empty" style="display:none">
+            <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
+          </div>
+          <div class="mission-detail" id="mission-detail" style="display:none"></div>
+        </div>
+      </div>
+      <div class="tasks-pane" id="tasks-pane-jobs">
+        <div class="jobs-container">
+          <div class="jobs-summary" id="jobs-summary"></div>
+          <table class="jobs-table" id="jobs-table">
+            <thead>
+              <tr>
+                <th data-i18n="jobs.id">ID</th>
+                <th data-i18n="jobs.title">Title</th>
+                <th data-i18n="jobs.source">Source</th>
+                <th data-i18n="jobs.status">Status</th>
+                <th data-i18n="jobs.created">Created</th>
+                <th data-i18n="jobs.actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobs-tbody"></tbody>
+          </table>
+          <div class="empty-state" id="jobs-empty" style="display:none" data-i18n="jobs.empty">No jobs found</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Integrations Tab (first-class; connected state may be mocked via
+         the onboarding handoff — see js/surfaces/integrations.js) -->
+    <div class="tab-panel" id="tab-integrations">
+      <div class="integrations-container">
+        <div class="surface-heading">
+          <div class="surface-title" data-i18n="integrations.title">Integrations</div>
+          <div class="surface-subtitle" data-i18n="integrations.subtitle">Connect the tools your agent works with — email, chat, calendars, and more.</div>
+        </div>
+        <div class="integrations-connected-section" id="integrations-connected-section" style="display:none">
+          <h3 data-i18n="integrations.connected">Connected</h3>
+          <div class="integrations-grid" id="integrations-connected-grid"></div>
+        </div>
+        <div class="integrations-available-section">
+          <h3 data-i18n="integrations.available">Available</h3>
+          <div class="integrations-grid" id="integrations-available-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skills Tab (promoted out of Settings) -->
+    <div class="tab-panel" id="tab-skills">
+      <div class="skills-surface-container">
+        <div class="surface-heading">
+          <div class="surface-title" data-i18n="tab.skills">Skills</div>
+          <div class="surface-subtitle" data-i18n="skills.subtitle">Teach your agent new tricks — install skills from ClawHub or by URL.</div>
+        </div>
+        <div class="extensions-container">
+          <div class="extensions-section">
+            <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
+            <div class="skill-search-box">
+              <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search for skills...">
+              <button id="skill-search-btn" data-i18n="skills.search">Search</button>
+            </div>
+            <div class="extensions-list" id="skill-search-results"></div>
+          </div>
+          <div class="extensions-section">
+            <h3 data-i18n="skills.installed">Installed Skills</h3>
+            <div class="extensions-list" id="skills-list">
+              <div class="empty-state" data-i18n="skills.loading">Loading skills...</div>
+            </div>
+          </div>
+          <div class="extensions-section">
+            <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
+            <div class="ext-install-form">
+              <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
+              <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
+              <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -372,21 +590,6 @@
       </div>
     </div>
 
-    <!-- Missions Tab -->
-    <div class="tab-panel" id="tab-missions">
-      <div class="missions-container">
-        <div class="missions-summary" id="missions-summary"></div>
-        <div class="missions-body" id="missions-body">
-          <div class="missions-list-col" id="missions-list-col"></div>
-          <div class="missions-activity-col" id="missions-activity-col"></div>
-        </div>
-        <div class="empty-state" id="missions-empty" style="display:none">
-          <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
-        </div>
-        <div class="mission-detail" id="mission-detail" style="display:none"></div>
-      </div>
-    </div>
-
     <!-- Routines Tab (engine v1 fallback) -->
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
@@ -423,7 +626,6 @@
           <button class="settings-subtab" data-settings-subtab="networking" data-i18n="settings.networking">Networking</button>
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
-          <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
           <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
           <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
           <button type="button" class="settings-subtab" data-settings-subtab="trace-commons" data-i18n="settings.traceCommons">Trace Commons</button>
@@ -509,32 +711,6 @@
               </div>
             </div>
           </div>
-          <div class="settings-subpanel" id="settings-skills">
-            <div class="extensions-container">
-              <div class="extensions-section">
-                <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
-                <div class="skill-search-box">
-                  <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search for skills...">
-                  <button id="skill-search-btn" data-i18n="skills.search">Search</button>
-                </div>
-                <div class="extensions-list" id="skill-search-results"></div>
-              </div>
-              <div class="extensions-section">
-                <h3 data-i18n="skills.installed">Installed Skills</h3>
-                <div class="extensions-list" id="skills-list">
-                  <div class="empty-state" data-i18n="skills.loading">Loading skills...</div>
-                </div>
-              </div>
-              <div class="extensions-section">
-                <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
-                <div class="ext-install-form">
-                  <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
-                  <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
-                  <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
-                </div>
-              </div>
-            </div>
-          </div>
           <div class="settings-subpanel" id="settings-users">
             <div class="users-container">
               <div class="users-header">
@@ -576,6 +752,7 @@
         </div>
       </div>
     </div>
+    </div><!-- /.app-main -->
   </div>
 
   <!-- Confirmation Modal -->

@@ -107,12 +107,23 @@ function applyToolActivityCardState(rendered, options) {
     rendered.icon.innerHTML = '<div class="spinner"></div>';
   }
 
-  rendered.output.textContent = getToolActivityBodyText(entry);
+  const bodyText = getToolActivityBodyText(entry);
+  if (bodyText) {
+    rendered.output.textContent = bodyText;
+    rendered.output.classList.remove('activity-tool-output-empty');
+  } else {
+    // Completed runs without a captured result used to expand into an empty
+    // box — show an explicit placeholder so the card never looks broken.
+    rendered.output.textContent = status === 'running'
+      ? ''
+      : I18n.t('activity.noOutput');
+    rendered.output.classList.toggle('activity-tool-output-empty', status !== 'running');
+  }
   const shouldAutoExpand = !!(
     options.expandErrors
     && !options.subtleFailure
     && status === 'fail'
-    && rendered.output.textContent
+    && bodyText
   );
   setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
