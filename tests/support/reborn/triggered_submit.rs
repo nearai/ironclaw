@@ -94,7 +94,7 @@ impl RebornIntegrationHarness {
             prompt: prompt.to_string(),
         };
         let content_ref = TriggerInboundContentRef::new(format!(
-            "triggered-submit:{}",
+            "content:triggered-submit:{}",
             fire.identity.external_event_id().as_str()
         ))?;
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
