@@ -222,6 +222,13 @@ pub(crate) enum StopKind {
 /// 5. **Rejected-reply escape**: reply admission rejects
 ///    `rejected_reply_threshold` replies in a row →
 ///    `Stop { Aborted(InvalidModelOutput) }`.
+/// 6. **Repeated-failure escape**: the same capability call signature
+///    dominates the recent window AND the trailing `recent_failure_kinds`
+///    are an unbroken run of the same kind for `repeated_failure_threshold`
+///    entries → the model is retrying an identical failing operation without
+///    adapting → `Stop { NoProgressDetected }`. Without this, such a run burns
+///    iterations until the wall-clock turn timeout instead of terminating with
+///    a model-visible no-progress failure.
 ///
 /// On no signal, returns `Continue`.
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +256,14 @@ pub struct DefaultStopConditionStrategy {
     /// Min trailing run length of completed capability batches whose typed
     /// progress reported no new evidence/state.
     pub typed_progress_run_threshold: usize,
+    /// Min trailing run length of identical `recent_failure_kinds` required —
+    /// in combination with a dominant repeated call signature — to treat the
+    /// loop as wedged on a non-converging retry (`failure_run` in the family
+    /// fingerprint). Gating on the repeated signature as well keeps unrelated,
+    /// transient failures that merely share a coarse `LoopFailureKind` from
+    /// tripping the escape; those are bounded by recovery and the iteration
+    /// limit instead. `0` disables the check.
+    pub repeated_failure_threshold: usize,
 }
 
 impl Default for DefaultStopConditionStrategy {
@@ -262,6 +277,7 @@ impl Default for DefaultStopConditionStrategy {
             min_delta_tokens: 4,
             noprogress_window: 4,
             typed_progress_run_threshold: 3,
+            repeated_failure_threshold: 3,
         }
     }
 }
@@ -382,6 +398,26 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         if state.stop_state.trailing_rejected_replies as usize >= self.rejected_reply_threshold {
             return StopOutcome::Stop {
                 kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
+            };
+        }
+
+        // (g) repeated-failure escape — the model is retrying an identical
+        // failing capability call without adapting. A failing call reports
+        // `Blocked` progress (not `NoChange`), so the repeated-call warning at
+        // (d) never terminalizes for it; left unchecked the run burns
+        // iterations until the wall-clock turn timeout. Fire only when BOTH
+        // signals agree: the same call signature dominates the recent window
+        // AND the trailing failure kinds are an unbroken run of the same kind.
+        // The conjunction is deliberate — `recent_failure_kinds` alone is too
+        // coarse (unrelated calls can share a `LoopFailureKind`), so the
+        // signature gate confirms it is the *same* operation being retried.
+        if self.repeated_failure_threshold > 0
+            && state.recent_failure_kinds.same_run_length() >= self.repeated_failure_threshold
+            && dominant_repeated_call(state, self.repetition_window, self.repetition_threshold)
+                .is_some()
+        {
+            return StopOutcome::Stop {
+                kind: StopKind::NoProgressDetected,
             };
         }
 
@@ -714,6 +750,7 @@ mod tests {
             assert_eq!(strategy.repetition_threshold, 3);
             assert_eq!(strategy.rejected_reply_threshold, 3);
             assert_eq!(strategy.typed_progress_run_threshold, 3);
+            assert_eq!(strategy.repeated_failure_threshold, 3);
         }
 
         #[tokio::test]
@@ -1081,12 +1118,73 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn same_failure_kind_three_times_does_not_trigger_no_progress() {
+        async fn same_failure_kind_three_times_without_repeated_signature_continues() {
+            // Failure-kind run alone is too coarse to terminate — a repeated
+            // call signature must agree (escape (g) is a conjunction). With no
+            // signatures recorded, the loop continues.
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             for _ in 0..3 {
                 state.recent_failure_kinds.push(LoopFailureKind::ModelError);
             }
+
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+        }
+
+        #[tokio::test]
+        async fn repeated_failing_signature_triggers_no_progress() {
+            // The model retries the identical failing capability call: the same
+            // signature dominates the window AND the trailing failure kinds are
+            // an unbroken run of the same kind. Escape (g) terminalizes as
+            // no-progress instead of looping to the wall-clock turn timeout.
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.failing").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(signature.clone());
+                state
+                    .recent_failure_kinds
+                    .push(LoopFailureKind::CapabilityProtocolError);
+            }
+
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn repeated_signature_with_broken_failure_run_continues() {
+            // Same repeated signature, but the failure kinds are not an unbroken
+            // run (a differing kind landed last) — escape (g) must not fire; the
+            // existing recovery/iteration bounds own this case.
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.failing").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(signature.clone());
+            }
+            state
+                .recent_failure_kinds
+                .push(LoopFailureKind::CapabilityProtocolError);
+            state
+                .recent_failure_kinds
+                .push(LoopFailureKind::CapabilityProtocolError);
+            state.recent_failure_kinds.push(LoopFailureKind::ModelError);
 
             let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
 
