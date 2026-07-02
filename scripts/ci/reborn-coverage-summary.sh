@@ -3,10 +3,11 @@
 # Render a Reborn-scoped coverage summary from a cargo-llvm-cov JSON export.
 #
 # cargo-llvm-cov instruments the whole workspace build, so a run over the
-# Reborn integration-tier test binaries produces coverage for every linked
-# crate. This script filters that export down to the Reborn crate families and
-# computes an aggregate line-coverage percentage plus a per-crate breakdown
-# (the "hole list" — which Reborn crates are least covered).
+# Reborn test suites (int-tier binaries + per-crate suites) produces coverage
+# for every linked crate. This script filters that export down to the Reborn
+# crate families and computes an aggregate line-coverage percentage plus a
+# per-crate breakdown (the "hole list" — which Reborn crates are least
+# covered).
 #
 # Usage:
 #   reborn-coverage-summary.sh <llvm-cov-json-export>
@@ -18,9 +19,10 @@
 #     aggregation as the report — this script is the single owner of that
 #     computation so reborn-coverage-comment.sh never has to recompute it.
 #
-# The Reborn crate families mirror the package allowlist in
-# .github/workflows/reborn-tests.yml: ironclaw_reborn*, ironclaw_product*,
-# ironclaw_architecture, the v2 channel adapters, and ironclaw_webui_v2*.
+# The Reborn crate families are the single predicate in
+# reborn-crate-family-regex.sh, shared with the package allowlist in
+# .github/workflows/reborn-tests.yml so the tested set and the reported set
+# can't drift apart (#5477).
 
 set -euo pipefail
 
@@ -40,11 +42,11 @@ fi
 # Matches the absolute filenames llvm-cov emits, e.g.
 # /work/ironclaw/crates/ironclaw_reborn/src/runtime.rs
 #
-# Mirrors the Reborn crate allowlist in .github/workflows/reborn-tests.yml:
-# prefix-match for the reborn_*/product_*/webui_v2_* families, exact-match
-# (no trailing name chars before the "/") for the four single crates. The
-# trailing "/" anchors the crate-name boundary in all cases.
-reborn_regex='/crates/(ironclaw_(reborn|product|webui_v2)[a-z0-9_]*|ironclaw_architecture|ironclaw_slack_v2_adapter|ironclaw_telegram_v2_adapter|ironclaw_wasm_product_adapters)/'
+# The trailing "/" anchors the crate-name boundary for both the prefix-match
+# families (reborn_*/product_*/webui_v2_*) and the exact-match single crates
+# emitted by reborn-crate-family-regex.sh.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+reborn_regex="/crates/($("${script_dir}/reborn-crate-family-regex.sh"))/"
 
 jq -r --arg re "${reborn_regex}" --arg mode "${mode}" '
   # Round to 2 decimal places.
@@ -80,7 +82,7 @@ jq -r --arg re "${reborn_regex}" --arg mode "${mode}" '
   | if $mode == "zero-crates"
     then ( $byCrate[] | select(.count > 0 and .covered == 0) | .crate )
     else
-      "## Reborn integration-tier coverage",
+      "## Reborn coverage",
       "",
       (if $total > 0
        then "**Line coverage (Reborn crates): \($pct | round2)%** — \($hit) / \($total) lines"

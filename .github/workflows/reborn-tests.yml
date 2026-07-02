@@ -104,24 +104,12 @@ jobs:
         run: |
           # Reborn/product crate families that are always tested, including
           # crates the shipped binary does not link (channel adapters, webui_v2).
+          # scripts/ci/reborn-crate-family-packages.sh is the single owner of
+          # this predicate, shared with scripts/ci/reborn-coverage-summary.sh
+          # so the tested set and the reported set can't drift apart (#5477).
           allowlist_packages="$(
-            cargo metadata --no-deps --format-version 1 \
-              | jq -c '
-                  [
-                    .packages[]
-                    | select(
-                        (.name | startswith("ironclaw_reborn"))
-                        or (.name | startswith("ironclaw_product"))
-                        or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui_v2"))
-                      )
-                    | .name
-                  ]
-                  | unique
-                '
+            scripts/ci/reborn-crate-family-packages.sh \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))'
           )"
 
           # The full ironclaw_reborn_cli dependency closure: every workspace

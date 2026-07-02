@@ -12,7 +12,9 @@
 # - PRs automatically get coverage comments showing changes in coverage
 # - Visit https://codecov.io/gh/nearai/ironclaw for detailed coverage reports
 # - Coverage reports are generated for three configurations:
-#   1. all-features: Full feature set
+#   1. all-features: postgres+libsql+html-to-markdown+bedrock+import (NOT
+#      literal --all-features — excludes deliberately-deferred forward-gate
+#      features like `pr7-ready`/`pr3180-ready`, see Cargo.toml; #5332)
 #   2. default: Default features
 #   3. libsql-only: Minimal libSQL-only configuration
 # - E2E coverage tracks end-to-end test coverage separately
@@ -56,7 +58,14 @@ jobs:
       matrix:
         include:
           - name: all-features
-            flags: "--all-features"
+            # Explicit feature list, NOT literal --all-features: the workspace
+            # carries deliberately-deferred forward gates (`pr7-ready`,
+            # `pr3180-ready` — see Cargo.toml) whose whole purpose is staying
+            # off until their follow-up PRs land. `--all-features` auto-enables
+            # them, silently un-ignoring tests that pin not-yet-implemented
+            # behavior (#5332). Mirrors the same fix already applied to
+            # test.yml and platform-and-compat.yml's own "all-features" leg.
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
             has_postgres: true
           - name: default
             flags: ""

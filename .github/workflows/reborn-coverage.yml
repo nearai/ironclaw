@@ -1,22 +1,32 @@
-# Reborn integration-tier coverage
+# Reborn coverage
 #
-# Runs cargo-llvm-cov over the Reborn in-process integration-tier test binaries
-# (tests/reborn_integration_*.rs + tests/reborn_group_*/) and reports a
-# Reborn-crate-scoped line-coverage percentage in the PR's job summary.
+# Runs cargo-llvm-cov over two tiers of Reborn tests and reports a
+# Reborn-crate-scoped line-coverage percentage in the PR's job summary:
+#   - Int-tier: the in-process integration test binaries
+#     (tests/reborn_integration_*.rs + tests/reborn_group_*/).
+#   - Crate-tier: each Reborn-family crate's own `tests/` suite (e.g.
+#     ironclaw_webui_v2, ironclaw_reborn_event_store), the same suites
+#     .github/workflows/reborn-tests.yml's crate-tests job gates PRs on.
+#     Without this tier, crates with real contract-test coverage but no
+#     int-tier suite of their own reported 0%.
 #
 # This is the measurable signal behind the Reborn backend's "100% int-tier
 # coverage" goal (task T0-COV): it yields a per-PR percentage and a per-crate
-# hole list. It is INFORMATIONAL only — it
-# does not gate the PR on a coverage threshold.
+# hole list. It is INFORMATIONAL only — it does not gate the PR on a coverage
+# threshold.
 #
 # Scope notes:
-# - Features: default (postgres + libsql + html-to-markdown + tui), matching
-#   how scripts/ci/run-reborn-root-partition.sh runs these same suites. No live
-#   Postgres is needed; the suites skip Postgres backends when DATABASE_URL is
-#   unset (backend_matrix stays libsql-only per the roadmap).
-# - The % is filtered to the Reborn crate families (crates/ironclaw_reborn*,
-#   ironclaw_product*, ironclaw_architecture, the v2 channel adapters,
-#   ironclaw_webui_v2*) via scripts/ci/reborn-coverage-summary.sh.
+# - Int-tier features: default (postgres + libsql + html-to-markdown + tui),
+#   matching how scripts/ci/run-reborn-root-partition.sh runs these same
+#   suites. No live Postgres is needed; the suites skip Postgres backends
+#   when DATABASE_URL is unset (backend_matrix stays libsql-only per the
+#   roadmap).
+# - Crate-tier features: resolved per package by
+#   scripts/ci/package-feature-flags.sh, the same source
+#   .github/workflows/reborn-tests.yml's crate-tests job uses.
+# - The package list for the crate tier, and the % filter over the combined
+#   export, both derive from scripts/ci/reborn-crate-family-regex.sh — the
+#   single owner of the Reborn crate-family predicate (#5477).
 
 name: Reborn Coverage
 
@@ -79,6 +89,18 @@ jobs:
         with:
           components: llvm-tools-preview
 
+      # The crate-tier pass always includes webui-v2-beta packages (ironclaw_reborn_cli,
+      # ironclaw_reborn_composition, ironclaw_webui_v2, ironclaw_webui_v2_static are
+      # permanent Reborn-family members), whose build.rs shells out to npm — unlike
+      # reborn-tests.yml's per-shard matrix, this single job always needs it, so
+      # installing it unconditionally is simpler than replicating that job's
+      # per-package detection.
+      - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-coverage
@@ -91,7 +113,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
-      - name: Generate Reborn integration-tier coverage
+      - name: Generate Reborn coverage (int-tier + crate-tier)
         run: |
           set -euo pipefail
           # Process substitution hides the discovery script's exit code, so
@@ -104,14 +126,52 @@ jobs:
           echo "Running coverage over Reborn int-tier binaries:"
           printf '  %s %s\n' "${test_args[@]}"
 
+          mapfile -t crate_packages < <(scripts/ci/reborn-crate-family-packages.sh)
+          if [ "${#crate_packages[@]}" -eq 0 ]; then
+            echo "No Reborn crate-family packages discovered" >&2
+            exit 1
+          fi
+          echo "Running coverage over Reborn crate-tier package test suites:"
+          printf '  %s\n' "${crate_packages[@]}"
+
           cargo llvm-cov clean --workspace
-          # Combined run+report in ONE invocation: --workspace scopes the report
-          # to every member crate (incl. the linked-but-not-root Reborn crates),
-          # which the standalone `report` subcommand cannot do. The named root
-          # `--test` targets still run only in the root package. Default features,
-          # matching scripts/ci/run-reborn-root-partition.sh.
-          cargo llvm-cov --workspace "${test_args[@]}" \
-            --json --output-path reborn-llvm-cov.json -- --nocapture
+
+          # Int-tier: root/group [[test]] binaries. --workspace instruments every
+          # member crate (incl. the linked-but-not-root Reborn crates) so a crate
+          # untouched by this pass still shows up in the report at 0%, rather than
+          # being absent. Default features, matching
+          # scripts/ci/run-reborn-root-partition.sh. --no-report defers reporting
+          # until the crate-tier passes below are folded in too.
+          cargo llvm-cov --no-report --workspace "${test_args[@]}" -- --nocapture
+
+          # Crate-tier (Tier B): each Reborn-family crate's own test suite
+          # (--all-targets: unit tests, tests/, examples, benches — same target
+          # selection as reborn-tests.yml's crate-tests job), merged into the
+          # same coverage session via --no-report. Per-package feature selection
+          # and the per-package timeout also mirror that job, so the same tests
+          # that gate the PR are the ones counted here, and a hung crate suite
+          # is caught per-package instead of by the blanket job timeout.
+          for package in "${crate_packages[@]}"; do
+            feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
+            echo "::group::cargo llvm-cov --package ${package} ${feature_flags}"
+            # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
+            timeout --signal=INT --kill-after=30s 28m \
+              cargo llvm-cov --no-report --package "${package}" ${feature_flags} --all-targets -- --nocapture
+            echo "::endgroup::"
+          done
+
+          # Standalone `report`: aggregates the profile data every --no-report run
+          # above produced. Unlike the run/test subcommands, `report` has no
+          # --workspace flag (confirmed: `cargo llvm-cov report --workspace`
+          # errors as unsupported) — it only includes crates named via explicit
+          # --package flags, so list every Reborn-family package again. Only the
+          # Reborn family is needed here (not the full workspace): non-family
+          # crates are filtered out by reborn-coverage-summary.sh regardless.
+          report_package_args=()
+          for package in "${crate_packages[@]}"; do
+            report_package_args+=(--package "${package}")
+          done
+          cargo llvm-cov report --json --output-path reborn-llvm-cov.json "${report_package_args[@]}"
 
       - name: Render Reborn coverage summary
         run: |

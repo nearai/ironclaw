@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Upsert a single sticky PR comment carrying the Reborn integration-tier
-# coverage summary, so the %/hole-list lives in the PR conversation instead of
-# being buried in the Actions job summary.
+# Upsert a single sticky PR comment carrying the Reborn coverage summary
+# (int-tier + crate-tier), so the %/hole-list lives in the PR conversation
+# instead of being buried in the Actions job summary.
 #
 # This is VISIBILITY ONLY — it never gates. The workflow step that runs it is
 # `continue-on-error: true`, so any failure here (notably: fork PRs get a
@@ -49,7 +49,7 @@ if [ "${#zero_crates[@]}" -gt 0 ]; then
   # Crate names are constrained to [a-z0-9_]+, so a plain ", " join is safe.
   crate_list="$(printf '%s, ' "${zero_crates[@]}")"
   crate_list="${crate_list%, }"
-  callout="⚠️ ${#zero_crates[@]} Reborn crate(s) have 0 int-tier coverage (target: 0) — ${crate_list}"
+  callout="⚠️ ${#zero_crates[@]} Reborn crate(s) have 0 test coverage (target: 0) — ${crate_list}"
 fi
 
 if [ -n "${callout}" ]; then

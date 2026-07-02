@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 #
-# Regression tests for the three Reborn coverage CI helpers:
+# Regression tests for the Reborn coverage CI helpers:
 #   - reborn-coverage-summary.sh        (report + --zero-crates modes)
 #   - reborn-coverage-comment.sh        (sticky PR comment upsert via `gh api`)
 #   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
+#   - reborn-crate-family-regex.sh      (Reborn crate-family predicate, #5477)
+#   - reborn-crate-family-packages.sh   (crate-family package discovery)
 #
 # Mirrors test-classify-test-scope.sh: self-contained, locates the
 # scripts-under-test relative to this file's own directory, builds its own
 # fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
 # precedent (which exits on the first failure), this suite runs every case
 # and prints a final summary, exiting non-zero only if something failed —
-# with three scripts and ~20 cases, seeing the full picture in one run beats
-# stopping at the first mismatch.
+# with five scripts and dozens of cases, seeing the full picture in one run
+# beats stopping at the first mismatch.
 #
 # reborn-coverage-comment.sh shells out to `gh api`. It is exercised here
 # against a fake `gh` (a fixture script placed first on PATH) that emulates
@@ -31,6 +33,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
 int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
+family_regex_sh="${script_dir}/reborn-crate-family-regex.sh"
+family_packages_sh="${script_dir}/reborn-crate-family-packages.sh"
 
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -466,9 +470,9 @@ assert_exit_code "C3: comment script exits 0 (zero-covered crate present)" 0 "${
 if [ -f "${c3_log}" ]; then
   c3_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c3_log}" | sed '1d;$d')"
   assert_contains "C3: body contains the 0-coverage callout" "${c3_body}" \
-    "⚠️ 1 Reborn crate(s) have 0 int-tier coverage"
+    "⚠️ 1 Reborn crate(s) have 0 test coverage"
   assert_line_before "C3: callout is prepended before the coverage header" "${c3_body}" \
-    "⚠️ 1 Reborn crate(s) have 0 int-tier coverage" "## Reborn integration-tier coverage"
+    "⚠️ 1 Reborn crate(s) have 0 test coverage" "## Reborn coverage"
 else
   report_fail "C3: fake gh did not record a mutation"
 fi
@@ -603,6 +607,61 @@ assert_exit_code "D4: multiple suites exits 0" 0 "${CAP_RC}"
 assert_eq "D4: multiple suites sorted+deduped in expected order" \
   "$(printf -- '--test\nreborn_group_beta\n--test\nreborn_group_omega\n--test\nreborn_integration_alpha\n--test\nreborn_integration_zeta')" \
   "${CAP_OUT}"
+
+# ---------------------------------------------------------------------------
+# E. reborn-crate-family-regex.sh / reborn-crate-family-packages.sh (#5477)
+# ---------------------------------------------------------------------------
+#
+# reborn-crate-family-regex.sh is pure static data (no cargo dependency), so
+# it's exercised directly with bash's own ERE engine. reborn-crate-family-packages.sh
+# runs `cargo metadata` and therefore, unlike every other script in this
+# suite, is run against the real repo rather than a synthetic fixture tree —
+# package discovery inherently needs a real Cargo.toml/Cargo.lock.
+
+capture "${family_regex_sh}"
+assert_exit_code "E1: family regex script exits 0" 0 "${CAP_RC}"
+family_regex="${CAP_OUT}"
+
+assert_family_match() {
+  local name="$1"
+  if [[ "${name}" =~ ^(${family_regex})$ ]]; then
+    report_pass "E1: '${name}' matches the Reborn family regex"
+  else
+    report_fail "E1: '${name}' matches the Reborn family regex"
+  fi
+}
+
+assert_family_no_match() {
+  local name="$1"
+  if [[ "${name}" =~ ^(${family_regex})$ ]]; then
+    report_fail "E1: '${name}' does NOT match the Reborn family regex"
+  else
+    report_pass "E1: '${name}' does NOT match the Reborn family regex"
+  fi
+}
+
+# Prefix-family members (bare name and a suffixed variant each).
+assert_family_match "ironclaw_reborn"
+assert_family_match "ironclaw_reborn_composition"
+assert_family_match "ironclaw_product_workflow"
+assert_family_match "ironclaw_webui_v2"
+assert_family_match "ironclaw_webui_v2_static"
+# Exact-match single crates.
+assert_family_match "ironclaw_architecture"
+assert_family_match "ironclaw_slack_v2_adapter"
+assert_family_match "ironclaw_telegram_v2_adapter"
+assert_family_match "ironclaw_wasm_product_adapters"
+# Non-family crates, including the same lookalike boundary case A6 pins
+# against reborn-coverage-summary.sh's assembled path regex.
+assert_family_no_match "ironclaw_engine"
+assert_family_no_match "ironclaw_architecture_extra"
+assert_family_no_match "ironclaw_telegram_v2_adapters"
+
+capture "${family_packages_sh}"
+assert_exit_code "E2: family packages script exits 0" 0 "${CAP_RC}"
+assert_contains "E2: package list includes exact-match ironclaw_architecture" "${CAP_OUT}" "ironclaw_architecture"
+assert_contains "E2: package list includes prefix-family ironclaw_webui_v2" "${CAP_OUT}" "ironclaw_webui_v2"
+assert_not_contains "E2: package list excludes non-family ironclaw_engine" "${CAP_OUT}" "ironclaw_engine"
 
 # ---------------------------------------------------------------------------
 # Summary
