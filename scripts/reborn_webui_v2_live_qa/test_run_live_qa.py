@@ -25,9 +25,11 @@ from unittest.mock import patch
 if __package__:
     from . import run_live_qa
     from . import semantic_judge
+    from . import text_match
 else:
     import run_live_qa
     import semantic_judge
+    import text_match
 
 
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
@@ -556,55 +558,55 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_required_text_accepts_explicit_alternatives(self):
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bug messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "records bug messages in a sheet",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for debug messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bugfix messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bug: messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "https://near.ai responded with HTTP 200 - the endpoint is up and running fine.",
                 ["status|http|200|up|running|responded"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "Trigger created. Schedule: every 5 minutes. Action: fetch latest releases.",
                 ["routine|trigger|automation|cron|schedule|created"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "The email from firat.sertgoz@near.ai is already in the sheet.",
                 ["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 'Discussion thread "vibe coded eh" (id=47005839) mentions NEAR AI.',
                 ["news.ycombinator.com|hacker news|hn|discussion|id="],
             )
@@ -2504,86 +2506,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(paths, [tool_index_path, message_path])
             self.assertNotIn(secret_path, paths)
             self.assertEqual(payload["entries"][1]["contents"]["content"], "hello live trace")
-
-    def test_write_green_run_explanation_records_success_reasons(self):
-        results = [
-            run_live_qa.ProbeResult(
-                provider="test",
-                mode="live:literal_case",
-                success=True,
-                latency_ms=1,
-                details={
-                    "case": "literal_case",
-                    "required_text": ["routine"],
-                    "text_excerpt": "Routine created successfully.",
-                    "semantic_judge_used": False,
-                    "semantic_judge_reason": "literal_required_text_matched",
-                },
-            ),
-            run_live_qa.ProbeResult(
-                provider="test",
-                mode="live:semantic_case",
-                success=True,
-                latency_ms=1,
-                details={
-                    "case": "semantic_case",
-                    "required_text": ["routine"],
-                    "text_excerpt": "Schedule: every hour. Trigger ID: trigger-123.",
-                    "semantic_judge_used": True,
-                    "semantic_judge_reason": "semantic_judge_completed",
-                    "semantic_judge": {
-                        "completed": True,
-                        "confidence": 0.91,
-                        "reason": "The response confirms the scheduled task.",
-                        "evidence": ["Trigger ID: trigger-123"],
-                    },
-                },
-            ),
-            run_live_qa.ProbeResult(
-                provider="test",
-                mode="live:side_effect_case",
-                success=True,
-                latency_ms=1,
-                details={
-                    "case": "side_effect_case",
-                    "delivery_verified": True,
-                },
-            ),
-        ]
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_dir = Path(tmpdir)
-            path = run_live_qa.write_green_run_explanation(output_dir, results)
-            payload = json.loads(path.read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["total_cases"], 3)
-        self.assertEqual(payload["successful_cases"], 3)
-        self.assertEqual(payload["failed_cases"], 0)
-        self.assertEqual(payload["successful_cases_matching_required_text_literally"], 1)
-        self.assertEqual(payload["successful_cases_using_semantic_judge"], 1)
-        self.assertIn("All 3 cases were green", payload["why_things_were_green"])
-        cases_by_name = {case["case"]: case for case in payload["cases"]}
-        self.assertEqual(
-            cases_by_name["literal_case"]["success_reasons"],
-            ["literal_required_text_matched"],
-        )
-        self.assertEqual(
-            cases_by_name["semantic_case"]["success_reasons"],
-            ["semantic_judge_completed"],
-        )
-        self.assertEqual(
-            cases_by_name["side_effect_case"]["success_reasons"],
-            ["case_success_from_non_text_assertions"],
-        )
-        self.assertEqual(
-            cases_by_name["semantic_case"]["semantic_judge_summary"],
-            {
-                "completed": True,
-                "confidence": 0.91,
-                "reason": "The response confirms the scheduled task.",
-                "enabled": None,
-            },
-        )
 
     def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
         async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:

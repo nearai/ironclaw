@@ -93,6 +93,9 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
+from scripts.reborn_webui_v2_live_qa.green_run_explanation import (  # noqa: E402
+    write_green_run_explanation,
+)
 from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
     _compact_json,
     _judge_assistant_reply_completion,
@@ -112,6 +115,9 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_config_value,
     _slack_enabled,
     _slack_team_id_from_bot_token_env,
+)
+from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
+    required_text_matches,
 )
 
 QA_SHEET_PROMPTS: dict[str, str] = {
@@ -1055,7 +1061,7 @@ async def _wait_for_assistant_reply(
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and _required_text_matches(normalized, required_text):
+            if marker_matches and required_text_matches(normalized, required_text):
                 return AssistantReplyWaitResult(
                     text_excerpt=text[-2000:],
                     semantic_judge_used=False,
@@ -1089,23 +1095,6 @@ async def _wait_for_assistant_reply(
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
-
-
-def _required_text_matches(text: str, required_text: list[str]) -> bool:
-    normalized_text = text.lower()
-    return all(
-        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
-        for piece in required_text
-    )
-
-
-def _required_option_matches(normalized_text: str, option: str) -> bool:
-    normalized_option = option.strip().lower()
-    if not normalized_option:
-        return False
-    if re.fullmatch(r"\w+", normalized_option):
-        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
-    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -3807,144 +3796,6 @@ def write_trace_index(output_dir: Path, traces: list[dict[str, object]]) -> Path
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
-
-
-def write_green_run_explanation(output_dir: Path, results: list[ProbeResult]) -> Path:
-    path = output_dir / "green-run-explanation.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cases: list[dict[str, object]] = []
-    successful_cases = 0
-    failed_cases = 0
-    literal_required_text_matched_count = 0
-    semantic_judge_used_count = 0
-
-    for result in results:
-        details = result.details if isinstance(result.details, dict) else {}
-        case_name = str(details.get("case") or result.mode.rsplit(":", 1)[-1])
-        required_text = _required_text_from_details(details.get("required_text"))
-        text_excerpt = str(details.get("text_excerpt") or "")
-        literal_required_text_matched = bool(required_text) and _required_text_matches(
-            text_excerpt,
-            required_text,
-        )
-        semantic_judge_used = bool(details.get("semantic_judge_used"))
-
-        if result.success:
-            successful_cases += 1
-            if literal_required_text_matched:
-                literal_required_text_matched_count += 1
-            if semantic_judge_used:
-                semantic_judge_used_count += 1
-        else:
-            failed_cases += 1
-
-        cases.append(
-            {
-                "case": case_name,
-                "mode": result.mode,
-                "success": result.success,
-                "blocked": bool(details.get("blocked")),
-                "required_text": required_text,
-                "text_excerpt_present": bool(text_excerpt),
-                "literal_required_text_matched": literal_required_text_matched,
-                "semantic_judge_used": semantic_judge_used,
-                "semantic_judge_reason": details.get("semantic_judge_reason"),
-                "semantic_judge_summary": _semantic_judge_summary(details),
-                "success_reasons": _green_success_reasons(
-                    result=result,
-                    required_text=required_text,
-                    literal_required_text_matched=literal_required_text_matched,
-                    semantic_judge_used=semantic_judge_used,
-                ),
-            }
-        )
-
-    payload = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "why_things_were_green": _green_run_summary(
-            total_cases=len(results),
-            successful_cases=successful_cases,
-            failed_cases=failed_cases,
-            literal_required_text_matched_count=literal_required_text_matched_count,
-            semantic_judge_used_count=semantic_judge_used_count,
-        ),
-        "total_cases": len(results),
-        "successful_cases": successful_cases,
-        "failed_cases": failed_cases,
-        "successful_cases_matching_required_text_literally": (
-            literal_required_text_matched_count
-        ),
-        "successful_cases_using_semantic_judge": semantic_judge_used_count,
-        "cases": cases,
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
-
-
-def _required_text_from_details(value: object) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item)]
-    if isinstance(value, str) and value:
-        return [value]
-    return []
-
-
-def _semantic_judge_summary(details: dict[str, object]) -> dict[str, object] | None:
-    semantic_judge = details.get("semantic_judge")
-    if not isinstance(semantic_judge, dict):
-        return None
-    return {
-        "completed": semantic_judge.get("completed"),
-        "confidence": semantic_judge.get("confidence"),
-        "reason": semantic_judge.get("reason"),
-        "enabled": semantic_judge.get("enabled"),
-    }
-
-
-def _green_success_reasons(
-    *,
-    result: ProbeResult,
-    required_text: list[str],
-    literal_required_text_matched: bool,
-    semantic_judge_used: bool,
-) -> list[str]:
-    if not result.success:
-        return []
-    reasons: list[str] = []
-    if literal_required_text_matched:
-        reasons.append("literal_required_text_matched")
-    if semantic_judge_used:
-        reasons.append("semantic_judge_completed")
-    if not required_text:
-        reasons.append("case_success_from_non_text_assertions")
-    if not reasons:
-        reasons.append("case_success_from_non_text_assertions")
-    return reasons
-
-
-def _green_run_summary(
-    *,
-    total_cases: int,
-    successful_cases: int,
-    failed_cases: int,
-    literal_required_text_matched_count: int,
-    semantic_judge_used_count: int,
-) -> str:
-    if failed_cases:
-        status = f"{successful_cases} of {total_cases} cases were green; {failed_cases} failed."
-    else:
-        status = f"All {total_cases} cases were green."
-    literal = (
-        f"{literal_required_text_matched_count} successful cases matched their "
-        "required text literally."
-    )
-    if semantic_judge_used_count:
-        judge = (
-            f"{semantic_judge_used_count} successful cases used the semantic judge fallback."
-        )
-    else:
-        judge = "No successful cases used the semantic judge fallback."
-    return f"{status} {literal} {judge}"
 
 
 def write_preflight(output_dir: Path, prepared_home: PreparedRebornHome) -> Path:
