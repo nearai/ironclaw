@@ -362,10 +362,26 @@ pub struct LifecycleSearchExtensionSummary {
     pub installation_phase: Option<LifecyclePhase>,
 }
 
+/// Whether an installed extension is tenant-shared or private to the caller
+/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
+/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleInstallScope {
+    /// Installed for the whole tenant (admin install) — visible to every user.
+    Shared,
+    /// Installed privately by the caller — visible only to them.
+    Private,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     pub phase: LifecyclePhase,
+    /// `None` only when the caller has no visible installation (projection of
+    /// an uninstalled package); list responses always carry `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

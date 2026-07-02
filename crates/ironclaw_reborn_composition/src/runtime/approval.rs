@@ -75,8 +75,12 @@ impl LocalDevApprovalLeaseTermsProvider {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
                 lease_terms_unavailable()
             })?;
+        // Lease terms resolve for the user whose run raised the gate; the
+        // owner filter in `grants` then behaves exactly like dispatch did
+        // (#5459 P1): their own private capability resolves, anyone else's
+        // yields no grant and the lease stays unavailable.
         let Some(grant) = surface
-            .grants(extension_id)
+            .grants(extension_id, &gate.resource_scope().user_id)
             .into_iter()
             .find(|grant| grant.capability == *capability)
         else {
@@ -249,6 +253,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -320,6 +325,7 @@ mod tests {
                     required: true,
                 }],
                 network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -372,6 +378,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -411,6 +418,7 @@ mod tests {
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -479,6 +487,7 @@ mod tests {
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(

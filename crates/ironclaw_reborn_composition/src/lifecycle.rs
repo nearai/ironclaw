@@ -335,6 +335,7 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
+                let caller = lifecycle_resource_scope(&context)?.user_id;
                 let credential_gate = if matches!(&context, LifecycleProductContext::Surface(_)) {
                     if let Some(credential_accounts) = &self.credential_accounts {
                         Some(RuntimeExtensionActivationCredentialGate::new(
@@ -348,25 +349,28 @@ impl RebornLocalLifecycleFacade {
                     None
                 };
                 extension_management
-                    .search(&query, credential_gate.as_ref())
+                    .search(&query, credential_gate.as_ref(), &caller)
                     .await
             }
             LifecycleProductAction::ExtensionList => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management.list_installed().await
+                let caller = lifecycle_resource_scope(&context)?.user_id;
+                extension_management.list_installed(&caller).await
             }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.install(package_ref).await
+                let caller = lifecycle_resource_scope(&context)?.user_id;
+                extension_management.install(package_ref, &caller).await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
+                let caller = lifecycle_resource_scope(&context)?.user_id;
                 let credential_gate = self
                     .extension_activation_credential_gate(
                         &context,
@@ -395,27 +399,46 @@ impl RebornLocalLifecycleFacade {
                     return match credential_gate {
                         Some(credential_gate) => {
                             extension_management
-                                .activate_with_credential_gate(package_ref, mode, credential_gate)
+                                .activate_with_credential_gate(
+                                    package_ref,
+                                    mode,
+                                    credential_gate,
+                                    &caller,
+                                )
                                 .await
                         }
-                        None => extension_management.activate(package_ref, mode).await,
+                        None => {
+                            extension_management
+                                .activate(package_ref, mode, &caller)
+                                .await
+                        }
                     };
                 }
                 let mode = crate::extension_lifecycle::ExtensionActivationMode::Static;
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management
-                            .activate_with_credential_gate(package_ref, mode, credential_gate)
+                            .activate_with_credential_gate(
+                                package_ref,
+                                mode,
+                                credential_gate,
+                                &caller,
+                            )
                             .await
                     }
-                    None => extension_management.activate(package_ref, mode).await,
+                    None => {
+                        extension_management
+                            .activate(package_ref, mode, &caller)
+                            .await
+                    }
                 }
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.remove(package_ref).await
+                let caller = lifecycle_resource_scope(&context)?.user_id;
+                extension_management.remove(package_ref, &caller).await
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
             | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
@@ -475,14 +498,15 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
 
     async fn project_package(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         if package_ref.kind == LifecyclePackageKind::Extension {
             let Some(extension_management) = &self.extension_management else {
                 return unsupported_projection(Some(package_ref));
             };
-            return extension_management.project(package_ref).await;
+            let caller = lifecycle_resource_scope(&context)?.user_id;
+            return extension_management.project(package_ref, &caller).await;
         }
         unsupported_projection(Some(package_ref))
     }

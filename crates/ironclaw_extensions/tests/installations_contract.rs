@@ -3,8 +3,8 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthMessage, ExtensionHealthSnapshot,
     ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
-    ExtensionManifestRef, InMemoryExtensionInstallationStore, MANIFEST_SCHEMA_VERSION,
-    ManifestHash, ManifestSource, ManifestV2Error,
+    ExtensionManifestRef, InMemoryExtensionInstallationStore, InstallationOwner,
+    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog};
 
@@ -65,6 +65,7 @@ fn installation(hash: &str) -> ExtensionInstallation {
         ExtensionManifestRef::new(extension_id("acme-tools"), Some(manifest_hash(hash))),
         vec![],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap()
 }
@@ -77,6 +78,7 @@ fn installation_with_manifest_hash(hash: Option<&str>) -> ExtensionInstallation 
         ExtensionManifestRef::new(extension_id("acme-tools"), hash.map(manifest_hash)),
         vec![],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap()
 }
@@ -117,6 +119,7 @@ async fn upsert_installation_rejects_unknown_manifest() {
                 ),
                 vec![],
                 Utc::now(),
+                InstallationOwner::Tenant,
             )
             .unwrap(),
         )
@@ -355,6 +358,7 @@ fn new_installation_uses_updated_at_for_initial_health_timestamp() {
         ),
         vec![],
         updated_at,
+        InstallationOwner::Tenant,
     )
     .unwrap();
 
@@ -389,6 +393,7 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
                     ),
                     vec![],
                     updated_at,
+                    InstallationOwner::Tenant,
                 )
                 .unwrap(),
             )

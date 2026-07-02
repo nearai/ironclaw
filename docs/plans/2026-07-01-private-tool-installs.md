@@ -117,6 +117,33 @@ credentials), #5513 (admin UI for the same credential rows).
    installed privately still gates on missing key and runs with the
    tenant-shared key.
 
+## Adversarial review (2026-07-01, run wmg0t4d3w) — confirmed + resolved
+
+- **[blocker] settings/tools catalog leaked private tools** — the
+  `GET /api/webchat/v2/settings/tools` catalog
+  (`ActiveRegistryOperatorToolCatalog`) read the global registry with no
+  owner filter, so any member saw another user's private capability id +
+  metadata (dispatch stayed denied — grants are per-caller — but the
+  existence/metadata leaked). FIXED: `RebornOperatorToolCatalog::list_operator_tools`
+  is now `async` + caller-aware; the composition catalog joins
+  `installation_owners()` and drops foreign-private tools; `find_operator_tool`
+  masks them on the get/set-key paths too. Pinned by
+  `operator_tool_catalog_hides_foreign_private_tools` (webui.rs) +
+  `installation_owners` assert in `active_capabilities_carry_installation_owner`.
+- **[should-fix] eviction bricked the id on partial failure** — a tenant
+  install that failed after eviction deregistered the private package left
+  the id un-installable tenant-wide until restart. FIXED: eviction is now
+  retry-safe (tolerates an already-absent lifecycle package), so the admin's
+  retry heals the slot. Pinned by
+  `admin_install_retry_heals_after_eviction_then_persist_failure`.
+- **[minor] activate TOCTOU across hosted-MCP discovery** — ownership was
+  checked only in phase 1; the slot could change hands during the discovery
+  network call. FIXED: `activate_inner` re-runs `ensure_caller_may_operate`
+  after re-acquiring the lock, mapping a change to
+  `hosted_mcp_changed_during_discovery_error`.
+
+Two accepted tradeoffs (documented, not code-fixed — see below).
+
 ## Non-goals / phase 2
 
 - **Multi-user private installs of the same id** (alice AND bob both
@@ -126,11 +153,40 @@ credentials), #5513 (admin UI for the same credential rows).
   demanded; the admin-escalation path covers the common case.
 - **Per-user suppression** of a tenant-wide tool ("hide this shared
   tool for me").
+- **User-uploaded private tools ("bring your own").** `import` (zip →
+  catalog) stays admin-only, and the `AvailableExtensionCatalog` is a
+  single tenant-global catalog, so a member can only privately *install*
+  a tool an admin already imported (or a bundled/first-party one) — they
+  cannot introduce a brand-new WASM tool that only they see. True BYO
+  private tools would require owner-scoping the import + catalog-browse
+  layer (one level below P1's install-scope), plus keeping arbitrary-WASM
+  upload behind a deliberate capability gate. Deferred.
 - **Restore-on-admin-remove** (evicted private install coming back when
   the admin removes the shared tool) — nice-to-have; MVP leaves the
   user to reinstall.
 - **Skills** — same shared-vs-private axis, different mechanics; owned
   by the P4 plan (`shared-` prefix IS right there, per-user trees).
+
+## Accepted tradeoffs (operator awareness / release notes)
+
+- **Rollback is a full outage once any private install exists.** Tenant
+  rows serialize byte-identical to pre-#5459 (owner field skipped when
+  `Tenant`), so a rollback loads a state.json holding only shared tools.
+  But a user-private row carries `owner: {kind: user, …}`, which an older
+  binary's `deny_unknown_fields` wire struct rejects — and the store fails
+  the WHOLE state.json load, so `serve` refuses to start until the file is
+  hand-edited. One member clicking "install" turns a rollback into an
+  outage. Flag in release notes; the real fix is a forward-compatible
+  older binary (out of scope here).
+- **SSO users (incl. real admins) always install private on this branch.**
+  The tenant-operator identity is the env-bearer `IRONCLAW_REBORN_WEBUI_USER_ID`;
+  SSO logins mint UUID user ids that never equal it, so every SSO user
+  derives `User(..)`: private installs only, cannot install/administer
+  shared tools, and — one behavior regression — cannot remove a
+  tenant-shared tool (new "only the tenant admin can remove" check) that
+  a browser user could remove pre-#5459. Matches decision 6 (env-owner
+  today, role-derived admin at P0); a private-install squat on a
+  first-party id is un-evictable from an SSO browser until P0 lands.
 
 ## Known upstream issue (not this plan's problem)
 
