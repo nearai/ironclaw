@@ -8,6 +8,7 @@ exercise the real Reborn binary without duplicating process plumbing.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -190,6 +191,16 @@ async def close_reborn_server(proc) -> None:
             await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+async def kill_reborn_server(proc) -> None:
+    """Hard-kill (SIGKILL) the reborn process, skipping graceful shutdown entirely.
+
+    Used by durability scenarios that need to prove on-disk state survives an
+    unclean process death, as opposed to `close_reborn_server`'s SIGINT/SIGTERM path.
+    """
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGKILL, timeout=5)
+
+
 async def enable_reborn_global_auto_approve(base_url: str) -> None:
     """Enable the Tools settings global auto-approve switch for this test user."""
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -239,7 +250,13 @@ async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_pat
 async def reborn_v2_restartable_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
 ):
-    """Start/stop Reborn against one persistent home directory."""
+    """Start/stop Reborn against one persistent home directory.
+
+    `stop(hard=True)` SIGKILLs the process instead of shutting it down
+    gracefully, for durability scenarios that need to prove on-disk state
+    survives an unclean death — the caller can read the killed PID off
+    `state["proc"].pid` beforehand for a post-kill leak check.
+    """
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-restartable-home")
     state = {"proc": None, "base_url": None}
 
@@ -255,8 +272,11 @@ async def reborn_v2_restartable_server(
         state["base_url"] = base_url
         return base_url
 
-    async def stop() -> None:
-        await close_reborn_server(state["proc"])
+    async def stop(*, hard: bool = False) -> None:
+        if hard:
+            await kill_reborn_server(state["proc"])
+        else:
+            await close_reborn_server(state["proc"])
         state["proc"] = None
 
     await start()
@@ -414,6 +434,49 @@ async def fetch_timeline(client: httpx.AsyncClient, base_url: str, thread_id: st
     )
     response.raise_for_status()
     return response.json()
+
+
+def capability_preview_payload(message: dict) -> dict | None:
+    """Parse a `capability_display_preview` timeline message, or `None` if not one."""
+    if message.get("kind") != "capability_display_preview":
+        return None
+    content = message.get("content")
+    assert isinstance(content, str), f"preview content must be a string: {message!r}"
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"preview content is not valid JSON: {content!r}") from error
+
+
+async def wait_for_capability_preview(
+    client: httpx.AsyncClient,
+    base_url: str,
+    thread_id: str,
+    capability_id: str,
+    *,
+    output_fragment: str | None = None,
+    timeout: float = 45.0,
+) -> dict:
+    """Poll the timeline until a `capability_id` preview (optionally matching
+    `output_fragment`) appears, proving a tool actually executed for the turn."""
+    last_timeline: dict = {}
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        last_timeline = await fetch_timeline(client, base_url, thread_id)
+        for message in last_timeline.get("messages", []):
+            preview = capability_preview_payload(message)
+            if not preview or preview.get("capability_id") != capability_id:
+                continue
+            output = preview.get("output_preview") or preview.get("output_summary") or ""
+            if output_fragment and output_fragment.lower() not in output.lower():
+                continue
+            return preview
+        await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"Timed out waiting for {capability_id!r} preview in thread {thread_id}. "
+        f"Last timeline: {last_timeline}"
+    )
 
 
 async def wait_for_assistant_message(
