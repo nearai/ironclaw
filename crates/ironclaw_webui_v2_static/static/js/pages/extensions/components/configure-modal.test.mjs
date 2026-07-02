@@ -121,7 +121,9 @@ test("ConfigureModal renders the pairing panel for a channel extension", () => {
 
 test("ConfigureModal does not render the pairing panel for a non-channel extension", () => {
   const { rendered } = renderModal({ kind: "mcp_server" });
-  assert.doesNotMatch(JSON.stringify(rendered), /Enter pairing code/);
+  const body = JSON.stringify(rendered);
+  assert.doesNotMatch(body, /pairing\.slackPlaceholder/);
+  assert.doesNotMatch(body, /pairing\.slackInstructions/);
 });
 
 test("ConfigureModal does not route setup-required channels to the pairing panel", () => {

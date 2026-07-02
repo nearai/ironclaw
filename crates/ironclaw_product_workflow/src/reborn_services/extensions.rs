@@ -611,6 +611,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_action_stays_retryable_when_removal_fails_after_disconnect() {
+        // Disconnect deliberately runs before `ExtensionRemove` and is
+        // destructive: when removal then fails, the caller's pairing is
+        // already gone and they re-pair afterwards (accepted cost). What must
+        // hold is that the failure surfaces to the caller and a retry
+        // converges — the pre-remove lookup still finds the installed package
+        // and the disconnect is idempotent for an already-unpaired caller, so
+        // removal is re-attempted instead of being skipped.
+        let facade = RemoveFacade::default();
+        facade.fail_next_removes(1);
+        let caller = caller();
+        let connections = Arc::new(TestConnections::default());
+        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
+
+        let error = remove_extension(
+            &facade,
+            channel_connections.clone(),
+            caller.clone(),
+            package_ref(),
+        )
+        .await
+        .expect_err("removal failure must surface after disconnect succeeded");
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert!(error.retryable, "transient removal failures stay retryable");
+
+        remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+            .await
+            .expect("retry converges once removal succeeds");
+
+        assert_eq!(
+            connections.disconnects(),
+            vec![
+                (caller.user_id.clone(), "fixture".to_string()),
+                (caller.user_id.clone(), "fixture".to_string()),
+            ],
+            "each attempt re-runs the idempotent caller disconnect"
+        );
+        let calls = facade.calls.lock().expect("lock");
+        let actions: Vec<_> = calls.iter().map(|(_, action)| action.clone()).collect();
+        assert_eq!(actions.len(), 4, "list+remove per attempt");
+        assert!(matches!(actions[0], LifecycleProductAction::ExtensionList));
+        assert!(matches!(
+            actions[1],
+            LifecycleProductAction::ExtensionRemove { .. }
+        ));
+        assert!(matches!(actions[2], LifecycleProductAction::ExtensionList));
+        assert!(matches!(
+            actions[3],
+            LifecycleProductAction::ExtensionRemove { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn static_channel_connection_facade_fails_disconnect_closed() {
         let error = StaticChannelConnectionFacade
             .disconnect_channel_for_caller(caller(), "slack")
@@ -1215,6 +1268,7 @@ mod tests {
     struct RemoveFacade {
         calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
         channel: bool,
+        remove_failures: Mutex<usize>,
     }
 
     impl Default for RemoveFacade {
@@ -1222,6 +1276,7 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 channel: true,
+                remove_failures: Mutex::new(0),
             }
         }
     }
@@ -1231,7 +1286,12 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 channel: false,
+                remove_failures: Mutex::new(0),
             }
+        }
+
+        fn fail_next_removes(&self, count: usize) {
+            *self.remove_failures.lock().expect("lock") = count;
         }
     }
 
@@ -1268,6 +1328,15 @@ mod tests {
                     })
                 }
                 LifecycleProductAction::ExtensionRemove { package_ref } => {
+                    {
+                        let mut failures = self.remove_failures.lock().expect("lock");
+                        if *failures > 0 {
+                            *failures -= 1;
+                            return Err(ProductWorkflowError::Transient {
+                                reason: "extension removal unavailable".to_string(),
+                            });
+                        }
+                    }
                     Ok(LifecycleProductResponse {
                         package_ref: Some(package_ref),
                         phase: LifecyclePhase::Removed,

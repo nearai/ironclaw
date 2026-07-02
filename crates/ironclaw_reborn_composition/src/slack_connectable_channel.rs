@@ -455,6 +455,24 @@ mod tests {
                 .expect("dm target lookup after disconnect"),
             None
         );
+
+        // Retry convergence for extension removal: `remove_extension` runs the
+        // caller disconnect before `ExtensionRemove`, so a failed removal
+        // retries the disconnect for a caller who is already unpaired. That
+        // repeat disconnect must stay an idempotent no-op success (the scope
+        // resolves from the installation, and deleting zero records is Ok),
+        // not an error that would wedge the removal retry.
+        facade
+            .disconnect_channel_for_caller(caller.clone(), "slack")
+            .await
+            .expect("repeat disconnect for an unpaired caller is an idempotent no-op");
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after repeat disconnect"),
+            HashMap::from([("slack".to_string(), false)])
+        );
     }
 
     #[tokio::test]
