@@ -305,38 +305,6 @@ async fn instructions_field_is_accepted() {
 /// directly — so this test exercises the no-engine branch by virtue of
 /// what `TestGatewayBuilder` actually wires up. No process-global env
 /// mutation required.
-#[tokio::test]
-async fn external_tools_rejected_when_engine_v2_disabled() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
-            "model": "default",
-            "input": "hello",
-            "tools": [
-                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
-            ]
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses with tools and engine v2 unavailable");
-
-    assert_eq!(
-        resp.status(),
-        400,
-        "expected 400 when engine v2 is unavailable, got {}",
-        resp.status()
-    );
-    let body = resp.text().await.unwrap_or_default();
-    assert!(
-        body.to_ascii_lowercase().contains("engine v2"),
-        "rejection should mention engine v2, got: {body}"
-    );
-}
-
 /// `function_call_output` items are a resume signal: they must be
 /// matched against a pending external-tool gate for the resolved
 /// thread. Without one (e.g. because the caller fabricates a

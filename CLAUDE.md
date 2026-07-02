@@ -45,7 +45,7 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/ironclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (system prompts, synthesis/summary prompts) go in a `prompts/*.md` directory (e.g. root `prompts/` or a crate's `prompts/`) and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -79,17 +79,14 @@ Rules:
 
 Current ownership:
 
-- `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
-- `src/bridge/router.rs`: auth gate display + submit routing
-- `src/channels/web/server.rs`: pending-gate/history rehydration
+- `src/auth/extension.rs`: canonical auth-flow extension-name resolver (`resolve_auth_flow_extension_name` free fn + `AuthManager::resolve_extension_name_for_auth_flow`)
+- `src/channels/web/features/chat/mod.rs`: web auth submit routing and history rehydration (`pending_gate_extension_name` wrapper, `pending_auth` handling)
 - `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/ironclaw_gateway/src/assets.rs` for the concat order)
 
-Temporary compatibility boundary:
+Auth mode:
 
-- Web auth prompts with a gate `request_id` are the v2 path and must resolve through `/api/chat/gate/resolve`.
-- Web auth prompts without a `request_id` are legacy engine v1 `pending_auth` compatibility only.
-- Keep that compatibility isolated; do not add new features to it.
-- Once v1 auth mode is removed, delete the legacy `/api/chat/auth-token` and `/api/chat/auth-cancel` shim endpoints and the matching no-`request_id` UI branch.
+- Web auth prompts use the legacy `pending_auth` path (`/api/chat/auth-token`, `/api/chat/auth-cancel`); the user's next message is intercepted and routed to the credential store.
+- The former engine-v2 gate path (`/api/chat/gate/resolve`, `request_id`-scoped pending gates) has been removed along with engine v2.
 
 Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `SuccessEvaluator`, `EmbeddingProvider`, `NetworkPolicyDecider`, `Hook`, `Observer`, `Tunnel`.
 
@@ -257,7 +254,6 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
-| `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
 | `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
 | `tests/support/reborn/` | `tests/support/reborn/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
@@ -317,20 +313,6 @@ incremental migration.
 See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
 and migration status. The dispatcher itself lives in
 `src/tools/dispatch.rs`.
-
-## Engine v2 Per-Project Sandbox
-
-When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
-(`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
-paths through a per-project Docker container instead of the host filesystem.
-The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
-`/project/` inside the container, and a `sandbox_daemon` binary inside the
-container speaks NDJSON over `docker exec -i`.
-
-When unset, the same code path uses a host-filesystem `MountBackend` —
-behavior is unchanged. See `docs/plans/2026-04-10-engine-v2-sandbox.md`.
-
-Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .`
 
 ## Workspace & Memory
 

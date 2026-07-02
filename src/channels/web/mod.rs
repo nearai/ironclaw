@@ -21,7 +21,6 @@ pub mod oauth;
 pub(crate) mod onboarding;
 pub mod openai_compat;
 pub mod platform;
-pub mod responses_api;
 pub mod types;
 pub(crate) mod util;
 

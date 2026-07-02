@@ -517,12 +517,7 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let engine_version = if crate::bridge::is_engine_v2_enabled() {
-            crate::tools::EngineVersion::V2
-        } else {
-            crate::tools::EngineVersion::V1
-        };
-        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        let mut registry = ToolRegistry::new().with_engine_version(crate::tools::EngineVersion::V1);
         if let Some(ref db) = self.db {
             registry = registry.with_database(Arc::clone(db));
         }

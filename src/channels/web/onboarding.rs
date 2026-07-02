@@ -5,10 +5,7 @@ use ironclaw_common::ExtensionName;
 pub(crate) enum ConfigureFlowOutcome {
     Ready,
     AuthRequired,
-    PairingRequired {
-        instructions: Option<String>,
-        onboarding: Option<serde_json::Value>,
-    },
+    PairingRequired,
     RetryAuth,
 }
 
@@ -19,16 +16,7 @@ pub(crate) fn classify_configure_result(result: &ConfigureResult) -> ConfigureFl
             Some(ChannelOnboardingState::PairingRequired)
         )
     {
-        return ConfigureFlowOutcome::PairingRequired {
-            instructions: result
-                .onboarding
-                .as_ref()
-                .and_then(|o| o.pairing_instructions.clone()),
-            onboarding: result
-                .onboarding
-                .as_ref()
-                .and_then(|o| serde_json::to_value(o).ok()),
-        };
+        return ConfigureFlowOutcome::PairingRequired;
     }
 
     if result.activated {
