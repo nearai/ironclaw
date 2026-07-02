@@ -192,7 +192,7 @@
   align-self: center;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   padding: 6px 12px;
 }
 
@@ -253,7 +253,7 @@
   gap: var(--space-2);
   padding: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 .scroll-load-spinner .spinner {
@@ -498,7 +498,7 @@
   margin: 0;
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   line-height: 1.4;
   color: var(--text-secondary);
   background: var(--code-bg);
@@ -601,7 +601,7 @@
 }
 
 .approval-header {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-weight: 600;
   color: var(--warning);
   text-transform: uppercase;
@@ -637,7 +637,7 @@
   border: none;
   color: var(--accent);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   padding: 0;
   text-align: left;
 }
@@ -650,7 +650,7 @@
   background: var(--code-bg);
   padding: 8px 12px;
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-family: var(--font-mono);
   line-height: 1.4;
   overflow-x: auto;
@@ -702,7 +702,7 @@
 }
 
 .approval-resolved {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-weight: 500;
   color: var(--text-secondary);
   font-style: italic;
@@ -779,7 +779,7 @@
 }
 
 .plan-step-result {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   font-style: italic;
   margin-left: 4px;
@@ -804,7 +804,7 @@
 }
 
 .plan-summary {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   padding-top: 4px;
   border-top: 1px solid var(--border);
@@ -886,7 +886,7 @@
   left: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay-heavy);
   z-index: 1001;
   display: flex;
   align-items: center;
@@ -914,8 +914,8 @@
   margin: 0;
   align-self: auto;
   background: var(--bg);
-  border-color: rgba(52, 211, 153, 0.35);
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+  border-color: color-mix(in srgb, var(--v2-positive-text) 35%, transparent);
+  box-shadow: var(--v2-shadow-modal);
 }
 
 .auth-card .auth-header {
@@ -1007,7 +1007,7 @@
 
 .auth-card .auth-error {
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 .setup-card {
@@ -1192,7 +1192,7 @@
 
 .suggestion-chip:hover {
   background: var(--accent);
-  color: #09090b;
+  color: var(--v2-inverse);
   border-color: var(--accent);
   transform: translateY(-1px);
 }
@@ -1399,7 +1399,7 @@
 
 .thread-label {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -1495,7 +1495,7 @@
 }
 
 .slash-ac-desc {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1581,7 +1581,7 @@
   background: var(--danger);
   color: var(--text-on-danger);
   border: none;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   line-height: 18px;
   text-align: center;
   cursor: pointer;

@@ -192,7 +192,7 @@
   font-family: var(--font-pixel);
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
 }
 
 .sidebar-nav-item svg {
@@ -520,7 +520,7 @@
   .sidebar-scrim {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--bg-overlay);
     z-index: 299;
     opacity: 0;
     pointer-events: none;

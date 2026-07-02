@@ -40,7 +40,7 @@
 .sidebar-credits-caption {
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: 9px;
   color: var(--text-muted);
 }
@@ -108,7 +108,7 @@
 .billing-card-label {
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: var(--text-xs);
   color: var(--text-muted);
   margin-bottom: 10px;
@@ -212,7 +212,7 @@
 .billing-add-credits:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .billing-empty {
@@ -279,7 +279,7 @@
 
 .billing-plan-card.recommended {
   border-color: var(--accent-soft);
-  box-shadow: 0 18px 40px -28px rgba(76, 167, 230, 0.6);
+  box-shadow: 0 18px 40px -28px color-mix(in srgb, var(--v2-accent) 60%, transparent);
 }
 
 .billing-plan-flag {
@@ -289,10 +289,10 @@
   padding: 2px 9px;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: 9px;
 }
 
@@ -317,7 +317,7 @@
 .billing-plan-credits {
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: 10px;
   color: var(--accent);
 }
@@ -346,13 +346,13 @@
 .billing-plan-btn:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .billing-plan-btn.primary {
   background: var(--btn-primary-bg);
   border: none;
-  color: #fff;
+  color: var(--text-on-accent);
   padding: 10px 14px;
 }
 
@@ -374,7 +374,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--bg-overlay);
   z-index: 800;
   padding: 20px;
 }
@@ -445,7 +445,7 @@
 .billing-reminder-later:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .billing-reminder-upgrade {
@@ -456,7 +456,7 @@
   font-family: inherit;
   font-size: var(--text-sm);
   font-weight: 500;
-  color: #fff;
+  color: var(--text-on-accent);
   cursor: pointer;
   transition: background 0.35s ease, box-shadow 0.3s ease;
 }

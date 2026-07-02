@@ -366,7 +366,7 @@
 }
 
 .auth-hint {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   text-align: center;
   line-height: 1.4;

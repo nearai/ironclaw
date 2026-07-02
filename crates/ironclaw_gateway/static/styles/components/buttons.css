@@ -29,7 +29,7 @@
 .restart-modal-btn.confirm,
 .empty-state-action {
   background: var(--btn-primary-bg);
-  color: #fff;
+  color: var(--text-on-accent);
   border: none;
   border-radius: var(--btn-radius);
   font-family: inherit;
@@ -93,7 +93,7 @@
 .config-form-actions .btn-secondary:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 /* The danger flavour of .btn-secondary contexts stays red */

@@ -378,7 +378,7 @@
 }
 
 .user-dropdown-email {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   margin-top: 2px;
   overflow: hidden;
@@ -444,7 +444,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--success);
   padding: 4px 10px;
   border-radius: 12px;
@@ -825,7 +825,7 @@
 }
 
 .tee-field-value {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-family: var(--font-mono);
   color: var(--text);
   word-break: break-all;
@@ -858,7 +858,7 @@
 }
 
 .tee-popover-loading {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   padding: 8px 0;
 }
@@ -903,7 +903,7 @@
 .gw-stat {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   padding: 3px 0;
   color: var(--text-secondary);
 }
@@ -916,7 +916,7 @@
 .gw-model-row {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   padding: 3px 0 0 0;
 }
 

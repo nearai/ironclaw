@@ -27,7 +27,7 @@
 .kanban-col-title {
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: var(--text-xs);
   color: var(--text-secondary);
 }
@@ -253,7 +253,7 @@
 .task-sheet-action:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .task-sheet-close {
@@ -287,7 +287,7 @@
 .task-sheet-section-label {
   font-family: var(--font-pixel);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--v2-tracking-tag);
   font-size: var(--text-xs);
   color: var(--text-muted);
   margin-bottom: 6px;
@@ -385,7 +385,7 @@
 .task-chat-msg.user {
   align-self: flex-end;
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .task-mini-chat-composer {
@@ -424,7 +424,7 @@
   background: var(--btn-primary-bg);
   border: none;
   border-radius: 50%;
-  color: #fff;
+  color: var(--text-on-accent);
   cursor: pointer;
 }
 
@@ -461,7 +461,7 @@
   background: var(--btn-primary-bg);
   border: none;
   border-radius: 50%;
-  color: #fff;
+  color: var(--text-on-accent);
   cursor: pointer;
   box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.45);
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
