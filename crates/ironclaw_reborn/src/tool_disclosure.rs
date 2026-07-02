@@ -439,19 +439,19 @@ fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitio
 fn advertised_bridge_tool_definitions(
     catalog: &CapabilityCatalog,
 ) -> Vec<(ProviderToolDefinition, u32)> {
+    // Only `tool_search` is advertised to the model. Discovery is
+    // `tool_search` (find names) → `capability_info` (load schema + promote) →
+    // direct call, so `tool_describe` and `tool_call` are no longer surfaced:
+    // `capability_info` already returns schemas, and a promoted tool is called
+    // directly rather than through a proxy. Their synthetic capabilities are
+    // retained internally (see `bridge_tool_definitions`) only so describe-first
+    // can still hand back a schema when the model calls a deferred tool blind.
     bridge_tool_definitions_with_tokens()
-        .map(|(definition, est_schema_tokens)| {
+        .filter(|(definition, _)| definition.name.as_str() == TOOL_SEARCH_NAME)
+        .map(|(definition, _)| {
             let mut advertised = definition.clone();
-            if advertised.name.as_str() == TOOL_SEARCH_NAME {
-                advertised.description = catalog_index_tool_search_description(catalog);
-                let est_schema_tokens = estimate_definition_tokens(&advertised);
-                return (advertised, est_schema_tokens);
-            }
-            if advertised.name.as_str() == TOOL_CALL_NAME {
-                advertised.description = tool_call_safety_description();
-                let est_schema_tokens = estimate_definition_tokens(&advertised);
-                return (advertised, est_schema_tokens);
-            }
+            advertised.description = catalog_index_tool_search_description(catalog);
+            let est_schema_tokens = estimate_definition_tokens(&advertised);
             (advertised, est_schema_tokens)
         })
         .collect()
@@ -503,11 +503,6 @@ fn catalog_index_tool_search_description(catalog: &CapabilityCatalog) -> String 
         ));
     }
     description
-}
-
-fn tool_call_safety_description() -> String {
-    "Invoke one named tool through the normal dispatcher path. Approvals, policy, and hooks run exactly as for a directly-listed tool."
-        .to_string()
 }
 
 pub(crate) fn is_bridge_name(name: &str) -> bool {
@@ -1323,8 +1318,6 @@ mod tests {
                 "memory_search",
                 "read_file",
                 "tool_search",
-                "tool_describe",
-                "tool_call",
                 "zzz_promoted",
                 "aaa_promoted"
             ]
@@ -1351,7 +1344,7 @@ mod tests {
             promoted.push(format!("promoted_{index:02}"));
         }
 
-        let base_count = bridge_tool_definitions().len() + 1;
+        let base_count = advertised_bridge_tool_definitions(&catalog).len() + 1;
         let by_count = select_active_set(
             &catalog,
             &promoted,
@@ -1370,8 +1363,8 @@ mod tests {
         assert!(by_count.definitions.len() <= base_count + 1);
         assert!(by_count_names.contains(&"read_file"));
         assert!(by_count_names.contains(&TOOL_SEARCH_NAME));
-        assert!(by_count_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(by_count_names.contains(&TOOL_CALL_NAME));
+        assert!(!by_count_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(!by_count_names.contains(&TOOL_CALL_NAME));
         assert!(by_count_names.contains(&"promoted_00"));
         assert!(!by_count_names.contains(&"promoted_01"));
 
@@ -1416,8 +1409,8 @@ mod tests {
         assert!(by_tokens.advertised_tokens <= token_threshold);
         assert!(by_token_names.contains(&"read_file"));
         assert!(by_token_names.contains(&TOOL_SEARCH_NAME));
-        assert!(by_token_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(by_token_names.contains(&TOOL_CALL_NAME));
+        assert!(!by_token_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(!by_token_names.contains(&TOOL_CALL_NAME));
         assert!(by_token_names.contains(&"promoted_00"));
         assert!(!by_token_names.contains(&"promoted_01"));
     }
@@ -1456,12 +1449,16 @@ mod tests {
             tool_search.description,
             catalog_index_tool_search_description(&catalog)
         );
-        let tool_call = active
-            .definitions
-            .iter()
-            .find(|definition| definition.name.as_str() == TOOL_CALL_NAME)
-            .expect("tool_call advertised");
-        assert_eq!(tool_call.description, tool_call_safety_description());
+        // tool_describe / tool_call are no longer advertised — only tool_search.
+        assert!(
+            !active.definitions.iter().any(|definition| {
+                matches!(
+                    definition.name.as_str(),
+                    TOOL_DESCRIBE_NAME | TOOL_CALL_NAME
+                )
+            }),
+            "only tool_search is advertised; describe/call bridges are internal-only"
+        );
 
         let actual_tokens = active.definitions.iter().fold(0_u32, |total, definition| {
             total.saturating_add(estimate_definition_tokens(definition))

@@ -483,18 +483,24 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             }
         }
         // Callable = the full reachable catalog (captured above) UNION the tools
-        // actually advertised this turn. The advertised set includes the bridges
-        // (tool_search / tool_describe / tool_call) synthesized just above, which
-        // are NOT catalog entries. Without this union the bridge ids are absent
-        // from `callable`, so the outer model-visible filter strips the bridges
-        // from the advertised tool list and the model loses its discovery entry
-        // point entirely ("tool_search is not available").
+        // actually advertised this turn UNION every bridge capability. Only
+        // `tool_search` is advertised now, but the `tool_describe` / `tool_call`
+        // synthetic capabilities are still used internally — describe-first routes
+        // a schema response through `tool_describe`'s capability id. Keeping ALL
+        // bridge capabilities callable authorizes that internal routing at the
+        // executor visibility gate even though they are no longer advertised;
+        // without it a describe-first response is rejected as "not visible".
         let mut callable: BTreeSet<CapabilityId> = callable_capability_ids.into_iter().collect();
         callable.extend(
             surface
                 .descriptors
                 .iter()
                 .map(|descriptor| descriptor.capability_id.clone()),
+        );
+        callable.extend(
+            bridge_tool_definitions()
+                .into_iter()
+                .map(|definition| definition.capability_id),
         );
         surface.callable_capability_ids = Some(callable.into_iter().collect());
         Ok(surface)
@@ -1561,7 +1567,15 @@ mod tests {
         assert!(
             advertised
                 .iter()
-                .any(|definition| definition.name.as_str() == TOOL_CALL_NAME)
+                .any(|definition| definition.name.as_str() == TOOL_SEARCH_NAME),
+            "tool_search stays advertised as the discovery entry point"
+        );
+        assert!(
+            !advertised
+                .iter()
+                .any(|definition| definition.name.as_str() == TOOL_CALL_NAME),
+            "tool_call is no longer advertised (discovery is capability_info + direct call); \
+             it still resolves internally for the forgiving path"
         );
         assert!(
             !advertised
