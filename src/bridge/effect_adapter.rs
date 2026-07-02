@@ -1532,15 +1532,21 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
-        // Thread-scope MCP tool calls to the engine thread. Without this the
-        // engine builds a user-scoped JobContext (conversation_id = None), so
-        // `McpClient::execute` resolves a user-scoped client and
-        // `inject_meta_context` is a no-op — no `io.ironclaw/threadId` (SEP-414)
-        // reaches `_meta`. Servers that correlate a call to its originating turn
-        // (e.g. the marketplace broker's MARKET_SUBMIT_DELIVERABLE) then fail
-        // with "missing thread context". This is the engine-path analogue of the
-        // chat path's `chat_job_context`, which already sets `conversation_id`.
-        job_ctx.conversation_id = Some(context.thread_id.0);
+        // Thread-scope MCP tool calls so the client injects `io.ironclaw/threadId`
+        // (SEP-414) into `_meta`; without it `McpClient::execute` resolves a
+        // user-scoped client and `inject_meta_context` is a no-op, and servers
+        // that correlate a call to its originating turn (e.g. the marketplace
+        // broker's MARKET_SUBMIT_DELIVERABLE) fail with "missing thread context".
+        //
+        // Prefer the host-supplied `conversation_scope` (the external/Responses
+        // thread the caller sees — e.g. what the marketplace encodes in the
+        // Responses `response_id`) over the engine's internal `thread_id`. The
+        // two differ (the engine allocates its own id and maps the external
+        // scope onto it), and only the external scope is stable across the
+        // request boundary, so it's the id a remote server can correlate against
+        // — and it's unique per turn, which keeps correlation correct when one
+        // agent runs several concurrent turns.
+        job_ctx.conversation_id = context.conversation_scope.or(Some(context.thread_id.0));
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.
