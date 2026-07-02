@@ -1,39 +1,251 @@
-/* Auth Screen */
+/* Landing / Auth Screen */
 #auth-screen {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100vh;
   height: 100dvh;
+  overflow-y: auto;
+}
+
+.landing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  max-width: 1040px;
+  padding: var(--space-8) var(--space-6);
+  margin: auto;
+}
+
+.landing-hero {
+  flex: 0 0 380px;
+  /* min-width:auto would let nowrap content (e.g. the carried-intent banner)
+     inflate the column past its flex-basis — clamp it so ellipsis engages. */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
 }
 
 .auth-card-login {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 16px;
-  padding: 40px 36px 32px;
+  padding: 28px 28px 24px;
   width: 100%;
-  max-width: 400px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-6);
+  gap: var(--space-4);
   box-shadow: var(--shadow-card);
-}
-
-.auth-brand {
-  text-align: center;
 }
 
 .auth-brand h1 {
   font-size: 28px;
   font-weight: 800;
   color: var(--text);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-3);
 }
 
-.auth-tagline {
-  font-size: var(--text-base);
+.landing-headline {
+  font-size: var(--text-3xl);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin-bottom: var(--space-3);
+}
+
+.landing-subhead {
+  font-size: var(--text-lg);
+  line-height: 1.5;
   color: var(--text-secondary);
+}
+
+/* Use-case showcase */
+.landing-showcase {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.landing-showcase-header {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.landing-usecase-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.landing-usecase-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  text-align: left;
+  padding: var(--space-4);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  transition: border-color var(--transition-fast), background var(--transition-fast),
+    transform var(--duration-fast) var(--ease-spring-gentle);
+}
+
+.landing-usecase-card:hover {
+  border-color: var(--border-hover);
+  background: var(--hover-surface);
+  transform: translateY(-1px);
+}
+
+.landing-usecase-card.selected {
+  border-color: var(--accent-border-subtle);
+  background: var(--accent-subtle);
+  box-shadow: var(--glow-accent);
+}
+
+.landing-usecase-glyph {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+
+.landing-usecase-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.landing-usecase-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.landing-usecase-desc {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.landing-showcase-hint {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* Token help disclosure */
+.auth-token-help {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.auth-token-help summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  transition: color var(--transition-fast);
+}
+
+.auth-token-help summary:hover {
+  color: var(--text-secondary);
+}
+
+.auth-token-help ul {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* Carried-intent banner on the auth card */
+.landing-intent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border-subtle);
+  border-radius: var(--radius);
+}
+
+.landing-intent-label {
+  flex: 0 0 auto;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.landing-intent-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.landing-intent-clear {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px var(--space-1);
+  border-radius: var(--radius);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.landing-intent-clear:hover {
+  color: var(--text);
+  background: var(--hover-surface);
+}
+
+@media (max-width: 900px) {
+  #auth-screen {
+    align-items: flex-start;
+  }
+
+  .landing {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-6);
+  }
+
+  .landing-hero {
+    flex: none;
+  }
+
+  .landing-usecase-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 #auth-screen .auth-form {
@@ -48,7 +260,7 @@
   color: var(--text-secondary);
 }
 
-#auth-screen input {
+.auth-card-login input {
   padding: 10px 12px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -58,13 +270,13 @@
   width: 100%;
 }
 
-#auth-screen input:focus {
+.auth-card-login input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-border-subtle);
 }
 
-#auth-screen button {
+.auth-card-login .auth-form button {
   padding: 10px 16px;
   background: var(--accent);
   color: var(--text-on-accent);
@@ -77,12 +289,12 @@
   transition: background 0.2s, transform 150ms var(--ease-spring);
 }
 
-#auth-screen button:hover {
+.auth-card-login .auth-form button:hover {
   background: var(--accent-hover);
   transform: translateY(-1px);
 }
 
-#auth-screen button:active {
+.auth-card-login .auth-form button:active {
   transform: scale(0.97);
 }
 

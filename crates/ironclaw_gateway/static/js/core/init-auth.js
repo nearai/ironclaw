@@ -36,15 +36,6 @@ function initApp() {
   if (authScreen) authScreen.style.opacity = '0';
   // Show app container (invisible — opacity:0 in CSS) so layout computes
   app.style.display = 'flex';
-  // Position tab indicator instantly (no transition) before fade-in
-  var indicator = document.getElementById('tab-indicator');
-  if (indicator) indicator.style.transition = 'none';
-  updateTabIndicator();
-  // Force layout so the instant position is applied, then restore transition
-  if (indicator) {
-    void indicator.offsetLeft;
-    indicator.style.transition = '';
-  }
   // Now fade in
   app.classList.add('visible');
   // Hide auth screen after fade-out transition completes
@@ -103,6 +94,8 @@ function initApp() {
   } else {
     loadServerLogLevel();
   }
+  // Carry a use case picked on the landing page into the chat input.
+  applyPendingUseCasePrompt();
 }
 
 function authenticate() {
@@ -299,6 +292,13 @@ async function authenticateWithNear() {
 // screen entirely.
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
+  // PROTOTYPE-ONLY convenience: `?token=<gateway token>` auto-authenticates,
+  // skipping the auth screen entirely. The mocked marketing-site onboarding
+  // flow hands off to the gateway with this param (alongside ?usecase=,
+  // ?prompt=, ?integrations= — see landing.js). The token is stored exactly
+  // like the manual auth form (sessionStorage via authenticate()) and is
+  // stripped from the URL in initApp() via history.replaceState. Do not ship
+  // token-in-URL auth beyond local prototyping.
   const urlToken = params.get('token');
   if (urlToken) {
     document.getElementById('token-input').value = urlToken;
