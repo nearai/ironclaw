@@ -5857,7 +5857,7 @@ fn automation_trigger_metadata_source() -> ThreadMetadataSource {
     // Invariant: the automation source tag is a static non-empty ASCII label
     // below the thread metadata source bound.
     ThreadMetadataSource::new(AUTOMATION_TRIGGER_THREAD_SOURCE_TAG)
-        .expect("static automation trigger metadata source is non-empty and bounded")
+        .expect("static automation trigger metadata source is non-empty and bounded") // safety: static tag is a repository-owned constant validated by thread metadata source bounds.
 }
 
 fn map_timeline_probe_error(error: SessionThreadError) -> RebornServicesError {
