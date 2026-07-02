@@ -257,6 +257,7 @@ pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunP
         descriptor,
         INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID,
     )
+    .map(|definition| definition.with_driver_specific_nudges(true))
 }
 
 pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
@@ -446,6 +447,10 @@ mod tests {
                 .as_ref()
                 .map(|id| id.as_str()),
             Some(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID)
+        );
+        assert!(
+            snapshot.steering_policy.allow_driver_specific_nudges,
+            "planned_default must have driver-specific nudges enabled"
         );
     }
 
