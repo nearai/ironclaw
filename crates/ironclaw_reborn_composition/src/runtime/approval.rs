@@ -275,13 +275,13 @@ mod tests {
             .expect("extension lease terms");
 
         assert_eq!(approval.issued_by, Principal::HostRuntime);
-        assert_eq!(approval.max_invocations, Some(1));
+        assert_eq!(approval.constraints.max_invocations, Some(1));
         assert_eq!(
-            approval.allowed_effects,
+            approval.constraints.allowed_effects,
             vec![EffectKind::Network, EffectKind::UseSecret]
         );
         assert_eq!(
-            approval.secrets,
+            approval.constraints.secrets,
             Vec::<SecretHandle>::new(),
             "test capability has no runtime credential handles"
         );
@@ -345,16 +345,16 @@ mod tests {
             .expect("extension spawn lease terms");
 
         assert_eq!(approval.issued_by, Principal::HostRuntime);
-        assert_eq!(approval.max_invocations, Some(1));
+        assert_eq!(approval.constraints.max_invocations, Some(1));
         assert_eq!(
-            approval.allowed_effects,
+            approval.constraints.allowed_effects,
             vec![
                 EffectKind::SpawnProcess,
                 EffectKind::Network,
                 EffectKind::UseSecret
             ]
         );
-        assert_eq!(approval.secrets, vec![secret]);
+        assert_eq!(approval.constraints.secrets, vec![secret]);
     }
 
     #[tokio::test]

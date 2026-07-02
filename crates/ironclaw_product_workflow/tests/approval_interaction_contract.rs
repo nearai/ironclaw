@@ -16,8 +16,8 @@ use ironclaw_authorization::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-    ExtensionId, InvocationFingerprint, InvocationId, MountView, NetworkPolicy, Principal,
-    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
+    ExtensionId, GrantConstraints, InvocationFingerprint, InvocationId, MountView, NetworkPolicy,
+    Principal, ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionDecision,
@@ -186,13 +186,15 @@ impl ApprovalLeaseTermsProvider for RejectingPersistentLeaseTermsProvider {
 fn dispatch_lease_approval(issued_by: Principal) -> LeaseApproval {
     LeaseApproval {
         issued_by,
-        allowed_effects: vec![EffectKind::DispatchCapability],
-        mounts: MountView::default(),
-        network: NetworkPolicy::default(),
-        secrets: vec![],
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: Some(1),
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: vec![],
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        },
     }
 }
 
@@ -253,7 +255,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
             scope: scope.clone(),
             request_id,
             issued_by: approval.issued_by,
-            allowed_effects: approval.allowed_effects,
+            allowed_effects: approval.constraints.allowed_effects,
         });
         Ok(())
     }
@@ -271,7 +273,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -289,7 +291,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -307,7 +309,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -2715,7 +2717,10 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
     let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
-    approval.allowed_effects.push(EffectKind::SpawnProcess);
+    approval
+        .constraints
+        .allowed_effects
+        .push(EffectKind::SpawnProcess);
 
     resolver
         .ensure_spawn_lease(&resource_scope, request_id, approval)
@@ -2848,7 +2853,10 @@ async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_appr
     let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
-    approval.allowed_effects.push(EffectKind::SpawnProcess);
+    approval
+        .constraints
+        .allowed_effects
+        .push(EffectKind::SpawnProcess);
     resolver
         .approve_spawn(&resource_scope, request_id, approval.clone())
         .await

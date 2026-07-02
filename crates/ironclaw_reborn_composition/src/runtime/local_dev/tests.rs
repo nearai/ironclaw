@@ -2101,13 +2101,8 @@ mod tests {
                 ),
                 approved_by: Principal::User(actor_user_id.clone()),
                 constraints: GrantConstraints {
-                    allowed_effects: persistent_terms.allowed_effects,
-                    mounts: persistent_terms.mounts,
-                    network: persistent_terms.network,
-                    secrets: persistent_terms.secrets,
-                    resource_ceiling: persistent_terms.resource_ceiling,
-                    expires_at: persistent_terms.expires_at,
                     max_invocations: None,
+                    ..persistent_terms.constraints
                 },
                 source_approval_request_id: Some(approval_request_id),
             })

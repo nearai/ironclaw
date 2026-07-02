@@ -693,13 +693,15 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -768,13 +770,15 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -839,13 +843,15 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -920,13 +926,15 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -1008,13 +1016,15 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -1084,13 +1094,15 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -1300,13 +1312,15 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

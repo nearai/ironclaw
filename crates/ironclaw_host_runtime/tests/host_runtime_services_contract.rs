@@ -6092,13 +6092,15 @@ async fn approve_dispatch_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -6119,13 +6121,15 @@ async fn approve_spawn_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: process_sandbox_authority_effects(),
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: process_sandbox_authority_effects(),
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -8506,13 +8510,15 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             gate.approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: vec![SecretHandle::new("script_api_token").unwrap()],
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: vec![SecretHandle::new("script_api_token").unwrap()],
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
