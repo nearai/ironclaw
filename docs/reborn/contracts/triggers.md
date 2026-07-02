@@ -419,7 +419,8 @@ directly.
 
 ## 8. Capability surface
 
-The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_remove` as first-party Reborn capabilities.
+The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
+`trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
 
 - `trigger_create` validates the schedule and timezone, captures caller scope,
   pairs the caller as the host-trusted synthetic trigger actor used by the
@@ -442,6 +443,8 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   defaults to 25 recent runs per trigger; callers that do not need embedded run
   history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
+- `trigger_pause` and `trigger_resume` are caller-scoped state transitions
+  (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
   `TriggerRepository` contract used by production libSQL. Local-dev builds
