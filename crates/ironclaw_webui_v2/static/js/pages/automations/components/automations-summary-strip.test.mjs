@@ -13,9 +13,9 @@ const COPY = {
   "automations.summary.activeDetail": "Active automations",
   "automations.summary.failures": "Failures",
   "automations.summary.failuresDetail": "Failed recent runs",
-  "automations.summary.filterAction": "Filter by {label}",
   "automations.summary.nextRun": "Next run",
   "automations.summary.nextRunDetail": "Soonest scheduled fire",
+  "automations.summary.nextRunDue": "Due now",
   "automations.summary.none": "None",
   "automations.summary.running": "Running",
   "automations.summary.runningDetail": "Runs in progress",
@@ -57,18 +57,34 @@ function visit(node, fn) {
   }
 }
 
-function nativeProps(root, tagName) {
-  const props = [];
+function collectStrings(root) {
+  const parts = [];
   visit(root, (node) => {
-    if (!Array.isArray(node.strings) || !node.strings.join("").includes(`<${tagName}`)) return;
-    const current = {};
-    node.strings.forEach((part, index) => {
-      const name = part.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
-      if (name) current[name] = node.values[index];
-    });
-    props.push(current);
+    if (Array.isArray(node.strings)) parts.push(node.strings.join(""));
   });
-  return props;
+  return parts.join("");
+}
+
+function collectValues(root) {
+  const values = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (typeof value === "string" || typeof value === "number") values.push(String(value));
+    }
+  });
+  return values;
+}
+
+function badgeTones(root) {
+  const tones = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.strings)) return;
+    node.strings.forEach((part, index) => {
+      if (part.match(/tone=\s*$/)) tones.push(node.values[index]);
+    });
+  });
+  return tones;
 }
 
 function t(key, vars = {}) {
@@ -76,12 +92,15 @@ function t(key, vars = {}) {
 }
 
 function loadComponent() {
-  function Panel() {}
-  function StatCard() {}
+  function Badge() {}
+  const React = {
+    useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+    useEffect: () => {},
+  };
   const context = {
     globalThis: {},
-    Panel,
-    StatCard,
+    Badge,
+    React,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
     useT: () => t,
@@ -90,57 +109,56 @@ function loadComponent() {
   return context.globalThis.__testExports.AutomationsSummaryStrip;
 }
 
-test("summary cards filter all, active, running, and nonzero failures", () => {
+test("strip reflows two/three/five columns and renders every summary cell", () => {
   const AutomationsSummaryStrip = loadComponent();
-  const selected = [];
 
   const rendered = AutomationsSummaryStrip({
-    summary: {
-      scheduled: 5,
-      active: 2,
-      running: 1,
-      failures: 3,
-      nextRun: "Jun 24",
-    },
-    activeFilter: "running",
-    onSelectFilter: (filter) => selected.push(filter),
+    summary: { scheduled: 5, active: 2, running: 1, failures: 0, nextRun: "Jun 24" },
+    nextRunAt: undefined,
   });
 
-  const buttons = nativeProps(rendered, "button");
-  assert.equal(buttons.length, 4);
-  assert.deepEqual(buttons.map((button) => button["aria-pressed"]), [false, false, true, false]);
-  assert.deepEqual(buttons.map((button) => button.title), [
-    "Filter by Scheduled",
-    "Filter by Active",
-    "Filter by Running",
-    "Filter by Failures",
-  ]);
+  const markup = collectStrings(rendered);
+  assert.ok(
+    markup.includes("grid-cols-2 sm:grid-cols-3 lg:grid-cols-5"),
+    "cells must reflow to fewer columns below large screens"
+  );
 
-  for (const button of buttons) button.onClick();
-
-  assert.deepEqual(selected, ["all", "active", "running", "failures"]);
+  const values = collectValues(rendered);
+  for (const label of ["Scheduled", "Active", "Running", "Failures", "Next run"]) {
+    assert.ok(values.includes(label), `expected the ${label} cell label`);
+  }
+  // No next run scheduled -> the headline falls back to "None".
+  assert.ok(values.includes("None"));
 });
 
-test("zero-failure summary card is not interactive", () => {
+test("failures cell flips from success to danger tone when failures exist", () => {
   const AutomationsSummaryStrip = loadComponent();
-  const selected = [];
 
-  const rendered = AutomationsSummaryStrip({
-    summary: {
-      scheduled: 5,
-      active: 2,
-      running: 1,
-      failures: 0,
-      nextRun: "Jun 24",
-    },
-    activeFilter: "all",
-    onSelectFilter: (filter) => selected.push(filter),
+  const clean = AutomationsSummaryStrip({
+    summary: { scheduled: 5, active: 2, running: 1, failures: 0 },
   });
+  assert.ok(badgeTones(clean).includes("success"));
+  assert.ok(!badgeTones(clean).includes("danger"));
 
-  const buttons = nativeProps(rendered, "button");
-  assert.equal(buttons.length, 3);
+  const failing = AutomationsSummaryStrip({
+    summary: { scheduled: 5, active: 2, running: 1, failures: 3 },
+  });
+  assert.ok(badgeTones(failing).includes("danger"));
+});
 
-  for (const button of buttons) button.onClick();
+test("next-run cell counts down to a future fire and reports overdue fires as due", () => {
+  const AutomationsSummaryStrip = loadComponent();
 
-  assert.deepEqual(selected, ["all", "active", "running"]);
+  const future = AutomationsSummaryStrip({
+    summary: { scheduled: 1, active: 1, running: 0, failures: 0 },
+    nextRunAt: Date.now() + 90_000,
+  });
+  const countdown = collectValues(future).find((value) => /^1:(2[89]|30)$/.test(value));
+  assert.ok(countdown, "a fire 90s out must render as a compact m:ss countdown");
+
+  const overdue = AutomationsSummaryStrip({
+    summary: { scheduled: 1, active: 1, running: 0, failures: 0 },
+    nextRunAt: Date.now() - 1_000,
+  });
+  assert.ok(collectValues(overdue).includes("Due now"));
 });
