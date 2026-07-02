@@ -2357,6 +2357,112 @@ test("useChat.submitOnboardingPairing: failed local resume keeps pairing panel r
   );
 });
 
+test("useChat.submitOnboardingPairing: admission-blocked resume keeps the pairing panel and waiter", async () => {
+  const threadId = "thread-slack-pairing-busy";
+  const sourceMessageId = "tool-slack-activation";
+  const stateUpdates = [];
+  const storageValues = new Map();
+  const sentContents = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [
+          5,
+          {
+            state: "pairing_required",
+            extensionName: "slack",
+            threadId,
+            requestId: null,
+            sourceMessageId,
+          },
+        ],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    approvePairingCode: async () => {
+      throw new Error("Slack pairing should use the Slack redemption endpoint");
+    },
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {
+      localStorage: {
+        getItem: (key) => (storageValues.has(key) ? storageValues.get(key) : null),
+        setItem: (key, value) => storageValues.set(key, String(value)),
+      },
+    },
+    queryClient: {
+      getQueryData: () => ({
+        threads: [{ thread_id: threadId, title: "Slack pairing thread" }],
+      }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    redeemSlackPairingCode: async () => ({ success: true }),
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: ({ content }) => {
+      sentContents.push(content);
+      // Never settles: keeps the submit re-entrancy guard held so the
+      // pairing continuation hits the admission block, not the network.
+      return new Promise(() => {});
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  // Occupy the submit guard with a send to another thread whose POST never
+  // settles, so the pairing continuation is admission-blocked (send → null).
+  chat.send("occupy the submit guard", { threadId: "thread-other" });
+  await Promise.resolve();
+  assert.deepEqual(sentContents, ["occupy the submit guard"]);
+
+  const response = await chat.submitOnboardingPairing("A1B2C3");
+  assert.equal(response?.success, true, "the redemption itself succeeded");
+
+  assert.deepEqual(
+    sentContents,
+    ["occupy the submit guard"],
+    "the blocked continuation must not reach the network",
+  );
+  assert.equal(
+    stateUpdates.some((update) => update.index === 5 && update.value === null),
+    false,
+    "an admission-blocked continuation must not clear the pairing panel",
+  );
+  assert.equal(
+    storageValues.has(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`),
+    false,
+    "an admission-blocked continuation must not persist a durable dismissal",
+  );
+});
+
 test("useChat.submitOnboardingPairing: stale Slack code stays local and does not resume chat", async () => {
   const threadId = "thread-stale-slack-pairing";
   const stateUpdates = [];

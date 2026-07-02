@@ -1142,11 +1142,23 @@ export function useChat(threadId) {
         setPendingOnboarding(null);
       };
       if (threadForResume && !onboarding.requestId) {
-        await send(channelConnectionContinuationMessage(onboarding.extensionName), {
-          threadId: threadForResume,
-          bypassPendingOnboarding: true,
-        });
-        clearOnboarding();
+        const continuation = await send(
+          channelConnectionContinuationMessage(onboarding.extensionName),
+          {
+            threadId: threadForResume,
+            bypassPendingOnboarding: true,
+          },
+        );
+        // `send` returns null (or a rejected_busy outcome) without posting a
+        // turn when thread admission blocks it — an in-flight submit or an
+        // active run on the resume thread. The account is paired either way,
+        // but the blocked request was NOT resumed: keep the waiter and panel
+        // so the channel-connected event path (or a manual retry) can still
+        // deliver the continuation instead of silently dropping it behind a
+        // success response.
+        if (continuation && continuation.outcome !== "rejected_busy") {
+          clearOnboarding();
+        }
         return response;
       }
       clearOnboarding();
