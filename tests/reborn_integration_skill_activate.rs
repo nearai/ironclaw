@@ -19,15 +19,20 @@
 //! the capability wrap or the `into_group` `skill_context_source` wiring
 //! regresses, the sentinel never reaches a captured request and the assert fails.
 //!
-//! The second test below drives the OTHER half of E-SKILL: criteria-based
-//! (keyword) auto-activation, with no `skill_activate` tool call scripted at
-//! all. `seed_system_skill_for_test`'s SKILL.md already carries
-//! `activation.keywords: ["greet"]`, and the harness wires
-//! `regex_skill_activation_enabled=true` unconditionally
-//! (`harness.rs`'s `skill_activation_tools`) — so a message containing "greet"
-//! reaches `SkillActivationMode::ActivationCriteria`
-//! (`ironclaw_first_party_extension_ports::activation::select_skill_activations`)
-//! with zero new production wiring.
+//! The second test below pins the OTHER half of E-SKILL: criteria-based
+//! (keyword) auto-activation stays OFF on the coordinator path. No
+//! `skill_activate` tool call is scripted, and `seed_system_skill_for_test`'s
+//! SKILL.md already carries `activation.keywords: ["greet"]` with
+//! `regex_skill_activation_enabled=true` wired unconditionally (`harness.rs`'s
+//! `skill_activation_tools`) — but `SkillActivationMode::ActivationCriteria`
+//! selection (`ironclaw_first_party_extension_ports::activation::select_skill_activations`)
+//! never runs on this path: it only fires when `take_message_for_run` returns
+//! `Some`, populated by `record_user_message`, whose sole production caller is
+//! the legacy `RebornRuntime::submit_user_turn` — the coordinator stack never
+//! records the message. So a keyword-matching message alone must NOT inject
+//! the skill prompt; the explicit `builtin.skill_activate` capability path
+//! (proven above) remains the supported mechanism (product decision, see
+//! closed issue #5530).
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -110,13 +115,21 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
         .await
         .expect("turn completes");
 
+    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+    // has a second, unrelated `Err` path (JSON serialization failure of the
+    // captured request) — asserting the exact "not found" message text rules
+    // that out, so an infra-level failure can't masquerade as proof the
+    // sentinel was absent.
+    let err = harness
+        .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
+        .await
+        .expect_err(
+            "criteria auto-activation is intentionally OFF on the coordinator path — \
+             a keyword-matching message alone must not inject the skill prompt (#5530)",
+        );
     assert!(
-        harness
-            .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
-            .await
-            .is_err(),
-        "criteria auto-activation is intentionally OFF on the coordinator path — \
-         a keyword-matching message alone must not inject the skill prompt (#5530)"
+        err.to_string().starts_with("no model request contained"),
+        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
     );
 
     // And the explicit capability was never dispatched either.

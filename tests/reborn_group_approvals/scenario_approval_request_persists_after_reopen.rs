@@ -57,6 +57,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         )
         .into());
     }
+    // Drop the independent connection before resuming through the live store to
+    // avoid two open libsql connections spanning a subsequent write.
+    drop(reopened);
 
     // Resolve normally so this scenario leaves no run permanently blocked.
     h.approve_gate(run_id, &gate_ref).await?;

@@ -1,6 +1,6 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives five scenarios over a shared
+//! One sequential `#[tokio::test]` drives six scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
 //! shared across threads). See `tests/support/reborn/CLAUDE.md` §"Group tests".
@@ -30,7 +30,11 @@
 //!    `"driver_protocol_violation"` sentinel. Independent of the auto-approve
 //!    toggle (no gate involved); ordered alongside the other independent
 //!    scenarios, before the toggle is flipped.
-//! 5. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
+//! 5. `approval_request_persists_after_reopen` (C-DURABLE) — reopens a FRESH
+//!    `ApprovalRequestStore` at the same on-disk root and confirms the
+//!    `Pending` request survives, independent of the auto-approve toggle
+//!    (its own gate, resolved before returning).
+//! 6. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
 //!    setting persists across thread boundaries. MUST run last (it flips the
 //!    toggle ON for the whole group), so the gate scenarios above are the control

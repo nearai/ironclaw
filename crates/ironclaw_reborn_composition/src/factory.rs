@@ -2458,7 +2458,7 @@ pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 /// Open (or create) the local-dev libSQL database file at `root` — just the
 /// connection, no migrations/mount. One owner for the `libsql::Builder::new_local`
 /// sequence: [`build_default_local_dev_database_roots`] (production) and the
-/// E-DURABLE test-support trigger-repository reopen
+/// C-DURABLE test-support trigger-repository reopen
 /// (`open_local_dev_trigger_repository_for_test`) both call this rather than
 /// each opening their own connection to the same file.
 #[cfg(feature = "libsql")]
@@ -2582,7 +2582,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     Ok(Arc::new(store))
 }
 
-/// Test-only (E-DURABLE/C-DURABLE seam): open a FRESH, independent
+/// Test-only (C-DURABLE seam): open a FRESH, independent
 /// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
 /// (same on-disk root; a sibling capability store). Reuses
@@ -2600,7 +2600,7 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
     Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
 }
 
-/// Test-only (E-DURABLE/C-DURABLE seam): open a FRESH, independent
+/// Test-only (C-DURABLE seam): open a FRESH, independent
 /// [`ironclaw_triggers::TriggerRepository`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`].
 /// Reuses [`open_local_dev_libsql_database`] (the same libSQL-open sequence

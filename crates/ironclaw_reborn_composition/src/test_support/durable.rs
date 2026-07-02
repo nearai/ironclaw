@@ -1,10 +1,10 @@
 //! Durable-store test support for capability-produced state that outlives a
-//! process restart (E-DURABLE seam): extension installs, approval requests,
-//! and triggers. All three reopen at the SAME on-disk local-dev
-//! `storage_root` — the capability harness's always-real filesystem,
-//! independent of the integration harness's own `StorageMode` (which governs
-//! only the SEPARATE thread/turn composite; see `assert_reply_persists_after_reopen`
-//! for that one).
+//! process restart: extension installs (E-DURABLE seam), and approval
+//! requests + triggers (C-DURABLE seam). All three reopen at the SAME
+//! on-disk local-dev `storage_root` — the capability harness's always-real
+//! filesystem, independent of the integration harness's own `StorageMode`
+//! (which governs only the SEPARATE thread/turn composite; see
+//! `assert_reply_persists_after_reopen` for that one).
 
 /// Test-support entry point (E-DURABLE seam): reopen a fresh, independent
 /// extension-installation store at an existing local-dev `storage_root`. Lets

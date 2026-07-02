@@ -99,8 +99,10 @@ impl RebornIntegrationGroupBuilder {
     /// Shared tail of the constructors whose capability is independent of the
     /// resolved base (`builtin_tools`/`extension_lifecycle`) and the degenerate
     /// single-shot path (`RebornIntegrationHarnessBuilder::build`).
-    /// `live_approvals` resolves its capability from `base` first, so it calls
-    /// `build_base` + `into_group` directly instead.
+    /// `live_approvals` and `profile_tools` both resolve their capability's
+    /// executor user FROM `base` (`canonical_subject_user()`), so they call
+    /// `build_base` + `into_group` directly instead, reusing the SAME `base`
+    /// for both the user lookup and the group assembly.
     pub(crate) async fn build_with_capability(
         self,
         capability: GroupCapability,
@@ -164,18 +166,16 @@ impl RebornIntegrationGroupBuilder {
     /// self-evidencing via the BeforeBlock checkpoint (loop_exit_applier.rs). Do
     /// NOT add approval-gate evidence here — that store is only for approval gates.
     pub async fn live_auth_gate(self) -> HarnessResult<RebornIntegrationGroup> {
-        let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools_auth_required().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.into_group(base, capability).await
+        self.build_with_capability(capability).await
     }
 
     /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].
     pub async fn project_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
-        let base = self.build_base().await?;
         let host_runtime = HostRuntimeCapabilityHarness::project_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.into_group(base, capability).await
+        self.build_with_capability(capability).await
     }
 
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
@@ -189,7 +189,10 @@ impl RebornIntegrationGroupBuilder {
         // `live_approvals`'s alignment above. Without this, a second thread's
         // loop resolves the profile under the canonical binding subject user
         // while the write dispatched under the fixed constructor user, so the
-        // read-back never sees it.
+        // read-back never sees it. This is ALSO why `profile_tools` cannot go
+        // through `build_with_capability` (see its doc comment): the
+        // capability depends on `base`, so `base` must be resolved first and
+        // reused here, exactly like `live_approvals`.
         let subject_user = base.canonical_subject_user()?;
         let host_runtime = HostRuntimeCapabilityHarness::profile_tools()
             .await?

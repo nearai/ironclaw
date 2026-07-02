@@ -302,9 +302,8 @@ impl RebornIntegrationGroup {
             group: self,
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
-            park_gate: None,
             actor_id: None,
-            fail_model: false,
+            model_mode: ThreadModelMode::Normal,
         }
     }
 
@@ -382,7 +381,7 @@ impl GroupBaseData {
     /// dispatch shares the run's `(tenant, user)` with the turn-store /
     /// evidence scope resolved from the SAME `canonical_binding` (see the
     /// `canonical_binding` field docs above).
-    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+    pub(crate) fn canonical_subject_user(&self) -> HarnessResult<UserId> {
         Ok(self
             .canonical_binding
             .subject_user_id
@@ -651,17 +650,28 @@ pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
-    /// When set, this thread's model call parks until the gate is released
-    /// (E-GATEWAY seam), enabling a mid-turn cancel test. `None` = normal
-    /// scripted playback. Mutually exclusive with `fail_model` by usage
-    /// contract (not enforced by the type — no test sets both); `park_gate`
-    /// wins if it ever were.
-    park_gate: Option<ParkingModelGate>,
     actor_id: Option<String>,
-    /// When `true`, this thread's model call always fails with a fixed
-    /// non-retryable `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing
-    /// back `replies`. See [`super::scripted_provider::ErrLlm`].
-    fail_model: bool,
+    model_mode: ThreadModelMode,
+}
+
+/// A thread's model-call behavior: exactly one of normal scripted playback,
+/// parked-until-released, or unconditional failure. One enum instead of an
+/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
+/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
+/// no tuple-priority rule needed at the dispatch site, and no state can
+/// silently ask for "parked AND failing" at once.
+#[derive(Default)]
+enum ThreadModelMode {
+    /// Normal scripted playback (the default).
+    #[default]
+    Normal,
+    /// This thread's model call parks until the gate is released (E-GATEWAY
+    /// seam), enabling a mid-turn cancel test.
+    Parked(ParkingModelGate),
+    /// This thread's model call always fails with a fixed non-retryable
+    /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
+    /// `replies`. See [`super::scripted_provider::ErrLlm`].
+    Failing,
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -680,9 +690,13 @@ impl<'g> RebornThreadBuilder<'g> {
     }
 
     /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own `park_gate` through the degenerate one-thread group).
+    /// its own park gate through the degenerate one-thread group). A `Some`
+    /// gate always wins, matching the old tuple-priority contract, even if
+    /// `fail_model_opt` is called first.
     pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        self.park_gate = gate;
+        if let Some(gate) = gate {
+            self.model_mode = ThreadModelMode::Parked(gate);
+        }
         self
     }
 
@@ -712,9 +726,13 @@ impl<'g> RebornThreadBuilder<'g> {
     }
 
     /// Internal: set the fail-model flag (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group).
+    /// its own knob through the degenerate one-thread group). Never downgrades
+    /// an already-`Parked` mode, matching the old tuple-priority contract
+    /// (`park_model` always wins over `fail_model`).
     pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
-        self.fail_model = fail;
+        if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
+            self.model_mode = ThreadModelMode::Failing;
+        }
         self
     }
 
@@ -781,13 +799,16 @@ impl<'g> RebornThreadBuilder<'g> {
         // (`assert_system_prompt_contains`, `assert_model_request_contains`)
         // regardless of whether this thread is parked.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
-        // C-ERRORS: `fail_model` swaps in `ErrLlm` at the same vendor-SDK seam,
-        // ahead of `park_gate` in priority (never both set by any test — see the
-        // field doc on `RebornThreadBuilder::park_gate`).
-        let raw: Arc<dyn LlmProvider> = match (self.park_gate, self.fail_model) {
-            (Some(gate), _) => Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
-            (None, true) => Arc::new(ErrLlm),
-            (None, false) => scripted_llm.clone(),
+        // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
+        // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
+        // three modes mutually exclusive by construction — no priority rule
+        // needed here.
+        let raw: Arc<dyn LlmProvider> = match self.model_mode {
+            ThreadModelMode::Parked(gate) => {
+                Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+            }
+            ThreadModelMode::Failing => Arc::new(ErrLlm),
+            ThreadModelMode::Normal => scripted_llm.clone(),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
