@@ -8,6 +8,7 @@ pub mod extension_surface;
 pub mod filesystem;
 pub mod github;
 pub mod group;
+pub mod group_constructors;
 pub mod harness;
 pub mod harness_mcp;
 pub mod harness_web_access;

@@ -1940,7 +1940,11 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
-    async fn skill_management_tools() -> HarnessResult<Self> {
+    /// `pub(crate)`: also used by `RebornIntegrationGroupBuilder::skill_management_tools`
+    /// (`group_constructors.rs`, C-SKILL) to wire the SAME preset onto the
+    /// int-tier group, so the QA/trace-tier smoke test and the int-tier group
+    /// never drift on capability ids / mounts / policy.
+    pub(crate) async fn skill_management_tools() -> HarnessResult<Self> {
         let mut harness = Self::new_with_options(
             "reborn-e2e-skill-management-tools",
             vec![
@@ -2894,6 +2898,28 @@ impl HostRuntimeCapabilityHarness {
     /// Tests only.
     pub(crate) fn storage_root_for_test(&self) -> PathBuf {
         self.root.path().join("local-dev")
+    }
+
+    /// C-DURABLE: resolve `gate_ref` (a `"gate:approval-<id>"` local-dev
+    /// approval gate) to the `(ApprovalRequestId, ResourceScope)` pair a fresh,
+    /// independently-reopened `ApprovalRequestStore::get`/`read_versioned` call
+    /// needs. Reuses the SAME private lookup `approve_local_dev_gate`/
+    /// `deny_local_dev_gate` already use (`approval_request_id_from_gate_ref` +
+    /// `pending_approval_scopes`) so a durability test's scope construction can
+    /// never drift from the live approve/deny path. Tests only.
+    pub(crate) fn approval_request_scope_for_test(
+        &self,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<(ApprovalRequestId, ResourceScope)> {
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let scope = self
+            .pending_approval_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&request_id)
+            .cloned()
+            .ok_or("approval gate was not recorded by the host runtime harness")?;
+        Ok((request_id, scope))
     }
 
     /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill

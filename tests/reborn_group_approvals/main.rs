@@ -43,6 +43,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_concurrent_dual_gate_resume;
 mod scenario_failure_category_demasked;
@@ -73,6 +74,14 @@ async fn approvals_group_e2e() {
     report.record(
         "failure_category_demasked",
         scenario_failure_category_demasked::run(&g).await,
+    );
+    // C-DURABLE: independent of the auto-approve toggle (its own gate, resolved
+    // before returning) — the approval-request store is always on-disk
+    // regardless of the group's `StorageMode` (a separate capability-harness
+    // filesystem), so this needs no `StorageMode::LibSql` variant.
+    report.record(
+        "approval_request_persists_after_reopen",
+        scenario_approval_request_persists_after_reopen::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)
