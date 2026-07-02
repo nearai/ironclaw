@@ -1,5 +1,6 @@
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import { Icon } from "../../../design-system/icons.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 
 function packageId(item) {
@@ -16,10 +17,24 @@ export function RegistryTab({
   onActivate,
   onConfigure,
   onRemove,
+  onImport,
+  isAdmin,
+  isImporting,
   isBusy,
 }) {
   const t = useT();
+  const fileInputRef = React.useRef(null);
   const [filter, setFilter] = React.useState("");
+
+  const handleFileChange = React.useCallback(
+    (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file || !onImport) return;
+      onImport(file);
+    },
+    [onImport]
+  );
   const query = filter.trim().toLowerCase();
 
   const filtered = query
@@ -109,28 +124,56 @@ export function RegistryTab({
                 </div>
               `}
 
-              ${availableEntries.length > 0 &&
+              ${(availableEntries.length > 0 || isAdmin) &&
               html`
-                <h3
+                <div
                   className=${[
-                    "mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal",
+                    "mb-4 flex items-center justify-between",
                     installedCount > 0 ? "mt-6" : "",
                   ].join(" ")}
                 >
-                  ${t("ext.registry.availableTitle")}
-                </h3>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-                  ${availableEntries.map(
-                    (entry) => html`
-                      <${RegistryCard}
-                        key=${entry.id}
-                        entry=${entry.entry}
-                        onInstall=${onInstall}
-                        isBusy=${isBusy}
+                  <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+                    ${t("ext.registry.availableTitle")}
+                  </h3>
+                  ${isAdmin &&
+                  html`
+                    <div>
+                      <button
+                        type="button"
+                        onClick=${() => fileInputRef.current?.click()}
+                        disabled=${isBusy}
+                        className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
+                      >
+                        <${Icon} name="upload" className="h-3 w-3" />
+                        ${isImporting
+                          ? t("ext.registry.importing")
+                          : t("ext.registry.import")}
+                      </button>
+                      <input
+                        ref=${fileInputRef}
+                        type="file"
+                        accept=".zip,application/zip"
+                        className="hidden"
+                        onChange=${handleFileChange}
                       />
-                    `
-                  )}
+                    </div>
+                  `}
                 </div>
+                ${availableEntries.length > 0 &&
+                html`
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                    ${availableEntries.map(
+                      (entry) => html`
+                        <${RegistryCard}
+                          key=${entry.id}
+                          entry=${entry.entry}
+                          onInstall=${onInstall}
+                          isBusy=${isBusy}
+                        />
+                      `
+                    )}
+                  </div>
+                `}
               `}
             `}
       </div>
