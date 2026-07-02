@@ -332,6 +332,12 @@ pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
     pub(crate) workflow: DefaultProductWorkflow,
     pub(crate) conversation_id: String,
+    /// External actor id every submit for this thread is made under. Defaults
+    /// to `HARNESS_ACTOR_ID`; a group thread built with `with_actor_id` (the
+    /// E-MULTIUSER seam) carries its distinct actor here so submit-time
+    /// envelopes resolve the SAME binding (and owner scope) as the build-time
+    /// probe.
+    pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
@@ -400,7 +406,7 @@ impl RebornIntegrationHarness {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
-            HARNESS_ACTOR_ID,
+            &self.actor_id,
             &self.conversation_id,
             text,
             ProductTriggerReason::DirectChat,

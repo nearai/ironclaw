@@ -340,6 +340,7 @@ impl RebornIntegrationGroup {
             group: self,
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
+            actor_id: None,
         }
     }
 
@@ -727,6 +728,7 @@ pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
+    actor_id: Option<String>,
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -734,6 +736,19 @@ impl<'g> RebornThreadBuilder<'g> {
     /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
+        self
+    }
+
+    /// Resolve this thread's binding under a DISTINCT actor instead of the
+    /// group's default `HARNESS_ACTOR_ID` (E-MULTIUSER seam). The resulting
+    /// binding's `subject_user_id`/`actor_user_id` differ from every other
+    /// thread's, so the run's `TurnActor` and per-turn owner-scope resolution
+    /// (`ThreadScopeResolver::resolve_for_turn`, the same mechanism production
+    /// uses for multi-user WebChat) isolate this thread's reads/writes under
+    /// its own `owners/<actor_id>` subtree. Unset (the default) keeps the
+    /// existing `HARNESS_ACTOR_ID` behavior byte-identical.
+    pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
+        self.actor_id = Some(actor_id.into());
         self
     }
 
@@ -758,11 +773,12 @@ impl<'g> RebornThreadBuilder<'g> {
         // A fresh adapter + ingress each time (cheap, stateless). The binding
         // service is backed by `shared.product_harness`, which is shared; the
         // idempotency ledger is also shared (per-binding idempotency).
+        let actor_id = self.actor_id.as_deref().unwrap_or(HARNESS_ACTOR_ID);
         let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
         let ingress = RebornTestIngress::new(adapter);
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
-            HARNESS_ACTOR_ID,
+            actor_id,
             &self.conversation_id,
             "hi",
             ProductTriggerReason::DirectChat,
@@ -854,6 +870,7 @@ impl<'g> RebornThreadBuilder<'g> {
             ingress,
             workflow,
             conversation_id: self.conversation_id,
+            actor_id: actor_id.to_owned(),
             binding,
             turn_scope,
             turn_store: Arc::clone(&shared.turn_store),
