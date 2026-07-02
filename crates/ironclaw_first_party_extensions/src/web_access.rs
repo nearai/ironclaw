@@ -1,3 +1,4 @@
+// arch-exempt: large_file, web-access Exa SSE regression coverage stays with this tool harness, plan #5573
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::IpAddr,
@@ -564,16 +565,36 @@ fn mcp_json_value_from_body(body: &[u8]) -> Option<Value> {
     }
 
     let body = std::str::from_utf8(body).ok()?;
-    for line in body.lines().filter_map(|line| line.strip_prefix("data:")) {
-        let line = line.trim();
+    let mut event_data = String::new();
+    for line in body.lines() {
         if line.is_empty() {
+            if let Some(value) = mcp_json_value_from_sse_event(&event_data) {
+                return Some(value);
+            }
+            event_data.clear();
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            return Some(value);
+
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim_start();
+        if data.is_empty() {
+            continue;
         }
+        if !event_data.is_empty() {
+            event_data.push('\n');
+        }
+        event_data.push_str(data);
     }
-    None
+    mcp_json_value_from_sse_event(&event_data)
+}
+
+fn mcp_json_value_from_sse_event(data: &str) -> Option<Value> {
+    if data.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(data).ok()
 }
 
 async fn call_exa_mcp_search(
@@ -1350,6 +1371,26 @@ mod tests {
             }
         }
 
+        fn ok_sse_data_lines(lines: &[&str]) -> RuntimeHttpEgressResponse {
+            let mut body = String::from("event: message\n");
+            for line in lines {
+                body.push_str("data: ");
+                body.push_str(line);
+                body.push('\n');
+            }
+            body.push('\n');
+            let bytes = body.into_bytes();
+            RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                response_bytes: bytes.len() as u64,
+                body: bytes,
+                saved_body: None,
+                request_bytes: 10,
+                redaction_applied: false,
+            }
+        }
+
         fn accepted() -> RuntimeHttpEgressResponse {
             RuntimeHttpEgressResponse {
                 status: 202,
@@ -1424,6 +1465,22 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
     fn validates_sse_mcp_initialize_response() {
         let body = br#"event: message
 data: {"result":{"protocolVersion":"2024-11-05","capabilities":{}},"jsonrpc":"2.0","id":1}
+"#;
+        assert!(is_valid_mcp_initialize_response(body));
+    }
+
+    #[test]
+    fn validates_split_data_sse_mcp_initialize_response() {
+        let body = br#"event: message
+data: {
+data:   "result": {
+data:     "protocolVersion": "2024-11-05",
+data:     "capabilities": {}
+data:   },
+data:   "jsonrpc": "2.0",
+data:   "id": 1
+data: }
+
 "#;
         assert!(is_valid_mcp_initialize_response(body));
     }
@@ -1873,6 +1930,42 @@ data: {"result":{"protocolVersion":"2024-11-05","capabilities":{}},"jsonrpc":"2.
                 "id": 1,
                 "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
             }))),
+            Ok(RecordingEgress::accepted()),
+            Ok(RecordingEgress::ok_json(json!({
+                "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
+            }))),
+        ]));
+
+        let result = executor
+            .dispatch(request(
+                &capability,
+                &scope,
+                &input,
+                Some(egress.clone() as Arc<dyn RuntimeHttpEgress>),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output["provider_used"], "exa_mcp");
+        assert_eq!(result.output["url"], "https://example.com");
+        assert_eq!(result.output["content"], "Example body");
+        assert_eq!(egress.request_bodies().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_content_accepts_split_data_sse_mcp_initialize_response() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url":"https://example.com", "max_characters": 1000});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![
+            Ok(RecordingEgress::ok_sse_data_lines(&[
+                "{",
+                r#""jsonrpc": "2.0","#,
+                r#""id": 1,"#,
+                r#""result": {"protocolVersion": "2024-11-05", "capabilities": {}}"#,
+                "}",
+            ])),
             Ok(RecordingEgress::accepted()),
             Ok(RecordingEgress::ok_json(json!({
                 "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
