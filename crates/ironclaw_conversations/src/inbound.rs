@@ -404,8 +404,12 @@ fn trusted_inbound_request_from_trigger(
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
-                RunProfileRequest::new(RunProfileId::scheduled_trigger().as_str())
-                    .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?,
+                RunProfileRequest::new(RunProfileId::scheduled_trigger().as_str()).map_err(
+                    |reason| InboundTurnError::InvalidExternalRef {
+                        kind: "run_profile_request",
+                        reason,
+                    },
+                )?,
             ),
         },
         fire.agent_id,
