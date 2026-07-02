@@ -42,7 +42,7 @@ async fn triggered_submit_carries_scheduled_trigger_origin() {
     let state = harness
         .coordinator
         .get_run_state(ironclaw_turns::GetRunStateRequest {
-            scope: submission.turn_scope.clone(),
+            scope: submission.turn_scope,
             run_id: submission.run_id,
         })
         .await

@@ -99,19 +99,20 @@ impl RebornIntegrationHarness {
             "triggered-submit:{}",
             fire.identity.external_event_id().as_str()
         ))?;
-        let request = TrustedTriggerSubmitRequest::new_for_test(
-            fire.clone(),
-            TriggerMaterializedPrompt::for_fire(&fire, content_ref),
-            fire_slot,
-        );
+        let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
+        let request =
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
 
         // Pre-pair the trigger's canonical external actor — mirrors
         // `TriggerTrustedInboundBinding::for_fire`'s own derivation exactly and mirrors
         // production's pre-seed requirement (`resolve_actor` hard-fails
         // `BindingRequired` without it, on both trusted and untrusted resolve paths).
+        // Uses `try_pair_external_actor` (not the infallible `pair_external_actor`
+        // wrapper) so a pairing failure surfaces here, at the seam boundary, instead
+        // of resurfacing later as an indirect binding-resolution error.
         let conversations = InMemoryConversationServices::default();
         conversations
-            .pair_external_actor(
+            .try_pair_external_actor(
                 tenant_id,
                 AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND)?,
                 AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)?,
@@ -121,7 +122,7 @@ impl RebornIntegrationHarness {
                 )?,
                 creator_user_id,
             )
-            .await;
+            .await?;
 
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
