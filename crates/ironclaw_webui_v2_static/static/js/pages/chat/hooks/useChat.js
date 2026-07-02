@@ -19,6 +19,7 @@ import { React } from "../../../lib/html.js";
 import { fetchExtensions } from "../../extensions/lib/extensions-api.js";
 import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
+import { touchThreadInCache } from "../lib/thread-cache.js";
 import {
   addPending,
   recordAcceptedMessageRef,

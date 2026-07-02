@@ -219,6 +219,18 @@ mod tests {
     }
 
     #[test]
+    fn chat_send_keeps_thread_cache_import_wired() {
+        // A main-merge conflict resolution once dropped this import while
+        // keeping the call: every WebChat v2 send then failed in the browser
+        // with `ReferenceError: touchThreadInCache is not defined`. The JS
+        // unit harness injects stubs for unknown identifiers, so only a
+        // source-level pin (and the Playwright smoke) catches a re-drop.
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("import { touchThreadInCache } from \"../lib/thread-cache.js\""));
+        assert!(use_chat.contains("touchThreadInCache({"));
+    }
+
+    #[test]
     fn markdown_code_blocks_keep_horizontal_scroll_local_to_block() {
         let renderer = asset_text("js/pages/chat/components/markdown-renderer.js");
         assert!(renderer.contains("wrap.className = \"markdown-code-frame\";"));
