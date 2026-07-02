@@ -744,7 +744,7 @@ fn gate_projection_prompt_context(
             allow_always: Some(prompt.allow_always),
             auth_context: None,
         },
-        // The channel-connection context (for a paste_secret pairing gate)
+        // The channel-connection context (for a manual_token pairing gate)
         // rides inside `auth_context` (`AuthPromptContextView::connection`) — the
         // single canonical place on the gate item, no duplicate top-level field.
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {

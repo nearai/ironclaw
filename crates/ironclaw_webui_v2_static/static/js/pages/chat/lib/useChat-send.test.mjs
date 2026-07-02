@@ -2136,7 +2136,7 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
   assert.equal(response.thread_id, "thread-created");
 });
 
-// A channel-pairing gate rides the standard auth rail: a `paste_secret`
+// A channel-pairing gate rides the standard auth rail: a `manual_token`
 // challenge whose gate also carries a `connection` requirement. `gates.js`
 // normalizes that into `pendingGate.connection`, and the pairing card submits
 // through `submitChannelConnectionPairing`.
@@ -2145,7 +2145,7 @@ function pairingGate(channel = "slack") {
     runId: "run-pairing",
     gateRef: "gate-auth-pairing",
     kind: "auth_required",
-    challengeKind: "paste_secret",
+    challengeKind: "manual_token",
     connection: {
       channel,
       strategy: "inbound_proof_code",

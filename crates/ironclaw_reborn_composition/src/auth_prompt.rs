@@ -181,7 +181,7 @@ fn auth_prompt_from_credential_requirement(
         }
         RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
             // A pairing code is pasted like any other secret, so it reuses the
-            // `paste_secret` (ManualToken) modality; what differs is the resolve
+            // `manual_token` (ManualToken) modality; what differs is the resolve
             // route, which rides in `connection` context. Render copy comes from
             // the single backend-authored connect builder (the same one the
             // connectable descriptor uses), so any inbound channel gets correct

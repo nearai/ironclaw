@@ -389,7 +389,7 @@ test("useChatEvents: an extension activation preview becomes a tool card (pairin
 
   // The event stream only materializes the activation tool card. A connectable
   // channel that needs pairing now blocks the turn as a standard auth gate
-  // (paste_secret + connection), so the pairing card is driven by pendingGate —
+  // (manual_token + connection), so the pairing card is driven by pendingGate —
   // there is no timeline-derived panel for this preview to open.
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].toolName, "extension_activate");

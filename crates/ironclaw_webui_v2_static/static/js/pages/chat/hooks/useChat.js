@@ -89,7 +89,7 @@ function resolveGateOutcome(response) {
 }
 
 function isPendingOAuthGate(gate) {
-  return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_relay";
+  return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_url";
 }
 
 function isOAuthCallbackCompletion(payload) {
@@ -827,7 +827,7 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
-  // Channel-pairing gate submit. A `paste_secret` gate that carries a
+  // Channel-pairing gate submit. A `manual_token` gate that carries a
   // `connection` is a per-user authorization to act on a connectable channel
   // (Slack, Telegram, …). Redeeming the pair code binds the identity and — as
   // of V2 — RESUMES the parked turn backend-side, so unlike `submitAuthToken`

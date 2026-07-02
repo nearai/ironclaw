@@ -42,12 +42,14 @@ is deleted.
 ### Refinement (adopted) — challenge kind = interaction modality, not provider
 
 Do NOT add a `channel_connection` challenge kind. Challenge kinds describe the
-**interaction modality**; the specifics ride as context:
-- `oauth_url` → rename to `oauth_relay` (serde `alias = "oauth_url"`): browser OAuth relay.
-- `manual_token` → rename to `paste_secret` (serde `alias = "manual_token"`): paste a
-  string. Covers GitHub PAT, API key, AND Slack/Telegram **pair code** — one card.
+**interaction modality**; the specifics ride as context. We do NOT rename the
+wire values — they stay the stable `oauth_url` / `manual_token`; the modality is
+expressed only in comments/naming:
+- `oauth_url`: browser OAuth relay.
+- `manual_token`: paste a string. Covers GitHub PAT, API key, AND
+  Slack/Telegram **pair code** — one card.
 
-Slack pairing reuses `paste_secret`. What differs between a PAT and a pair code is
+Slack pairing reuses `manual_token`. What differs between a PAT and a pair code is
 only the **resolve route**, carried as gate *context* (data, not a new kind/turn-state):
 - PAT → store credential → resolve with `credential_ref` (`resolve_auth_gate`).
 - pair code → redeem (bind identity) → resolve → resume (`resolve_generic_gate` path).
@@ -58,9 +60,10 @@ input_placeholder, submit_label, error_message }` (optional, serde-default) on
 resolve-route discriminator ("this paste is a pair code for channel X"). The one
 paste card renders for both (copy from context); its submit + the backend resolve
 route by that discriminator. Any future "paste a code to connect" channel or
-"relay to OAuth" provider drops in with no new kind. Renames keep serde aliases so
-persisted gates / in-flight events / the frontend transition don't break; update
-all enum readers (frontend `gates.js`, serde tests) in the same branch.
+"relay to OAuth" provider drops in with no new kind. The wire values stay stable
+(`oauth_url` / `manual_token`), so persisted gates / in-flight events / the
+frontend transition don't break; the enum readers (frontend `gates.js`, serde
+tests) keep reading those exact strings.
 
 ## Per-layer plan (file:line seams from tracing)
 

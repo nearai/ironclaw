@@ -346,12 +346,12 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
 
 test("Chat renders the pairing card from a channel-connection gate and blocks composer sends", async () => {
   // A connectable channel that needs connection blocks the turn as a standard
-  // auth gate: a `paste_secret` challenge that also carries a `connection`
+  // auth gate: a `manual_token` challenge that also carries a `connection`
   // requirement. Chat renders the pairing card off that gate — no timeline
   // heuristic — wired to a redeem submit and a run-cancel dismiss.
   const pendingGate = {
     kind: "auth_required",
-    challengeKind: "paste_secret",
+    challengeKind: "manual_token",
     runId: "run-1",
     gateRef: "gate-1",
     connection: {
@@ -396,7 +396,7 @@ test("Chat renders the pairing card from a channel-connection gate and blocks co
   });
 
   const pairingCard = findComponent(tree, components.OnboardingPairingCard);
-  assert.ok(pairingCard, "pairing card should render off the paste_secret+connection gate");
+  assert.ok(pairingCard, "pairing card should render off the manual_token+connection gate");
   const pairingProps = componentProps(pairingCard, components.OnboardingPairingCard);
   // The gate's connection context is normalized onto an onboarding-shaped prop.
   assert.equal(pairingProps.onboarding.extensionName, "telegram");

@@ -318,12 +318,12 @@ mod tests {
         assert!(!events.contains("resumeWaitingChannelConnections"));
         assert!(!events.contains("ironclaw:channel-connection:waiting:v1"));
 
-        // gates.js recognizes the renamed challenge kinds (paste_secret /
-        // oauth_relay) that ALL auth gates now use, and normalizes the optional
-        // channel `connection` context onto the pending gate.
+        // gates.js recognizes the challenge kinds (manual_token / oauth_url)
+        // that ALL auth gates use, and normalizes the optional channel
+        // `connection` context onto the pending gate.
         let gates = asset_text("js/pages/chat/lib/gates.js");
-        assert!(gates.contains("paste_secret"));
-        assert!(gates.contains("oauth_relay"));
+        assert!(gates.contains("manual_token"));
+        assert!(gates.contains("oauth_url"));
         assert!(gates.contains("connectionFromContext"));
 
         // useChat keeps a cache-invalidation-only channel-connected subscription
@@ -340,7 +340,7 @@ mod tests {
         assert!(!use_chat.contains("pendingOnboarding"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
 
-        // chat.js renders the pairing card off a paste_secret gate carrying a
+        // chat.js renders the pairing card off a manual_token gate carrying a
         // connection, on the same auth-gate switch as the token / oauth cards.
         let chat = asset_text("js/pages/chat/chat.js");
         assert!(chat.contains("OnboardingPairingCard"));

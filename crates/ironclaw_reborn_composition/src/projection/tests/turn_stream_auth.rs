@@ -181,9 +181,9 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
-async fn webui_event_stream_renders_channel_pairing_requirement_as_paste_secret_with_connection() {
+async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_with_connection() {
     // A channel-pairing credential requirement (Slack) blocks on the same
-    // auth-gate rail as GitHub, but the projection renders it as a `paste_secret`
+    // auth-gate rail as GitHub, but the projection renders it as a `manual_token`
     // challenge carrying channel-connection context (the render copy + resolve
     // route), so one paste card serves both a stored secret and a pairing code.
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();

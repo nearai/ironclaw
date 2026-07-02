@@ -4,21 +4,14 @@
 // browser must hold `run_id` + `gate_ref` so a follow-up
 // `resolve_gate` call can fill them into the v2 path params.
 
-// Challenge kinds describe the interaction modality, not the provider. The
-// backend renamed `oauth_url` -> `oauth_relay` and `manual_token` ->
-// `paste_secret` (keeping serde aliases). Fold the legacy strings onto the
-// canonical names here so every reader (chat.js card switch, the OAuth
-// completion listener) only has to know the new vocabulary. `paste_secret`
-// covers GitHub PAT / API key AND a channel pairing code — the pairing card
-// vs token card split is decided by the presence of `connection`, below.
-function normalizeChallengeKind(kind) {
-  if (kind === "oauth_url") return "oauth_relay";
-  if (kind === "manual_token") return "paste_secret";
-  return kind || null;
-}
+// Challenge kinds describe the interaction modality, not the provider:
+// `manual_token` covers a GitHub PAT / API key AND a channel pairing code
+// (paste a secret), while `oauth_url` is a browser OAuth relay. The pairing
+// card vs token card split for a `manual_token` gate is decided by the
+// presence of `connection`, below.
 
 // Optional `ChannelConnectionPromptContext` carried only on channel-pairing
-// gates (a `paste_secret` gate whose paste is a pair code for a connectable
+// gates (a `manual_token` gate whose paste is a pair code for a connectable
 // channel). Present on the live `auth_required` prompt as `prompt.connection`
 // and on the projection gate as `gate.auth_context.connection`. Normalized to
 // camelCase so the pairing card can render `{ channel, strategy, instructions,
@@ -68,14 +61,14 @@ export function gateFromEvent(eventType, prompt) {
       // prompts. Explicit unknown/other challenge kinds still route to the neutral
       // auth card in chat.js.
       challengeKind:
-        normalizeChallengeKind(prompt.challenge_kind) ||
+        prompt.challenge_kind ||
         (prompt.provider ||
         prompt.account_label ||
         prompt.authorization_url ||
         prompt.expires_at
           ? "other"
-          : "paste_secret"),
-      // Channel-pairing gates ride the same `paste_secret` rail but carry the
+          : "manual_token"),
+      // Channel-pairing gates ride the same `manual_token` rail but carry the
       // connection requirement so the frontend renders the pairing card.
       connection: connectionFromContext(prompt.connection),
       runId: prompt.turn_run_id,
@@ -118,7 +111,7 @@ export function gateFromProjectionGate(gate) {
     return {
       ...base,
       kind: "auth_required",
-      challengeKind: normalizeChallengeKind(authContext.challenge_kind) || "other",
+      challengeKind: authContext.challenge_kind || "other",
       provider: authContext.provider || null,
       accountLabel: authContext.account_label || "",
       authorizationUrl: authContext.authorization_url || null,

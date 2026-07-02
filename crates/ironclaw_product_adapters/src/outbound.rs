@@ -963,26 +963,24 @@ pub enum AuthPromptChallengeKind {
     /// unconfigured, the URL may be absent so UI can still render an
     /// OAuth-specific unavailable state instead of the generic auth fallback.
     ///
-    /// Wire value is `oauth_relay`. The challenge kind is always re-derived at
-    /// projection time from the persisted credential setup, never deserialized
-    /// back from the wire, so no legacy alias is needed.
-    #[serde(rename = "oauth_relay")]
+    /// Wire value is `oauth_url` (for browser OAuth). The challenge kind is
+    /// always re-derived at projection time from the persisted credential
+    /// setup, never deserialized back from the wire.
+    #[serde(rename = "oauth_url")]
     OAuthUrl,
-    /// User pastes a secret string into the chat form. Covers a GitHub PAT, an
-    /// API key, AND a channel pairing code (e.g. Slack): the interaction
-    /// modality — "paste a string" — is identical; what differs is the resolve
-    /// route, which rides in `connection` context (present for channel pairing,
-    /// absent for a stored-credential secret).
-    ///
-    /// Wire value is `paste_secret`.
-    #[serde(rename = "paste_secret")]
+    /// User pastes a secret string into the chat form. Wire value is
+    /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
+    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Slack): the
+    /// interaction modality — "paste a string" — is identical; what differs is
+    /// the resolve route, which rides in `connection` context (present for
+    /// channel pairing, absent for a stored-credential secret).
     ManualToken,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
 }
 
-/// Connection context for a channel-pairing challenge riding the `paste_secret`
+/// Connection context for a channel-pairing challenge riding the `manual_token`
 /// modality. Present on an auth prompt when the paste is a pairing code that
 /// connects an inbound channel (e.g. Slack), carrying the render copy and the
 /// resolve-route discriminator (`channel`) so one paste card serves both a
@@ -1041,7 +1039,7 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Channel-pairing connection context. Present only for a `paste_secret`
+    /// Channel-pairing connection context. Present only for a `manual_token`
     /// challenge whose paste is a pairing code (channel connection), carrying
     /// the render copy + resolve route. Absent for stored-credential secrets and
     /// OAuth. Additive + serde-default.
@@ -1251,7 +1249,7 @@ pub enum ProductProjectionItem {
         body: Option<String>,
         #[serde(default)]
         allow_always: bool,
-        /// Auth challenge context. For a `paste_secret` gate whose paste is a
+        /// Auth challenge context. For a `manual_token` gate whose paste is a
         /// pairing code, its `connection` field carries the channel-connection
         /// render copy + resolve route — the single canonical place the
         /// projection-gate consumer reads it (no duplicate top-level field, per
@@ -1624,11 +1622,11 @@ mod tests {
 
     #[test]
     fn auth_prompt_challenge_kind_all_variants_roundtrip() {
-        // Current wire values: the interaction-modality rename (oauth_relay /
-        // paste_secret) replaces the provider-shaped oauth_url / manual_token.
+        // Stable wire values: `oauth_url` (browser OAuth) and `manual_token`
+        // (paste a secret — PAT / API key / channel pairing code).
         for (variant, expected) in [
-            (AuthPromptChallengeKind::OAuthUrl, "\"oauth_relay\""),
-            (AuthPromptChallengeKind::ManualToken, "\"paste_secret\""),
+            (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
+            (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
             (AuthPromptChallengeKind::Other, "\"other\""),
         ] {
             let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
@@ -1641,7 +1639,7 @@ mod tests {
 
     #[test]
     fn auth_prompt_context_round_trips_channel_connection() {
-        // A paste_secret challenge whose paste is a pairing code carries the
+        // A manual_token challenge whose paste is a pairing code carries the
         // connection context (channel + copy). Round-trip it through the wire.
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
@@ -1683,7 +1681,7 @@ mod tests {
         // place); there is no duplicate top-level Gate.connection field.
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["challenge_kind"],
-            "paste_secret"
+            "manual_token"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
@@ -1925,7 +1923,7 @@ mod tests {
 
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["challenge_kind"],
-            "oauth_relay"
+            "oauth_url"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["provider"],

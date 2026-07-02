@@ -36,7 +36,7 @@ import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
-// A channel-pairing gate rides the auth rail as a `paste_secret` challenge that
+// A channel-pairing gate rides the auth rail as a `manual_token` challenge that
 // also carries a `connection` requirement. The pairing card reads an
 // `onboarding`-shaped object, so map the gate's connection context onto it.
 function onboardingFromGate(gate) {
@@ -55,7 +55,7 @@ function onboardingFromGate(gate) {
 function isChannelPairingGate(gate) {
   return (
     gate?.kind === "auth_required" &&
-    gate?.challengeKind === "paste_secret" &&
+    gate?.challengeKind === "manual_token" &&
     Boolean(gate?.connection)
   );
 }
@@ -299,7 +299,7 @@ export function Chat({
             html`<${TypingIndicator} />`}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
-              ? (pendingGate.challengeKind === "oauth_relay"
+              ? (pendingGate.challengeKind === "oauth_url"
                 ? html`
                   <${AuthOauthCard}
                     gate=${pendingGate}
@@ -307,7 +307,7 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 `
-                : pendingGate.challengeKind === "paste_secret"
+                : pendingGate.challengeKind === "manual_token"
                   ? (isChannelPairingGate(pendingGate)
                     ? html`
                   <${OnboardingPairingCard}

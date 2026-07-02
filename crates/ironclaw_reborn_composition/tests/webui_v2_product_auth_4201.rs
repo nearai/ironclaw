@@ -1218,7 +1218,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
         connection: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
-    assert_eq!(json["challenge_kind"], "oauth_relay");
+    assert_eq!(json["challenge_kind"], "oauth_url");
     let invocation_id = view
         .invocation_id
         .expect("invocation id present")
