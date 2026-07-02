@@ -215,6 +215,25 @@ impl GroupSharedStorage {
             GroupCapability::Recording => None,
         }
     }
+
+    /// C-MULTIUSER: the auto-approve `(tenant, user)` scope for a SPECIFIC run
+    /// owner. Uses the group's real run tenant (`product_harness.scope`, e.g.
+    /// `tenant-itest`) with `owner`'s user id — the exact key the dispatch-time
+    /// auto-approve check reads for a run OWNED by `owner` once the capability
+    /// backend is built with `with_run_owner_scoped_capability_dispatch`. Unlike
+    /// [`auto_approve_scope`] (which keys on the fixed capability user, shared by
+    /// all actors), this keys per actor, so a grant seeded here applies to that
+    /// owner's runs only. `None` for the Echo backend (no approval stores).
+    pub(crate) fn auto_approve_scope_for_owner(&self, owner: &UserId) -> Option<ResourceScope> {
+        match &self.capability {
+            GroupCapability::HostRuntime(_) => {
+                let mut scope = self.product_harness.scope.clone();
+                scope.user_id = owner.clone();
+                Some(scope)
+            }
+            GroupCapability::Recording => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +353,29 @@ impl RebornIntegrationGroup {
         Self::builder().skill_activation_tools().await
     }
 
+    /// C-MULTIUSER: core built-in tools (memory/http/shell/…) with **per-actor
+    /// capability scoping** (`with_run_owner_scoped_capability_dispatch`). Each
+    /// thread dispatches its capabilities under its OWN run owner's
+    /// `(tenant, user)` scope, so `memory_write`/`read`/`search` resolve to that
+    /// owner's `/memory/tenants/<t>/users/<u>/…` subtree — actor A's memory is
+    /// invisible to actor B. Distinct from [`builtin_tools`], which collapses
+    /// every actor onto one fixed capability user (shared memory). Drives
+    /// `scenario_memory_isolation_across_actors`.
+    pub async fn multiuser_memory_tools() -> HarnessResult<Self> {
+        Self::builder().multiuser_memory_tools().await
+    }
+
+    /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
+    /// **per-actor capability scoping**. A grant via
+    /// [`enable_auto_approve_for_owner`] and an explicit OFF via
+    /// [`disable_auto_approve_for_owner`] each apply to that owner ALONE. Drives
+    /// `scenario_auto_approve_isolation_across_actors`: actor A's always-allow
+    /// grant lets A's call complete gate-free while actor B (set OFF) still
+    /// raises a real `BlockedApproval` gate on the identical call.
+    pub async fn multiuser_approvals() -> HarnessResult<Self> {
+        Self::builder().multiuser_approvals().await
+    }
+
     /// Builder for advanced configuration (e.g. `StorageMode::LibSql`).
     /// Defaults to `StorageMode::InMemory`.
     pub fn builder() -> RebornIntegrationGroupBuilder {
@@ -381,6 +423,41 @@ impl RebornIntegrationGroup {
             GroupCapability::HostRuntime(arc) => Some(arc),
             GroupCapability::Recording => None,
         }
+    }
+
+    /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
+    /// owner's `(tenant, user)` scope over the shared CAS-persisted
+    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
+    /// then dispatches its capability without raising an approval gate, while
+    /// any OTHER owner's identical call still gates — the per-actor isolation
+    /// proof. Errors for the Echo backend (no approval stores).
+    pub async fn enable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .enable_auto_approve_for(scope)
+            .await
+    }
+
+    /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
+    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
+    /// isolation test that needs owner B to still GATE must give B its own
+    /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
+    /// scope to make gates fire. Errors for the Echo backend.
+    pub async fn disable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .disable_auto_approve_for(scope)
+            .await
     }
 
     /// The exact `HostUserProfileSource` wired into this group's ONE planned
@@ -722,6 +799,40 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
+    }
+
+    /// Build a per-actor-scoped memory group.
+    /// See [`RebornIntegrationGroup::multiuser_memory_tools`]. Same capability
+    /// surface as [`builtin_tools`] but with per-actor capability dispatch, so
+    /// each actor's memory lands under its own owner subtree. Self-contained
+    /// (no shared helper) so it relocates trivially if the group constructors
+    /// are later split out.
+    pub async fn multiuser_memory_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a per-actor-scoped file-approval group.
+    /// See [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
+    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch. Auto-
+    /// approve defaults ON per owner (`AUTO_APPROVE_DEFAULT_ENABLED = true`), so
+    /// a scenario that needs an owner to GATE sets that owner OFF explicitly via
+    /// `disable_auto_approve_for_owner` (and grants another owner via
+    /// `enable_auto_approve_for_owner`) — the per-user setting is what the test
+    /// asserts isolates. Because the seam makes the dispatch user equal the turn
+    /// owner, a raised approval request persists under — and its gate-evidence
+    /// lookup resolves through — the SAME owner, so the gate is verified (not
+    /// masked to `Failed`). Self-contained for trivial relocation.
+    pub async fn multiuser_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].

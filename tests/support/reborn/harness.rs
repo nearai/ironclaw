@@ -1615,6 +1615,18 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `into_group`. Held as the opaque test-support handle so this crate never
     /// names the crate-private source type.
     skill_activation_source: Option<SkillActivationTestSource>,
+    /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
+    /// capability-execution user from the RUN's owner/actor (mirroring
+    /// production `local_dev_visible_capability_request`,
+    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) instead of
+    /// this harness's single fixed `user_id`. That is what lets two distinct
+    /// actors dispatching over the group's ONE shared capability backend run
+    /// under DISTINCT `(tenant, user)` scopes, so memory, auto-approve, and
+    /// approval-settings isolate per actor — the real production behavior.
+    /// Defaults `false` so every existing fixed-user harness is byte-identical;
+    /// only the multiuser group constructors flip it on via
+    /// [`with_run_owner_scoped_capability_dispatch`].
+    scope_capability_by_run_owner: bool,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1844,6 +1856,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2273,6 +2286,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem,
             project_service,
             skill_activation_source,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2420,6 +2434,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2515,6 +2530,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2589,6 +2605,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2649,6 +2666,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            scope_capability_by_run_owner: false,
         })
     }
 
@@ -2997,6 +3015,37 @@ impl HostRuntimeCapabilityHarness {
         self
     }
 
+    /// C-MULTIUSER: opt in to per-actor capability scoping. With this set,
+    /// [`create_capability_port`] resolves the execution `(tenant, user)` from
+    /// each run's OWN owner/actor rather than this harness's single fixed
+    /// `user_id` — so N actors sharing one capability backend dispatch under N
+    /// distinct scopes. See [`scope_capability_by_run_owner`] and
+    /// [`dispatch_user_for_run`]. Enabled only by the multiuser group
+    /// constructors; every other harness keeps the legacy fixed-user behavior.
+    pub(crate) fn with_run_owner_scoped_capability_dispatch(mut self) -> Self {
+        self.scope_capability_by_run_owner = true;
+        self
+    }
+
+    /// The capability-execution `UserId` for one run. Mirrors production
+    /// `local_dev_visible_capability_request`'s owner→actor→fallback resolution
+    /// (`runtime/local_dev.rs`): when [`scope_capability_by_run_owner`] is set,
+    /// prefer the run scope's explicit owner, then the run actor, then fall back
+    /// to the fixed harness `user_id`. Without the flag, always the fixed
+    /// `user_id` (legacy behavior — every existing test unaffected).
+    fn dispatch_user_for_run(&self, run_context: &LoopRunContext) -> UserId {
+        if self.scope_capability_by_run_owner {
+            run_context
+                .scope
+                .explicit_owner_user_id()
+                .cloned()
+                .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
+                .unwrap_or_else(|| self.user_id.clone())
+        } else {
+            self.user_id.clone()
+        }
+    }
+
     fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
         let mounts = self
             .capability_mount_overrides
@@ -3220,8 +3269,13 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        // C-MULTIUSER: resolve the execution user per run (owner/actor) when the
+        // harness opts in, else the fixed harness user. Both the authority scope
+        // and the grant grantee MUST use the SAME user so the lease is
+        // self-consistent (grantee == execution user) — matching production.
+        let dispatch_user = self.harness.dispatch_user_for_run(run_context);
         let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
-            self.harness.user_id.clone(),
+            dispatch_user.clone(),
             self.harness.runtime_kind,
             TrustClass::FirstParty,
             SurfaceKind::new("agent_loop").map_err(host_runtime_harness_error)?,
@@ -3229,7 +3283,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         )
         .with_mounts(self.harness.mounts.clone())
         .with_grants(capability_grants(
-            Principal::User(self.harness.user_id.clone()),
+            Principal::User(dispatch_user.clone()),
             &self.harness.capability_ids,
             self.harness.effect_kinds.clone(),
             self.harness.mounts.clone(),

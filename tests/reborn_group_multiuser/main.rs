@@ -15,22 +15,47 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_auto_approve_isolation_across_actors;
+mod scenario_memory_isolation_across_actors;
 mod scenario_two_actors_own_threads;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
 async fn multiuser_group_e2e() {
-    let g = RebornIntegrationGroup::builtin_tools()
-        .await
-        .expect("group builds");
     let mut report = ScenarioReport::new();
 
-    // Single scenario: two distinct actors, each completing a turn on their
-    // own thread over the SAME shared coordinator/scheduler/thread_service.
+    // Scenario 1: two distinct actors, each completing a turn on their own
+    // thread over the SAME shared coordinator/scheduler/thread_service — the
+    // thread-history isolation the E-MULTIUSER `with_actor_id` seam provides.
+    let g = RebornIntegrationGroup::builtin_tools()
+        .await
+        .expect("builtin group builds");
     report.record(
         "two_actors_own_threads",
         scenario_two_actors_own_threads::run(&g).await,
+    );
+
+    // Scenario 2 (C-MULTIUSER): per-actor MEMORY isolation. Uses the
+    // per-actor-scoped memory group so each actor's memory lands under its own
+    // owner subtree (production's `MemoryDocumentScope` behavior).
+    let memory_group = RebornIntegrationGroup::multiuser_memory_tools()
+        .await
+        .expect("multiuser memory group builds");
+    report.record(
+        "memory_isolation_across_actors",
+        scenario_memory_isolation_across_actors::run(&memory_group).await,
+    );
+
+    // Scenario 3 (C-MULTIUSER): per-actor AUTO-APPROVE / approval-settings
+    // isolation. Uses the per-actor-scoped file-approval group so a grant for
+    // actor A does not skip actor B's gate.
+    let approvals_group = RebornIntegrationGroup::multiuser_approvals()
+        .await
+        .expect("multiuser approvals group builds");
+    report.record(
+        "auto_approve_isolation_across_actors",
+        scenario_auto_approve_isolation_across_actors::run(&approvals_group).await,
     );
 
     report.assert_all_passed();
