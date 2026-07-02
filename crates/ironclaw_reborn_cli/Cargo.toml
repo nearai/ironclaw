@@ -95,12 +95,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+axum = "0.8"
+http-body-util = "0.1"
 # Enable the composition crate's `test-support` seam for CLI unit tests so
 # `open_reborn_identity_resolver` (the test-only standalone resolver opener)
 # is available when building this crate's tests. Production code uses the
 # runtime-owned `RebornRuntime::open_reborn_identity_resolver` accessor
 # instead. Feature-unifies with the `[dependencies]` entry above.
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "ironclaw-reborn"

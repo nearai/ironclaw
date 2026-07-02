@@ -165,10 +165,17 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request, StatusCode, header};
+    use http_body_util::BodyExt;
     use ironclaw_reborn_composition::WebuiAuthentication;
     use ironclaw_reborn_webui_ingress::{
         OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
     };
+    use serde::Deserialize;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
 
     /// Bearer verifier that accepts nothing — stands in for the env-bearer
     /// authenticator without pulling in its construction requirements.
@@ -191,11 +198,11 @@ mod tests {
 
         fn authorization_url(
             &self,
-            _callback_url: &str,
-            _state: &str,
+            callback_url: &str,
+            state: &str,
             _code_challenge: &str,
         ) -> String {
-            "https://provider.example/authorize".to_string()
+            format!("https://provider.example/authorize?redirect_uri={callback_url}&state={state}")
         }
 
         async fn exchange_code(
@@ -204,8 +211,117 @@ mod tests {
             _callback_url: &str,
             _code_verifier: &str,
         ) -> Result<OAuthUserProfile, OAuthError> {
-            unreachable!("provider exchange is not exercised by auth-surface wiring tests")
+            Ok(OAuthUserProfile {
+                provider_user_id: "google-subject-1".to_string(),
+                email: Some("alice@example.com".to_string()),
+                email_verified: true,
+                verified_emails: vec!["alice@example.com".to_string()],
+                display_name: None,
+            })
         }
+    }
+
+    fn with_peer(mut request: Request<Body>) -> Request<Body> {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+        request
+    }
+
+    fn state_from_location(location: &str) -> String {
+        let query = location.split_once('?').expect("query").1;
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("state=") {
+                return value.to_string();
+            }
+        }
+        panic!("no state in {location}");
+    }
+
+    fn ticket_from_landing(landing: &str) -> String {
+        let query = landing.split_once('?').expect("query").1;
+        let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("login_ticket=") {
+                return value.to_string();
+            }
+        }
+        panic!("no login_ticket in {landing}");
+    }
+
+    #[derive(Deserialize)]
+    struct SessionExchangeResponse {
+        token: String,
+    }
+
+    async fn mint_session_token(public_mount: &PublicRouteMount) -> String {
+        let router = public_mount.router.clone();
+        let login = router
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/auth/login/google?redirect_after=%2Fv2")
+                    .body(Body::empty())
+                    .expect("request"),
+            ))
+            .await
+            .expect("login request");
+        assert_eq!(login.status(), StatusCode::TEMPORARY_REDIRECT);
+        let auth_url = login
+            .headers()
+            .get(header::LOCATION)
+            .expect("login Location")
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        let state = state_from_location(&auth_url);
+
+        let callback = router
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/auth/callback/google?code=auth-code&state={state}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            ))
+            .await
+            .expect("callback request");
+        assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+        let landing = callback
+            .headers()
+            .get(header::LOCATION)
+            .expect("callback Location")
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        let ticket = ticket_from_landing(&landing);
+
+        let response = router
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/session/exchange")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "ticket": ticket }).to_string(),
+                    ))
+                    .expect("request"),
+            ))
+            .await
+            .expect("session exchange request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("exchange body")
+            .to_bytes();
+        let payload: SessionExchangeResponse = serde_json::from_slice(&bytes).expect("json");
+        payload.token
     }
 
     #[tokio::test]
@@ -340,6 +456,77 @@ mod tests {
         assert!(
             surface.public_mount.is_some(),
             "configured SSO must mount the public login routes"
+        );
+    }
+
+    #[tokio::test]
+    async fn sso_surface_rejects_signed_session_after_local_access_revoked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let access_store_path = tmp.path().join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&access_store_path)
+                .await
+                .expect("open local trigger access store");
+        let tenant_id = TenantId::new("sso-validator-tenant").expect("tenant");
+        let agent_id = AgentId::new("sso-validator-agent").expect("agent");
+        let project_id = ProjectId::new("sso-validator-project").expect("project");
+        let sso = SsoStartupConfig {
+            providers: vec![Arc::new(StubProvider(
+                OAuthProviderName::new("google").expect("provider name"),
+            ))],
+            base_url: "https://app.example".to_string(),
+            allowed_email_domains: vec!["example.com".to_string()],
+            session_epoch: None,
+        };
+
+        let surface = build_webui_auth_surface(
+            Some(sso),
+            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+                &tenant_id,
+            )),
+            tenant_id.clone(),
+            SecretString::from("operator-session-secret".to_string()),
+            Arc::new(RejectingAuth),
+            Some(LocalTriggerAccessBootstrapConfig {
+                store: access_store.clone(),
+                tenant_id: tenant_id.clone(),
+                agent_id: agent_id.clone(),
+                project_id: Some(project_id.clone()),
+            }),
+        )
+        .await
+        .expect("SSO surface with a bootstrap config must build");
+
+        let token = mint_session_token(surface.public_mount.as_ref().expect("public mount")).await;
+        let initial_auth = surface
+            .authenticator
+            .authenticate(&token)
+            .await
+            .expect("freshly minted signed session should authenticate");
+        let signed_session_user = initial_auth.user_id;
+        assert!(
+            !signed_session_user.as_str().is_empty(),
+            "test profile should resolve to an admitted SSO user",
+        );
+
+        access_store
+            .reconcile_local_access(
+                ironclaw_reborn_composition::LocalTriggerAccessReconciliation {
+                    tenant_id: &tenant_id,
+                    user_ids: &[],
+                    agent_id: Some(&agent_id),
+                    project_id: Some(&project_id),
+                    role: ironclaw_reborn_composition::LocalTriggerAccessRole::Owner,
+                    source:
+                        ironclaw_reborn_composition::LocalTriggerAccessSource::LocalDevSsoBootstrap,
+                },
+            )
+            .await
+            .expect("revoke local access");
+
+        assert!(
+            surface.authenticator.authenticate(&token).await.is_none(),
+            "the same signed bearer must be rejected after local access is reconciled away",
         );
     }
 }

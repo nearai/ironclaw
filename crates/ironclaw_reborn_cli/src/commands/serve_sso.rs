@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use ironclaw_reborn_webui_ingress::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthProvider,
+    SessionEpoch,
 };
 use secrecy::SecretString;
 
@@ -48,7 +49,7 @@ pub(crate) struct SsoStartupConfig {
     /// Optional deployment epoch for signed WebUI sessions. Changing this
     /// value invalidates previously minted browser tokens without rotating the
     /// operator secret.
-    pub(crate) session_epoch: Option<String>,
+    pub(crate) session_epoch: Option<SessionEpoch>,
 }
 
 /// Resolve the SSO startup config from environment, applying all
@@ -81,8 +82,15 @@ pub(crate) fn sso_startup_config_from_env(
         providers,
         base_url,
         allowed_email_domains,
-        session_epoch: non_empty_env(WEBUI_SESSION_EPOCH_ENV),
+        session_epoch: session_epoch_from_env()?,
     }))
+}
+
+fn session_epoch_from_env() -> anyhow::Result<Option<SessionEpoch>> {
+    non_empty_env(WEBUI_SESSION_EPOCH_ENV)
+        .map(SessionEpoch::new)
+        .transpose()
+        .with_context(|| format!("invalid {WEBUI_SESSION_EPOCH_ENV}"))
 }
 
 /// Resolve the externally visible WebUI base URL used for OAuth redirects.
@@ -616,7 +624,7 @@ mod tests {
             "explicit WebUI base URL must become the SSO callback base URL"
         );
         assert_eq!(
-            resolved.session_epoch.as_deref(),
+            resolved.session_epoch.as_ref().map(SessionEpoch::as_str),
             Some("deploy-2026-07-02"),
             "configured session epoch should be trimmed and carried into signed-session wiring",
         );

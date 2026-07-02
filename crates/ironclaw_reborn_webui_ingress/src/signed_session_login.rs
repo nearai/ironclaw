@@ -30,6 +30,7 @@
 //!   OR the host's existing env-bearer operator token.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -53,6 +54,79 @@ use crate::session::{
 };
 
 type HmacSha256 = Hmac<Sha256>;
+const SESSION_EPOCH_MAX_CHARS: usize = 128;
+
+/// Deployment epoch carried by signed WebUI session tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct SessionEpoch(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionEpochError {
+    #[error("session epoch must not be empty")]
+    Empty,
+    #[error("session epoch exceeds {max} chars")]
+    TooLong { max: usize },
+    #[error("session epoch must not contain control characters")]
+    ControlCharacter,
+}
+
+impl SessionEpoch {
+    pub fn new(raw: impl Into<String>) -> Result<Self, SessionEpochError> {
+        let value = raw.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    fn validate(value: &str) -> Result<(), SessionEpochError> {
+        if value.trim().is_empty() {
+            return Err(SessionEpochError::Empty);
+        }
+        if value.chars().count() > SESSION_EPOCH_MAX_CHARS {
+            return Err(SessionEpochError::TooLong {
+                max: SESSION_EPOCH_MAX_CHARS,
+            });
+        }
+        if value.chars().any(char::is_control) {
+            return Err(SessionEpochError::ControlCharacter);
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<String> for SessionEpoch {
+    type Error = SessionEpochError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for SessionEpoch {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SessionEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<SessionEpoch> for String {
+    fn from(value: SessionEpoch) -> Self {
+        value.into_inner()
+    }
+}
 
 /// Host-supplied input to [`build_signed_session_login`].
 pub struct SignedSessionLoginConfig {
@@ -69,7 +143,7 @@ pub struct SignedSessionLoginConfig {
     /// Optional deployment epoch included in newly minted session tokens and
     /// required during lookup when configured. Changing this value forces all
     /// browsers through SSO again without rotating the broader operator secret.
-    pub session_epoch: Option<String>,
+    pub session_epoch: Option<SessionEpoch>,
     /// Optional host-supplied validator that re-checks whether a signed
     /// token's user still has active access. SSO creation still goes through
     /// `user_directory`; this guard only invalidates stale signed bearers.
@@ -167,7 +241,7 @@ struct SignedTokenSessionStore {
     tenant_id: TenantId,
     /// Optional deployment epoch. When configured, lookup only accepts tokens
     /// minted with this exact epoch.
-    session_epoch: Option<String>,
+    session_epoch: Option<SessionEpoch>,
     access_validator: Option<Arc<dyn SessionUserAccessValidator>>,
     /// Revoked session ids → their expiry (unix seconds). Bounded by
     /// [`MAX_REVOKED_ENTRIES`]; the common-case logout is an O(1) insert,
@@ -188,7 +262,7 @@ impl SignedTokenSessionStore {
     fn from_operator_secret(
         secret: &SecretString,
         tenant_id: &TenantId,
-        session_epoch: Option<String>,
+        session_epoch: Option<SessionEpoch>,
         access_validator: Option<Arc<dyn SessionUserAccessValidator>>,
     ) -> Self {
         let mut hasher = Sha256::new();
@@ -245,7 +319,7 @@ struct TokenPayload {
     tenant: String,
     user: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    ep: Option<String>,
+    ep: Option<SessionEpoch>,
     iat: i64,
     exp: i64,
 }
@@ -314,11 +388,9 @@ impl SessionStore for SignedTokenSessionStore {
         }
         let user_id = UserId::new(&payload.user)
             .map_err(|err| SessionStoreError::Backend(format!("token user: {err}")))?;
-        if self
-            .session_epoch
-            .as_deref()
-            .is_some_and(|epoch| payload.ep.as_deref() != Some(epoch))
-        {
+        if self.session_epoch.as_ref().is_some_and(
+            |epoch| !matches!(payload.ep.as_ref(), Some(payload_epoch) if payload_epoch == epoch),
+        ) {
             return Ok(None);
         }
         if let Some(validator) = &self.access_validator {
@@ -439,6 +511,28 @@ mod tests {
         )
     }
 
+    #[test]
+    fn session_epoch_validates_boundary_values() {
+        assert_eq!(
+            SessionEpoch::new("deploy-2026-07-02")
+                .expect("valid epoch")
+                .as_str(),
+            "deploy-2026-07-02",
+        );
+        assert!(matches!(
+            SessionEpoch::new(""),
+            Err(SessionEpochError::Empty),
+        ));
+        assert!(matches!(
+            SessionEpoch::new("deploy\n2026"),
+            Err(SessionEpochError::ControlCharacter),
+        ));
+        assert!(matches!(
+            SessionEpoch::new("x".repeat(SESSION_EPOCH_MAX_CHARS + 1)),
+            Err(SessionEpochError::TooLong { .. }),
+        ));
+    }
+
     /// Mint a raw `{payload}.{sig}` token directly from a payload — used
     /// to craft tokens (expired, malformed identity) that
     /// `create_session` would refuse to produce.
@@ -545,13 +639,13 @@ mod tests {
         let store_epoch_1 = SignedTokenSessionStore::from_operator_secret(
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
-            Some("epoch-1".to_string()),
+            Some(SessionEpoch::new("epoch-1").expect("valid epoch")),
             None,
         );
         let store_epoch_2 = SignedTokenSessionStore::from_operator_secret(
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
-            Some("epoch-2".to_string()),
+            Some(SessionEpoch::new("epoch-2").expect("valid epoch")),
             None,
         );
         let token = store_epoch_1
