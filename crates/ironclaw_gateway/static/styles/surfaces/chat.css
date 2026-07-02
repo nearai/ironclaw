@@ -1398,8 +1398,9 @@
 }
 
 .thread-label {
-  font-family: var(--font-mono);
-  font-size: var(--v2-font-size-caption);
+  /* Chat titles are prose, not identifiers — body face, not mono. */
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
   flex: 1;
   min-width: 0;
   overflow: hidden;

@@ -273,6 +273,7 @@ I18n.register('en', {
   // Thread Sidebar
   'thread.assistant': 'Assistant',
   'thread.new': 'New thread',
+  'thread.untitled': 'New chat',
   
   // Memory Tab
   'memory.searchPlaceholder': 'Search memory...',

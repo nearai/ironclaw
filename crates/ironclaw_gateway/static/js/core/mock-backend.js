@@ -389,6 +389,28 @@ window.NUX_BILLING = {
     return false;
   }
 
+  // Human-friendly thread title from the first message (implied: the real
+  // backend titles threads via a cheap LLM pass after the first turn; the
+  // mock approximates it deterministically). Collapses whitespace, strips
+  // wrapping quotes and trailing punctuation, cuts at a word boundary, and
+  // capitalizes — "every morning at 9am, send…" -> "Every morning at 9am".
+  function deriveThreadTitle(content) {
+    var text = String(content || '')
+      .replace(/\s+/g, ' ')
+      .replace(/^["'\u201c\u2018]+|["'\u201d\u2019]+$/g, '')
+      .trim();
+    if (!text) return null;
+    // First clause reads better than a mid-sentence cut.
+    var clause = text.split(/(?<=[.!?])\s/)[0];
+    if (clause.length > 48) {
+      var cut = clause.slice(0, 48);
+      var lastSpace = cut.lastIndexOf(' ');
+      clause = (lastSpace > 24 ? cut.slice(0, lastSpace) : cut) + '\u2026';
+    }
+    clause = clause.replace(/[,;:.\s]+$/, '');
+    return clause.charAt(0).toUpperCase() + clause.slice(1);
+  }
+
   function createMission(spec) {
     var mission = {
       id: uid('mission'),
@@ -726,7 +748,7 @@ window.NUX_BILLING = {
 
     var thread = findThread(threadId);
     if (thread) {
-      if (!thread.title) thread.title = String(content).slice(0, 60);
+      if (!thread.title) thread.title = deriveThreadTitle(content);
       thread.updated_at = iso(0);
     }
 
