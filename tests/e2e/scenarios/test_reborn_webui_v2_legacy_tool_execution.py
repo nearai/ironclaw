@@ -11,6 +11,7 @@ from playwright.async_api import expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     USER_ID,
+    capability_preview_payload,
     create_thread,
     fetch_timeline,
     reborn_bearer_headers,
@@ -20,55 +21,12 @@ from reborn_webui_harness import (
     reborn_v2_yolo_server,  # noqa: F401 - imported fixture
     send_message,
     wait_for_assistant_message,
+    wait_for_capability_preview,
 )
 
 
 EMPTY_REPLY_THREAD_ID = "thread-legacy-empty-reply"
 EMPTY_REPLY_RUN_ID = "22222222-3333-4444-5555-666666666666"
-
-
-def _preview_payload(message: dict) -> dict | None:
-    if message.get("kind") != "capability_display_preview":
-        return None
-    content = message.get("content")
-    assert isinstance(content, str), f"preview content must be a string: {message!r}"
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as error:
-        raise AssertionError(f"preview content is not valid JSON: {content!r}") from error
-
-
-async def _wait_for_capability_preview(
-    client: httpx.AsyncClient,
-    base_url: str,
-    thread_id: str,
-    capability_id: str,
-    *,
-    output_fragment: str | None = None,
-    timeout: float = 45.0,
-) -> dict:
-    last_timeline = {}
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        last_timeline = await fetch_timeline(client, base_url, thread_id)
-        for message in last_timeline.get("messages", []):
-            preview = _preview_payload(message)
-            if not preview or preview.get("capability_id") != capability_id:
-                continue
-            output = (
-                preview.get("output_preview")
-                or preview.get("output_summary")
-                or ""
-            )
-            if output_fragment and output_fragment.lower() not in output.lower():
-                continue
-            return preview
-        await asyncio.sleep(0.25)
-
-    raise AssertionError(
-        f"Timed out waiting for {capability_id!r} preview in thread {thread_id}. "
-        f"Last timeline: {last_timeline}"
-    )
 
 
 async def _install_fake_event_source(page):
@@ -296,7 +254,7 @@ async def test_reborn_legacy_builtin_echo_tool_executes(reborn_v2_yolo_server):
             f"reborn builtin echo {marker}",
         )
 
-        preview = await _wait_for_capability_preview(
+        preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
@@ -319,7 +277,7 @@ async def test_reborn_legacy_builtin_time_tool_executes(reborn_v2_yolo_server):
             "reborn builtin time",
         )
 
-        preview = await _wait_for_capability_preview(
+        preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
@@ -364,14 +322,14 @@ async def test_reborn_legacy_parallel_tool_calls_complete(reborn_v2_yolo_server)
             "reborn parallel echo and time",
         )
 
-        echo_preview = await _wait_for_capability_preview(
+        echo_preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
             "builtin.echo",
             output_fragment="parallel-test",
         )
-        time_preview = await _wait_for_capability_preview(
+        time_preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
@@ -403,14 +361,14 @@ async def test_reborn_legacy_multi_step_tool_chain_completes(reborn_v2_yolo_serv
             "multi step echo then time",
         )
 
-        echo_preview = await _wait_for_capability_preview(
+        echo_preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
             "builtin.echo",
             output_fragment="step-one",
         )
-        time_preview = await _wait_for_capability_preview(
+        time_preview = await wait_for_capability_preview(
             client,
             reborn_v2_yolo_server,
             thread_id,
@@ -428,7 +386,7 @@ async def test_reborn_legacy_multi_step_tool_chain_completes(reborn_v2_yolo_serv
     previews = [
         preview
         for message in timeline.get("messages", [])
-        if (preview := _preview_payload(message)) is not None
+        if (preview := capability_preview_payload(message)) is not None
         and preview.get("capability_id") in {"builtin.echo", "builtin.time"}
     ]
     assert echo_preview["status"] == "completed", echo_preview
