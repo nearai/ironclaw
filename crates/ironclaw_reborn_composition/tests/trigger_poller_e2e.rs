@@ -114,7 +114,7 @@ impl HostManagedModelGateway for RecordingGateway {
 /// the same seam a production LLM-provider-backed gateway uses to turn a raw
 /// tool-call response into a `CapabilityCallCandidate`
 /// (`LoopCapabilityPort::register_provider_tool_call`), so registering
-/// through it here exercises the *real* `DisabledCapabilitiesDecorator` /
+/// through it here exercises the *real* `PerSurfaceCapabilityDenyDecorator` /
 /// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
 ///
 /// `register_provider_tool_call`'s default `provider_tool_call_capability_ids`
@@ -1239,7 +1239,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// exact seam a native provider tool-call response goes through in
 /// production), attempting to create a second trigger named
 /// `SELF_CREATE_MARKER_TRIGGER_NAME`. See `SelfCreateAttemptGateway`'s doc
-/// comment for why this exercises the real `DisabledCapabilitiesDecorator` /
+/// comment for why this exercises the real `PerSurfaceCapabilityDenyDecorator` /
 /// `CapabilitySurfaceDenyFilter` chain instead of a stand-in.
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
@@ -1321,7 +1321,7 @@ async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
 
     // Core assertion, mechanism-level: the surface must deny the registration
     // itself. `builtin.trigger_create` is missing from `tool_definitions()`
-    // on the scheduled_trigger surface (the fix's `DisabledCapabilitiesDecorator`
+    // on the scheduled_trigger surface (the fix's `PerSurfaceCapabilityDenyDecorator`
     // / `CapabilitySurfaceDenyFilter`), so the provider-tool-name -> capability-id
     // lookup `register_provider_tool_call` performs against that same list
     // comes up empty and fails closed — see `SelfCreateAttemptGateway`'s doc
