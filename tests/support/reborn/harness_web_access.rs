@@ -7,11 +7,16 @@
 //! `ironclaw_first_party_extensions::web_access::WebAccessExecutor::dispatch`,
 //! which itself speaks MCP JSON-RPC by hand over three sequential
 //! `RuntimeHttpEgress` calls (`initialize` → `notifications/initialized` →
-//! `tools/call`) to the Exa MCP endpoint. `WebAccessTestHandler` below is a
-//! thin adapter mirroring production's `WebAccessFirstPartyHandler`
-//! (`crates/ironclaw_reborn_composition/src/web_access.rs`, `pub(crate)` to
-//! that crate and therefore unreachable from here) — only the adapter glue is
-//! re-authored; the dispatch logic executed is the real `WebAccessExecutor`.
+//! `tools/call`) to the Exa MCP endpoint. This harness wires the real
+//! production handler registration,
+//! `ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers`
+//! (`crates/ironclaw_reborn_composition/src/web_access.rs`, `pub` since the
+//! self-review that landed this file), instead of duplicating the
+//! `FirstPartyCapabilityHandler` dispatch/error-mapping glue here. Only the
+//! manifest/schema loading below and the trust/network policy further down
+//! remain harness-local — those are test-support concerns (reading assets
+//! off disk, scoping a test-only trust policy), not business logic that
+//! production owns.
 //!
 //! `web_access_extension_package()` mirrors `github.rs`'s
 //! `extension_registry()` pattern exactly: it reads the REAL production
@@ -37,23 +42,18 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_first_party_extensions::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
-    WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
-};
+use ironclaw_first_party_extensions::{EXA_MCP_HOST, NETWORK_EGRESS_LIMIT};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
-    VirtualPath,
+    EffectKind, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityError,
-    FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest,
-    FirstPartyCapabilityResult, HostRuntime, HostRuntimeServices,
-    default_host_api_contract_registry, default_host_port_catalog,
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityRegistry,
+    HostRuntime, HostRuntimeServices, default_host_api_contract_registry,
+    default_host_port_catalog,
 };
+use ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -64,41 +64,6 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Extension id (== manifest `service`) for the test-only web-access package.
 pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
-
-/// Thin `FirstPartyCapabilityHandler` adapter mirroring production's
-/// `WebAccessFirstPartyHandler` 1:1 — only the adapter glue is re-authored,
-/// the dispatch logic is the real, fully-`pub` `WebAccessExecutor::dispatch`.
-struct WebAccessTestHandler {
-    executor: WebAccessExecutor,
-}
-
-#[async_trait]
-impl FirstPartyCapabilityHandler for WebAccessTestHandler {
-    async fn dispatch(
-        &self,
-        request: FirstPartyCapabilityRequest,
-    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        let result = self
-            .executor
-            .dispatch(WebAccessDispatchRequest {
-                capability_id: &request.capability_id,
-                scope: &request.scope,
-                input: &request.input,
-                runtime_http_egress: request.services.runtime_http_egress.clone(),
-            })
-            .await
-            .map_err(web_access_test_error)?;
-        Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
-    }
-}
-
-fn web_access_test_error(error: WebAccessDispatchError) -> FirstPartyCapabilityError {
-    let mapped = FirstPartyCapabilityError::new(error.kind());
-    match error.usage() {
-        Some(usage) => mapped.with_usage(usage.clone()),
-        None => mapped,
-    }
-}
 
 /// Build the `ExtensionPackage` for the real `web-access` provider by parsing
 /// its production manifest off disk, mirroring `github.rs`'s
@@ -164,23 +129,16 @@ pub(super) fn exa_mcp_test_network_policy() -> NetworkPolicy {
 }
 
 /// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
-/// (`harness.rs`) that wires the `web-access` package registry plus a
-/// `FirstPartyCapabilityRegistry` carrying `WebAccessTestHandler` for both
+/// (`harness.rs`) that wires the `web-access` package registry plus the real
+/// production `FirstPartyCapabilityRegistry` registration for both
 /// capability ids, instead of the built-in first-party handler set.
 pub(super) fn local_dev_host_runtime_with_web_access(
     storage_root: PathBuf,
     package_registry: ExtensionRegistry,
     http_egress: Arc<RecordingRuntimeHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let handler = Arc::new(WebAccessTestHandler {
-        executor: WebAccessExecutor::default(),
-    });
     let mut handlers = FirstPartyCapabilityRegistry::new();
-    handlers.insert_handler(
-        CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
-        Arc::clone(&handler),
-    );
-    handlers.insert_handler(CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?, handler);
+    register_bundled_web_access_first_party_handlers(&mut handlers)?;
 
     let services = HostRuntimeServices::new(
         Arc::new(package_registry),
