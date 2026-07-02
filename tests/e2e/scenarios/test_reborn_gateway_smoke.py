@@ -217,16 +217,18 @@ async def test_reborn_gateway_loads_shell(reborn_gateway_page):
     """The isolated Reborn smoke gateway boots the browser shell.
 
     With engine v2 removed the gateway always reports ``engine_v2_enabled:
-    false``, so the shell renders the legacy tab layout: chat and routines
-    are visible and the v2-only missions tab stays hidden.
+    false``, so the shell renders the legacy tab layout: chat, missions, and
+    routines stay visible while the v2-only projects tab is hidden.
     """
     chat_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="chat"))
     missions_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="missions"))
     routines_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="routines"))
+    projects_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="projects"))
 
     await expect(chat_tab).to_be_visible()
+    await expect(missions_tab).to_be_visible()
     await expect(routines_tab).to_be_visible()
-    await expect(missions_tab).to_be_hidden()
+    await expect(projects_tab).to_be_hidden()
 
 
 async def test_reborn_gateway_persists_text_and_tool_turns_without_duplicate_response(
