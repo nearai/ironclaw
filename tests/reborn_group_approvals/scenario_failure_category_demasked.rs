@@ -45,7 +45,8 @@
 //! bounded-retry `RecoveryStrategy` (`crates/ironclaw_agent_loop/src/strategies/recovery.rs`,
 //! default `max_attempts_per_class: 2`) until the retry budget is exhausted,
 //! at which point the loop emits `LoopExit::Failed` with
-//! `LoopFailureKind::ModelError` and the run reaches `TurnStatus::Failed`.
+//! `LoopFailureKind::ModelError`, attaches the more specific safe summary
+//! category `"model_unavailable"`, and the run reaches `TurnStatus::Failed`.
 //! This is exactly the original flake's failure shape (model/driver failure
 //! racing checkpoint evidence), now correctly surfaced through the de-masked
 //! path instead of being swallowed into `driver_protocol_violation`.
@@ -83,18 +84,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .into());
     }
 
-    // Empirically discovered: a `TraceLlm` exhaustion on the very first model
-    // call surfaces, after the bounded model-error retry budget is spent, as
-    // `LoopFailureKind::ModelError` → category `"model_error"`
-    // (`crates/ironclaw_turns/src/loop_exit.rs`,
-    // `LoopFailureKind::category` -> `Self::ModelError => "model_error"`).
+    // A `TraceLlm` exhaustion on the first model call is classified as
+    // `ModelErrorClass::Unavailable`. The loop-level `reason_kind` remains
+    // `LoopFailureKind::ModelError`, while the persisted `TurnRunState::failure`
+    // uses the more specific safe summary category from the failed exit.
     // Asserting the exact value (not just `!= driver_protocol_violation`)
-    // proves the de-masked path produces the loop's REAL reason, not some
-    // other incidental category.
-    if failure.category() != "model_error" {
+    // proves the de-masked path preserves the loop's real safe category, not
+    // some other incidental category.
+    if failure.category() != "model_unavailable" {
         return Err(format!(
-            "expected de-masked failure category \"model_error\" (TraceLlm exhaustion -> \
-             LoopFailureKind::ModelError), got {failure:?}"
+            "expected de-masked failure category \"model_unavailable\" (TraceLlm exhaustion -> \
+             ModelErrorClass::Unavailable safe summary), got {failure:?}"
         )
         .into());
     }
