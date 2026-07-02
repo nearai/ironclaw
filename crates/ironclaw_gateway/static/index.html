@@ -518,32 +518,56 @@
 
     <!-- Skills Tab (promoted out of Settings) -->
     <div class="tab-panel" id="tab-skills">
-      <div class="skills-surface-container">
-        <div class="surface-heading">
-          <div class="surface-title" data-i18n="tab.skills">Skills</div>
-          <div class="surface-subtitle" data-i18n="skills.subtitle">Teach your agent new tricks — install skills from ClawHub or by URL.</div>
-        </div>
-        <div class="extensions-container">
-          <div class="extensions-section">
-            <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
-            <div class="skill-search-box">
-              <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search for skills...">
-              <button id="skill-search-btn" data-i18n="skills.search">Search</button>
-            </div>
-            <div class="extensions-list" id="skill-search-results"></div>
+      <div class="skills-page">
+        <!-- Linear-style view toolbar: search is the primary affordance,
+             install-by-URL is an escape hatch. The page name lives in the
+             topbar only (no duplicated h1). -->
+        <div class="skills-toolbar">
+          <div class="skills-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search installed skills and ClawHub...">
+            <button id="skill-search-btn" class="skills-search-go" data-i18n="skills.search">Search</button>
           </div>
-          <div class="extensions-section">
-            <h3 data-i18n="skills.installed">Installed Skills</h3>
-            <div class="extensions-list" id="skills-list">
+          <button type="button" id="skill-install-url-open" class="btn-secondary skills-url-btn" data-i18n="skills.installByUrlBtn">Install from URL</button>
+        </div>
+
+        <div class="skills-body">
+          <section class="skills-section">
+            <div class="skills-section-head">
+              <span class="skills-section-title" data-i18n="skills.installed">Installed</span>
+              <span class="skills-section-count" id="skills-installed-count"></span>
+            </div>
+            <div class="skills-rows" id="skills-list">
               <div class="empty-state" data-i18n="skills.loading">Loading skills...</div>
             </div>
-          </div>
-          <div class="extensions-section">
-            <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
-            <div class="ext-install-form">
+          </section>
+          <section class="skills-section">
+            <div class="skills-section-head">
+              <span class="skills-section-title" id="skills-results-title" data-i18n="skills.featured">Discover on ClawHub</span>
+            </div>
+            <div class="skills-rows" id="skill-search-results"></div>
+          </section>
+        </div>
+
+        <!-- Install-from-URL modal (hidden; opened from the toolbar). -->
+        <div class="skills-url-overlay" id="skills-url-overlay" style="display:none">
+          <div class="skills-url-modal" role="dialog" aria-modal="true" aria-labelledby="skills-url-title">
+            <div class="skills-url-header">
+              <h3 id="skills-url-title" data-i18n="skills.installByUrl">Install skill from URL</h3>
+              <button type="button" class="skills-url-close" id="skills-url-close" aria-label="Close">&times;</button>
+            </div>
+            <p class="skills-url-desc" data-i18n="skills.installByUrlDesc">Point at a hosted SKILL.md (HTTPS). The skill installs under the name you give it.</p>
+            <label class="skills-url-field">
+              <span data-i18n="skills.nameLabel">Name</span>
               <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
-              <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
-              <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
+            </label>
+            <label class="skills-url-field">
+              <span data-i18n="skills.urlLabel">URL</span>
+              <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="https://example.com/SKILL.md">
+            </label>
+            <div class="skills-url-actions">
+              <button type="button" class="btn-secondary" id="skills-url-cancel" data-i18n="btn.cancel">Cancel</button>
+              <button type="button" class="btn-primary" id="skill-install-btn" data-i18n="extensions.install">Install</button>
             </div>
           </div>
         </div>

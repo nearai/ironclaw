@@ -267,13 +267,49 @@ window.NUX_BILLING = {
     engineThreads: [],
     // Installed extensions (implied: /api/extensions, /api/extensions/install)
     extensions: [],
-    // Skills (implied: /api/skills, /api/skills/search)
+    // Installed skills (implied: GET /api/skills -> { skills: [{ name,
+    // version, trust: 'Trusted'|'Installed', description, keywords,
+    // usage_hint, install_source_url }] })
     skills: [
-      { name: 'summarize', description: 'Summarize long content into key points.', enabled: true, source: 'builtin' },
-      { name: 'web-research', description: 'Search the web and synthesize findings with citations.', enabled: true, source: 'builtin' },
-      { name: 'daily-briefing', description: 'Compose a morning briefing from calendar, email, and tasks.', enabled: true, source: 'clawhub' },
+      {
+        name: 'summarize',
+        version: '1.2.0',
+        trust: 'Trusted',
+        description: 'Condense long content — pages, threads, transcripts — into clean key points.',
+        keywords: ['summarize', 'tl;dr', 'recap'],
+        usage_hint: 'Try: "/summarize this thread" or paste a link.',
+      },
+      {
+        name: 'web-research',
+        version: '2.0.1',
+        trust: 'Trusted',
+        description: 'Search the web, cross-check sources, and synthesize findings with citations.',
+        keywords: ['research', 'search', 'sources'],
+        usage_hint: 'Try: "research the best CI providers for a Rust monorepo".',
+      },
+      {
+        name: 'daily-briefing',
+        version: '0.9.4',
+        trust: 'Installed',
+        description: 'Compose a morning briefing from calendar, email, and open tasks.',
+        keywords: ['briefing', 'morning', 'digest'],
+        install_source_url: 'https://clawhub.ai/skills/nearai/daily-briefing',
+      },
     ],
   };
+
+  // ClawHub catalog backing Skills discovery (implied: POST
+  // /api/skills/search { query } -> { catalog: [{ slug, name, description,
+  // owner, version, stars, downloads, updatedAt, installed }], installed:
+  // [...] }). An empty query returns the featured shelf.
+  var SKILL_CATALOG = [
+    { slug: 'nearai/inbox-zero', name: 'inbox-zero', version: '1.4.2', owner: 'nearai', stars: 412, downloads: 12800, updatedAt: Date.now() - 3 * 86400000, description: 'Triage email into Action / FYI / Ignore, draft replies, and keep the inbox at zero.' },
+      { slug: 'nearai/meeting-prep', name: 'meeting-prep', version: '2.1.0', owner: 'nearai', stars: 356, downloads: 9400, updatedAt: Date.now() - 6 * 86400000, description: 'Brief you on attendees, company context, and recent news before every meeting.' },
+    { slug: 'clawhub/changelog-writer', name: 'changelog-writer', version: '0.8.0', owner: 'clawhub', stars: 288, downloads: 7600, updatedAt: Date.now() - 12 * 86400000, description: 'Turn merged PRs into a crisp weekly changelog, grouped by feature area.' },
+    { slug: 'community/kpi-digest', name: 'kpi-digest', version: '1.0.3', owner: 'community', stars: 190, downloads: 5100, updatedAt: Date.now() - 20 * 86400000, description: 'Pull metrics from Sheets or an API and post a formatted digest to your channel.' },
+    { slug: 'community/pr-review-buddy', name: 'pr-review-buddy', version: '0.6.1', owner: 'community', stars: 173, downloads: 4300, updatedAt: Date.now() - 8 * 86400000, description: 'First-pass review notes on open pull requests: risky diffs, missing tests, nits.' },
+    { slug: 'nearai/site-monitor', name: 'site-monitor', version: '1.1.0', owner: 'nearai', stars: 240, downloads: 6900, updatedAt: Date.now() - 15 * 86400000, description: 'Watch a page or endpoint and alert with a diff summary the moment it changes.' },
+  ];
 
   // Registry entries backing Discover / the setup wizard / Integrations.
   // Implied: GET /api/extensions/registry -> { entries: [...] }
@@ -894,9 +930,52 @@ window.NUX_BILLING = {
 
     // ---- skills ----
     if (path === '/api/skills/search') {
-      return { results: [], skills: [] };
+      var q = String((body && body.query) || '').trim().toLowerCase();
+      var installedNames = {};
+      state.skills.forEach(function(s) { installedNames[s.name] = true; });
+      var catalog = SKILL_CATALOG.filter(function(entry) {
+        if (!q) return true;
+        return (entry.name + ' ' + entry.slug + ' ' + entry.description).toLowerCase().indexOf(q) !== -1;
+      }).map(function(entry) {
+        var copy = {};
+        for (var key in entry) copy[key] = entry[key];
+        copy.installed = !!installedNames[entry.name];
+        return copy;
+      });
+      var installed = state.skills.filter(function(s) {
+        if (!q) return false;
+        return (s.name + ' ' + (s.description || '')).toLowerCase().indexOf(q) !== -1;
+      });
+      return { catalog: catalog, installed: installed };
     }
-    if (path === '/api/skills/install') return { success: true };
+    if (path === '/api/skills/install') {
+      var skillName = (body && (body.name || body.slug)) || 'skill';
+      var short = skillName.indexOf('/') >= 0 ? skillName.split('/').pop() : skillName;
+      var known = null;
+      for (var sc = 0; sc < SKILL_CATALOG.length; sc++) {
+        if (SKILL_CATALOG[sc].name === short || SKILL_CATALOG[sc].slug === skillName) {
+          known = SKILL_CATALOG[sc];
+          break;
+        }
+      }
+      var already = state.skills.some(function(s) { return s.name === short; });
+      if (!already) {
+        state.skills.push({
+          name: short,
+          version: (known && known.version) || '1.0.0',
+          trust: 'Installed',
+          description: (known && known.description) || 'Installed from ' + ((body && body.url) || 'ClawHub') + '.',
+          keywords: [short],
+          install_source_url: (body && body.url) || (known ? 'https://clawhub.ai/skills/' + known.slug : null),
+        });
+      }
+      return { success: true };
+    }
+    var skillDelete = path.match(/^\/api\/skills\/([^/?]+)$/);
+    if (skillDelete && method === 'DELETE') {
+      state.skills = state.skills.filter(function(s) { return s.name !== decodeURIComponent(skillDelete[1]); });
+      return { success: true };
+    }
     if (path.indexOf('/api/skills') === 0) {
       return { skills: state.skills };
     }
