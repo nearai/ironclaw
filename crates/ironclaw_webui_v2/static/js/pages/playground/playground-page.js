@@ -138,9 +138,7 @@ export function PlaygroundPage() {
         ${SECTIONS.map(
           (section) => html`
             <div key=${section.label} className="mb-5">
-              <p
-                className="mb-1.5 px-2 font-mono text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
-              >
+              <p className="v2-tag-face mb-1.5 px-2 text-[0.625rem] text-[var(--v2-text-faint)]">
                 ${section.label}
               </p>
               <div className="flex flex-col gap-0.5">
@@ -161,10 +159,25 @@ export function PlaygroundPage() {
           `
         )}
 
-        <div className="mt-auto px-1 pt-4">
-          <p className="text-[0.625rem] leading-4 text-[var(--v2-text-faint)]">
-            Rules: crates/ironclaw_webui_v2/DESIGN_SYSTEM.md
-          </p>
+        <!-- Footer: pointer to the written rules. Styled like a quiet
+             card row (panel border, code-surface path chip, truncation)
+             with the full path in the hover tooltip. -->
+        <div
+          className="mt-auto flex items-center gap-2.5 rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5"
+          title="crates/ironclaw_webui_v2/DESIGN_SYSTEM.md"
+        >
+          <${Icon}
+            name="bookOpen"
+            className="h-4 w-4 shrink-0 text-[var(--v2-text-muted)]"
+          />
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-[0.75rem] font-medium leading-tight text-[var(--v2-text-strong)]">
+              Design rules
+            </span>
+            <span className="truncate font-mono text-[0.625rem] leading-tight text-[var(--v2-text-faint)]">
+              DESIGN_SYSTEM.md
+            </span>
+          </div>
         </div>
       </aside>
 
