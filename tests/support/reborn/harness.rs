@@ -3306,6 +3306,12 @@ pub(crate) fn local_dev_root_filesystem(
             HostPath::from_path_buf(github_support::asset_root()),
         )?;
     }
+    if mounts.web_access_assets {
+        local.mount_local(
+            VirtualPath::new("/system/extensions/web-access")?,
+            HostPath::from_path_buf(harness_web_access::asset_root()),
+        )?;
+    }
 
     let local = Arc::new(local);
     let mut root = CompositeRootFilesystem::new();
@@ -3326,6 +3332,20 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
+                BackendKind::LocalFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ExtensionPackage,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            Arc::clone(&local),
+        )?;
+    }
+    if mounts.web_access_assets {
+        root.mount(
+            local_dev_mount_descriptor(
+                "/system/extensions/web-access",
+                "local-dev-web-access-assets",
                 BackendKind::LocalFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
@@ -3356,6 +3376,7 @@ pub(crate) fn local_dev_root_filesystem(
 #[derive(Clone, Copy)]
 pub(crate) struct LocalDevRootMounts {
     github_assets: bool,
+    web_access_assets: bool,
     memory: bool,
 }
 
@@ -3363,6 +3384,7 @@ impl LocalDevRootMounts {
     pub(crate) fn core_builtins() -> Self {
         Self {
             github_assets: false,
+            web_access_assets: false,
             memory: true,
         }
     }
@@ -3370,6 +3392,15 @@ impl LocalDevRootMounts {
     fn github_assets() -> Self {
         Self {
             github_assets: true,
+            web_access_assets: false,
+            memory: false,
+        }
+    }
+
+    pub(crate) fn web_access_assets() -> Self {
+        Self {
+            github_assets: false,
+            web_access_assets: true,
             memory: false,
         }
     }
