@@ -113,6 +113,10 @@ mod imp {
             &self.model
         }
 
+        fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+            crate::provider::EmbeddingProviderKind::Bedrock
+        }
+
         fn max_input_length(&self) -> usize {
             32_000
         }

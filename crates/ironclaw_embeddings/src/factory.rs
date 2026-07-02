@@ -107,7 +107,7 @@ pub async fn create_provider(
                     .with_model(&config.model, config.dimension),
             ) as Arc<dyn EmbeddingProvider>)
         }
-        _ => {
+        "openai" => {
             if let Some(api_key) = config.openai_api_key() {
                 let mut provider =
                     OpenAiEmbeddings::with_model(api_key, &config.model, config.dimension);
@@ -135,6 +135,15 @@ pub async fn create_provider(
                 tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
                 None
             }
+        }
+        other => {
+            // The binary's config resolver (`resolve_embeddings_config`) rejects
+            // unknown providers before they ever reach the factory. This arm is
+            // a defensive backstop for any other caller that builds an
+            // `EmbeddingsConfig` directly: fail loudly instead of silently
+            // falling back to OpenAI (#3751).
+            tracing::error!("Unknown embedding provider '{other}'; refusing to build");
+            None
         }
     }
 }
@@ -211,6 +220,15 @@ mod tests {
             ollama_base_url: "file:///etc/passwd".to_string(),
             ..config_with_provider("ollama")
         };
+        assert!(create_provider(&cfg, stub_deps()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_returns_none() {
+        // The defensive `other =>` arm: a caller that builds EmbeddingsConfig
+        // directly with a misspelled provider gets a loud None, not a silent
+        // OpenAI fallback (#3751).
+        let cfg = config_with_provider("totally-unknown");
         assert!(create_provider(&cfg, stub_deps()).await.is_none());
     }
 

@@ -39,9 +39,38 @@ pub(crate) fn resolve_embeddings_config(
         "EMBEDDING_PROVIDER",
     )?;
 
-    let model = if provider == "bedrock" {
-        optional_env("EMBEDDING_MODEL")?
-            .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
+    // Reject unknown provider strings up front rather than silently routing
+    // them to the OpenAI-compatible path in the embeddings factory (#3751).
+    const KNOWN_PROVIDERS: [&str; 4] = ["openai", "nearai", "ollama", "bedrock"];
+    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+        // Bound the echoed value — it comes from operator config (env/DB) and
+        // flows into startup logs.
+        let shown: String = provider.chars().take(64).collect();
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_PROVIDER".to_string(),
+            message: format!(
+                "unknown embedding provider '{shown}' \
+                 (expected one of: openai, nearai, ollama, bedrock)"
+            ),
+        });
+    }
+
+    // Resolve the model with DB/TOML > env > default precedence for every
+    // provider. Bedrock's default differs from the shared `defaults.model` (an
+    // OpenAI model name), so when no explicit model is configured — detected the
+    // same way `db_first_or_default` itself does, i.e. the setting still equals
+    // its default — we resolve env > Titan v2 here instead of letting the OpenAI
+    // default leak into the Bedrock path (#3750).
+    //
+    // silent-ok: a Bedrock deployment that *explicitly* sets its model to the
+    // OpenAI default string is indistinguishable from "unset" here and falls
+    // back to env/Titan. That configuration is nonsensical, so we accept it
+    // rather than widen `EmbeddingsSettings::model` to `Option<String>`.
+    let model = if provider == "bedrock" && settings.embeddings.model == defaults.model {
+        parse_optional_env(
+            "EMBEDDING_MODEL",
+            "amazon.titan-embed-text-v2:0".to_string(),
+        )?
     } else {
         db_first_or_default(
             &settings.embeddings.model,
@@ -257,6 +286,101 @@ mod tests {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
+        }
+    }
+
+    #[test]
+    fn bedrock_model_from_db_settings_is_respected() {
+        // Regression for #3750: a configured DB/TOML model must win for the
+        // Bedrock provider instead of being dropped in favor of the Titan
+        // default. EMBEDDING_DIMENSION is set to a Bedrock-valid value so the
+        // separate dimension validation doesn't reject a non-Titan model name.
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_DIMENSION", "1024");
+        }
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "bedrock".to_string(),
+                model: "my-titan-variant".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
+        assert_eq!(
+            config.model, "my-titan-variant",
+            "DB/TOML model must win for Bedrock, not be dropped for the Titan default (#3750)"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_DIMENSION");
+        }
+    }
+
+    #[test]
+    fn bedrock_model_env_wins_when_db_is_default() {
+        // Regression for #3750: when no DB/TOML model is set (it still equals
+        // the shared default), the Bedrock path resolves EMBEDDING_MODEL env >
+        // Titan default rather than ignoring the env entirely.
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+            std::env::set_var("EMBEDDING_MODEL", "amazon.titan-embed-text-v1:0");
+            std::env::set_var("EMBEDDING_DIMENSION", "1024");
+        }
+
+        // Settings left at defaults — embeddings.model stays at the shared default.
+        let settings = Settings::default();
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
+        assert_eq!(
+            config.model, "amazon.titan-embed-text-v1:0",
+            "env EMBEDDING_MODEL must win for Bedrock when no DB model is set (#3750)"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("EMBEDDING_MODEL");
+            std::env::remove_var("EMBEDDING_DIMENSION");
+        }
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected() {
+        // Regression for #3751: a typo'd provider must fail with a clear error
+        // instead of silently routing to the OpenAI-compatible path.
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_PROVIDER", "near-ai");
+        }
+
+        let settings = Settings::default();
+        let result = resolve_embeddings_config(&settings, "https://api.near.ai");
+        assert!(
+            result.is_err(),
+            "unknown provider must be rejected, not routed to OpenAI"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown embedding provider"),
+            "error should name the unknown provider clearly: {err}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_PROVIDER");
         }
     }
 

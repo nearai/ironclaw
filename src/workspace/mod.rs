@@ -2481,16 +2481,12 @@ impl Workspace {
                     count += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to embed chunk {}: {}{}",
-                        chunk.id,
-                        e,
-                        if matches!(e, EmbeddingError::AuthFailed) {
-                            ". Check OPENAI_API_KEY or set EMBEDDING_PROVIDER=ollama for local embeddings"
-                        } else {
-                            ""
-                        }
-                    );
+                    let hint = if matches!(e, EmbeddingError::AuthFailed) {
+                        provider.provider_kind().auth_failed_hint()
+                    } else {
+                        ""
+                    };
+                    tracing::warn!("Failed to embed chunk {}: {}{}", chunk.id, e, hint);
                 }
             }
         }
