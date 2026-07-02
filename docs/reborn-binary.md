@@ -163,6 +163,44 @@ and NEAR AI's session flow (`api_key_required: false`), the runtime boots
 without that env var and authenticates separately — so export your provider's
 key before launching `serve`.
 
+### Optional: Google OAuth for "connect to gmail"
+
+The launcher can also wire up Google product-auth so you can exercise the
+"connect to gmail" flow without hand-assembling redirect URIs. It stays off
+unless you set a client id:
+
+```bash
+export IRONCLAW_REBORN_GOOGLE_CLIENT_ID="<id>.apps.googleusercontent.com"
+export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET="<secret>"   # optional — omit for public-client PKCE
+scripts/run-reborn-webui.sh
+```
+
+When `IRONCLAW_REBORN_GOOGLE_CLIENT_ID` (or legacy `GOOGLE_CLIENT_ID`) is set,
+the launcher **auto-derives** `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` from
+the host/port `serve` is about to bind. The callback path is static
+(`/api/reborn/product-auth/oauth/google/callback` — the `flow_id` rides in the
+OAuth `state` param, not the path), so deriving it guarantees an exact
+scheme/host/port/path match and that it tracks `REBORN_PORT`. This sidesteps two
+footguns: once a client id is set `serve` also requires a redirect URI, and
+Google rejects any redirect URI that doesn't match the bound port exactly.
+Register the redirect URI printed in the startup banner as an Authorized
+redirect URI in Google Cloud Console (Web application client, Gmail API
+enabled).
+
+| Env var | Effect |
+| --- | --- |
+| `IRONCLAW_REBORN_GOOGLE_CLIENT_ID` | Enables Google OAuth wiring (off when unset). |
+| `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET` | Confidential-client secret; omit for public-client PKCE (fine for local). |
+| `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` | Override the auto-derived redirect URI. |
+| `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT` | Gate sign-in to a Workspace domain. |
+
+Legacy `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI`
+/ `GOOGLE_ALLOWED_HD` are honored as fallbacks. The startup banner reports
+whether OAuth is enabled, the derived redirect URI, whether PKCE-only mode is in
+effect, and any hosted-domain gate. This is distinct from Google **SSO login**
+(the `IRONCLAW_REBORN_WEBUI_GOOGLE_*` vars), which signs the operator into the
+gateway rather than connecting the agent to a Gmail account.
+
 ### Common startup errors (and fixes)
 
 These are validation failures that abort `serve` before it binds; each prints a
@@ -174,6 +212,7 @@ single-line `Error:` and exits.
 | `must be set to the UserId an env-bearer-authenticated caller maps to` | `IRONCLAW_REBORN_WEBUI_USER_ID` unset | Export the user-id env var (step 3). |
 | `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
 | `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
+| `is required for Google OAuth setup` | A `GOOGLE_*` / `IRONCLAW_REBORN_GOOGLE_*` var is set but `CLIENT_ID` or the redirect URI is missing | Set `IRONCLAW_REBORN_GOOGLE_CLIENT_ID` (the launcher derives the redirect URI for you), or unset all `GOOGLE_*` vars to disable OAuth. |
 
 The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
 **current working directory** as the local-dev workspace root, and boot is

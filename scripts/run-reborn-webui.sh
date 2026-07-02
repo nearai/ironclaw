@@ -26,6 +26,14 @@
 #   IRONCLAW_REBORN_WEBUI_USER_ID    (default: home's [identity].default_owner)
 #   IRONCLAW_REBORN_WEBUI_TOKEN      (default: generated and printed)
 #
+# Google OAuth ("connect to gmail") — optional, off unless CLIENT_ID is set:
+#   IRONCLAW_REBORN_GOOGLE_CLIENT_ID            enables Google OAuth wiring
+#   IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET        optional (else public-client PKCE)
+#   IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT   optional Workspace-domain gate
+#   IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI   auto-derived from host/port if unset
+#   (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_OAUTH_REDIRECT_URI /
+#    GOOGLE_ALLOWED_HD work too as legacy fallbacks.)
+#
 # REBORN_HOST/REBORN_PORT are deliberately prefixed: a bare HOST would collide
 # with zsh's auto-set $HOST (the machine hostname), which could bind serve to a
 # non-loopback interface and expose the bearer token over plain HTTP.
@@ -104,6 +112,57 @@ if [ -f "$config_file" ]; then
 fi
 export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-${config_owner:-reborn-cli}}"
 
+# Google OAuth (product-auth) wiring for testing "connect to gmail".
+# Set IRONCLAW_REBORN_GOOGLE_CLIENT_ID (or legacy GOOGLE_CLIENT_ID) to enable it;
+# the secret is optional (falls back to public-client PKCE, fine for local).
+#
+# The redirect URI is a STATIC path — the flow_id rides in the OAuth state param,
+# not the path — so we derive it from the host/port serve is about to bind. In the
+# common case (CLIENT_ID set), this sidesteps serve's redirect-URI footguns: once
+# CLIENT_ID is present serve also requires REDIRECT_URI, and Google demands an
+# exact scheme/host/port/path match on it — both handled here automatically.
+GOOGLE_REDIRECT_PATH="/api/reborn/product-auth/oauth/google/callback"
+if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_ID:-}" ] || [ -n "${GOOGLE_CLIENT_ID:-}" ]; then
+  # Wildcard bind addresses can't appear in a redirect URI — Google rejects them
+  # and there's no browser at 0.0.0.0/::. Fall back to loopback for the callback.
+  redirect_host="$REBORN_HOST"
+  if [ "$redirect_host" = "0.0.0.0" ] || [ "$redirect_host" = "::" ]; then
+    redirect_host="127.0.0.1"
+  fi
+  # An IPv6 literal (e.g. ::1, fe80::1) must be bracketed in a URL authority:
+  # http://[::1]:3000/... — interpolating it bare yields a malformed redirect.
+  redirect_authority="$redirect_host"
+  case "$redirect_host" in
+    *:*) redirect_authority="[$redirect_host]" ;;
+  esac
+  # Honor an explicit redirect URI (prefixed wins, then legacy GOOGLE_OAUTH_REDIRECT_URI)
+  # before auto-deriving, so a caller who set either legacy or new var isn't overridden.
+  export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI="${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-${GOOGLE_OAUTH_REDIRECT_URI:-http://$redirect_authority:$REBORN_PORT$GOOGLE_REDIRECT_PATH}}"
+  GOOGLE_OAUTH_STATUS="enabled (redirect: $IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI)"
+  if [ -z "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}" ] && [ -z "${GOOGLE_CLIENT_SECRET:-}" ]; then
+    GOOGLE_OAUTH_STATUS="$GOOGLE_OAUTH_STATUS [public-client PKCE; no secret set]"
+  fi
+  # Optional hosted-domain hint (gates sign-in to a Workspace domain). The
+  # runtime reads IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT or legacy GOOGLE_ALLOWED_HD.
+  google_hd="${IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT:-${GOOGLE_ALLOWED_HD:-}}"
+  if [ -n "$google_hd" ]; then
+    GOOGLE_OAUTH_STATUS="$GOOGLE_OAUTH_STATUS [hd: $google_hd]"
+  fi
+else
+  # No client id — but serve still aborts at startup once ANY Google OAuth var
+  # is set (secret, redirect URI, or hosted-domain hint). Catch that partial
+  # config here with an actionable message instead of a later, opaque failure.
+  if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}" ] || [ -n "${GOOGLE_CLIENT_SECRET:-}" ] \
+    || [ -n "${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-}" ] || [ -n "${GOOGLE_OAUTH_REDIRECT_URI:-}" ] \
+    || [ -n "${IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT:-}" ] || [ -n "${GOOGLE_ALLOWED_HD:-}" ]; then
+    echo "error: a Google OAuth var is set but no client id is present." >&2
+    echo "       serve requires IRONCLAW_REBORN_GOOGLE_CLIENT_ID (or legacy GOOGLE_CLIENT_ID)" >&2
+    echo "       once any GOOGLE_* var is set. Set the client id, or unset the others." >&2
+    exit 1
+  fi
+  GOOGLE_OAUTH_STATUS="disabled (export IRONCLAW_REBORN_GOOGLE_CLIENT_ID to enable)"
+fi
+
 # Discover the credential env var for this provider and warn if it is unset.
 key_env="$("${CARGO[@]}" models status 2>/dev/null \
   | sed -n 's/^default\.api_key_env: //p' || true)"
@@ -118,6 +177,7 @@ cat <<EOF
     login token : $IRONCLAW_REBORN_WEBUI_TOKEN
     login user  : $IRONCLAW_REBORN_WEBUI_USER_ID
     reborn home : $IRONCLAW_REBORN_HOME
+    google oauth: $GOOGLE_OAUTH_STATUS
 
 EOF
 
