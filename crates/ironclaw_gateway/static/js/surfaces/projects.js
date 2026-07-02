@@ -71,10 +71,6 @@ function renderCrCards(projects) {
       + '</button></div>';
   }
 
-  // User-created project cards.
-  if (!userProjects.length && !defaultProj) {
-    html += '<div class="cr-empty">No projects yet. Ask the assistant to create one, or use the button below.</div>';
-  }
   html += userProjects.map(function(p) {
     var dot = p.health === 'green' ? 'cr-dot-green'
       : p.health === 'yellow' ? 'cr-dot-yellow' : 'cr-dot-red';
@@ -91,11 +87,40 @@ function renderCrCards(projects) {
 
   // "New Project" card.
   html += '<button class="cr-card cr-card-new" data-action="cr-new-project">'
-    + '<div class="cr-card-head"><span class="cr-card-name">+ New Project</span></div>'
-    + '<div class="cr-card-stats">Create an autonomous workspace</div>'
+    + '<div class="cr-card-head"><span class="cr-card-name">+ New project</span></div>'
+    + '<div class="cr-card-stats">' + escapeHtml(I18n.t('projects.newBlurb')) + '</div>'
     + '</button>';
 
+  // Null state (no user projects yet): explain what a project is and offer
+  // curated starter templates that kick off through chat.
+  if (userProjects.length === 0) {
+    var starters = (typeof NUX_DATA !== 'undefined' && NUX_DATA.projectStarters) || [];
+    if (starters.length > 0) {
+      html += '<div class="cr-starters">'
+        + '<div class="cr-starters-head">'
+        + '<span class="cr-starters-label">' + escapeHtml(I18n.t('projects.startersLabel')) + '</span>'
+        + '<span class="cr-starters-hint">' + escapeHtml(I18n.t('projects.startersHint')) + '</span>'
+        + '</div>'
+        + '<div class="cr-starters-grid">'
+        + starters.map(function(s) {
+          return '<button type="button" class="cr-starter" data-starter-prompt="' + escapeHtml(s.prompt) + '">'
+            + '<span class="cr-starter-name">' + escapeHtml(s.name) + '</span>'
+            + '<span class="cr-starter-blurb">' + escapeHtml(s.blurb) + '</span>'
+            + '<span class="cr-starter-cta">' + escapeHtml(I18n.t('projects.starterCta'))
+            + ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>'
+            + '</button>';
+        }).join('')
+        + '</div></div>';
+    }
+  }
+
   el.innerHTML = html;
+  el.querySelectorAll('[data-starter-prompt]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      switchTab('chat');
+      prefillChatPrompt(btn.getAttribute('data-starter-prompt'));
+    });
+  });
 }
 
 function drillIntoProject(projectId) {

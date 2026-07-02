@@ -4,6 +4,82 @@
 
 #tab-projects { padding: 0; }
 
+/* ── Project starter templates (null state) ── */
+
+.cr-starters {
+  grid-column: 1 / -1;
+  margin-top: var(--v2-space-6);
+}
+
+.cr-starters-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--v2-space-3);
+  margin-bottom: var(--v2-space-3);
+}
+
+.cr-starters-label {
+  font-family: var(--font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.cr-starters-hint {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-dimmed);
+}
+
+.cr-starters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--v2-space-3);
+}
+
+.cr-starter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--v2-space-2);
+  padding: var(--v2-space-4);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-sans);
+  transition: border-color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.cr-starter:hover {
+  border-color: var(--accent-border-subtle);
+  transform: translateY(-1px);
+  box-shadow: var(--v2-shadow-sm);
+}
+
+.cr-starter-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cr-starter-blurb {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.cr-starter-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: var(--v2-space-1);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .cr-shell {
   display: flex;
   flex-direction: column;

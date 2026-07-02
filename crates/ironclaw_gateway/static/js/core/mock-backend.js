@@ -180,6 +180,30 @@ window.NUX_DATA = {
     { id: 'linear', icon: '/icons/integrations/linear.png', label: 'Linear', glyph: '\u2713', blurb: 'Create and update tickets straight from chat.' },
   ],
 
+  // MOCK: Project starter templates for the Projects null state. Clicking
+  // one pre-fills chat with `prompt` — the agent then creates the project
+  // (implied: POST /api/engine/projects). Curated editorial content.
+  projectStarters: [
+    {
+      id: 'competitive-intel',
+      name: 'Competitive intel',
+      blurb: 'Track competitor launches, pricing changes, and press — get a weekly digest.',
+      prompt: 'Create a project called "Competitive intel". Watch our main competitors for launches, pricing changes, and press coverage, and post me a digest every Friday.',
+    },
+    {
+      id: 'growth-reporting',
+      name: 'Growth reporting',
+      blurb: 'Weekly KPI reports assembled from your sheets and posted to the team.',
+      prompt: 'Create a project called "Growth reporting". Every Monday, pull our KPI numbers from Google Sheets and post a formatted report to Slack.',
+    },
+    {
+      id: 'personal-ops',
+      name: 'Personal ops',
+      blurb: 'Inbox triage, meeting prep, and reminders — your chief-of-staff workspace.',
+      prompt: 'Create a project called "Personal ops" that handles my inbox triage, meeting prep, and daily reminders in one place.',
+    },
+  ],
+
   // MOCK: Unified discovery categories. `kinds` map onto real registry entry
   // kinds (`/api/extensions/registry`) plus the virtual `skill` kind backed
   // by `/api/skills` + `/api/skills/search`.
