@@ -131,13 +131,16 @@ export function TypographySection({ theme }) {
         })}
       </div>
 
-      <${SectionTitle}>Letter spacing<//>
+      <${SectionTitle}>Tag face & letter spacing<//>
       <div className="flex flex-col gap-3">
+        <span className="v2-tag-face text-[0.6875rem] text-[var(--v2-accent-text)]">
+          .v2-tag-face — Geist Pixel Square tag language (--v2-tracking-tag)
+        </span>
         <span
           className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-muted)]"
           style=${{ letterSpacing: "var(--v2-tracking-caps)" }}
         >
-          --v2-tracking-caps — mono-caps labels
+          --v2-tracking-caps — mono-caps data labels
         </span>
         <span
           className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-faint)]"
@@ -146,13 +149,13 @@ export function TypographySection({ theme }) {
           --v2-tracking-wide — card eyebrows
         </span>
         <span
-          className="text-[1.35rem] font-medium text-[var(--v2-text-strong)]"
+          className="text-[1.5rem] font-medium text-[var(--v2-text-strong)]"
           style=${{ letterSpacing: "var(--v2-tracking-tight)" }}
         >
-          --v2-tracking-tight — titles
+          --v2-tracking-tight — headings (nux heading tracking)
         </span>
         <span
-          className="text-[2.2rem] font-medium text-[var(--v2-text-strong)]"
+          className="text-[2.25rem] font-medium text-[var(--v2-text-strong)]"
           style=${{ letterSpacing: "var(--v2-tracking-display)" }}
         >
           --v2-tracking-display — display headings
@@ -245,18 +248,50 @@ export function RadiiSection({ theme }) {
 export function MotionSection({ theme }) {
   return html`
     <div>
-      <${SectionTitle}>Static-motion policy<//>
+      <${SectionTitle}>Restrained-motion policy (nux)<//>
       <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
-        The v2 UI is intentionally static: app.css disables all CSS
-        transitions and animations globally. The three loops below are the
-        only sanctioned exceptions — they signal live work, and each is
-        suppressed under ${" "}
+        Motion is purposeful and quick, never decorative. Every duration and
+        easing comes from the tokens below — no raw ms values or ad-hoc
+        cubic-beziers. Hover/focus feedback uses instant/fast + ease; surface
+        entrances use base + out-expo; springs are reserved for small playful
+        pops. Everything is suppressed under ${" "}
         <code className="font-mono text-[0.75rem]">prefers-reduced-motion</code>.
-        Do not add new animation without updating the policy in app.css and
-        DESIGN_SYSTEM.md.
       </p>
 
-      <${SectionTitle}>Sanctioned exceptions<//>
+      <${SectionTitle}>Durations & easings<//>
+      <div className="flex flex-col gap-2">
+        ${[
+          "--v2-duration-instant",
+          "--v2-duration-fast",
+          "--v2-duration-base",
+          "--v2-duration-slow",
+          "--v2-ease-standard",
+          "--v2-ease-in-out",
+          "--v2-ease-out-expo",
+          "--v2-ease-spring",
+          "--v2-ease-spring-gentle",
+        ].map(
+          (name) => html`
+            <div key=${name + theme} className="flex items-baseline gap-4">
+              <span className="w-56 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
+                ${name}
+              </span>
+              <${TokenValue}>${readToken(name)}<//>
+            </div>
+          `
+        )}
+      </div>
+
+      <${SectionTitle}>Entrance demo<//>
+      <div
+        key=${"entrance" + theme}
+        className="v2-page-entrance flex w-72 items-center gap-3 rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3 shadow-[var(--v2-shadow-sm)]"
+      >
+        <span className="text-sm text-[var(--v2-text)]">.v2-page-entrance</span>
+        <${TokenValue}>base + out-expo<//>
+      </div>
+
+      <${SectionTitle}>Ambient loops (work indicators)<//>
       <div className="flex flex-col gap-5">
         <div className="flex items-center gap-4">
           <span className="flex w-44 items-center gap-1 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2">

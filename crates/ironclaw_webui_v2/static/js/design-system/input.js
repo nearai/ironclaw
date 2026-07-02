@@ -27,11 +27,11 @@ const INPUT_BASE =
   "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
-/* Sizes mirroring reference AppInput */
+/* Sizes mirroring reference AppInput; radii from the --v2-radius-* scale */
 const INPUT_SIZES = {
-  sm: "h-9 rounded-[10px] px-3 text-[12px]",
-  md: "h-[44px] rounded-[14px] px-3.5 text-[13px] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg: "h-[54px] rounded-[18px] px-4 text-base",
+  sm: "h-9 rounded-[var(--v2-radius-md)] px-3 text-[12px]",
+  md: "h-[44px] rounded-[var(--v2-radius-md)] px-3.5 text-[13px] md:h-[50px] md:rounded-[var(--v2-radius-lg)] md:px-4 md:text-sm",
+  lg: "h-[54px] rounded-[var(--v2-radius-lg)] px-4 text-base",
 };
 
 /* ─── Input ───────────────────────────────────────────────────────── */
@@ -68,7 +68,7 @@ export function Textarea({
       rows=${rows}
       className=${cn(
         INPUT_BASE,
-        "rounded-[14px] px-3.5 py-3 text-[13px] md:rounded-[16px] md:px-4 md:text-sm",
+        "rounded-[var(--v2-radius-md)] px-3.5 py-3 text-[13px] md:rounded-[var(--v2-radius-lg)] md:px-4 md:text-sm",
         "resize-y min-h-[80px]",
         error && "border-[var(--v2-danger-text)] focus:ring-[color-mix(in_srgb,var(--v2-danger-text)_28%,transparent)]",
         className

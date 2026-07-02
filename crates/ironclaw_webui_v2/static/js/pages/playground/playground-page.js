@@ -61,7 +61,7 @@ const SECTIONS = [
       { id: "typography", name: "Typography", icon: "file", render: TypographySection, blurb: "Type scale, tracking, and weights derived from what components render." },
       { id: "spacing", name: "Spacing", icon: "list", render: SpacingSection, blurb: "The 4px grid. Pick the named step that matches the relationship, not a raw value." },
       { id: "radii", name: "Radii & Shadows", icon: "layers", render: RadiiSection, blurb: "Corner radii by control size, plus the two elevation shadows." },
-      { id: "motion", name: "Motion", icon: "pulse", render: MotionSection, blurb: "The static-motion policy and its three sanctioned exceptions." },
+      { id: "motion", name: "Motion", icon: "pulse", render: MotionSection, blurb: "The restrained-motion system: duration + easing tokens, entrances, and the ambient work indicators." },
       { id: "z-index", name: "Z-index", icon: "logs", render: ZIndexSection, blurb: "The five-layer ladder. Every overlay picks a layer, never a number." },
     ],
   },

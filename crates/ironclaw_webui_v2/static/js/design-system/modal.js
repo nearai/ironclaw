@@ -82,8 +82,8 @@ export function Modal({
         className=${cn(
           "relative z-10 w-full",
           "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
-          "shadow-[0_24px_60px_rgba(0,0,0,0.35)]",
-          "rounded-[1.5rem]",
+          "shadow-[var(--v2-shadow-modal)]",
+          "rounded-[var(--v2-radius-2xl)]",
           "flex flex-col max-h-[90dvh] overflow-hidden",
           SIZES[size] ?? SIZES.md,
           className

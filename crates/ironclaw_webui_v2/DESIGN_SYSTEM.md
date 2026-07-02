@@ -7,6 +7,45 @@ without a design review, because the decision space is already
 constrained. Deep design work still goes through design; everything
 here is the delegated layer.
 
+## Provenance & reconciliation
+
+Token values codify the **new aesthetic** developed in the design
+explorations, not the legacy webui styling. Where they disagree, the
+explorations win:
+
+1. **`achal/nux` (gateway restyle)** — primary source. Backfilled
+   from its `theme.css` + surface CSS: the zinc-dark palette
+   (`#09090b / #0f0f11 / #1a1a1e`), light ink line
+   (`rgba(0,0,0,0.08)`), brand-blue action ramp and 16px button
+   radius (ironclaw.com parity), Geist Pixel Square tag language,
+   layered shadow scale (sm/md/lg + card/modal), and the restrained
+   motion system (100/150/250/400ms durations, out-expo/spring
+   easings).
+2. **`private-assistant` `achal/chat-first` (onboarding prototype)**
+   — corroborating source for the overall direction (quiet surfaces,
+   soft cards, shimmer/streaming affordances).
+
+Reconciliation decisions made here:
+
+- **Accent:** nux's IronClaw brand blue (`#4CA7E6` dark /
+  `#2882c8` light) wins over the prototype's monochrome
+  black-primary — the prototype is a generic shadcn base; nux is
+  branded and more recent.
+- **Radii:** nux's 6/8/10/16/24 scale wins over the prototype's
+  `0.625rem`-derived shadcn scale and over legacy v2's 14px
+  controls. A 20px `xl` step is kept between 16 and 24 because
+  existing v2 cards render it.
+- **Motion:** nux's token-driven restrained motion replaces legacy
+  v2's global `animation: none` freeze. The three ambient loops the
+  legacy UI allowed (typing/spin/breathe) are retained as the only
+  ambient animations, plus the skeleton shimmer both explorations
+  use.
+- **Status colors:** nux's set (`#34d399 / #F5A623 / #E64C4C /
+  #60a5fa` dark) wins over legacy v2's mint/gold/rose set.
+- **Type scale:** nux's 11/13/14/16/20/24/36 gateway scale wins over
+  legacy v2's ad-hoc 15px/1.2rem/1.35rem/2.2rem sizes; 12px caption
+  and 28px stat sizes are kept from v2 components.
+
 **Live reference:** open `/v2/playground` in any running WebUI — it
 renders every token and every component state below, in both themes.
 
@@ -56,17 +95,21 @@ add a token first — do not inline the raw value.
 
 ## 3. Typography
 
-- Fonts: Geist (sans, default), Geist Mono (labels, values, code).
-  Never introduce another font.
-- Use the scale in `--v2-font-size-*`: `label` (11px mono-caps) →
-  `caption` (12) → `body-sm` (13) → `body` (14) → `body-lg` (15) →
-  `title` (1.2rem) → `heading` (1.35rem) → `display-sm` (1.75rem) →
-  `display` (2.2rem). If a size isn't on the scale, you don't need it.
-- Mono-caps labels (`font-mono uppercase`) always pair with
-  `--v2-tracking-caps` (0.14em) or `--v2-tracking-wide` (0.22em for
-  card eyebrows) and a muted/faint text color. Large headings use
-  negative tracking (`--v2-tracking-tight` / `--v2-tracking-display`).
-- Weights: 400/500/600 only. Numbers that align in columns get
+- Fonts: Geist (sans, default), Geist Mono (data values, code), and
+  Geist Pixel Square (the nux **tag face** — uppercase tags, badges,
+  section kickers only, via the `.v2-tag-face` utility). Never
+  introduce another font.
+- Use the scale in `--v2-font-size-*` (nux gateway scale): `label`
+  (11px) → `caption` (12) → `body-sm` (13) → `body` (14) → `body-lg`
+  (16) → `title` (20) → `heading` (24) → `display-sm` (28) →
+  `display` (36). If a size isn't on the scale, you don't need it.
+- Small uppercase labels use `.v2-tag-face` (pixel face, 0.08em
+  tracking). Mono-caps data eyebrows use `font-mono uppercase` with
+  `--v2-tracking-caps` (0.14em) or `--v2-tracking-wide` (0.22em).
+  Headings use negative tracking (`--v2-tracking-tight`, the nux
+  heading tracking; `--v2-tracking-display` for oversized display).
+- Weights: 400/500/600 only — headings are **medium (500)**, per the
+  nux heading language. Numbers that align in columns get
   `tabular-nums`.
 
 ## 4. Spacing & layout
@@ -83,25 +126,39 @@ add a token first — do not inline the raw value.
 
 ## 5. Radii, shadows, z-index
 
-- Radii come from `--v2-radius-*`. Rule of thumb: the bigger and more
-  container-like the element, the bigger the radius. Compact controls
-  10px, default controls 14/16px (mobile/desktop), cards 20–24px,
-  pills `full`. Never a new radius value.
-- Shadows: cards use the themed `--v2-card-shadow` (via `Card`);
-  modals use `--v2-shadow-modal`. Nothing else casts a shadow.
+- Radii come from `--v2-radius-*` (nux scale). Rule of thumb: the
+  bigger and more container-like the element, the bigger the radius.
+  Inline chips 6–8px, compact controls/inputs 10px, buttons and
+  cards 16px (the nux button/card radius), large cards 20px, modals
+  and hero surfaces 24px, pills `full`. Never a new radius value.
+- Shadows come from the nux layered scale: `--v2-shadow-sm/md/lg`
+  for lifts, the themed `--v2-card-shadow` (via `Card`),
+  `--v2-shadow-modal` for dialogs, and `--v2-shadow-accent-hover`
+  only on the primary button. Nothing else invents a shadow.
 - Z-index is a five-layer ladder — `raised(10) → sticky(20) →
   overlay(40) → modal(50) → toast(60)`. Pick the layer that names
   your surface. Never invent a number between layers.
 
 ## 6. Motion
 
-**The v2 UI is static by policy.** `app.css` globally disables all
-CSS transitions and animations. The only sanctioned exceptions are
-the three "work is happening" loops: `.v2-typing-dot`, `.v2-spin`,
-and the badge `v2-breathe` dot — each suppressed under
-`prefers-reduced-motion`. Do not add animation, transition, hover
-motion, or entrance effects. If a feature genuinely needs motion,
-that is a design-review decision, not a micro-decision.
+Motion follows the nux **restrained-motion** system: purposeful,
+quick, and token-driven.
+
+- Every duration comes from `--v2-duration-*` (`instant` 100ms for
+  hover fills, `fast` 150ms for borders/small transforms, `base`
+  250ms for panel/sheet entrances, `slow` 400ms for large surface
+  transitions) and every easing from `--v2-ease-*` (`standard`,
+  `in-out`, `out-expo` for entrances, `spring`/`spring-gentle` for
+  small playful pops). **Never a raw ms value or ad-hoc
+  cubic-bezier.**
+- Ambient (infinite) animation is limited to work indicators:
+  `.v2-typing-dot`, `.v2-spin`, the badge `v2-breathe` dot, and the
+  `.v2-skeleton` shimmer.
+- Entrances use `.v2-page-entrance` (or `base` + `out-expo`); don't
+  choreograph multi-step sequences — that's a design-review
+  decision.
+- All motion is suppressed under `prefers-reduced-motion` by the
+  global rule in app.css; never override it.
 
 ## 7. Components — when to use what
 
@@ -120,13 +177,17 @@ that is a design-review decision, not a micro-decision.
 
 Component rules:
 
-- **Buttons:** at most one `primary` per view section. Icon-only
-  buttons must carry `aria-label`. Don't override a variant's colors
-  via `className` — `className` is for layout (margin, width) only.
+- **Buttons:** at most one `primary` (brand-gradient) per view
+  section. `outline` is the nux secondary role — accent outline,
+  frosted fill, fills solid on hover — for prominent secondary
+  actions; `secondary`/`ghost` for quiet ones. Icon-only buttons
+  must carry `aria-label`. Don't override a variant's colors via
+  `className` — `className` is for layout (margin, width) only.
 - **Badges:** tone conveys state (`success/warning/danger/info/
   accent/muted`); the label must be translated copy, not the tone
-  keyword. The breathing dot on success tones is the only "live"
-  indicator.
+  keyword. Badges render in the pixel tag face (`.v2-tag-face`)
+  automatically. The breathing dot on success tones is the only
+  "live" indicator.
 - **Forms:** every input gets a `Label` (via `FormField`); errors go
   in the `error` slot (rendered `role="alert"`), hints in `hint`.
   Mark required fields with `required` on `FormField`.
@@ -147,17 +208,19 @@ move a value *onto* the grid; adding an icon to `icons.js` matching
 the 24px/1.7-stroke style; wiring an existing component into a page.
 
 **Needs a design decision (stop and flag)** — a new color, font,
-radius, shadow, animation, or z-layer; a new component category
-(e.g. tabs, tooltip, date-picker); changing a token's value; changing
-a component's API or default look; anything on the login/onboarding
-brand surfaces beyond copy.
+radius, shadow, duration/easing, or z-layer; a new component
+category (e.g. tabs, tooltip, date-picker); multi-step motion
+choreography; changing a token's value; changing a component's API
+or default look; anything on the login/onboarding brand surfaces
+beyond copy.
 
 ### Self-review checklist
 
 Before committing a UI change, verify — honestly — each of:
 
 1. **No raw values:** no new hex/`rgb()` colors, no off-grid px
-   spacing, no new radius/shadow/z-index/duration values.
+   spacing, no raw ms durations or ad-hoc cubic-beziers, no new
+   radius/shadow/z-index values.
    Run `node scripts/check-design-tokens.mjs` — it must pass.
 2. **Right component:** the table above maps your need to a
    component; you used it rather than rebuilding it.
@@ -166,7 +229,10 @@ Before committing a UI change, verify — honestly — each of:
 4. **States:** interactive elements have hover, focus-visible,
    and disabled handled (the components do this for you — another
    reason to use them).
-5. **Motion policy:** you added no animation/transition.
+5. **Motion policy:** any animation/transition you added uses the
+   duration + easing tokens and follows the restrained-motion rules
+   in §6 (feedback fast, entrances base/out-expo, no new ambient
+   loops).
 6. **A11y:** labels on inputs, `aria-label` on icon-only buttons,
    `role="alert"` for errors (via `FormField`), semantic headings.
 7. **i18n:** new copy goes through i18n keys, and

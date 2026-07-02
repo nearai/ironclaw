@@ -18,39 +18,45 @@ import { html } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */
+/* The brand-blue ramp lives in the --v2-btn-* tokens (app.css),
+   backfilled from the nux / ironclaw.com landing button language. */
 
-const PRIMARY_BG =
-  "radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%)";
-const PRIMARY_HOVER_BG =
-  "radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%)";
+const PRIMARY_BG = "var(--v2-btn-primary-bg)";
+const PRIMARY_HOVER_BG = "var(--v2-btn-primary-bg-hover)";
 
 /* ── Base ──────────────────────────────────────────────────────────── */
 
 const BASE =
-  "inline-flex items-center justify-center font-semibold select-none " +
+  "inline-flex items-center justify-center font-medium select-none " +
+  "transition-[background,border-color,color,box-shadow] " +
+  "duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)] " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
   "focus-visible:outline-none focus-visible:ring-2 " +
   "focus-visible:ring-[var(--v2-accent)]/50 focus-visible:ring-offset-1 " +
   "focus-visible:ring-offset-[var(--v2-canvas)]";
 
 /* ── Size classes ──────────────────────────────────────────────────── */
+/* Radii come from the --v2-radius-* scale: compact controls md (10px),
+   default/large controls lg (16px — the nux --btn-radius). */
 
 const SIZES = {
-  sm:      "h-9 rounded-[10px] px-3 text-xs",
-  md:      "min-h-[44px] rounded-[14px] px-3.5 text-[13px] md:min-h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg:      "min-h-[54px] rounded-[18px] px-6 text-base",
-  icon:    "h-[44px] w-[44px] rounded-[14px] md:h-[50px] md:w-[50px] md:rounded-[16px]",
-  "icon-sm": "h-9 w-9 rounded-[10px]",
+  sm:      "h-9 rounded-[var(--v2-radius-md)] px-3 text-xs",
+  md:      "min-h-[44px] rounded-[var(--v2-radius-lg)] px-3.5 text-[13px] md:min-h-[50px] md:px-4 md:text-sm",
+  lg:      "min-h-[54px] rounded-[var(--v2-radius-lg)] px-6 text-base",
+  icon:    "h-[44px] w-[44px] rounded-[var(--v2-radius-lg)] md:h-[50px] md:w-[50px]",
+  "icon-sm": "h-9 w-9 rounded-[var(--v2-radius-md)]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */
 // Primary has no Tailwind variant string — it uses inline style for the gradient.
+// Outline is the nux SECONDARY role: translucent accent outline that
+// fills solid blue on hover.
 
 const VARIANTS = {
   outline:
-    "border border-[rgba(76,167,230,0.7)] bg-transparent text-[#8fc8f2] " +
-    "hover:bg-[rgba(76,167,230,0.1)] hover:border-[#4ca7e6] " +
-    "active:bg-[rgba(76,167,230,0.15)]",
+    "border-2 border-[var(--v2-btn-secondary-border)] bg-[var(--v2-btn-secondary-bg)] text-[var(--v2-text-strong)] " +
+    "hover:bg-[var(--v2-accent)] hover:border-[var(--v2-accent)] hover:text-white " +
+    "active:bg-[var(--v2-accent-strong)]",
 
   secondary:
     "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] " +
@@ -62,8 +68,8 @@ const VARIANTS = {
     "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
 
   danger:
-    "border border-[rgba(217,101,116,0.6)] bg-transparent text-[#ff6480] " +
-    "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
+    "border border-[color-mix(in_srgb,var(--v2-danger-text)_60%,transparent)] bg-transparent text-[var(--v2-danger-text)] " +
+    "hover:bg-[var(--v2-danger-soft)] active:bg-[var(--v2-danger-soft)]",
 };
 
 /* ── Component ─────────────────────────────────────────────────────── */
@@ -86,14 +92,14 @@ export function Button({
       <${Tag}
         style=${{
           background: PRIMARY_BG,
-          border: "1px solid rgba(76, 167, 230, 0.72)",
+          border: "1px solid var(--v2-btn-primary-border)",
         }}
         className=${cn(
           BASE,
           sizeClass,
           fullClass,
           "relative overflow-hidden text-white group",
-          "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
+          "hover:shadow-[var(--v2-shadow-accent-hover)]",
           className
         )}
         ...${rest}
@@ -101,7 +107,10 @@ export function Button({
         <span
           aria-hidden="true"
           style=${{ background: PRIMARY_HOVER_BG }}
-          className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
+          className=${
+            "pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100 " +
+            "transition-opacity duration-[var(--v2-duration-base)] ease-[var(--v2-ease-standard)]"
+          }
         />
         <span className="relative z-10 flex items-center gap-2">
           ${children}

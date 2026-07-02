@@ -40,10 +40,11 @@ const VARIANTS = {
 
 /* ─── Radius ──────────────────────────────────────────────────────── */
 
+/* nux card radii: 16px standard cards, up to 24px hero/modal surfaces */
 const RADII = {
-  sm: "rounded-[14px]",
-  md: "rounded-[1.25rem] md:rounded-[1.5rem]",
-  lg: "rounded-[1.5rem]",
+  sm: "rounded-[var(--v2-radius-lg)]",
+  md: "rounded-[var(--v2-radius-xl)] md:rounded-[var(--v2-radius-2xl)]",
+  lg: "rounded-[var(--v2-radius-2xl)]",
 };
 
 /* ─── Padding ─────────────────────────────────────────────────────── */
@@ -125,12 +126,12 @@ export function CardFooter({ children, className = "", divider = true }) {
 
 /* ─── CardLabel ───────────────────────────────────────────────────── */
 
-/** Mono-caps eyebrow label — sits above section headings. */
+/** Pixel-face eyebrow label — sits above section headings (nux tag language). */
 export function CardLabel({ children, className = "" }) {
   return html`
     <div
       className=${cn(
-        "font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.22em] text-[var(--v2-text-faint)]",
+        "v2-tag-face text-[0.6875rem] text-[var(--v2-text-faint)]",
         className
       )}
     >

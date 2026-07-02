@@ -2,11 +2,13 @@
  * tokens.js — machine-readable catalog of the v2 design tokens.
  *
  * The canonical *values* live in static/styles/app.css as `--v2-*`
- * custom properties (light + dark themes). This module is the
- * canonical *index* of those tokens: every token the system exposes,
- * grouped by role, with a short usage note. It powers the
+ * custom properties (light + dark themes) — backfilled from the
+ * `achal/nux` gateway exploration and the onboarding prototype (see
+ * the provenance header in app.css and DESIGN_SYSTEM.md). This module
+ * is the canonical *index* of those tokens: every token the system
+ * exposes, grouped by role, with a short usage note. It powers the
  * /playground token pages and gives agents/tooling one import to
- * enumerate the system (see DESIGN_SYSTEM.md).
+ * enumerate the system.
  *
  * Reading a value at runtime:
  *   getComputedStyle(document.documentElement).getPropertyValue("--v2-accent")
@@ -68,16 +70,27 @@ export const COLOR_TOKENS = [
       { var: "--v2-info-text", note: "Info text/icon" },
     ],
   },
+  {
+    group: "Action ramp & glass",
+    tokens: [
+      { var: "--v2-btn-primary-bg", note: "Primary button gradient (brand ramp)" },
+      { var: "--v2-btn-primary-bg-hover", note: "Primary hover gradient" },
+      { var: "--v2-btn-primary-border", note: "Primary button border" },
+      { var: "--v2-btn-secondary-border", note: "Outline button border" },
+      { var: "--v2-btn-secondary-bg", note: "Outline button frosted fill" },
+      { var: "--v2-glass-bg", note: "Glass chrome fill (with --v2-glass-blur)" },
+    ],
+  },
 ];
 
-/** Radius scale. */
+/** Radius scale — nux 6/8/10/16/20/24. */
 export const RADIUS_TOKENS = [
   { var: "--v2-radius-xs", note: "Inline chips, skeleton bars" },
-  { var: "--v2-radius-sm", note: "Compact (sm) buttons and inputs" },
-  { var: "--v2-radius-md", note: "Default controls (mobile)" },
-  { var: "--v2-radius-lg", note: "Default controls (desktop)" },
-  { var: "--v2-radius-xl", note: "Cards, composer (mobile)" },
-  { var: "--v2-radius-2xl", note: "Large cards, modals" },
+  { var: "--v2-radius-sm", note: "Small chips, code spans" },
+  { var: "--v2-radius-md", note: "Compact controls, inputs (mobile)" },
+  { var: "--v2-radius-lg", note: "Buttons, inputs (desktop), cards" },
+  { var: "--v2-radius-xl", note: "Large cards, composer (mobile)" },
+  { var: "--v2-radius-2xl", note: "Modals, hero surfaces" },
   { var: "--v2-radius-full", note: "Pills, round icon chips" },
 ];
 
@@ -94,32 +107,43 @@ export const SPACE_TOKENS = [
   { var: "--v2-space-10", note: "Hero / empty-state breathing room" },
 ];
 
-/** Type scale. `sample` is rendered on the playground typography page. */
+/** Type scale — nux gateway scale. `sample` renders on the typography page. */
 export const TYPE_TOKENS = [
-  { var: "--v2-font-size-label", note: "Mono-caps eyebrows, badges", sample: "TRACE COMMONS" },
-  { var: "--v2-font-size-caption", note: "Hints, meta rows, errors", sample: "Last synced 2 minutes ago" },
-  { var: "--v2-font-size-body-sm", note: "Controls + body (mobile)", sample: "Every run is scoped to your project." },
-  { var: "--v2-font-size-body", note: "Controls + body (desktop)", sample: "Every run is scoped to your project." },
-  { var: "--v2-font-size-body-lg", note: "Descriptions, empty states", sample: "Connect a channel to start routing messages." },
-  { var: "--v2-font-size-title", note: "Modal and panel titles", sample: "Configure extension" },
-  { var: "--v2-font-size-heading", note: "Section sub-labels", sample: "Recent activity" },
-  { var: "--v2-font-size-display-sm", note: "Stat values", sample: "1,284" },
-  { var: "--v2-font-size-display", note: "Page headings (desktop)", sample: "Automations" },
+  { var: "--v2-font-size-label", note: "Tags, badges, eyebrows (11px)", sample: "TRACE COMMONS" },
+  { var: "--v2-font-size-caption", note: "Hints, meta rows, errors (12px)", sample: "Last synced 2 minutes ago" },
+  { var: "--v2-font-size-body-sm", note: "Controls + body, mobile (13px)", sample: "Every run is scoped to your project." },
+  { var: "--v2-font-size-body", note: "Controls + body, desktop (14px)", sample: "Every run is scoped to your project." },
+  { var: "--v2-font-size-body-lg", note: "Descriptions, empty states (16px)", sample: "Connect a channel to start routing messages." },
+  { var: "--v2-font-size-title", note: "Modal and panel titles (20px)", sample: "Configure extension" },
+  { var: "--v2-font-size-heading", note: "Section headings (24px)", sample: "Recent activity" },
+  { var: "--v2-font-size-display-sm", note: "Stat values (28px)", sample: "1,284" },
+  { var: "--v2-font-size-display", note: "Page headings, desktop (36px)", sample: "Automations" },
 ];
 
-/** Shadow tokens. */
+/** Shadow tokens — nux layered elevation scale. */
 export const SHADOW_TOKENS = [
-  { var: "--v2-card-shadow", note: "Card elevation (themed: none in light)" },
+  { var: "--v2-shadow-sm", note: "Subtle lift: rows, small chips" },
+  { var: "--v2-shadow-md", note: "Raised controls, popovers" },
+  { var: "--v2-shadow-lg", note: "Floating panels, sheets" },
+  { var: "--v2-card-shadow", note: "Card elevation (themed per mode)" },
   { var: "--v2-shadow-modal", note: "Modal / dialog elevation" },
   { var: "--v2-shadow-accent-hover", note: "Primary button hover glow" },
 ];
 
-/** Motion tokens — see the static-motion policy in DESIGN_SYSTEM.md. */
+/** Motion tokens — the nux restrained-motion system (see DESIGN_SYSTEM.md). */
 export const MOTION_TOKENS = [
-  { var: "--v2-duration-spin", note: "Loading spinner (sanctioned exception)" },
-  { var: "--v2-duration-typing", note: "Typing indicator (sanctioned exception)" },
-  { var: "--v2-duration-breathe", note: "Live badge dot (sanctioned exception)" },
-  { var: "--v2-ease-standard", note: "Easing for sanctioned motion" },
+  { var: "--v2-duration-instant", note: "Hover fills, color shifts" },
+  { var: "--v2-duration-fast", note: "Borders, small transforms" },
+  { var: "--v2-duration-base", note: "Panel/sheet entrances" },
+  { var: "--v2-duration-slow", note: "Large surface transitions" },
+  { var: "--v2-ease-standard", note: "Default ease for feedback" },
+  { var: "--v2-ease-in-out", note: "Symmetric moves" },
+  { var: "--v2-ease-out-expo", note: "Surface entrances" },
+  { var: "--v2-ease-spring", note: "Playful pops (chips, badges)" },
+  { var: "--v2-ease-spring-gentle", note: "Soft spring settle" },
+  { var: "--v2-duration-spin", note: "Loading spinner loop" },
+  { var: "--v2-duration-typing", note: "Typing indicator loop" },
+  { var: "--v2-duration-breathe", note: "Live badge dot loop" },
 ];
 
 /** Z-index ladder — pick a layer, never a raw number. */
