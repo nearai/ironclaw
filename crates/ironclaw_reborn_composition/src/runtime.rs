@@ -8592,6 +8592,100 @@ output_schema_ref = "schemas/write.output.json"
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// Caller-level regression for the production attachment-landing path:
+    /// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
+    /// `build_webui_services`/`build_openai_compat_route_mount` call — through
+    /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
+    /// through the same `ProjectScopedAttachmentReader` production wires
+    /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
+    /// shared `RebornServices::read_write_workspace_filesystem` recipe via the
+    /// `local_dev_attachment_test_support_for_test` seam, but never call through
+    /// this `RebornRuntime` wrapper itself; this closes that gap so a future
+    /// regression in the wrapper (not just the shared recipe) fails a test
+    /// instead of only breaking WebUI/OpenAI-compatible attachment landing in
+    /// production.
+    #[tokio::test]
+    async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "attachment mount ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-attachment-mount-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-attachment-mount-tenant".to_string(),
+            agent_id: "runtime-attachment-mount-agent".to_string(),
+            source_binding_id: "runtime-attachment-mount-source".to_string(),
+            reply_target_binding_id: "runtime-attachment-mount-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let read_write_filesystem = runtime
+            .webui_workspace_filesystem()
+            .expect("local-dev runtime composes a read-write webui workspace filesystem");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        // Mirrors production's `attachment_read_port` wiring (read-only
+        // `workspace_filesystem`), so the read side is the same authority a
+        // vision-capable model's multimodal part would resolve through.
+        let read_port = crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+            &local_runtime.workspace_filesystem,
+        ));
+        let lander =
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(read_write_filesystem);
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
+            agent_id: AgentId::new("runtime-attachment-mount-agent").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
+            mission_id: None,
+        };
+        let refs = ironclaw_product_workflow::InboundAttachmentLander::land(
+            &lander,
+            &thread_scope,
+            "msg-attachment-mount",
+            vec![ironclaw_attachments::InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("mount-check.png".to_string()),
+                bytes: b"attachment-mount-bytes".to_vec(),
+            }],
+        )
+        .await
+        .expect("landing through the production webui workspace filesystem succeeds");
+        let storage_key = refs[0]
+            .storage_key
+            .as_deref()
+            .expect("landed attachment carries a storage_key");
+
+        let read_back = ironclaw_loop_support::LoopAttachmentReadPort::read_attachment_bytes(
+            &read_port,
+            &thread_scope.to_resource_scope(),
+            storage_key,
+        )
+        .await
+        .expect("reading the landed attachment back through the read port succeeds");
+
+        assert_eq!(read_back, b"attachment-mount-bytes".to_vec());
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
         let root = tempfile::tempdir().expect("tempdir");
