@@ -16,7 +16,7 @@ use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRe
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+    ProviderToolName, ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
@@ -36,6 +36,9 @@ use ironclaw_triggers::{
     TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_turns::run_profile::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -43,6 +46,20 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+/// Name of the trigger the fired run's capability call attempts to create.
+/// Issue #5505's fix strips `builtin.trigger_create` from the model-visible
+/// surface for a `scheduled_trigger` fire, so this name must NEVER appear in
+/// the trigger repository after the fire settles.
+const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-exist";
+/// Provider tool name IronClaw's deterministic capability -> provider-tool-name
+/// mapping assigns to `builtin.trigger_create` (`.` becomes `__`; see
+/// `provider_tool_name_base` in `ironclaw_loop_support::capability_port`, and
+/// the existing hardcoded uses of this exact string in
+/// `ironclaw_reborn_composition::outbound_delivery_capability_surface`).
+/// Referenced directly rather than discovered via `tool_definitions()` because
+/// on a `scheduled_trigger` surface the fix removes `trigger_create` from
+/// `tool_definitions()` entirely — there would be nothing to look up.
+const TRIGGER_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__trigger_create";
 
 #[derive(Debug, Default)]
 struct RecordingGateway {
@@ -77,6 +94,145 @@ impl HostManagedModelGateway for RecordingGateway {
         Ok(HostManagedModelResponse::assistant_reply(
             "trigger e2e ok".to_string(),
         ))
+    }
+}
+
+/// Model gateway for T0-5505-E2E: on its FIRST turn of the fired run, attempts
+/// to register a `builtin.trigger_create` provider tool call — as a real
+/// native provider tool call would — directly against the fired run's actual
+/// (composed) capability port via `stream_model_with_capabilities`. This is
+/// the same seam a production LLM-provider-backed gateway uses to turn a raw
+/// tool-call response into a `CapabilityCallCandidate`
+/// (`LoopCapabilityPort::register_provider_tool_call`), so registering
+/// through it here exercises the *real* `DisabledCapabilitiesDecorator` /
+/// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
+///
+/// `register_provider_tool_call`'s default `provider_tool_call_capability_ids`
+/// resolves a provider tool name to a capability id by searching
+/// `self.tool_definitions()` — the same list-then-filter path the model's
+/// tool list is built from. `CapabilitySurfaceDenyFilter::tool_definitions()`
+/// (composed from the fix's scheduled_trigger deny set) removes
+/// `builtin.trigger_create` from that list, so on this surface the name
+/// lookup itself comes up empty and registration fails closed with
+/// `AgentLoopHostErrorKind::InvalidInvocation` /
+/// "provider tool call is outside the visible capability surface" — before
+/// any capability-id-keyed deny check even runs. `builtin.trigger_list` stays
+/// in the list (verified directly against `tool_definitions()` while
+/// developing this test), matching the fix's read-only carve-out.
+///
+/// If registration succeeds (capability visible + permitted), the resulting
+/// candidate is forwarded as a `capability_calls` response, which the loop
+/// will actually dispatch — including staging the real JSON input through
+/// the run's real `LocalDevCapabilityIo`, so a genuinely unpatched surface
+/// would really create the marker trigger. If registration is denied, that
+/// denial (and its reason) is recorded instead, and a plain reply is
+/// returned so the run still terminates cleanly.
+///
+/// Every subsequent turn returns a plain assistant reply so the run
+/// terminates after at most one capability-call round trip.
+#[derive(Default)]
+struct SelfCreateAttemptGateway {
+    requests: Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
+    call_count: TokioMutex<usize>,
+    /// `None` until the first turn runs. `Some(Ok(()))` if the registration
+    /// was accepted (capability was visible + permitted on this run's
+    /// surface — the pre-fix behavior). `Some(Err(safe_summary))` if it was
+    /// denied before a candidate could even be built (the fixed behavior).
+    registration_outcome: TokioMutex<Option<Result<(), String>>>,
+}
+
+impl SelfCreateAttemptGateway {
+    async fn captured_message_contents(&self) -> Vec<String> {
+        let snapshot = self.requests.lock().await.clone();
+        snapshot
+            .iter()
+            .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
+            .collect()
+    }
+
+    async fn registration_outcome(&self) -> Option<Result<(), String>> {
+        self.registration_outcome.lock().await.clone()
+    }
+
+    fn self_create_tool_call() -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "trigger-e2e-provider".to_string(),
+            provider_model_id: "trigger-e2e-model".to_string(),
+            turn_id: Some("trigger-e2e-self-create-turn".to_string()),
+            id: "trigger-e2e-self-create-call".to_string(),
+            name: ProviderToolName::new(TRIGGER_CREATE_PROVIDER_TOOL_NAME)
+                .expect("trigger_create provider tool name is valid"),
+            arguments: json!({
+                "name": SELF_CREATE_MARKER_TRIGGER_NAME,
+                "prompt": "run-time action steps -- this trigger must never be created",
+                "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" },
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SelfCreateAttemptGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        // Only reachable if the driver host ever omits the capability port
+        // from the model request (it should not — the composed loop always
+        // wires one). Recording + a plain reply keeps this branch harmless
+        // either way instead of silently no-op'ing the test.
+        self.requests.lock().await.push(request);
+        Ok(HostManagedModelResponse::assistant_reply(
+            "trigger e2e ok (no capability port on request)".to_string(),
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.requests.lock().await.push(request);
+        let is_first_call = {
+            let mut count = self.call_count.lock().await;
+            *count += 1;
+            *count == 1
+        };
+
+        if !is_first_call {
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "trigger e2e ok".to_string(),
+            ));
+        }
+
+        let registration = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                Self::self_create_tool_call(),
+            ))
+            .await;
+        match registration {
+            Ok(candidate) => {
+                *self.registration_outcome.lock().await = Some(Ok(()));
+                Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate],
+                    "",
+                ))
+            }
+            Err(error) => {
+                *self.registration_outcome.lock().await = Some(Err(error.safe_summary.clone()));
+                // Registration was rejected before any capability call
+                // candidate could exist, so there is nothing to dispatch.
+                // Reply plainly so the run still terminates cleanly — this
+                // is what proves the fix only blocks the mutator, not the
+                // fire itself.
+                Ok(HostManagedModelResponse::assistant_reply(
+                    "capability unavailable; continuing".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -128,9 +284,15 @@ fn current_minute_slot() -> chrono::DateTime<Utc> {
 
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
 /// wants; identity, runtime policy, and model-gateway override are shared.
+///
+/// `model_gateway` is `Arc<dyn HostManagedModelGateway>` (rather than the
+/// concrete `RecordingGateway`) so tests that need a gateway which inspects
+/// the fired run's real capability port (e.g. `SelfCreateAttemptGateway`) can
+/// share this builder too — `Arc<Concrete>` coerces to `Arc<dyn Trait>` at
+/// the call site, so existing call sites are unchanged.
 async fn build_runtime_with(
     root: &tempfile::TempDir,
-    recording_gateway: Arc<RecordingGateway>,
+    model_gateway: Arc<dyn HostManagedModelGateway>,
     trigger_poller: TriggerPollerSettings,
 ) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
@@ -154,9 +316,7 @@ async fn build_runtime_with(
             reply_target_binding_id: "trigger-e2e-reply".to_string(),
         })
         .with_trigger_poller_settings(trigger_poller)
-        .with_model_gateway_override(
-            Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>
-        );
+        .with_model_gateway_override(model_gateway);
 
     build_reborn_runtime(input).await.expect("runtime builds")
 }
@@ -265,7 +425,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -429,7 +589,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -552,7 +712,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -649,7 +809,7 @@ async fn trigger_conversation_pairing_returns_none_when_poller_disabled() {
     // with_trigger_poller_settings with enabled: true.
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::default(),
     )
     .await;
@@ -678,7 +838,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -798,7 +958,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -909,7 +1069,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 
     let runtime = build_runtime_with(
         &root,
-        Arc::clone(&recording_gateway),
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
             TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
@@ -1056,4 +1216,159 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         original_next_run_at,
         settled.next_run_at
     );
+}
+
+/// T0-5505-E2E: end-to-end proof that issue #5505's fix composes through the
+/// real Reborn runtime — a scheduled-trigger fire resolves the dedicated
+/// `scheduled_trigger` capability surface, and a fired run that tries to
+/// create a *second* trigger cannot, because `builtin.trigger_create` is
+/// stripped from that surface (`builtin.trigger_list` and firing itself stay
+/// intact).
+///
+/// Unlike the other tests in this file, the fired run's model gateway
+/// (`SelfCreateAttemptGateway`) does not just record requests — on the fired
+/// run's first turn it registers a real `builtin.trigger_create` provider
+/// tool call against the run's actual composed `LoopCapabilityPort` (the
+/// exact seam a native provider tool-call response goes through in
+/// production), attempting to create a second trigger named
+/// `SELF_CREATE_MARKER_TRIGGER_NAME`. See `SelfCreateAttemptGateway`'s doc
+/// comment for why this exercises the real `DisabledCapabilitiesDecorator` /
+/// `CapabilitySurfaceDenyFilter` chain instead of a stand-in.
+#[tokio::test]
+async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(SelfCreateAttemptGateway::default());
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&gateway) as Arc<dyn HostManagedModelGateway>,
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    // Create the one legitimate trigger through the builtin tool (direct
+    // dispatch — bypasses the model, so `gateway` is not invoked yet).
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-self-create-guard",
+            "prompt": TRIGGER_PROMPT,
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert_eq!(
+        created["trigger"]["name"],
+        json!("trigger-e2e-self-create-guard")
+    );
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get created trigger")
+        .expect("created trigger persisted");
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("make created trigger due");
+
+    // Wait for the fire to settle. This is the model's ONLY turn where a
+    // capability call can be attempted (`invoke_trigger_create` above never
+    // touched the model), so once `last_status` is set, the self-create
+    // attempt inside `gateway` has already run to completion.
+    let settled = wait_for_settled(
+        &repo,
+        &tenant_id,
+        trigger_id,
+        Duration::from_secs(15),
+        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some() && r.last_status.is_some(),
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let captured_contents = gateway.captured_message_contents().await;
+    let registration_outcome = gateway.registration_outcome().await;
+
+    assert!(
+        registration_outcome.is_some(),
+        "the fired run never reached the model with a capability port, so the \
+         self-create attempt was never issued — captured_messages: {captured_contents:?}"
+    );
+
+    // Core assertion, mechanism-level: the surface must deny the registration
+    // itself. `builtin.trigger_create` is missing from `tool_definitions()`
+    // on the scheduled_trigger surface (the fix's `DisabledCapabilitiesDecorator`
+    // / `CapabilitySurfaceDenyFilter`), so the provider-tool-name -> capability-id
+    // lookup `register_provider_tool_call` performs against that same list
+    // comes up empty and fails closed — see `SelfCreateAttemptGateway`'s doc
+    // comment for the exact call chain.
+    //
+    // GUARD AGAINST FALSE-PASS: pre-fix (before commit 1d83e6f), the
+    // scheduled_trigger capability surface did not exclude
+    // `builtin.trigger_create` from `tool_definitions()`, so the name lookup
+    // above would succeed and `capabilities.register_provider_tool_call(...)`
+    // inside the gateway would return `Ok(candidate)` — with a REAL,
+    // run-scoped staged input, because `register_provider_tool_call` is the
+    // exact path a native provider tool call uses to stage its arguments
+    // through the run's real `LocalDevCapabilityIo`. The loop would then
+    // actually dispatch `trigger_create` against that staged input and the
+    // marker trigger asserted absent below WOULD exist. A revert of 1d83e6f
+    // turns this `assert_eq!` into a `Some(Ok(()))` and the marker-absence
+    // assertion into a failure — both catch the regression independently.
+    assert_eq!(
+        registration_outcome,
+        Some(Err(
+            "provider tool call is outside the visible capability surface".to_string()
+        )),
+        "expected the scheduled_trigger surface to deny the trigger_create \
+         registration attempt made from inside the fired run"
+    );
+
+    // The mutator denial must not otherwise break the fire: the original
+    // trigger still settles Ok, exactly like the happy-path tests above.
+    assert_eq!(
+        settled.last_status,
+        Some(TriggerRunStatus::Ok),
+        "the original trigger must still settle Ok — the fix blocks only the \
+         mutator capability, not the fire itself — record: {settled:?}"
+    );
+
+    // Belt-and-suspenders behavioral check straight against the repository:
+    // regardless of how the denial surfaced, no second trigger was ever
+    // persisted, and the only trigger that exists is the original.
+    let all_triggers = repo
+        .list_triggers(tenant_id)
+        .await
+        .expect("list triggers after fire settles");
+    assert!(
+        all_triggers
+            .iter()
+            .all(|trigger| trigger.name != SELF_CREATE_MARKER_TRIGGER_NAME),
+        "a scheduled-trigger fire must not be able to create a second trigger — \
+         found triggers: {all_triggers:?}"
+    );
+    assert_eq!(
+        all_triggers.len(),
+        1,
+        "exactly the original trigger should exist after the fire settles — \
+         found triggers: {all_triggers:?}"
+    );
+    assert_eq!(all_triggers[0].trigger_id, trigger_id);
 }
