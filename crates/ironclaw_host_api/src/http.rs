@@ -257,6 +257,27 @@ pub struct RuntimeHttpEgressResponse {
     pub redaction_applied: bool,
 }
 
+/// Runtime-lane host HTTP request shared by MCP, scripts, and other capability
+/// hosts.
+///
+/// This is the pre-translation shape a runtime lane hands to its
+/// `RuntimeHttpEgress` adapter; the adapter fills in `runtime`/`save_body_to`
+/// when building the [`RuntimeHttpEgressRequest`]. Non-serde by design — an
+/// in-process host-call value, not a wire/persistence type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityHostHttpRequest {
+    pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
+    pub method: NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub network_policy: NetworkPolicy,
+    pub credential_injections: Vec<RuntimeCredentialInjection>,
+    pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
+}
+
 pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_body_limit_exceeded";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

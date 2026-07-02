@@ -114,7 +114,7 @@ async fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress));
 
     let error = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             method: NetworkMethod::Get,
@@ -140,7 +140,7 @@ async fn mcp_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error(
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
 
     let error = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             method: NetworkMethod::Get,

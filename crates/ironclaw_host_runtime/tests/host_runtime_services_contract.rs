@@ -6294,7 +6294,7 @@ impl ScriptExecutor for RecordingScriptExecutor {
         let usage = ResourceUsage::default();
         let receipt = governor.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
-            result: ironclaw_scripts::ScriptCapabilityResult {
+            result: CapabilityHostResult {
                 output: request.invocation.input,
                 reservation_id: reservation.id,
                 usage,
