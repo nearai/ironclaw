@@ -446,6 +446,16 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   local-dev libSQL database (`reborn-local-dev.db`) through the same
   `TriggerRepository` contract used by production libSQL. Local-dev builds
   without `libsql` keep the existing in-memory repository behavior.
+- A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
+  profile, not the interactive default. That profile's capability surface
+  denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
+  `trigger_resume` via a host-level per-surface-profile deny decorator
+  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_support`, composed in
+  `ironclaw_reborn::runtime`). Read-only `trigger_list` remains visible and
+  callable during a fire, so a routine can still inspect triggers. This
+  prevents a fired trigger's own run from creating or mutating the trigger
+  fleet — a malformed or self-referential routine prompt could otherwise
+  cause a fire to re-invoke `trigger_create` and spawn more triggers.
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 

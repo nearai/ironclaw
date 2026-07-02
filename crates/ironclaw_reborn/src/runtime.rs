@@ -1198,8 +1198,9 @@ mod tests {
     /// Fixed-surface inner port standing in for the host capability port —
     /// exercised through `DecoratingLoopCapabilityPortFactory` +
     /// [`PerSurfaceCapabilityDenyDecorator`], the same composition pipeline
-    /// used in `build_default_planned_runtime` (runtime.rs `~610-621`), not
-    /// `decorate()` called in isolation (mechanism-level coverage of
+    /// `build_default_planned_runtime` constructs its
+    /// `PerSurfaceCapabilityDenyDecorator` through, not `decorate()` called
+    /// in isolation (mechanism-level coverage of
     /// `PerSurfaceCapabilityDenyDecorator` itself lives in
     /// `ironclaw_loop_support::capability_surface_filter`).
     struct FixedSurfacePort {

@@ -51,15 +51,19 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 /// surface for a `scheduled_trigger` fire, so this name must NEVER appear in
 /// the trigger repository after the fire settles.
 const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-exist";
-/// Provider tool name IronClaw's deterministic capability -> provider-tool-name
-/// mapping assigns to `builtin.trigger_create` (`.` becomes `__`; see
-/// `provider_tool_name_base` in `ironclaw_loop_support::capability_port`, and
-/// the existing hardcoded uses of this exact string in
-/// `ironclaw_reborn_composition::outbound_delivery_capability_surface`).
+/// Mirrors the production capability-id -> provider-tool-name transform
+/// (`provider_tool_name_base` in `ironclaw_loop_support::capability_port`,
+/// private to that crate) so this test tracks `TRIGGER_CREATE_CAPABILITY_ID`
+/// automatically instead of hardcoding its mapped result. Only the `.` ->
+/// `__` replacement is needed for this specific capability id
+/// (`"builtin.trigger_create"`) — the full transform also maps other
+/// non-alphanumeric/`_`/`-` characters to `_`, but this id has none.
 /// Referenced directly rather than discovered via `tool_definitions()` because
 /// on a `scheduled_trigger` surface the fix removes `trigger_create` from
 /// `tool_definitions()` entirely — there would be nothing to look up.
-const TRIGGER_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__trigger_create";
+fn trigger_create_provider_tool_name() -> String {
+    TRIGGER_CREATE_CAPABILITY_ID.replace('.', "__")
+}
 
 /// Shared by every scripted `HostManagedModelGateway` test double in this
 /// file that records raw requests (`RecordingGateway`,
@@ -166,7 +170,7 @@ impl SelfCreateAttemptGateway {
             provider_model_id: "trigger-e2e-model".to_string(),
             turn_id: Some("trigger-e2e-self-create-turn".to_string()),
             id: "trigger-e2e-self-create-call".to_string(),
-            name: ProviderToolName::new(TRIGGER_CREATE_PROVIDER_TOOL_NAME)
+            name: ProviderToolName::new(trigger_create_provider_tool_name())
                 .expect("trigger_create provider tool name is valid"),
             arguments: json!({
                 "name": SELF_CREATE_MARKER_TRIGGER_NAME,
@@ -1326,18 +1330,19 @@ async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
     // capability id fails closed before a candidate is ever built — see
     // `SelfCreateAttemptGateway`'s doc comment for the exact call chain.
     //
-    // GUARD AGAINST FALSE-PASS: pre-fix (before commit 1d83e6f), the
-    // scheduled_trigger capability surface did not deny `builtin.trigger_create`
-    // at all, so the scope check above would pass and
+    // GUARD AGAINST FALSE-PASS: pre-fix, the scheduled_trigger capability
+    // surface did not deny `builtin.trigger_create` at all, so the scope
+    // check above would pass and
     // `capabilities.register_provider_tool_call(...)` inside the gateway
     // would return `Ok(candidate)` — with a REAL, run-scoped staged input,
     // because `register_provider_tool_call` is the exact path a native
     // provider tool call uses to stage its arguments through the run's real
     // `LocalDevCapabilityIo`. The loop would then actually dispatch
     // `trigger_create` against that staged input and the marker trigger
-    // asserted absent below WOULD exist. A revert of 1d83e6f turns this
-    // `assert_eq!` into a `Some(Ok(()))` and the marker-absence assertion
-    // into a failure — both catch the regression independently.
+    // asserted absent below WOULD exist. Reverting the scheduled_trigger deny
+    // map turns this `assert_eq!` into a `Some(Ok(()))` and the
+    // marker-absence assertion into a failure — both catch the regression
+    // independently.
     assert_eq!(
         registration_outcome,
         Some(Err(
