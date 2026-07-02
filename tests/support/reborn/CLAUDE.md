@@ -378,6 +378,19 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 
+### Distinct actors per thread (E-MULTIUSER)
+
+`g.thread(conv).with_actor_id("some-actor")` resolves that thread's binding
+under a DISTINCT actor instead of the default `HARNESS_ACTOR_ID` — both at
+the build-time binding probe and at every `submit_turn` for that thread, so
+probe and submit always resolve the same binding/owner. The group's one
+shared runtime resolves each turn's thread by the run's own owner
+(production's `ThreadScopeResolver::resolve_for_turn` over the harness's
+per-op `/threads` mount), so two actors' threads coexist over one
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
+
 ### Key accessors on `RebornIntegrationGroup`
 
 - `turn_composite()` — the thread/turn `CompositeRootFilesystem`; use for

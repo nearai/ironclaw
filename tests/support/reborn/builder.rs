@@ -309,6 +309,27 @@ pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
     pub(crate) workflow: DefaultProductWorkflow,
     pub(crate) conversation_id: String,
+    /// External (raw, pre-resolution) actor id every submit for this thread is
+    /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
+    /// `with_actor_id` (the E-MULTIUSER seam) carries its distinct actor here
+    /// so submit-time envelopes resolve the SAME binding (and owner scope) as
+    /// the build-time probe.
+    ///
+    /// NOT redundant with `binding.actor_user_id`: the binding's field is a
+    /// one-way SHA-256-derived opaque `UserId` (`user_id_for_binding` /
+    /// `scoped_id`, product_workflow.rs), while `verified_text_envelope_with_trigger`
+    /// (called by both the build-time probe and every submit) needs the raw,
+    /// pre-hash external actor-id string to compute the SAME `binding_path`
+    /// hash the probe persisted under. Substituting `binding.actor_user_id`
+    /// here would make submit resolve a *different*, unrelated binding (new
+    /// `actor_user_id`/`subject_user_id`, same `thread_id` since that hash is
+    /// actor-independent) instead of reusing this harness's own — silently
+    /// breaking every `submit_turn`/`submit_turn_async` call, not just the
+    /// multi-actor scenario. `binding.actor_user_id` IS the right source of
+    /// truth for `resume_run`'s `TurnActor` (an already-resolved identity, no
+    /// envelope round-trip involved) — that is a materially different use
+    /// case from this field's.
+    pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
@@ -385,7 +406,7 @@ impl RebornIntegrationHarness {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
-            HARNESS_ACTOR_ID,
+            &self.actor_id,
             &self.conversation_id,
             text,
             ProductTriggerReason::DirectChat,

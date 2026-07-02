@@ -356,6 +356,7 @@ impl RebornIntegrationGroup {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
             park_gate: None,
+            actor_id: None,
         }
     }
 
@@ -825,6 +826,7 @@ pub struct RebornThreadBuilder<'g> {
     /// (E-GATEWAY seam), enabling a mid-turn cancel test. `None` = normal
     /// scripted playback.
     park_gate: Option<ParkingModelGate>,
+    actor_id: Option<String>,
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -849,6 +851,24 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    /// Resolve this thread's binding under a DISTINCT actor instead of the
+    /// group's default `HARNESS_ACTOR_ID` (E-MULTIUSER seam). The resulting
+    /// binding's `subject_user_id`/`actor_user_id` differ from every other
+    /// thread's, so the run's `TurnActor` and per-turn owner-scope resolution
+    /// (`ThreadScopeResolver::resolve_for_turn`, the same mechanism production
+    /// uses for multi-user WebChat) isolate this thread's reads/writes under
+    /// their own subtree. The owner axis of that subtree is the resolved
+    /// canonical `UserId` (`binding.subject_user_id` / `ThreadScope.owner_user_id`)
+    /// — NOT the external `actor_id` string passed here — the binding probe
+    /// maps this `actor_id` to that canonical user id once at build time, and
+    /// every subsequent op resolves its mount from the binding, not the raw
+    /// string. Unset (the default) keeps the existing `HARNESS_ACTOR_ID`
+    /// behavior byte-identical.
+    pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
+        self.actor_id = Some(actor_id.into());
+        self
+    }
+
     /// Build the per-thread `RebornIntegrationHarness` over the group's shared
     /// storage and ONE shared planned runtime.
     ///
@@ -870,11 +890,12 @@ impl<'g> RebornThreadBuilder<'g> {
         // A fresh adapter + ingress each time (cheap, stateless). The binding
         // service is backed by `shared.product_harness`, which is shared; the
         // idempotency ledger is also shared (per-binding idempotency).
+        let actor_id = self.actor_id.as_deref().unwrap_or(HARNESS_ACTOR_ID);
         let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
         let ingress = RebornTestIngress::new(adapter);
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
-            HARNESS_ACTOR_ID,
+            actor_id,
             &self.conversation_id,
             "hi",
             ProductTriggerReason::DirectChat,
@@ -980,6 +1001,7 @@ impl<'g> RebornThreadBuilder<'g> {
             ingress,
             workflow,
             conversation_id: self.conversation_id,
+            actor_id: actor_id.to_owned(),
             binding,
             turn_scope,
             turn_store: Arc::clone(&shared.turn_store),

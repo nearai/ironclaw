@@ -1,11 +1,12 @@
 # Trigger Loop — Design
 
 **Date:** 2026-05-21
-**Status:** Design approved, revised after spec review
+**Status:** Historical design snapshot; current Reborn crates live on `main`
+
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`).
 **Target architecture:** IronClaw Reborn (`crates/ironclaw_*`)
-**Target branch:** `reborn-integration` — the Reborn crates and contracts
-referenced below exist on `reborn-integration`, not on `staging`. Any review or
-implementation worktree must branch from `reborn-integration`.
+**Source baseline:** `main` — the Reborn crates and contracts referenced below
+are in-tree.
 **Related design:** nearai/ironclaw#4240
 (`docs/superpowers/specs/2026-05-29-channel-communication-delivery-resolution.md`)
 
@@ -26,13 +27,10 @@ are the first acceptance target. Webhook, message-regex, and system-event
 sources are not P0.
 
 A trigger fire is treated as exactly what it is: a **synthetic inbound
-message**. Instead of building a parallel execution engine, a fire fans into
-the Reborn inbound pipeline (`InboundTurnService → TurnCoordinator →
-TurnRunnerWorker → AgentLoopDriver`). The contracts and crates for that
-pipeline exist on `reborn-integration` as implemented slices; full end-to-end
-turn-coordination wiring is a Level-3 item still in progress per the contract
-freeze index. This design depends on that wiring and must not ship before it.
-The "job queue" a trigger extends is the Reborn turn queue.
+message**. Instead of building a parallel execution engine, a fire fans into the
+Reborn inbound pipeline (`InboundTurnService → TurnCoordinator →
+TurnRunScheduler → RebornTurnRunExecutor → AgentLoopDriver`). The "job queue" a
+trigger extends is the Reborn turn queue.
 
 The reusable abstraction is **trigger source provider**, not product adapter.
 Product adapters normalize external products into IronClaw messages. Trigger
@@ -96,7 +94,7 @@ A cron fire is **host-internal**, not an untrusted product adapter. This drives
 the one contract-sensitive piece of the design.
 
 - `InboundTurnService::handle_inbound_turn()`
-  (`crates/ironclaw_conversations/src/inbound.rs:54` on `reborn-integration`)
+  (`crates/ironclaw_conversations/src/inbound.rs`)
   calls `resolve_or_create_binding()` — the **untrusted** path. It fails closed
   for unpaired actors and does not trust requested scope hints
   (`conversation-binding.md` §4.2, §4.5).
@@ -276,9 +274,9 @@ fires; `InboundTurnService` starts the resulting agent turn.
 
 ### 5.4 `TriggerPollerWorker`
 
-A background tokio task modelled on `TurnRunnerWorker`
-(`crates/ironclaw_reborn/src/turn_runner.rs`), which is the existing precedent
-for a long-lived Reborn background worker. Loop:
+A background tokio task modelled on `TurnRunScheduler`
+(`crates/ironclaw_host_runtime/src/turn_scheduler.rs`), which is the existing
+precedent for a long-lived Reborn background worker. Loop:
 
 1. Tick every `poll_interval` (config, default ~30s).
 2. Ask the schedule source provider to query `TriggerRepository` for `enabled &&
@@ -331,10 +329,10 @@ remains deferred, now as an efficiency optimization rather than a correctness
 fix.
 
 The worker is started by the Reborn composition root — the same startup path
-that spawns `TurnRunnerWorker`. `ironclaw_reborn_composition` owns wiring it
-from config; the worker code lives in `ironclaw_triggers`. Implementation must
-confirm the composition root exposes a background-worker spawn hook and add one
-if it does not (H3).
+that wires the scheduler/executor control plane. `ironclaw_reborn_composition`
+owns wiring it from config; the worker code lives in `ironclaw_triggers`.
+Implementation must confirm the composition root exposes a background-worker
+spawn hook and add one if it does not (H3).
 
 ### 5.5 Synthetic `InboundTurnRequest` per fire
 
@@ -393,10 +391,10 @@ bundle that already carries other repositories.
 ### Execution
 
 The submitted turn rides the normal Reborn queue: `submit_turn` →
-one-active-run-per-thread gate → `TurnRunnerWorker` claims the run →
-`AgentLoopDriver` runs the LLM loop. No new execution machinery. Each fire is
-its own thread, so a trigger never contends with itself for the active-run
-lock.
+one-active-run-per-thread gate → `TurnRunScheduler` claims the run →
+`RebornTurnRunExecutor` invokes the `AgentLoopDriver`. No new execution
+machinery. Each fire is its own thread, so a trigger never contends with itself
+for the active-run lock.
 
 ### Delivery (H2 — dependency-gated)
 
@@ -529,19 +527,8 @@ being far enough along to run an end-to-end turn.
 
 ## 11. Rejected review findings (for the record)
 
-The 2026-05-21 spec review was conducted against a worktree based on `staging`,
-where the Reborn crates do not exist. The following findings are artifacts of
-that branch mismatch and are rejected; the files exist on `reborn-integration`:
-
-- **C1** — `ironclaw_conversations` (`inbound.rs`, `traits.rs`) and
-  `conversation-binding.md` exist on `reborn-integration`. Real action taken:
-  this doc and the implementation worktree now target `reborn-integration`
-  explicitly.
-- **C2 (partial)** — `InboundTurnService`, `TurnCoordinator`,
-  `TurnRunnerWorker`, `AgentLoopDriver` exist as implemented slices. The valid
-  half — full turn-coordination wiring is still in progress — is now addressed
-  in §1 and the §10 Level-0 gate.
-- **H4** — `InboundTurnService::submit_or_replay` and the idempotency mechanism
-  exist (`inbound.rs:91-151`). The valid half — specify the contract — is now
-  addressed in §4 "Idempotency contract".
-- **M5** — the cited `.claude/rules/*.md` files exist on `reborn-integration`.
+This appendix is historical provenance from a review run before the Reborn
+crates and contracts lived on `main`. For current implementation work, verify
+against the in-tree contracts (`docs/reborn/contracts/`) and crates such as
+`crates/ironclaw_triggers`, `crates/ironclaw_conversations`, and
+`crates/ironclaw_turns`.

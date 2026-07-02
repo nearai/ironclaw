@@ -93,6 +93,9 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
+from scripts.reborn_webui_v2_live_qa.green_run_explanation import (  # noqa: E402
+    write_green_run_explanation,
+)
 from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
     _compact_json,
     _judge_assistant_reply_completion,
@@ -112,6 +115,9 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_config_value,
     _slack_enabled,
     _slack_team_id_from_bot_token_env,
+)
+from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
+    required_text_matches,
 )
 
 QA_SHEET_PROMPTS: dict[str, str] = {
@@ -796,6 +802,14 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
             await browser.close()
 
 
+@dataclass(frozen=True)
+class AssistantReplyWaitResult:
+    text_excerpt: str
+    semantic_judge_used: bool
+    semantic_judge_reason: str
+    semantic_judge: dict[str, object] | None = None
+
+
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
     details = {"case": case_name, **details}
     if case_name in QA_SHEET_CASES:
@@ -812,6 +826,17 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
+
+
+def _record_assistant_reply_wait_result(
+    observed: dict[str, object],
+    reply: AssistantReplyWaitResult,
+) -> None:
+    observed["text_excerpt"] = reply.text_excerpt
+    observed["semantic_judge_used"] = reply.semantic_judge_used
+    observed["semantic_judge_reason"] = reply.semantic_judge_reason
+    if reply.semantic_judge is not None:
+        observed["semantic_judge"] = reply.semantic_judge
 
 
 async def _live_chat_case(
@@ -856,12 +881,15 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
@@ -968,12 +996,15 @@ async def _live_chat_with_extensions_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
 
     try:
@@ -1004,7 +1035,7 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
-) -> str:
+) -> AssistantReplyWaitResult:
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
@@ -1030,8 +1061,12 @@ async def _wait_for_assistant_reply(
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and _required_text_matches(normalized, required_text):
-                return text[-2000:]
+            if marker_matches and required_text_matches(normalized, required_text):
+                return AssistantReplyWaitResult(
+                    text_excerpt=text[-2000:],
+                    semantic_judge_used=False,
+                    semantic_judge_reason="literal_required_text_matched",
+                )
         await asyncio.sleep(0.5)
     main_text = ""
     try:
@@ -1048,30 +1083,18 @@ async def _wait_for_assistant_reply(
             semantic_goal=semantic_goal,
         )
         if _semantic_judge_passed(semantic_judge):
-            return last_text[-2000:]
+            return AssistantReplyWaitResult(
+                text_excerpt=last_text[-2000:],
+                semantic_judge_used=True,
+                semantic_judge_reason="semantic_judge_completed",
+                semantic_judge=semantic_judge,
+            )
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
-
-
-def _required_text_matches(text: str, required_text: list[str]) -> bool:
-    normalized_text = text.lower()
-    return all(
-        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
-        for piece in required_text
-    )
-
-
-def _required_option_matches(normalized_text: str, option: str) -> bool:
-    normalized_option = option.strip().lower()
-    if not normalized_option:
-        return False
-    if re.fullmatch(r"\w+", normalized_option):
-        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
-    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -3335,11 +3358,14 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            observed["text_excerpt"] = await _wait_for_assistant_reply(
-                page,
-                marker=None,
-                required_text=["slack"],
-                timeout=180.0,
+            _record_assistant_reply_wait_result(
+                observed,
+                await _wait_for_assistant_reply(
+                    page,
+                    marker=None,
+                    required_text=["slack"],
+                    timeout=180.0,
+                ),
             )
             deadline = time.monotonic() + 180.0
             while time.monotonic() < deadline:
@@ -4041,8 +4067,13 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
+    green_explanation_path = write_green_run_explanation(args.output_dir, results)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)
     print(f"[reborn-webui-v2-live-qa] trace_index={trace_index_path}", flush=True)
+    print(
+        f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+        flush=True,
+    )
     return 0 if all(result.success for result in results) else 1
 
 
@@ -4089,6 +4120,11 @@ def main() -> int:
             details={"error": str(exc)},
         )
         write_results(args.output_dir, [failed], "")
+        green_explanation_path = write_green_run_explanation(args.output_dir, [failed])
+        print(
+            f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+            flush=True,
+        )
         print(f"[reborn-webui-v2-live-qa] {exc}", file=sys.stderr, flush=True)
         return 1
 
