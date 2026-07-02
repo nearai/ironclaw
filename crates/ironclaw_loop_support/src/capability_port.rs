@@ -27,9 +27,10 @@ use ironclaw_turns::{
         CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
         LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ModelVisibleToolObservation,
+        ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -1408,6 +1409,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
+        let model_observation = model_visible_output_observation(output.clone());
         let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -1426,6 +1428,7 @@ impl HostRuntimeLoopCapabilityPort {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation,
         }))
     }
 
@@ -2568,6 +2571,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
+            let model_observation = model_visible_output_observation(completed.output.clone());
             let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
@@ -2585,6 +2589,7 @@ async fn runtime_outcome_to_loop(
                 terminate_hint: false,
                 byte_len: write_result.byte_len,
                 output_digest: write_result.output_digest,
+                model_observation,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
@@ -2713,6 +2718,21 @@ fn runtime_terminal_milestone(
         | RuntimeCapabilityOutcome::ResourceBlocked(_)
         | RuntimeCapabilityOutcome::SpawnedProcess(_) => None,
     })
+}
+
+fn model_visible_output_observation(
+    output: serde_json::Value,
+) -> Option<ModelVisibleToolObservation> {
+    match ModelVisibleToolObservation::success_output(output) {
+        Ok(observation) => Some(observation),
+        Err(error) => {
+            tracing::debug!(
+                reason = %error,
+                "dropping completed capability model-visible output observation"
+            );
+            None
+        }
+    }
 }
 
 fn runtime_failure_to_loop(
@@ -3040,6 +3060,10 @@ fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
 mod tests {
     use super::*;
     mod runtime_lifecycle_tests;
+
+    use ironclaw_turns::run_profile::{
+        ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+    };
 
     use std::{
         collections::VecDeque,
@@ -4638,6 +4662,43 @@ mod tests {
             &serde_json::json!({"message": "hello"}),
             "observer should receive the resolved tool-call arguments"
         );
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_returns_bounded_model_visible_output_observation() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id,
+                provider_id,
+            )])),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-model-visible-output",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability succeeds");
+        let CapabilityOutcome::Completed(result) = outcome else {
+            panic!("expected completed outcome");
+        };
+        let observation = result
+            .model_observation
+            .expect("completed output must be model-visible");
+        assert_eq!(observation.status, ToolObservationStatus::Success);
+        assert_eq!(observation.summary, "Tool completed.");
+        assert_eq!(observation.trust, ObservationTrust::UntrustedToolOutput);
+        match observation.detail {
+            ToolObservationDetail::Output { content } => {
+                assert_eq!(content, serde_json::json!({"ok": true}));
+            }
+            detail => panic!("expected output detail, got {detail:?}"),
+        }
     }
 
     #[tokio::test]
@@ -8518,6 +8579,7 @@ mod tests {
                 result_ref,
                 byte_len: 0,
                 output_digest: Some(output_digest),
+                model_observation: None,
             })
         }
     }

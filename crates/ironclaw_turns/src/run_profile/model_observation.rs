@@ -7,6 +7,7 @@ const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
 const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
+const MODEL_OBSERVATION_MAX_BYTES: usize = 16 * 1024;
 pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 #[non_exhaustive]
@@ -31,6 +32,22 @@ pub struct ModelVisibleToolObservation {
 }
 
 impl ModelVisibleToolObservation {
+    /// Builds the canonical bounded observation for successful capability JSON
+    /// output. The full result remains staged behind the result ref.
+    pub fn success_output(output: serde_json::Value) -> Result<Self, String> {
+        let observation = Self {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed.".to_string(),
+            detail: ToolObservationDetail::Output { content: output },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION {
             return Err(format!(
@@ -38,6 +55,7 @@ impl ModelVisibleToolObservation {
                 self.schema_version
             ));
         }
+        validate_observation_len(self)?;
         validate_non_empty_text(&self.summary, "model observation summary")?;
         validate_text_len(
             &self.summary,
@@ -75,6 +93,7 @@ pub enum ToolObservationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolObservationDetail {
+    Output { content: serde_json::Value },
     InvalidInput { issues: Vec<CapabilityInputIssue> },
     GenericFailure { failure_kind: CapabilityFailureKind },
 }
@@ -82,6 +101,7 @@ pub enum ToolObservationDetail {
 impl ToolObservationDetail {
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::Output { .. } => Ok(()),
             Self::InvalidInput { issues } => {
                 validate_len(
                     issues.len(),
@@ -256,6 +276,17 @@ fn validate_len(len: usize, max: usize, label: &'static str) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_observation_len(value: &ModelVisibleToolObservation) -> Result<(), String> {
+    let serialized = serde_json::to_vec(value)
+        .map_err(|_| "model observation could not be serialized".to_string())?;
+    if serialized.len() > MODEL_OBSERVATION_MAX_BYTES {
+        return Err(format!(
+            "model observation exceeds {MODEL_OBSERVATION_MAX_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_optional_text(value: Option<&str>, label: &'static str) -> Result<(), String> {
     if let Some(value) = value {
         validate_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
@@ -332,5 +363,27 @@ mod tests {
             serde_json::json!("provide_required_field")
         );
         assert_eq!(value["trust"], "untrusted_tool_output");
+    }
+
+    #[test]
+    fn model_visible_tool_observation_accepts_bounded_output() {
+        let observation = ModelVisibleToolObservation::success_output(
+            serde_json::json!({"path": "notes.md", "content": "answer"}),
+        )
+        .expect("bounded output is valid");
+
+        let value = serde_json::to_value(&observation).expect("serialize");
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["detail"]["kind"], "output");
+        assert_eq!(value["detail"]["content"]["content"], "answer");
+    }
+
+    #[test]
+    fn model_visible_tool_observation_rejects_oversized_output() {
+        let error = ModelVisibleToolObservation::success_output(serde_json::json!({
+            "content": "x".repeat(MODEL_OBSERVATION_MAX_BYTES)
+        }))
+        .expect_err("oversized output must be rejected");
+        assert!(error.contains("model observation exceeds"));
     }
 }

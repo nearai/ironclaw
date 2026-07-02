@@ -9,7 +9,7 @@ use ironclaw_product_workflow::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
     CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    LoopRunContext,
+    LoopRunContext, ModelVisibleToolObservation,
 };
 
 use crate::runtime::local_dev::synthetic_capability::{
@@ -127,6 +127,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
         // name and id from the result `output`; the summary stays a fixed,
         // delimiter-free string.
         let safe_summary = "created project".to_string();
+        let model_observation = ModelVisibleToolObservation::success_output(output.clone()).ok();
         let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -145,6 +146,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation,
         }))
     }
 }

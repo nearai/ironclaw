@@ -19,6 +19,7 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityFailure,
         CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, CapabilityProgress,
         CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopRunContext,
+        ModelVisibleToolObservation,
     },
 };
 
@@ -417,6 +418,7 @@ async fn write_completed_result(
     output: serde_json::Value,
     safe_summary: String,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    let model_observation = ModelVisibleToolObservation::success_output(output.clone()).ok();
     let write_result = invocation
         .result_writer
         .write_capability_result(CapabilityResultWrite {
@@ -435,6 +437,7 @@ async fn write_completed_result(
         terminate_hint: false,
         byte_len: write_result.byte_len,
         output_digest: write_result.output_digest,
+        model_observation,
     }))
 }
 

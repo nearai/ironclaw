@@ -219,6 +219,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -292,6 +293,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 

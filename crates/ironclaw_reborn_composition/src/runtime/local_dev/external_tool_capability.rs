@@ -31,9 +31,9 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
     CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    LoopRunContext, ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -201,6 +201,8 @@ impl ExternalToolCapabilityPort {
             .await
             .map_err(catalog_error)?
         {
+            let model_observation =
+                ModelVisibleToolObservation::success_output(output.clone()).ok();
             let write = self
                 .result_writer
                 .write_capability_result(CapabilityResultWrite {
@@ -225,6 +227,7 @@ impl ExternalToolCapabilityPort {
                 terminate_hint: false,
                 byte_len: write.byte_len,
                 output_digest: write.output_digest,
+                model_observation,
             }));
         }
         // No output yet → park and return control to the API client.

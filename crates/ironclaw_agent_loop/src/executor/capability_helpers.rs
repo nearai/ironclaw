@@ -231,7 +231,7 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: None,
+        model_observation: result.model_observation.clone(),
     })
     .await
     .map_err(capability_host_error)?;
@@ -599,6 +599,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 1000,
             output_digest: None,
+            model_observation: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -607,6 +608,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 500,
             output_digest: None,
+            model_observation: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -615,6 +617,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 2000,
             output_digest: None,
+            model_observation: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);

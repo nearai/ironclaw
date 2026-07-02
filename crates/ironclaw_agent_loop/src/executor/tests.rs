@@ -10,9 +10,10 @@ use ironclaw_turns::{
         LoopCancelReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopProgressEvent,
-        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId, ObservationTrust,
-        ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
+        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId, ModelVisibleToolObservation,
+        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -1225,6 +1226,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1296,6 +1298,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1466,6 +1469,7 @@ async fn capability_stage_returns_after_batch_summary() {
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -1829,6 +1833,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: true,
         },
@@ -1920,6 +1925,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2058,6 +2064,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2289,6 +2296,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -2349,6 +2357,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -2357,6 +2366,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: true,
@@ -2580,6 +2590,7 @@ async fn terminate_hint_counts_only_visible_invoked_calls() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2671,6 +2682,7 @@ async fn retry_uses_single_call_invocation() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )]);
         let executor = CanonicalAgentLoopExecutor;
@@ -2707,6 +2719,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             },
         )]);
     let executor = CanonicalAgentLoopExecutor;
@@ -2832,6 +2845,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2879,6 +2893,7 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {
                     reason_kind:
@@ -2996,6 +3011,45 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
             path: "file_path".to_string()
         }]
     );
+}
+
+#[tokio::test]
+async fn completed_provider_tool_result_appends_model_visible_output_observation() {
+    let observation = ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed.".to_string(),
+        detail: ToolObservationDetail::Output {
+            content: serde_json::json!({"path": "notes.md", "content": "remembered"}),
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: LoopResultRef::new("result:memory-read").expect("valid result ref"),
+                safe_summary: "capability completed".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 64,
+                output_digest: None,
+                model_observation: Some(observation.clone()),
+            })],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].model_observation, Some(observation));
 }
 
 #[tokio::test]
@@ -3119,6 +3173,7 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: Some(digest),
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3425,6 +3480,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
                 // Exceeds the default 32 000-byte cap for unknown capability ids.
                 byte_len: 33_001,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3488,6 +3544,7 @@ async fn executor_post_capability_does_not_trip_under_threshold() {
                 terminate_hint: true,
                 byte_len: 100, // well under the 32 000-byte default cap
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3535,6 +3592,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
                 terminate_hint: false, // loop must continue so SkipModel fires
                 byte_len: 33_001,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3647,6 +3705,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     terminate_hint: true, // exit after batch so we can inspect state
                     byte_len: 20_000,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -3655,6 +3714,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     terminate_hint: true,
                     byte_len: 20_000,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -3877,6 +3937,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
                 terminate_hint: false, // loop must continue so SkipModel iteration fires
                 byte_len: 33_001,      // exceeds the 32 000-byte default cap
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }])
@@ -4324,6 +4385,7 @@ async fn parallel_batch_records_completed_results_before_external_tool_block() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::ExternalToolPending {
                     gate_ref: external_gate_ref.clone(),
@@ -4381,6 +4443,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -4457,6 +4520,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -4628,6 +4692,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                         terminate_hint: true,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -4698,6 +4763,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5190,6 +5256,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5432,6 +5499,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5567,6 +5635,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         terminate_hint: false,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 ),
                 CapabilityOutcome::Completed(
@@ -5577,6 +5646,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         terminate_hint: false,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 ),
             ],
@@ -6415,6 +6485,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -6613,6 +6684,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -6767,6 +6839,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: z_result_ref.clone(),
@@ -6775,6 +6848,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -7010,6 +7084,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -7226,6 +7301,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);

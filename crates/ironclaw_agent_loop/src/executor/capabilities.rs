@@ -435,6 +435,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             terminate_hint: false,
                             byte_len,
                             output_digest: None,
+                            model_observation: None,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -735,6 +736,7 @@ impl CapabilityStage {
                     terminate_hint: false,
                     byte_len,
                     output_digest: None,
+                    model_observation: None,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1250,6 +1252,7 @@ async fn append_spawned_child_result(
         terminate_hint: false,
         byte_len,
         output_digest: None,
+        model_observation: None,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -1389,6 +1392,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         })
     }
 

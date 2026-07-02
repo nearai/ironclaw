@@ -1785,6 +1785,11 @@ pub struct CapabilityResultMessage {
     /// compatibility and for synthetic results that do not stage real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<ContentDigest>,
+    /// Bounded, model-visible view of the staged output. The full result stays
+    /// behind `result_ref`; this optional observation lets the next model turn
+    /// consume ordinary tool output without dereferencing host storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
