@@ -78,35 +78,19 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .expect("activated skill instructions must inject into a model request");
 }
 
-// ESCALATED (not fixed here — architectural, touches the shared agent-loop
-// ingress path): `SkillActivationMode::ActivationCriteria` is unreachable from
-// the modern Reborn turn-submission path today. `SelectableSkillContextSource::
-// load_skill_context_candidates` (activation.rs:789-808, the `HostSkillContextSource`
-// the loop calls) only runs fresh criteria selection when
-// `take_message_for_run(scope, accepted_message_ref)` returns `Some` — populated
-// exclusively by `record_user_message`/`record_message` (activation.rs:256-274).
-// `record_user_message`'s ONLY production caller is the legacy
-// `RebornRuntime::submit_user_turn` (`ironclaw_reborn_composition::runtime`, line
-// ~1924) — a different, older runtime, NOT the `TurnCoordinator`/agent-loop stack
-// `product_workflow::accept_inbound` drives (confirmed: production `skill_context_source`
-// wiring in `build_reborn_runtime` → `local_dev_filesystem_skill_context_source`,
-// runtime.rs:2925-3417, hands the raw `SelectableSkillContextSource` to the loop
-// driver with no message-recording decorator — same shape this test harness
-// wires). Net effect: on every real Reborn turn, `take_message_for_run` returns
-// `None`, `load_skill_context_candidates` falls back to `active_plan_candidates`
-// (only an already-EXPLICITLY-activated plan), and keyword/regex criteria
-// selection never fires — even though `auto_activate` defaults `true` and
-// `regex_skill_activation_enabled=true` is already wired.
-// TODO(reborn-skill-criteria-gap): wire `record_user_message` into the modern
-// turn-submission/loop-driver-host ingress path (mirroring what
-// `RebornRuntime::submit_user_turn` already does for the legacy path) — needs
-// its own PR; the right hook point (loop_driver_host pre-loop setup vs. a new
-// BeforeInbound-style hook) needs its own design pass. Pinned RED here so this
-// regresses loudly instead of silently if anyone assumes the criteria path
-// already works.
-#[ignore = "TODO(reborn-skill-criteria-gap): record_user_message never called on the modern Reborn submit_turn path — see comment above"]
+// INTENTIONAL: `SkillActivationMode::ActivationCriteria` (keyword/regex
+// auto-activation) does NOT fire on the modern `TurnCoordinator`/agent-loop
+// path — auto-activation is disabled on purpose (product decision, see closed
+// issue #5530). The explicit `builtin.skill_activate` capability path is the
+// supported mechanism and is what this binary covers. Mechanically: criteria
+// selection only runs when `take_message_for_run` returns `Some`, populated by
+// `record_user_message`, whose sole production caller is the legacy
+// `RebornRuntime::submit_user_turn` — the coordinator stack never records the
+// message, so criteria selection stays inert there by design. This test pins
+// that intentional OFF state: a keyword-matching message alone must NOT inject
+// the skill.
 #[tokio::test]
-async fn skill_auto_activates_via_criteria_without_explicit_capability_call() {
+async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
     let group = RebornIntegrationGroup::skill_activation_tools()
         .await
         .expect("skill-activation group builds");
@@ -118,25 +102,29 @@ async fn skill_auto_activates_via_criteria_without_explicit_capability_call() {
         .expect("thread builds");
 
     // The message CONTAINS the seeded skill's activation keyword ("greet") and
-    // no `skill_activate` tool call is scripted — the only way the sentinel can
-    // reach the model is criteria-based auto-activation.
+    // no `skill_activate` tool call is scripted — if criteria auto-activation
+    // ever silently turned on for the coordinator path, the sentinel would
+    // reach the model and this test would go RED.
     harness
         .submit_turn("please greet the visitor")
         .await
         .expect("turn completes");
 
-    harness
-        .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
-        .await
-        .expect("keyword-matching skill must auto-inject without an explicit activate call");
+    assert!(
+        harness
+            .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
+            .await
+            .is_err(),
+        "criteria auto-activation is intentionally OFF on the coordinator path — \
+         a keyword-matching message alone must not inject the skill prompt (#5530)"
+    );
 
-    // Prove this really is the criteria path, not a hidden explicit call: the
-    // synthetic capability was never dispatched.
+    // And the explicit capability was never dispatched either.
     assert!(
         harness
             .assert_tool_invoked("builtin.skill_activate")
             .await
             .is_err(),
-        "builtin.skill_activate must NOT have been invoked on the criteria-only path"
+        "builtin.skill_activate must NOT have been invoked without an explicit call"
     );
 }
