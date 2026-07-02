@@ -69,7 +69,7 @@ fn provider_tool_name_for_capability_id(capability_id: &str) -> String {
 
 /// Shared by every scripted `HostManagedModelGateway` test double in this
 /// file that records raw requests (`RecordingGateway`,
-/// `SelfCreateAttemptGateway`) — flattens every captured request's message
+/// `TriggerMutatorAttemptGateway`) — flattens every captured request's message
 /// contents into one list.
 async fn captured_message_contents(
     requests: &Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
@@ -162,7 +162,7 @@ impl HostManagedModelGateway for RecordingGateway {
 /// Every subsequent turn returns a plain assistant reply so the run
 /// terminates after at most one capability-call round trip.
 #[derive(Default)]
-struct SelfCreateAttemptGateway {
+struct TriggerMutatorAttemptGateway {
     requests: Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
     call_count: TokioMutex<usize>,
     /// Set by the test body, before the fire is triggered, to the id of the
@@ -180,7 +180,7 @@ struct SelfCreateAttemptGateway {
     registration_outcomes: TokioMutex<BTreeMap<String, Result<(), String>>>,
 }
 
-impl SelfCreateAttemptGateway {
+impl TriggerMutatorAttemptGateway {
     async fn captured_message_contents(&self) -> Vec<String> {
         captured_message_contents(&self.requests).await
     }
@@ -237,7 +237,7 @@ impl SelfCreateAttemptGateway {
 }
 
 #[async_trait]
-impl HostManagedModelGateway for SelfCreateAttemptGateway {
+impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -366,7 +366,7 @@ fn current_minute_slot() -> chrono::DateTime<Utc> {
 ///
 /// Generic over the concrete gateway type (rather than
 /// `Arc<dyn HostManagedModelGateway>`) so every call site — the existing
-/// `RecordingGateway` ones and `SelfCreateAttemptGateway`'s — passes its
+/// `RecordingGateway` ones and `TriggerMutatorAttemptGateway`'s — passes its
 /// `Arc<Concrete>` unchanged; the unsized coercion to
 /// `Arc<dyn HostManagedModelGateway>` happens once, here, instead of at every
 /// call site.
@@ -1306,7 +1306,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// surface (`builtin.trigger_list` and firing itself stay intact).
 ///
 /// Unlike the other tests in this file, the fired run's model gateway
-/// (`SelfCreateAttemptGateway`) does not just record requests — on the fired
+/// (`TriggerMutatorAttemptGateway`) does not just record requests — on the fired
 /// run's first turn it registers real `builtin.trigger_create`,
 /// `builtin.trigger_remove`, `builtin.trigger_pause`, and
 /// `builtin.trigger_resume` provider tool calls against the run's actual
@@ -1314,16 +1314,16 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// response goes through in production) — one attempting to create a second
 /// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
 /// targeting the already-created legitimate trigger. See
-/// `SelfCreateAttemptGateway`'s doc comment for why this exercises the real
+/// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
 /// `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter` chain
 /// instead of a stand-in, and for why all four mutators — not just
 /// `trigger_create` — are covered here (PR #5515 review comment: a
 /// full-path test that only exercised `trigger_create` would not catch the
 /// production deny constant accidentally dropping one of the other three).
 #[tokio::test]
-async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
+async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(SelfCreateAttemptGateway::default());
+    let gateway = Arc::new(TriggerMutatorAttemptGateway::default());
 
     let runtime = build_runtime_with(
         &root,
@@ -1410,7 +1410,7 @@ async fn scheduled_trigger_fire_cannot_self_create_a_second_trigger() {
     // scheduled_trigger deny set (the fix's `PerSurfaceCapabilityDenyDecorator`
     // / `CapabilitySurfaceDenyFilter`), so `register_provider_tool_call`'s own
     // scope check on the resolved capability id fails closed before a
-    // candidate is ever built — see `SelfCreateAttemptGateway`'s doc comment
+    // candidate is ever built — see `TriggerMutatorAttemptGateway`'s doc comment
     // for the exact call chain.
     //
     // GUARD AGAINST FALSE-PASS: pre-fix (or if the production deny constant

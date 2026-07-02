@@ -33,7 +33,7 @@ pub const PLANNED_DEFAULT_PROFILE_ID: &str = "reborn-planned-default";
 pub const SUBAGENT_PLANNED_DRIVER_ID: &str = "reborn:planned-subagent";
 pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";
 /// Capability-surface profile id for the default interactive planned driver.
-pub const INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID: &str = "interactive_tools";
+const INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID: &str = "interactive_tools";
 pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
 /// Capability-surface profile id for scheduled-trigger fires (issue #5505).
 /// Shared with `runtime.rs`, which keys its per-profile deny-map on this
