@@ -20,6 +20,10 @@ For all messengers: receive notifications of new messages, read contacts, groups
 - [ ] WhatsApp - Cloud API for messaging via Meta Business platform
 - [ ] Signal - messaging (note: no official public API exists)
 
+# NEAR / DeFi
+
+- [x] NEAR Intents - cross-chain token swaps via Defuse 1Click API; list supported tokens, simulate quotes (dry mode), submit deposit TX hash to speed up processing, check swap status; no API key required
+
 # Transportation
 
 - [ ] Uber - call a car to specific destination from current place, check the status of the car/ride including stream the current position, support ordering food as well
