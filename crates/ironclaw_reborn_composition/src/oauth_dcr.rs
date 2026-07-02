@@ -44,6 +44,16 @@ const DCR_RESPONSE_BODY_LIMIT: u64 = 32 * 1024;
 const DCR_TIMEOUT_MS: u32 = 30_000;
 const DCR_FLOW_TTL_SECONDS: i64 = 600;
 
+/// Minimal RFC 7591 §3.2.2 DCR/metadata error response — we extract only
+/// the `error` code field. The full body (including `error_description`)
+/// is never logged or returned to callers. Mirrors
+/// `oauth_provider_client::OAuthErrorResponseBody` for the token leg.
+#[derive(Debug, Deserialize)]
+struct DcrErrorResponseBody {
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OAuthDcrProviderConfig {
     pub(crate) spec: HostOAuthProviderSpec,
@@ -737,6 +747,24 @@ impl OAuthDcrProvider {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
+            if (500..600).contains(&response.status) {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            // RFC 7591 §3.2.2: DCR (and metadata) 4xx error bodies carry an
+            // `error` code. REDACTION: extract only that code — never log,
+            // serialize, or return the raw body or `error_description`.
+            let error_code = serde_json::from_slice::<DcrErrorResponseBody>(&response.body)
+                .ok()
+                .and_then(|body| body.error);
+            if let Some(error_code) = error_code {
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    status = response.status,
+                    oauth_error_code = %error_code,
+                    "DCR/metadata endpoint rejected request"
+                );
+                return Err(AuthProductError::ProviderDenied);
+            }
             return Err(AuthProductError::BackendUnavailable);
         }
         serde_json::from_slice(&response.body).map_err(|_| AuthProductError::BackendUnavailable)
@@ -1614,6 +1642,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dcr_registration_4xx_error_body_maps_to_provider_denied() {
+        // RFC 7591 error responses on the register POST were collapsed into
+        // opaque BackendUnavailable; a 4xx with a parseable `error` code
+        // must surface as a diagnosable ProviderDenied instead.
+        let provider = test_provider(Arc::new(DcrRegistrationErrorEgress));
+        let auth = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = auth.clone();
+        let flow_source: Arc<dyn AuthFlowRecordSource> = auth.clone();
+        let scope = sample_turn_scope();
+        let owner = ironclaw_host_api::UserId::new("user").unwrap();
+        let run_id = TurnRunId::new();
+        let gate_ref =
+            AuthGateRef::new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()).unwrap();
+
+        let error = provider
+            .challenge_for_blocked_gate(
+                &flow_manager,
+                &flow_source,
+                &scope,
+                &owner,
+                run_id,
+                &gate_ref,
+            )
+            .await
+            .expect_err("4xx DCR registration error must be diagnosable");
+
+        assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::ProviderDenied);
+    }
+
+    #[tokio::test]
     async fn pkce_verifier_for_flow_returns_none_when_secret_not_found() {
         let provider = test_provider(Arc::new(TestEgress));
 
@@ -1997,6 +2055,45 @@ mod tests {
             };
             Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
                 status: 200,
+                headers: Vec::new(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                body,
+                saved_body: None,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct DcrRegistrationErrorEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for DcrRegistrationErrorEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::RuntimeHttpEgressResponse,
+            ironclaw_host_api::RuntimeHttpEgressError,
+        > {
+            let (status, body) = match request.url.as_str() {
+                "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => (
+                    200,
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec(),
+                ),
+                "https://oauth.notion.com/.well-known/oauth-authorization-server" => (
+                    200,
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec(),
+                ),
+                "https://oauth.notion.com/register" => (
+                    400,
+                    br#"{"error":"invalid_redirect_uri","error_description":"redirect_uri not allowed for this client"}"#.to_vec(),
+                ),
+                other => panic!("unexpected DCR registration-error egress URL: {other}"),
+            };
+            Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+                status,
                 headers: Vec::new(),
                 request_bytes: request.body.len() as u64,
                 response_bytes: body.len() as u64,
