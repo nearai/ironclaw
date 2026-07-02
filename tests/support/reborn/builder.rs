@@ -170,7 +170,6 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-
     /// Use the real first-party tool runtime so scripted tool calls execute through
     /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
