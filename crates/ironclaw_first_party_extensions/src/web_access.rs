@@ -1346,13 +1346,17 @@ mod tests {
 
         fn ok_json(body: Value) -> RuntimeHttpEgressResponse {
             let bytes = serde_json::to_vec(&body).unwrap();
+            Self::ok_body(bytes, 20)
+        }
+
+        fn ok_body(body: Vec<u8>, response_bytes: u64) -> RuntimeHttpEgressResponse {
             RuntimeHttpEgressResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: bytes,
+                body,
                 saved_body: None,
                 request_bytes: 10,
-                response_bytes: 20,
+                response_bytes,
                 redaction_applied: false,
             }
         }
@@ -1360,15 +1364,8 @@ mod tests {
         fn ok_sse_json(body: Value) -> RuntimeHttpEgressResponse {
             let body = format!("event: message\ndata: {body}\n");
             let bytes = body.into_bytes();
-            RuntimeHttpEgressResponse {
-                status: 200,
-                headers: Vec::new(),
-                response_bytes: bytes.len() as u64,
-                body: bytes,
-                saved_body: None,
-                request_bytes: 10,
-                redaction_applied: false,
-            }
+            let response_bytes = bytes.len() as u64;
+            Self::ok_body(bytes, response_bytes)
         }
 
         fn ok_sse_data_lines(lines: &[&str]) -> RuntimeHttpEgressResponse {
@@ -1380,15 +1377,8 @@ mod tests {
             }
             body.push('\n');
             let bytes = body.into_bytes();
-            RuntimeHttpEgressResponse {
-                status: 200,
-                headers: Vec::new(),
-                response_bytes: bytes.len() as u64,
-                body: bytes,
-                saved_body: None,
-                request_bytes: 10,
-                redaction_applied: false,
-            }
+            let response_bytes = bytes.len() as u64;
+            Self::ok_body(bytes, response_bytes)
         }
 
         fn accepted() -> RuntimeHttpEgressResponse {
@@ -1918,18 +1908,15 @@ data: }
         );
     }
 
-    #[tokio::test]
-    async fn get_content_accepts_sse_mcp_initialize_response() {
+    async fn assert_get_content_accepts_initialize_response(
+        initialize_response: RuntimeHttpEgressResponse,
+    ) {
         let executor = WebAccessExecutor::default();
         let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
         let scope = scope();
         let input = json!({"url":"https://example.com", "max_characters": 1000});
         let egress = Arc::new(RecordingEgress::with_responses(vec![
-            Ok(RecordingEgress::ok_sse_json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
-            }))),
+            Ok(initialize_response),
             Ok(RecordingEgress::accepted()),
             Ok(RecordingEgress::ok_json(json!({
                 "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
@@ -1953,39 +1940,27 @@ data: }
     }
 
     #[tokio::test]
+    async fn get_content_accepts_sse_mcp_initialize_response() {
+        let initialize_response = RecordingEgress::ok_sse_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
+        }));
+
+        assert_get_content_accepts_initialize_response(initialize_response).await;
+    }
+
+    #[tokio::test]
     async fn get_content_accepts_split_data_sse_mcp_initialize_response() {
-        let executor = WebAccessExecutor::default();
-        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
-        let scope = scope();
-        let input = json!({"url":"https://example.com", "max_characters": 1000});
-        let egress = Arc::new(RecordingEgress::with_responses(vec![
-            Ok(RecordingEgress::ok_sse_data_lines(&[
-                "{",
-                r#""jsonrpc": "2.0","#,
-                r#""id": 1,"#,
-                r#""result": {"protocolVersion": "2024-11-05", "capabilities": {}}"#,
-                "}",
-            ])),
-            Ok(RecordingEgress::accepted()),
-            Ok(RecordingEgress::ok_json(json!({
-                "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
-            }))),
-        ]));
+        let initialize_response = RecordingEgress::ok_sse_data_lines(&[
+            "{",
+            r#""jsonrpc": "2.0","#,
+            r#""id": 1,"#,
+            r#""result": {"protocolVersion": "2024-11-05", "capabilities": {}}"#,
+            "}",
+        ]);
 
-        let result = executor
-            .dispatch(request(
-                &capability,
-                &scope,
-                &input,
-                Some(egress.clone() as Arc<dyn RuntimeHttpEgress>),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(result.output["provider_used"], "exa_mcp");
-        assert_eq!(result.output["url"], "https://example.com");
-        assert_eq!(result.output["content"], "Example body");
-        assert_eq!(egress.request_bodies().len(), 3);
+        assert_get_content_accepts_initialize_response(initialize_response).await;
     }
 
     #[tokio::test]
