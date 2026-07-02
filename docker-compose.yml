@@ -125,6 +125,12 @@ services:
       # environment or a custom live RPC endpoint.
       T3N_SDK_ENV: ${T3N_MCP_ENV:-staging}
       T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
+      # Comma-separated candidate node URLs for dynamic Raft-leader
+      # resolution (multi-node local clusters). When set, takes
+      # precedence over T3N_MCP_RPC_URL — the sidecar probes each
+      # candidate's /status at bootstrap and picks the current leader,
+      # so a leader move heals on reconnect without a recreate.
+      T3N_MCP_RPC_URLS: ${T3N_MCP_RPC_URLS:-}
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
       # Agent signing key for runPayroll. The Trinity-side handler prefers
