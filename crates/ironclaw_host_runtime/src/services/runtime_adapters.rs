@@ -84,6 +84,30 @@ fn trace_first_party_latency_error(
     );
 }
 
+fn trace_first_party_stage_and_dispatch_error(
+    stage: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    stage_started_at: Option<std::time::Instant>,
+    dispatch_started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    used_prepared_reservation: bool,
+) {
+    trace_first_party_latency_error(
+        stage,
+        fields,
+        stage_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+    trace_first_party_latency_error(
+        "dispatch",
+        fields,
+        dispatch_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+}
+
 pub(super) struct ServiceResolvedRuntimeAdapter<T> {
     inner: Arc<T>,
     invocation_services: Arc<dyn InvocationServicesResolver>,
@@ -311,16 +335,10 @@ where
                 );
             }
             tracing::debug!("first-party runtime adapter missing handler");
-            trace_first_party_latency_error(
+            trace_first_party_stage_and_dispatch_error(
                 "lookup_handler",
                 latency_fields.as_ref(),
                 lookup_started_at,
-                RuntimeDispatchErrorKind::UndeclaredCapability.as_str(),
-                used_prepared_reservation,
-            );
-            trace_first_party_latency_error(
-                "dispatch",
-                latency_fields.as_ref(),
                 dispatch_started_at,
                 RuntimeDispatchErrorKind::UndeclaredCapability.as_str(),
                 used_prepared_reservation,
@@ -350,16 +368,10 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
-                trace_first_party_latency_error(
+                trace_first_party_stage_and_dispatch_error(
                     "plan_capability",
                     latency_fields.as_ref(),
                     plan_started_at,
-                    kind.as_str(),
-                    used_prepared_reservation,
-                );
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
                     dispatch_started_at,
                     kind.as_str(),
                     used_prepared_reservation,
@@ -400,16 +412,10 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
-                trace_first_party_latency_error(
+                trace_first_party_stage_and_dispatch_error(
                     "resolve_services",
                     latency_fields.as_ref(),
                     resolve_started_at,
-                    error.kind().as_str(),
-                    used_prepared_reservation,
-                );
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
                     dispatch_started_at,
                     error.kind().as_str(),
                     used_prepared_reservation,
@@ -455,16 +461,10 @@ where
                 })
                 .map_err(|_| {
                     tracing::debug!("first-party runtime adapter resource reservation failed");
-                    trace_first_party_latency_error(
+                    trace_first_party_stage_and_dispatch_error(
                         "reserve_resources",
                         latency_fields.as_ref(),
                         reserve_started_at,
-                        RuntimeDispatchErrorKind::Resource.as_str(),
-                        used_prepared_reservation,
-                    );
-                    trace_first_party_latency_error(
-                        "dispatch",
-                        latency_fields.as_ref(),
                         dispatch_started_at,
                         RuntimeDispatchErrorKind::Resource.as_str(),
                         used_prepared_reservation,
@@ -529,11 +529,12 @@ where
                 let error_kind = error
                     .kind()
                     .map(RuntimeDispatchErrorKind::as_str)
-                    .unwrap_or("AuthRequired");
-                trace_first_party_latency_error(
+                    .unwrap_or("auth_required");
+                trace_first_party_stage_and_dispatch_error(
                     "handler_dispatch",
                     latency_fields.as_ref(),
                     handler_started_at,
+                    dispatch_started_at,
                     error_kind,
                     used_prepared_reservation,
                 );
@@ -547,13 +548,6 @@ where
                          returning original handler error"
                     );
                 }
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
-                    dispatch_started_at,
-                    error_kind,
-                    used_prepared_reservation,
-                );
                 return match error {
                     FirstPartyCapabilityError::AuthRequired {
                         required_secrets,
@@ -581,16 +575,10 @@ where
                     reservation_id = %reservation_id,
                     "first-party runtime adapter handler panicked"
                 );
-                trace_first_party_latency_error(
+                trace_first_party_stage_and_dispatch_error(
                     "handler_dispatch",
                     latency_fields.as_ref(),
                     handler_started_at,
-                    RuntimeDispatchErrorKind::Backend.as_str(),
-                    used_prepared_reservation,
-                );
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
                     dispatch_started_at,
                     RuntimeDispatchErrorKind::Backend.as_str(),
                     used_prepared_reservation,
@@ -612,16 +600,10 @@ where
                     reservation_id = %reservation_id,
                     "first-party runtime adapter output serialization failed"
                 );
-                trace_first_party_latency_error(
+                trace_first_party_stage_and_dispatch_error(
                     "serialize_output",
                     latency_fields.as_ref(),
                     serialize_started_at,
-                    RuntimeDispatchErrorKind::OutputDecode.as_str(),
-                    used_prepared_reservation,
-                );
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
                     dispatch_started_at,
                     RuntimeDispatchErrorKind::OutputDecode.as_str(),
                     used_prepared_reservation,
@@ -671,16 +653,10 @@ where
                         "failed to release first-party resource reservation after reconcile failure"
                     );
                 }
-                trace_first_party_latency_error(
+                trace_first_party_stage_and_dispatch_error(
                     "reconcile_resources",
                     latency_fields.as_ref(),
                     reconcile_started_at,
-                    RuntimeDispatchErrorKind::Resource.as_str(),
-                    used_prepared_reservation,
-                );
-                trace_first_party_latency_error(
-                    "dispatch",
-                    latency_fields.as_ref(),
                     dispatch_started_at,
                     RuntimeDispatchErrorKind::Resource.as_str(),
                     used_prepared_reservation,

@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use ironclaw_host_api::{CapabilityId, ResourceScope};
+use ironclaw_observability::json_value_bytes;
 
 pub(crate) struct RuntimeLatencyFields {
     capability_id: String,
@@ -39,7 +40,7 @@ impl RuntimeLatencyFields {
         if !ironclaw_observability::live_latency_enabled() {
             return None;
         }
-        Self::from_scope(capability_id, scope, runtime, json_bytes(input))
+        Self::from_scope(capability_id, scope, runtime, json_value_bytes(input))
     }
 
     pub(crate) fn from_scope(
@@ -101,26 +102,6 @@ impl RuntimeLatencyFields {
         self.allow_partial_response_body = allow_partial_response_body;
         self
     }
-}
-
-pub(crate) fn json_bytes(value: &serde_json::Value) -> u64 {
-    struct ByteCounter(u64);
-
-    impl std::io::Write for ByteCounter {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.saturating_add(buffer.len() as u64);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, value)
-        .map(|()| counter.0)
-        .unwrap_or(0)
 }
 
 pub(crate) fn started_at() -> Option<Instant> {

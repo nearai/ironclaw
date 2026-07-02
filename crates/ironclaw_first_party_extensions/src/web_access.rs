@@ -551,6 +551,13 @@ fn mcp_initialize_params() -> Value {
     })
 }
 
+fn is_valid_mcp_initialize_response(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value.get("error").is_none() && value.get("result").is_some_and(Value::is_object)
+}
+
 async fn call_exa_mcp_search(
     egress: Arc<dyn RuntimeHttpEgress>,
     capability_id: &CapabilityId,
@@ -653,13 +660,9 @@ async fn call_exa_mcp_tool(
         .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
         .map(|(_, v)| v.clone());
 
-    // Check initialize response for MCP-level error.
+    // Check initialize response before moving to initialized notification.
     let init_parse_started_at = web_access_latency_started_at();
-    if serde_json::from_slice::<Value>(&init_resp.body)
-        .ok()
-        .and_then(|v| v.get("error").cloned())
-        .is_some()
-    {
+    if !is_valid_mcp_initialize_response(&init_resp.body) {
         let error = RuntimeHttpEgressError::Response {
             reason: "invalid_mcp_response".to_string(),
             request_bytes: prior_bytes,
@@ -1293,6 +1296,15 @@ mod tests {
     }
 
     impl RecordingEgress {
+        fn with_responses(
+            responses: Vec<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+        ) -> Self {
+            Self {
+                responses: StdMutex::new(responses.into()),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+
         fn ok_json(body: Value) -> RuntimeHttpEgressResponse {
             let bytes = serde_json::to_vec(&body).unwrap();
             RuntimeHttpEgressResponse {
@@ -1952,6 +1964,60 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
             result.output["queries"][0]["results"][0]["url"],
             "https://tokio.rs"
         );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_malformed_mcp_initialize_response() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_SEARCH_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"query":"rust async"});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![Ok(
+            RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"not json".to_vec(),
+                saved_body: None,
+                request_bytes: 10,
+                response_bytes: 8,
+                redaction_applied: false,
+            },
+        )]));
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, Some(egress.clone())))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
+        assert_eq!(
+            error.usage().unwrap().network_egress_bytes,
+            10,
+            "only the initialize request should be accounted"
+        );
+        assert_eq!(egress.request_bodies().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_mcp_initialize_response_without_result() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_SEARCH_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"query":"rust async"});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![Ok(
+            RecordingEgress::ok_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1
+            })),
+        )]));
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, Some(egress.clone())))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
+        assert_eq!(egress.request_bodies().len(), 1);
     }
 
     #[tokio::test]

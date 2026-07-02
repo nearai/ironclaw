@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use ironclaw_host_api::{CapabilityId, ResourceScope};
+pub(crate) use ironclaw_observability::json_value_bytes as json_bytes;
 use serde_json::Value;
 
 pub(crate) struct FirstPartyToolLatencyFields<'a> {
@@ -43,26 +44,6 @@ impl<'a> FirstPartyToolLatencyFields<'a> {
 
 pub(crate) fn started_at() -> Option<Instant> {
     ironclaw_observability::live_latency_started_at()
-}
-
-pub(crate) fn json_bytes(value: &Value) -> u64 {
-    struct ByteCounter(u64);
-
-    impl std::io::Write for ByteCounter {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.saturating_add(buffer.len() as u64);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, value)
-        .map(|()| counter.0)
-        .unwrap_or(0)
 }
 
 pub(crate) fn trace_tool_ok(

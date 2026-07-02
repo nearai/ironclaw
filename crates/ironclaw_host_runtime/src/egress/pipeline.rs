@@ -290,12 +290,18 @@ where
         &capability_id,
     ) {
         Ok(result) => {
+            let output_bytes = result
+                .1
+                .as_ref()
+                .map_or(result.0.body.len() as u64, |saved_body| {
+                    saved_body.bytes_written
+                });
             trace_http_egress_latency_ok(
                 "body_disposition",
                 latency_fields.as_ref(),
                 body_disposition_started_at,
                 0,
-                result.0.body.len() as u64,
+                output_bytes,
             );
             result
         }
