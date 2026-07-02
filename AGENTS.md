@@ -18,7 +18,7 @@ Start with these deeper docs as needed:
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo is indexed into a **codebase knowledge graph** via the `codebase-memory` MCP server over `src/` + `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before `grep`** — text search can't see cross-crate call chains, and a feature here crosses many crates (`product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo can be indexed into a **codebase knowledge graph** via the `codebase-memory` MCP server over `src/` + `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before `grep`** — text search can't see cross-crate call chains, and a feature here crosses many crates (`product_workflow → composition → webui_v2 → runtime → frontend`).
 
 - **Location:** `.codebase-memory/graph.db.zst` — a git-ignored build artifact (rebuilt from code, one per environment, never committed).
 - **Freshness:** run `bash scripts/codebase-graph.sh status` (compares indexed commit vs `HEAD`). If missing → `index_repository(repo_path=".")`; if stale → `detect_changes(since="<indexed-commit>")` or re-index. The graph is point-in-time — verify its claims against live code before acting.

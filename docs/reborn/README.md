@@ -41,7 +41,8 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 
 ## Reborn contract docs
 
-The Reborn contract-doc packet is present — prefer these docs as the source of truth:
+Start with these common Reborn contract docs and prefer the full in-tree
+`docs/reborn/contracts/` set over older design notes:
 
 ```text
 docs/reborn/contracts/_contract-freeze-index.md

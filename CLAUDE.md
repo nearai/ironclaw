@@ -4,7 +4,7 @@
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
 
 **Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
 
@@ -349,9 +349,10 @@ and migration status. The dispatcher itself lives in
 
 ## Engine v2 Per-Project Sandbox
 
-When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
-(`read_file`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
-paths through a per-project Docker container instead of the host filesystem.
+When `SANDBOX_ENABLED=true`, engine v2 routes the sandbox-eligible
+filesystem/shell tools (`file_read`/`read_file`, `file_write`/`write_file`,
+`list_dir`, `apply_patch`, `shell`) for `/project/` paths through a per-project
+Docker container instead of the host filesystem.
 The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
 `/project/` inside the container, and a `sandbox_daemon` binary inside the
 container speaks NDJSON over `docker exec -i`.

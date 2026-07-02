@@ -15,7 +15,7 @@ Monty is the embedded Python interpreter used for Tier 1 (CodeAct) execution. It
 
 ## Current Limitations
 
-These are documented in `prompts/codeact_preamble.md` so the LLM avoids them:
+Keep `prompts/codeact_preamble.md` aligned with the limitations the LLM must avoid:
 
 ### Syntax not supported
 | Feature | Workaround |
@@ -61,6 +61,7 @@ These are injected by the IronClaw executor, not by Monty:
 
 | Date | Pin | Notable changes |
 |------|-----|-----------------|
+| 2026-07-02 | `v0.0.18` | Current repo pin; re-check upstream changes before adding or removing preamble limitations. |
 | 2026-04-19 | `v0.0.16` | Mixed `asyncio.gather()` future-resolution panic fix, `hasattr` builtin, and input-safety hardening. |
 | 2026-04-10 | `v0.0.11` | JSON perf improvements (~2x loads, ~1.6x dumps), filesystem mounting, Rust-side async API, mount edge case fixes. |
 | 2026-03-29 | `7a0d4b7` | Multi-module imports, `datetime` module, `json` module, nested subscript assignment, `str.expandtabs()`. |

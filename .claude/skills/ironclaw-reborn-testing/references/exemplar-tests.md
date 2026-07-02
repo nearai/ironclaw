@@ -36,10 +36,10 @@ When a predicate selects what goes out the wire, the test must construct the rea
 
 ## 5. Silent skip vs loud skip
 
-**BAD**: `if docker_unavailable { return }` — the container security suite silently vanishes from CI and no gate notices.
+**BAD for PR-gated coverage**: `if docker_unavailable { return }` — the container security suite silently vanishes from CI and no gate notices. Existing Docker sandbox canaries still use soft skips; don't copy that pattern into new gate coverage.
 
 **GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`, which `scripts/check-boundaries.sh` enforces for root `tests/`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
 
 ## 6. Naming your contract's tests
 
-`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map (48 pinned invocations). If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.
+`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.

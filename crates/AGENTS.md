@@ -1,6 +1,6 @@
 # IronClaw Crates Map
 
-Instructions for AI coding assistants entering `crates/` (the Reborn stack; merged to `main`).
+Instructions for AI coding assistants entering `crates/`, which contains Reborn crates plus legacy v1 support crates.
 
 This file is a routing map, not a full architecture spec. Pick the crate(s) that match the change, then read crate-local guidance before editing:
 
@@ -133,7 +133,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 
 | Crate | Load first | Owns / go here for | Avoid moving in |
 | --- | --- | --- | --- |
-| `ironclaw_reborn` | `ironclaw_reborn/AGENTS.md`, `ironclaw_reborn/CLAUDE.md` | **Internal loop-runtime assembly** (sole sanctioned consumer: `ironclaw_reborn_composition`): driver registry, planned/text driver adapters, per-run turn-run executor, loop host factory, exit-applier wiring, home/profile/doctor support. | Treating it as a public composition root; V1 root runtime imports unless explicitly bridged. |
+| `ironclaw_reborn` | `ironclaw_reborn/AGENTS.md`, `ironclaw_reborn/CLAUDE.md` | **Internal loop-runtime assembly** (sole production consumer: `ironclaw_reborn_composition`; test harnesses may use it directly): driver registry, planned/text driver adapters, per-run turn-run executor, loop host factory, exit-applier wiring, home/profile/doctor support. | Treating it as a public composition root; V1 root runtime imports unless explicitly bridged. |
 | `ironclaw_reborn_config` | `ironclaw_reborn_config/AGENTS.md`, `Cargo.toml`, `src/lib.rs` | Boot configuration contracts for standalone Reborn binary. | Runtime execution or product adapter behavior. |
 | `ironclaw_reborn_composition` | `ironclaw_reborn_composition/AGENTS.md`, `ironclaw_reborn_composition/CLAUDE.md` | Facade-shaped production composition root for Reborn. | Low-level policy internals that belong to service crates. |
 | `ironclaw_reborn_openai_compat` | `ironclaw_reborn_openai_compat/AGENTS.md`, `ironclaw_reborn_openai_compat/CLAUDE.md` | Reborn-native OpenAI-compatible API route descriptors, Chat/Responses DTOs, sanitized error envelope, and fail-closed route fragment. | V1 gateway handlers, direct LLM proxying, listener binding, ProductWorkflow internals/direct runtime wiring. |
@@ -176,12 +176,12 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 - Events/projections/outbound: `ironclaw_events` for canonical redacted events; `ironclaw_event_projections` for projection model; `ironclaw_event_streams` for transport-neutral live/replay streams; `ironclaw_outbound` for metadata-only delivery/subscription policy; adapters for concrete delivery.
 - Trust/auth/approval: `ironclaw_trust` -> `ironclaw_authorization` -> `ironclaw_run_state`/`ironclaw_approvals` -> `ironclaw_capabilities` as needed.
 - Hooks and prompt context: `ironclaw_hooks` for hook registration/dispatch/failure policy; `ironclaw_prompt_envelope` for model-visible untrusted or trust-labeled snippet wrapping.
-- Runtime execution: lane crate (`scripts`, `mcp`, `wasm`) first; `dispatcher` for routing; `host_runtime` for secrets/network/resources/redaction; `processes` for background lifecycle; `ironclaw_wasm_limiter` only for shared limiter mechanics.
-- Turns/agent loop: `ironclaw_turns` for turn coordination; `ironclaw_agent_loop` for strategy/planner/executor contracts; `ironclaw_loop_support` for host support ports; `ironclaw_engine` for CodeAct/thread runtime.
+- Reborn runtime execution: lane crate (`scripts`, `mcp`, `wasm`) first; `dispatcher` for routing; `host_runtime` for secrets/network/resources/redaction; `processes` for background lifecycle; `ironclaw_wasm_limiter` only for shared limiter mechanics. Use `ironclaw_engine` only for existing v1 engine maintenance.
+- Reborn turns/agent loop: `ironclaw_turns` for turn coordination; `ironclaw_agent_loop` for strategy/planner/executor contracts; `ironclaw_loop_support` for host support ports. Use `ironclaw_engine` only for existing v1 CodeAct/thread runtime maintenance.
 - Product adapter flow: `ironclaw_product_adapters` contracts -> `ironclaw_product_adapter_registry` installation/projection -> `ironclaw_product_workflow` orchestration -> concrete adapter crate.
 - Reborn binary/composition: `ironclaw_reborn_config` for boot config; `ironclaw_reborn_composition` for production wiring; `ironclaw_reborn_cli` for commands; `ironclaw_reborn` for standalone adapters/driver registry; `ironclaw_reborn_webui_ingress` for host-owned WebChat v2 listener lifecycle.
 - Model/provider behavior: `ironclaw_llm`; do not leak provider auth/cache/retry concerns into engine or product workflow.
-- UI presentation: `ironclaw_tui`, `ironclaw_gateway`, or `ironclaw_webui_v2`; backend API/web channel code remains under root `src/` unless the surface is the Reborn WebChat v2 route crate.
+- UI presentation: `ironclaw_webui_v2` and `ironclaw_webui_v2_static` for Reborn WebChat v2; `ironclaw_tui` and `ironclaw_gateway` only for existing v1 UI maintenance. Backend API/web channel code remains under root `src/` unless the surface is the Reborn WebChat v2 route crate.
 
 ## Testing
 

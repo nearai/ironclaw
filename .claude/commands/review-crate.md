@@ -241,5 +241,5 @@ And a final tally: X Critical, Y High, Z Medium, W Low, V Nit.
 - Respect existing project conventions (check CLAUDE.md). Don't flag patterns the project explicitly endorses.
 - When in doubt about severity, round up.
 - For large crates (>50 files), prioritize: core logic > public API > internal utilities > tests > examples.
-- Use the Task tool to parallelize file reading across modules when the crate is large.
+- Use the Agent tool to parallelize file reading across modules when the crate is large.
 - Do NOT fix anything. This is a read-only audit. Report findings for the user to action.

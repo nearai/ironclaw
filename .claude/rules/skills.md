@@ -47,8 +47,9 @@ compatibility.
 The parser supports more than the example above shows (source of truth:
 `crates/ironclaw_skills/src/types.rs` and `selector.rs`):
 
-- `requires.bins`, `requires.env`, **`requires.config`**, and
-  **`requires.skills`** (skill-to-skill prerequisites) are all gating inputs.
+- `requires.bins`, `requires.env`, and **`requires.config`** are gating inputs.
+- **`requires.skills`** declares companion skills that should chain-load when
+  available; missing companions do not prevent the parent skill from loading.
 - `activation.setup_marker` gates a skill on a workspace setup-marker file
   (used by the `*-setup` skill family).
 - **Silent truncation caps**: `enforce_limits` keeps at most

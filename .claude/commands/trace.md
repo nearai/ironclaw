@@ -1,17 +1,17 @@
 ---
 description: Trace a data flow or bug through the IronClaw codebase end-to-end
-allowed-tools: Read, Glob, Grep, Bash(cargo test:*), Bash(bash scripts/codebase-graph.sh:*)
+allowed-tools: Read, Glob, Grep, Bash(cargo test:*), Bash(bash scripts/codebase-graph.sh:*), mcp__codebase-memory__search_graph, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__trace_path, mcp__codebase-memory__get_architecture, mcp__codebase-memory__query_graph, mcp__codebase-memory__index_repository, mcp__codebase-memory__detect_changes
 argument-hint: <symptom or feature name>
 model: sonnet
 ---
 
 Trace the flow of `$ARGUMENTS` through the IronClaw codebase. Map every file and function involved, identify where data transforms or could break, and report the full chain.
 
-## Step 0 — pick the stack
-
-New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If unsure: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
+## Step 0 — probe the graph and pick the stack
 
 Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph is FRESH and the codebase-memory MCP is connected, use `trace_path(mode="cross_service"|"data_flow")`; otherwise fall back to the anchors + recipes below without stalling.
+
+New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If the graph is missing/stale/unavailable and you're unsure which stack owns the symptom: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
 
 ## Reborn flow anchors (verify with the recipe beside each — do not trust this table blindly)
 

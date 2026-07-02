@@ -154,12 +154,11 @@ because each layer catches a different failure mode.
 
 ### Why this split
 
-- **Pre-commit catches the mechanical patterns.** A regex on staged
-  diffs is enough for #1 (annotation grep), #2 (paired patterns),
-  and #5 (line count). These are cheap, deterministic, and run on
-  every commit. The plan is to add them to `scripts/pre-commit-safety.sh`
-  as an `ARCH-SPRAWL` check. **Status: NOT yet implemented** — as of
-  2026-07 the script has no such check (verify:
+- **Pre-commit should catch the mechanical patterns once implemented.** A regex
+  on staged diffs is enough for #1 (annotation grep), #2 (paired patterns), and
+  #5 (line count). These are cheap and deterministic; the plan is to add them to
+  `scripts/pre-commit-safety.sh` as an `ARCH-SPRAWL` check. **Status: NOT yet
+  implemented** — verify with:
   `grep -n ARCH-SPRAWL scripts/pre-commit-safety.sh`), so review is
   currently the only enforcement for these smells.
 - **CI / clippy catches what compilers can express.** clippy already
