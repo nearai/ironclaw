@@ -68,7 +68,8 @@ use ironclaw_reborn::milestone_events::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
+    RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
+    build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -2689,6 +2690,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
+        tool_disclosure,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -3311,6 +3313,10 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    // Resolve the disclosure mode once so the runtime config and the system-prompt
+    // disclosure-protocol injection agree on a single value.
+    let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3347,10 +3353,12 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            text_only_driver: Default::default(),
+            host: Default::default(),
+            tool_disclosure: resolved_tool_disclosure,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
-            ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -3363,6 +3371,7 @@ pub async fn build_reborn_runtime(
                 DefaultSystemPromptIdentitySource::try_new(
                     local_runtime.local_dev_storage_root.clone(),
                     local_runtime.default_system_prompt_path.clone(),
+                    resolved_tool_disclosure.is_bridged(),
                 )
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: error.to_string(),

@@ -5077,6 +5077,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "jsonschema",
  "libsql",
  "parking_lot",
  "rust_decimal",

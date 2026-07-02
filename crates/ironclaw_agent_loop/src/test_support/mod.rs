@@ -783,6 +783,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         self.record_call(MockHostCall::VisibleCapabilities);
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: self.visible_capabilities.clone(),
         })

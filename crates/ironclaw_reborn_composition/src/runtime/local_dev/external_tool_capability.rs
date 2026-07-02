@@ -512,6 +512,7 @@ mod tests {
             Ok(VisibleCapabilitySurface {
                 version: CapabilitySurfaceVersion::new("test.surface.v1").expect("surface version"),
                 descriptors: Vec::new(),
+                callable_capability_ids: None,
             })
         }
 

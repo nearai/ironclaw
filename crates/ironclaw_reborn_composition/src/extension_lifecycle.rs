@@ -574,13 +574,20 @@ impl RebornLocalExtensionManagementPort {
             LifecyclePhase::Active,
             LifecycleProductPayload::ExtensionActivate {
                 activated: true,
-                visible_capability_ids,
+                visible_capability_ids: visible_capability_ids.clone(),
             },
         );
-        response.message = Some(
-            "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true."
-                .to_string(),
-        );
+        // Enumerate the now-available tools by exact name in the model-visible
+        // message. Under progressive tool disclosure the model otherwise only
+        // learns a *count* of deferred tools (the tool_search description) and
+        // must guess a query to discover them — so after activating an extension
+        // it frequently concludes the tools are "not exposed" and gives up
+        // instead of using them. Handing over the exact capability ids lets it go
+        // straight to tool_call(name=...) / tool_describe(name=...). This is
+        // transient result text, NOT a promotion: the persistent advertised tool
+        // surface still grows only when a tool is actually invoked (earned
+        // promotion), so activating many extensions does not bloat the surface.
+        response.message = Some(activation_success_message(&visible_capability_ids));
         Ok(response)
     }
 
@@ -1168,6 +1175,26 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
         .collect()
 }
 
+/// Build the model-visible activation success message.
+///
+/// When the activated extension publishes model-visible tools, the message
+/// enumerates them by exact capability id so the model can invoke them directly
+/// — closing the progressive-disclosure awareness gap where the model only sees
+/// a *count* of deferred tools and gives up instead of discovering them.
+fn activation_success_message(visible_capability_ids: &[String]) -> String {
+    let mut message = String::from(
+        "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.",
+    );
+    if !visible_capability_ids.is_empty() {
+        message.push_str(
+            " These tools are now callable by exact name — invoke one directly with tool_call(name=\"<tool>\", arguments={ ... }), or tool_describe(name=\"<tool>\") first if you need its full schema. Do NOT call tool_search for these; you already have their names: ",
+        );
+        message.push_str(&visible_capability_ids.join(", "));
+        message.push('.');
+    }
+    message
+}
+
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductWorkflowError> {
@@ -1343,6 +1370,40 @@ mod tests {
         LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
+
+    #[test]
+    fn activation_message_enumerates_published_tools_by_exact_name() {
+        // Regression: the model only sees a *count* of deferred tools, so after
+        // activating an extension it must be handed the exact tool names or it
+        // assumes they are unavailable and gives up. The success message must name
+        // every published capability and steer the model to direct invocation.
+        let message = activation_success_message(&[
+            "google-calendar.list_events".to_string(),
+            "google-calendar.create_event".to_string(),
+        ]);
+        assert!(message.contains("google-calendar.list_events"));
+        assert!(message.contains("google-calendar.create_event"));
+        assert!(
+            message.contains("callable by exact name"),
+            "must steer the model to tool_call by name, got: {message}"
+        );
+        assert!(
+            message.contains("Do NOT call tool_search for these"),
+            "must stop the model from re-searching for already-named tools, got: {message}"
+        );
+    }
+
+    #[test]
+    fn activation_message_without_published_tools_keeps_the_base_message_only() {
+        // Channel-only / tool-less extensions publish no model tools; the message
+        // must not invent an empty tool list or the direct-invocation guidance.
+        let message = activation_success_message(&[]);
+        assert!(message.contains("Extension activation succeeded"));
+        assert!(
+            !message.contains("callable by exact name"),
+            "no tools published ⇒ no direct-invocation guidance, got: {message}"
+        );
+    }
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
