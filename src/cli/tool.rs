@@ -112,6 +112,26 @@ pub enum ToolCommand {
         /// User ID for storing the secret (default: "default")
         #[arg(short, long, default_value = "default")]
         user: String,
+
+        /// Non-interactive secret values as name=value pairs.
+        /// Can be repeated. Skips all prompts for the named secrets.
+        ///
+        /// **WARNING**: values passed via -s are visible in `ps aux` and shell
+        /// history. For CI/CD or shared machines, prefer --secrets-file.
+        ///
+        /// Examples:
+        ///   ironclaw tool setup telegram_mtproto -s telegram_api_id=12345 -s telegram_api_hash=abc123
+        #[arg(short = 's', long = "secret", value_name = "NAME=VALUE")]
+        secrets: Vec<String>,
+
+        /// Read secrets from a file (one NAME=VALUE per line).
+        /// Safer than --secret for CI/CD: values stay out of process args and shell history.
+        ///
+        /// Example file contents:
+        ///   telegram_api_id=12345
+        ///   telegram_api_hash=abc123def456
+        #[arg(long = "secrets-file", value_name = "PATH")]
+        secrets_file: Option<PathBuf>,
     },
 }
 
@@ -135,7 +155,7 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
             user,
         } => show_tool_info(name_or_path, dir, user).await,
         ToolCommand::Auth { name, dir, user } => auth_tool(name, dir, user).await,
-        ToolCommand::Setup { name, dir, user } => setup_tool(name, dir, user).await,
+        ToolCommand::Setup { name, dir, user, secrets, secrets_file } => setup_tool(name, dir, user, secrets, secrets_file).await,
     }
 }
 
@@ -1172,7 +1192,7 @@ fn print_success(display_name: &str) {
 }
 
 /// Configure required secrets for a tool via its `setup.required_secrets` schema.
-async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String, preset_secrets: Vec<String>, secrets_file: Option<PathBuf>) -> anyhow::Result<()> {
     validate_tool_name(&name)?;
     let tools_dir = dir.unwrap_or_else(default_tools_dir);
     let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
@@ -1204,23 +1224,108 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
         return Ok(());
     }
 
+    // Parse preset secret values from -s/--secret flags and --secrets-file
+    let mut preset_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Load from --secrets-file first (lower priority than --secret flags)
+    if let Some(ref file_path) = secrets_file {
+        let file_content = std::fs::read_to_string(file_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read secrets file '{}': {}", file_path.display(), e))?;
+        for line in file_content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim().to_string();
+                if key.is_empty() {
+                    anyhow::bail!("Invalid line in secrets file: empty name in '{}'", line);
+                }
+                // File entries use insert (first wins) so --secret flags override below
+                preset_map.entry(key).or_insert_with(|| v.to_string());
+            } else {
+                anyhow::bail!(
+                    "Invalid line in secrets file: expected NAME=VALUE, got '{}'",
+                    line
+                );
+            }
+        }
+    }
+
+    // -s/--secret flags override file entries (insert overwrites)
+    for pair in &preset_secrets {
+        if let Some((k, v)) = pair.split_once('=') {
+            let key = k.trim().to_string();
+            let val = v.to_string(); // do NOT trim the value side
+            if key.is_empty() {
+                anyhow::bail!("Invalid --secret value: empty name in '{}'", pair);
+            }
+            preset_map.insert(key, val);
+        } else {
+            anyhow::bail!(
+                "Invalid --secret value: expected NAME=VALUE, got '{}'",
+                pair
+            );
+        }
+    }
+
     let display_name = caps
         .auth
         .as_ref()
         .and_then(|a| a.display_name.as_deref())
         .unwrap_or(&name);
 
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  {:^62}║", format!("{} Setup", display_name));
-    println!("╚════════════════════════════════════════════════════════════════╝");
-    println!();
+    let non_interactive = !preset_map.is_empty();
+
+    if !non_interactive {
+        println!();
+        println!("╔════════════════════════════════════════════════════════════════╗");
+        println!("║  {:^62}║", format!("{} Setup", display_name));
+        println!("╚════════════════════════════════════════════════════════════════╝");
+        println!();
+    }
 
     let secrets_store = init_secrets_store().await?;
 
     let mut any_saved = false;
 
     for secret in &setup.required_secrets {
+        // If a preset value exists for this secret, use it directly
+        if let Some(value) = preset_map.get(&secret.name) {
+            if value.is_empty() {
+                if secret.optional {
+                    continue;
+                } else {
+                    anyhow::bail!(
+                        "Empty value for required secret '{}' passed via --secret",
+                        secret.name
+                    );
+                }
+            }
+            let params = CreateSecretParams::new(&secret.name, value).with_provider(name.to_string());
+            secrets_store
+                .create(&user_id, params)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to save secret: {}", e))?;
+            any_saved = true;
+            continue;
+        }
+
+        // No preset for this secret
+        if non_interactive {
+            if secret.optional {
+                continue;
+            } else {
+                anyhow::bail!(
+                    "Required secret '{}' not provided via --secret; \
+                     add `-s {}=<value>` or run without --secret for interactive setup",
+                    secret.name,
+                    secret.name
+                );
+            }
+        }
+
+        // Interactive prompt (original behavior)
         let already_exists = secrets_store
             .exists(&user_id, &secret.name)
             .await
@@ -1266,11 +1371,11 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
             .create(&user_id, params)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to save secret: {}", e))?;
-
         println!("    ✓ Saved.");
         any_saved = true;
     }
 
+    println!();
     println!();
     if any_saved {
         println!("  ✓ {} setup complete!", display_name);
@@ -1302,6 +1407,123 @@ mod tests {
         let dir = default_tools_dir();
         assert!(dir.to_string_lossy().contains(".ironclaw"));
         assert!(dir.to_string_lossy().contains("tools"));
+    }
+
+    // ── Preset secret parsing tests ──────────────────────────────
+
+    /// Helper: parse --secret flags into a preset map (mirrors setup_tool logic).
+    fn parse_preset_flags(flags: &[&str]) -> Result<std::collections::HashMap<String, String>, String> {
+        let mut map = std::collections::HashMap::new();
+        for pair in flags {
+            if let Some((k, v)) = pair.split_once('=') {
+                let key = k.trim().to_string();
+                let val = v.to_string(); // do NOT trim value
+                if key.is_empty() {
+                    return Err(format!("Invalid --secret value: empty name in '{}'", pair));
+                }
+                map.insert(key, val);
+            } else {
+                return Err(format!("Invalid --secret value: expected NAME=VALUE, got '{}'", pair));
+            }
+        }
+        Ok(map)
+    }
+
+    /// Helper: parse --secrets-file content into a preset map.
+    fn parse_secrets_file(content: &str) -> Result<std::collections::HashMap<String, String>, String> {
+        let mut map = std::collections::HashMap::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim().to_string();
+                if key.is_empty() {
+                    return Err(format!("Invalid line in secrets file: empty name in '{}'", line));
+                }
+                map.entry(key).or_insert_with(|| v.to_string());
+            } else {
+                return Err(format!("Invalid line in secrets file: expected NAME=VALUE, got '{}'", line));
+            }
+        }
+        Ok(map)
+    }
+
+    #[test]
+    fn test_preset_flags_valid() {
+        let map = parse_preset_flags(&[
+            "api_key=abc123",
+            "api_secret=xyz789",
+        ]).unwrap();
+        assert_eq!(map.get("api_key").unwrap(), "abc123");
+        assert_eq!(map.get("api_secret").unwrap(), "xyz789");
+    }
+
+    #[test]
+    fn test_preset_flags_value_not_trimmed() {
+        let map = parse_preset_flags(&["key=  padded  "]).unwrap();
+        assert_eq!(map.get("key").unwrap(), "  padded  ");
+    }
+
+    #[test]
+    fn test_preset_flags_no_equals() {
+        let err = parse_preset_flags(&["noequalsign"]).unwrap_err();
+        assert!(err.contains("expected NAME=VALUE"));
+    }
+
+    #[test]
+    fn test_preset_flags_empty_name() {
+        let err = parse_preset_flags(&["=value"]).unwrap_err();
+        assert!(err.contains("empty name"));
+    }
+
+    #[test]
+    fn test_secrets_file_valid() {
+        let content = "\
+# My secrets
+api_id=12345
+api_hash=abc123
+
+# trailing comment
+";
+        let map = parse_secrets_file(content).unwrap();
+        assert_eq!(map.get("api_id").unwrap(), "12345");
+        assert_eq!(map.get("api_hash").unwrap(), "abc123");
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_secrets_file_first_wins() {
+        // File entries: first occurrence wins (or_insert_with)
+        let content = "key=first\nkey=second\n";
+        let map = parse_secrets_file(content).unwrap();
+        assert_eq!(map.get("key").unwrap(), "first");
+    }
+
+    #[test]
+    fn test_secrets_file_invalid_line() {
+        let err = parse_secrets_file("noequalsign\n").unwrap_err();
+        assert!(err.contains("expected NAME=VALUE"));
+    }
+
+    #[test]
+    fn test_secrets_file_empty_name() {
+        let err = parse_secrets_file("=value\n").unwrap_err();
+        assert!(err.contains("empty name"));
+    }
+
+    #[test]
+    fn test_flags_override_file() {
+        // Simulate the merge logic: file loaded first with or_insert_with,
+        // then flags with insert (overwrite).
+        let mut map = parse_secrets_file("key=file_val\nother=file_other\n").unwrap();
+        let flags = parse_preset_flags(&["key=flag_val"]).unwrap();
+        for (k, v) in flags {
+            map.insert(k, v);
+        }
+        assert_eq!(map.get("key").unwrap(), "flag_val", "flag should override file");
+        assert_eq!(map.get("other").unwrap(), "file_other", "file entry preserved");
     }
 
     /// Verify that auth secrets are deduplicated across auth, setup, and http.credentials,
