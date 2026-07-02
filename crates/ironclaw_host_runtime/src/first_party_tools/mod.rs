@@ -545,6 +545,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     ));
                 };
                 let request = CodingCapabilityRequest::new(
+                    &request.capability_id,
                     metadata.kind,
                     &request.scope,
                     request.mounts.as_ref(),

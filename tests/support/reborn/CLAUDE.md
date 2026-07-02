@@ -90,6 +90,12 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
   in `harness_mcp.rs`. `harness.rs` remains large (a further `harness_auth.rs`
   split is tracked in the coverage roadmap).
+- `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
+  `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
+  `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
+  private child module of `group.rs` (same `harness_mcp.rs` split precedent)
+  so it can reach `group.rs`'s shared assembly internals at module-private
+  visibility. See [Group tests](#group-tests) below.
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
@@ -376,7 +382,21 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
+| `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Distinct actors per thread (E-MULTIUSER)
+
+`g.thread(conv).with_actor_id("some-actor")` resolves that thread's binding
+under a DISTINCT actor instead of the default `HARNESS_ACTOR_ID` — both at
+the build-time binding probe and at every `submit_turn` for that thread, so
+probe and submit always resolve the same binding/owner. The group's one
+shared runtime resolves each turn's thread by the run's own owner
+(production's `ThreadScopeResolver::resolve_for_turn` over the harness's
+per-op `/threads` mount), so two actors' threads coexist over one
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 

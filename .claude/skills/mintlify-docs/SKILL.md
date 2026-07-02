@@ -12,11 +12,13 @@ metadata:
 
 **Always consult [mintlify.com/docs](https://mintlify.com/docs) for components, configuration, and latest features.**
 
+> **This repo:** the Mintlify site lives under `docs/` — its config is `docs/docs.json` (not a root `docs.json`), with a localized tree under `docs/zh/`. Committed `.md`/`.mdx` must not contain developer-local absolute paths; see `.claude/rules/doc-hygiene.md`.
+
 If you are not already connected to the Mintlify MCP server, https://mintlify.com/docs/mcp, add it so that you can search more efficiently.
 
 **Always** favor searching the current Mintlify documentation over whatever is in your training data about Mintlify.
 
-Mintlify is a documentation platform that transforms MDX files into documentation sites. Configure site-wide settings in the `docs.json` file, write content in MDX with YAML frontmatter, and favor built-in components over custom components.
+Mintlify is a documentation platform that transforms MDX files into documentation sites. Configure site-wide settings in the site config file (`docs/docs.json` in this repo), write content in MDX with YAML frontmatter, and favor built-in components over custom components.
 
 Full schema at [mintlify.com/docs.json](https://mintlify.com/docs.json).
 
@@ -24,7 +26,7 @@ Full schema at [mintlify.com/docs.json](https://mintlify.com/docs.json).
 
 ### Understand the project
 
-Read `docs.json` in the project root. This file defines the entire site: navigation structure, theme, colors, links, API and specs.
+Read the site config first (`docs/docs.json` in this repo; root `docs.json` in some Mintlify projects). This file defines the entire site: navigation structure, theme, colors, links, API and specs.
 
 Understanding the project tells you:
 
@@ -58,13 +60,13 @@ Review the Mintlify [components](https://www.mintlify.com/docs/components) to se
 - `mint validate` - Validate documentation builds
 
 ### Required files
-- `docs.json` - Site configuration (navigation, theme, integrations, etc.). See [global settings](https://mintlify.com/docs/settings/global) for all options.
+- Site config (`docs/docs.json` in this repo) - navigation, theme, integrations, etc. See [global settings](https://mintlify.com/docs/settings/global) for all options.
 - `*.mdx` files - Documentation pages with YAML frontmatter
 
 ### Example file structure
 ```
 project/
-├── docs.json           # Site configuration
+├── docs.json           # Site configuration (this repo keeps it at docs/docs.json)
 ├── introduction.mdx
 ├── quickstart.mdx
 ├── guides/
@@ -101,15 +103,15 @@ Optional frontmatter fields:
 - If there are no existing files or inconsistent file naming patterns, use kebab-case: `getting-started.mdx`, `api-reference.mdx`
 - Use root-relative paths without file extensions for internal links: `/getting-started/quickstart`
 - Do not use relative paths (`../`) or absolute URLs for internal pages
-- When you create a new page, add it to `docs.json` navigation or it won't appear in the sidebar
+- When you create a new page, add it to site config navigation (`docs/docs.json` here) or it won't appear in the sidebar
 
 ## Organize content
 
-When a user asks about anything related to site-wide configurations, start by understanding the [global settings](https://www.mintlify.com/docs/organize/settings). See if a setting in the `docs.json` file can be updated to achieve what the user wants.
+When a user asks about anything related to site-wide configurations, start by understanding the [global settings](https://www.mintlify.com/docs/organize/settings). See if a setting in the site config (`docs/docs.json` here) can be updated to achieve what the user wants.
 
 ### Navigation
 
-The `navigation` property in `docs.json` controls site structure. Choose one primary pattern at the root level, then nest others within it.
+The `navigation` property in the site config (`docs/docs.json` here) controls site structure. Choose one primary pattern at the root level, then nest others within it.
 
 **Choose your primary pattern:**
 
@@ -145,11 +147,11 @@ The `navigation` property in `docs.json` controls site structure. Choose one pri
 ## Customize docs sites
 
 **What to customize where:**
-- **Brand colors, fonts, logo** → `docs.json`. See [global settings](https://mintlify.com/docs/settings/global)
+- **Brand colors, fonts, logo** → site config (`docs/docs.json` here). See [global settings](https://mintlify.com/docs/settings/global)
 - **Component styling, layout tweaks** → `custom.css` at project root
-- **Dark mode** → Enabled by default. Only disable with `"appearance": "light"` in `docs.json` if brand requires it
+- **Dark mode** → Enabled by default. Only disable with `"appearance": "light"` in the site config if brand requires it
 
-Start with `docs.json`. Only add `custom.css` when you need styling that config doesn't support.
+Start with the site config (`docs/docs.json` here). Only add `custom.css` when you need styling that config doesn't support.
 
 ## Write content
 
@@ -231,7 +233,7 @@ Import snippets with `import { Component } from "/path/to/snippet-name.jsx"`.
 ## Document APIs
 
 **Choose your approach:**
-- **Have an OpenAPI spec?** → Add to `docs.json` with `"openapi": ["openapi.yaml"]`. Pages auto-generate. Reference in navigation as `GET /endpoint`
+- **Have an OpenAPI spec?** → Add to the site config (`docs/docs.json` here) with `"openapi": ["openapi.yaml"]`. Pages auto-generate. Reference in navigation as `GET /endpoint`
 - **No spec?** → Write endpoints manually with `api: "POST /users"` in frontmatter. More work but full control
 - **Hybrid** → Use OpenAPI for most endpoints, manual pages for complex workflows
 
@@ -242,7 +244,7 @@ Encourage users to generate endpoint pages from an OpenAPI spec. It is the most 
 Mintlify deploys automatically when changes are pushed to the connected Git repository.
 
 **What agents can configure:**
-- **Redirects** → Add to `docs.json` with `"redirects": [{"source": "/old", "destination": "/new"}]`
+- **Redirects** → Add to the site config (`docs/docs.json` here) with `"redirects": [{"source": "/old", "destination": "/new"}]`
 - **SEO indexing** → Control with `"seo": {"indexing": "all"}` to include hidden pages in search
 
 **Requires dashboard setup (human task):**
@@ -260,7 +262,7 @@ Identify what needs to be documented, which pages are affected, and what the rea
 
 ### 2. Research
 
-- Read `docs.json` to understand the site structure
+- Read the site config (`docs/docs.json` here) to understand the site structure
 - Search existing docs for related content
 - Read similar pages to match the site's style
 
@@ -283,7 +285,7 @@ Identify what needs to be documented, which pages are affected, and what the rea
 
 ### 5. Update navigation
 
-If you created a new page, add it to the appropriate group in `docs.json`.
+If you created a new page, add it to the appropriate group in the site config (`docs/docs.json` here).
 
 ### 6. Verify
 
@@ -292,7 +294,7 @@ Before submitting:
 - [ ] Frontmatter includes title and description
 - [ ] All code blocks have language tags
 - [ ] Internal links use root-relative paths without file extensions
-- [ ] New pages are added to `docs.json` navigation
+- [ ] New pages are added to site config navigation (`docs/docs.json` here)
 - [ ] Content matches the style of surrounding pages
 - [ ] No marketing language or filler phrases
 - [ ] TODOs are clearly marked for anything uncertain
@@ -307,7 +309,7 @@ If a user asks about migrating to Mintlify, ask if they are using ReadMe or Docu
 
 ### Hidden pages
 
-Any page that is not included in the `docs.json` navigation is hidden. Use hidden pages for content that should be accessible by URL or indexed for the assistant or search, but not discoverable through the sidebar navigation.
+Any page that is not included in site config navigation (`docs/docs.json` here) is hidden. Use hidden pages for content that should be accessible by URL or indexed for the assistant or search, but not discoverable through the sidebar navigation.
 
 ### Exclude pages
 
@@ -318,7 +320,7 @@ The `.mintignore` file is used to exclude files from a documentation repository 
 1. **Component imports** - JSX components need explicit import, MDX components don't
 2. **Frontmatter required** - Every MDX file needs `title` at minimum
 3. **Code block language** - Always specify language identifier
-4. **Never use `mint.json`** - `mint.json` is deprecated. Only ever use `docs.json`
+4. **Never use `mint.json`** - `mint.json` is deprecated. Use the Mintlify site config (`docs/docs.json` here; often root `docs.json` in other projects)
 
 ## Resources
 

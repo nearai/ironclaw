@@ -23,6 +23,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_trigger_persists_after_reopen;
 mod scenario_verbs_lifecycle;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -37,6 +38,13 @@ async fn triggers_group_e2e() {
     // HEADLINE: create a one-shot Once trigger + list it in thread A, then
     // pause → resume → remove it by id in thread B over the shared repo.
     report.record("verbs_lifecycle", scenario_verbs_lifecycle::run(&g).await);
+    // C-DURABLE: independent of `verbs_lifecycle` (its own trigger name/id) —
+    // the trigger repository is always on-disk regardless of the group's
+    // `StorageMode` (a separate capability-harness filesystem).
+    report.record(
+        "trigger_persists_after_reopen",
+        scenario_trigger_persists_after_reopen::run(&g).await,
+    );
 
     // TODO(triggered-turn follow-ups): coverage intentionally left OUT of this
     // binary because it needs a harness seam that does not exist yet — a way to

@@ -111,6 +111,10 @@ pub struct RebornIntegrationHarnessBuilder {
     /// E-GATEWAY: when set, the model call parks until released, enabling a
     /// mid-turn cancel test. Threaded into the degenerate one-thread group.
     park_gate: Option<ParkingModelGate>,
+    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
+    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
+    /// group. See [`RebornThreadBuilder::fail_model`].
+    fail_model: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -145,6 +149,14 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
         self.park_gate = Some(gate);
+        self
+    }
+
+    /// Fail this harness's model call unconditionally with a fixed, non-retryable
+    /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
+    /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
+    pub fn fail_model(mut self) -> Self {
+        self.fail_model = true;
         self
     }
 
@@ -298,6 +310,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .park_model_opt(self.park_gate)
+            .fail_model_opt(self.fail_model)
             .build()
             .await
     }
@@ -309,6 +322,27 @@ pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
     pub(crate) workflow: DefaultProductWorkflow,
     pub(crate) conversation_id: String,
+    /// External (raw, pre-resolution) actor id every submit for this thread is
+    /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
+    /// `with_actor_id` (the E-MULTIUSER seam) carries its distinct actor here
+    /// so submit-time envelopes resolve the SAME binding (and owner scope) as
+    /// the build-time probe.
+    ///
+    /// NOT redundant with `binding.actor_user_id`: the binding's field is a
+    /// one-way SHA-256-derived opaque `UserId` (`user_id_for_binding` /
+    /// `scoped_id`, product_workflow.rs), while `verified_text_envelope_with_trigger`
+    /// (called by both the build-time probe and every submit) needs the raw,
+    /// pre-hash external actor-id string to compute the SAME `binding_path`
+    /// hash the probe persisted under. Substituting `binding.actor_user_id`
+    /// here would make submit resolve a *different*, unrelated binding (new
+    /// `actor_user_id`/`subject_user_id`, same `thread_id` since that hash is
+    /// actor-independent) instead of reusing this harness's own — silently
+    /// breaking every `submit_turn`/`submit_turn_async` call, not just the
+    /// multi-actor scenario. `binding.actor_user_id` IS the right source of
+    /// truth for `resume_run`'s `TurnActor` (an already-resolved identity, no
+    /// envelope round-trip involved) — that is a materially different use
+    /// case from this field's.
+    pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
@@ -368,6 +402,7 @@ impl RebornIntegrationHarness {
             safety_context: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
+            fail_model: false,
         }
     }
 
@@ -382,21 +417,29 @@ impl RebornIntegrationHarness {
     /// — the caller drives the wait (`wait_for_status`). Used by approval/auth flows
     /// where the turn blocks on a gate rather than completing.
     pub async fn submit_turn_async(&self, text: &str) -> HarnessResult<TurnRunId> {
-        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
-        let envelope = self.ingress.verified_text_envelope_with_trigger(
-            &event_id,
-            HARNESS_ACTOR_ID,
-            &self.conversation_id,
-            text,
-            ProductTriggerReason::DirectChat,
-        )?;
-        let ack = self.workflow.accept_inbound(envelope).await?;
-        match ack {
+        match self.submit_turn_ack(text).await? {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
             } => Ok(submitted_run_id),
             other => Err(format!("expected accepted inbound ack, got {other:?}").into()),
         }
+    }
+
+    /// Submit a user turn and return the raw `ProductInboundAck` — `Accepted` OR
+    /// `RejectedBusy` (thread already has an active run). Most callers want
+    /// `submit_turn_async`, which narrows to `Accepted` and errors on any other
+    /// ack; this is the seam for C-ERRORS' busy-reject test, which needs to
+    /// observe `RejectedBusy` without that narrowing turning it into an `Err`.
+    pub async fn submit_turn_ack(&self, text: &str) -> HarnessResult<ProductInboundAck> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_text_envelope_with_trigger(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            text,
+            ProductTriggerReason::DirectChat,
+        )?;
+        Ok(self.workflow.accept_inbound(envelope).await?)
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning

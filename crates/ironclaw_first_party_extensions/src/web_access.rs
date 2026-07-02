@@ -13,6 +13,11 @@ use ironclaw_host_api::{
 use serde_json::{Value, json};
 use url::{Host, Url};
 
+use crate::latency::{
+    FirstPartyToolLatencyFields, FirstPartyToolLatencyMetrics, json_bytes, started_at,
+    trace_tool_error, trace_tool_ok,
+};
+
 pub const WEB_ACCESS_EXTENSION_ID: &str = "web-access";
 pub const WEB_SEARCH_CAPABILITY_ID: &str = "web-access.search";
 pub const WEB_GET_CONTENT_CAPABILITY_ID: &str = "web-access.get_content";
@@ -85,6 +90,52 @@ pub struct WebAccessDispatchRequest<'a> {
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 }
 
+fn web_access_latency_started_at() -> Option<std::time::Instant> {
+    started_at()
+}
+
+fn trace_web_access_latency_ok(
+    operation: &'static str,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
+    started_at: Option<std::time::Instant>,
+    request_bytes: u64,
+    output_bytes: u64,
+) {
+    trace_tool_ok(
+        "web_access_first_party_tool",
+        operation,
+        fields,
+        started_at,
+        FirstPartyToolLatencyMetrics {
+            request_bytes,
+            output_bytes,
+            ..FirstPartyToolLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_web_access_latency_error(
+    operation: &'static str,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
+    started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    request_bytes: u64,
+    output_bytes: u64,
+) {
+    trace_tool_error(
+        "web_access_first_party_tool",
+        operation,
+        fields,
+        started_at,
+        error_kind,
+        FirstPartyToolLatencyMetrics {
+            request_bytes,
+            output_bytes,
+            ..FirstPartyToolLatencyMetrics::default()
+        },
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebAccessDispatchResult {
     pub output: Value,
@@ -130,13 +181,40 @@ impl WebAccessExecutor {
         &self,
         request: WebAccessDispatchRequest<'_>,
     ) -> Result<WebAccessDispatchResult, WebAccessDispatchError> {
-        match request.capability_id.as_str() {
+        let latency_fields = FirstPartyToolLatencyFields::from_input(
+            request.capability_id,
+            request.scope,
+            request.input,
+        );
+        let started_at = web_access_latency_started_at();
+        let result = match request.capability_id.as_str() {
             WEB_SEARCH_CAPABILITY_ID => self.search(request).await,
             WEB_GET_CONTENT_CAPABILITY_ID => self.get_content(request).await,
             _ => Err(WebAccessDispatchError::new(
                 RuntimeDispatchErrorKind::UndeclaredCapability,
             )),
+        };
+        match &result {
+            Ok(result) => trace_web_access_latency_ok(
+                "dispatch",
+                latency_fields.as_ref(),
+                started_at,
+                result.usage.network_egress_bytes,
+                result.usage.output_bytes,
+            ),
+            Err(error) => trace_web_access_latency_error(
+                "dispatch",
+                latency_fields.as_ref(),
+                started_at,
+                error.kind().as_str(),
+                error
+                    .usage()
+                    .map(|usage| usage.network_egress_bytes)
+                    .unwrap_or(0),
+                error.usage().map(|usage| usage.output_bytes).unwrap_or(0),
+            ),
         }
+        result
     }
 
     async fn search(
@@ -267,9 +345,7 @@ impl WebAccessExecutor {
                 "content": result.content,
             })).collect::<Vec<_>>(),
         });
-        let output_bytes = serde_json::to_vec(&output)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0);
+        let output_bytes = json_bytes(&output);
         Ok(WebAccessDispatchResult {
             output,
             usage: ResourceUsage {
@@ -351,9 +427,7 @@ impl WebAccessExecutor {
             "provider_used": "exa_mcp",
             "queries": output_queries,
         });
-        let output_bytes = serde_json::to_vec(&output)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0);
+        let output_bytes = json_bytes(&output);
         Ok(WebAccessDispatchResult {
             output,
             usage: ResourceUsage {
@@ -477,6 +551,13 @@ fn mcp_initialize_params() -> Value {
     })
 }
 
+fn is_valid_mcp_initialize_response(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value.get("error").is_none() && value.get("result").is_some_and(Value::is_object)
+}
+
 async fn call_exa_mcp_search(
     egress: Arc<dyn RuntimeHttpEgress>,
     capability_id: &CapabilityId,
@@ -526,6 +607,7 @@ async fn call_exa_mcp_tool(
     tool_name: &str,
     arguments: Value,
 ) -> Result<EgressText, EgressCallError> {
+    let latency_fields = FirstPartyToolLatencyFields::from_input(capability_id, scope, &arguments);
     let mut prior_bytes = 0_u64;
 
     // 1. initialize — required before tools/call on compliant MCP servers.
@@ -545,9 +627,30 @@ async fn call_exa_mcp_tool(
         save_body_to: None,
         timeout_ms: Some(DEFAULT_TIMEOUT_MS),
     };
-    let init_resp = execute_runtime_http(init_req, Arc::clone(&egress))
-        .await
-        .map_err(|e| EgressCallError::new(e).with_prior(prior_bytes))?;
+    let init_started_at = web_access_latency_started_at();
+    let init_resp = match execute_runtime_http(init_req, Arc::clone(&egress)).await {
+        Ok(response) => {
+            trace_web_access_latency_ok(
+                "exa_initialize",
+                latency_fields.as_ref(),
+                init_started_at,
+                response.request_bytes,
+                response.response_bytes,
+            );
+            response
+        }
+        Err(error) => {
+            trace_web_access_latency_error(
+                "exa_initialize",
+                latency_fields.as_ref(),
+                init_started_at,
+                error.stable_runtime_reason(),
+                prior_bytes.saturating_add(error.request_bytes()),
+                error.response_bytes(),
+            );
+            return Err(EgressCallError::new(error).with_prior(prior_bytes));
+        }
+    };
     prior_bytes = prior_bytes.saturating_add(init_resp.request_bytes);
 
     // Extract Mcp-Session-Id for reuse in subsequent requests.
@@ -557,18 +660,23 @@ async fn call_exa_mcp_tool(
         .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
         .map(|(_, v)| v.clone());
 
-    // Check initialize response for MCP-level error.
-    if serde_json::from_slice::<Value>(&init_resp.body)
-        .ok()
-        .and_then(|v| v.get("error").cloned())
-        .is_some()
-    {
-        return Err(EgressCallError::new(RuntimeHttpEgressError::Response {
+    // Check initialize response before moving to initialized notification.
+    let init_parse_started_at = web_access_latency_started_at();
+    if !is_valid_mcp_initialize_response(&init_resp.body) {
+        let error = RuntimeHttpEgressError::Response {
             reason: "invalid_mcp_response".to_string(),
             request_bytes: prior_bytes,
             response_bytes: init_resp.response_bytes,
-        })
-        .with_prior(0));
+        };
+        trace_web_access_latency_error(
+            "exa_initialize_parse",
+            latency_fields.as_ref(),
+            init_parse_started_at,
+            error.stable_runtime_reason(),
+            error.request_bytes(),
+            error.response_bytes(),
+        );
+        return Err(EgressCallError::new(error).with_prior(0));
     }
 
     // 2. notifications/initialized — no id (notification, not a request).
@@ -588,9 +696,30 @@ async fn call_exa_mcp_tool(
         save_body_to: None,
         timeout_ms: Some(DEFAULT_TIMEOUT_MS),
     };
-    let notif_resp = execute_runtime_http(notif_req, Arc::clone(&egress))
-        .await
-        .map_err(|e| EgressCallError::new(e).with_prior(prior_bytes))?;
+    let notif_started_at = web_access_latency_started_at();
+    let notif_resp = match execute_runtime_http(notif_req, Arc::clone(&egress)).await {
+        Ok(response) => {
+            trace_web_access_latency_ok(
+                "exa_initialized",
+                latency_fields.as_ref(),
+                notif_started_at,
+                response.request_bytes,
+                response.response_bytes,
+            );
+            response
+        }
+        Err(error) => {
+            trace_web_access_latency_error(
+                "exa_initialized",
+                latency_fields.as_ref(),
+                notif_started_at,
+                error.stable_runtime_reason(),
+                prior_bytes.saturating_add(error.request_bytes()),
+                error.response_bytes(),
+            );
+            return Err(EgressCallError::new(error).with_prior(prior_bytes));
+        }
+    };
     prior_bytes = prior_bytes.saturating_add(notif_resp.request_bytes);
 
     // 3. tools/call with session ID.
@@ -614,26 +743,73 @@ async fn call_exa_mcp_tool(
         save_body_to: None,
         timeout_ms: Some(DEFAULT_TIMEOUT_MS),
     };
-    let call_resp = execute_runtime_http(call_req, egress)
-        .await
-        .map_err(|e| EgressCallError::new(e).with_prior(prior_bytes))?;
+    let call_started_at = web_access_latency_started_at();
+    let call_resp = match execute_runtime_http(call_req, egress).await {
+        Ok(response) => {
+            trace_web_access_latency_ok(
+                "exa_tool_call",
+                latency_fields.as_ref(),
+                call_started_at,
+                response.request_bytes,
+                response.response_bytes,
+            );
+            response
+        }
+        Err(error) => {
+            trace_web_access_latency_error(
+                "exa_tool_call",
+                latency_fields.as_ref(),
+                call_started_at,
+                error.stable_runtime_reason(),
+                prior_bytes.saturating_add(error.request_bytes()),
+                error.response_bytes(),
+            );
+            return Err(EgressCallError::new(error).with_prior(prior_bytes));
+        }
+    };
     let call_request_bytes = call_resp.request_bytes;
     prior_bytes = prior_bytes.saturating_add(call_request_bytes);
 
+    let parse_started_at = web_access_latency_started_at();
     let body = String::from_utf8(call_resp.body).map_err(|_| {
-        EgressCallError::new(RuntimeHttpEgressError::Response {
+        let error = RuntimeHttpEgressError::Response {
             reason: "invalid_utf8".to_string(),
             request_bytes: prior_bytes,
             response_bytes: call_resp.response_bytes,
-        })
+        };
+        trace_web_access_latency_error(
+            "exa_parse_tool_response",
+            latency_fields.as_ref(),
+            parse_started_at,
+            error.stable_runtime_reason(),
+            error.request_bytes(),
+            error.response_bytes(),
+        );
+        EgressCallError::new(error)
     })?;
     let text = extract_mcp_text(&body).ok_or_else(|| {
-        EgressCallError::new(RuntimeHttpEgressError::Response {
+        let error = RuntimeHttpEgressError::Response {
             reason: "invalid_mcp_response".to_string(),
             request_bytes: prior_bytes,
             response_bytes: call_resp.response_bytes,
-        })
+        };
+        trace_web_access_latency_error(
+            "exa_parse_tool_response",
+            latency_fields.as_ref(),
+            parse_started_at,
+            error.stable_runtime_reason(),
+            error.request_bytes(),
+            error.response_bytes(),
+        );
+        EgressCallError::new(error)
     })?;
+    trace_web_access_latency_ok(
+        "exa_parse_tool_response",
+        latency_fields.as_ref(),
+        parse_started_at,
+        prior_bytes,
+        text.len() as u64,
+    );
     Ok(EgressText {
         body: text,
         request_bytes: prior_bytes,
@@ -1120,6 +1296,15 @@ mod tests {
     }
 
     impl RecordingEgress {
+        fn with_responses(
+            responses: Vec<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+        ) -> Self {
+            Self {
+                responses: StdMutex::new(responses.into()),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+
         fn ok_json(body: Value) -> RuntimeHttpEgressResponse {
             let bytes = serde_json::to_vec(&body).unwrap();
             RuntimeHttpEgressResponse {
@@ -1779,6 +1964,60 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
             result.output["queries"][0]["results"][0]["url"],
             "https://tokio.rs"
         );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_malformed_mcp_initialize_response() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_SEARCH_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"query":"rust async"});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![Ok(
+            RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"not json".to_vec(),
+                saved_body: None,
+                request_bytes: 10,
+                response_bytes: 8,
+                redaction_applied: false,
+            },
+        )]));
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, Some(egress.clone())))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
+        assert_eq!(
+            error.usage().unwrap().network_egress_bytes,
+            10,
+            "only the initialize request should be accounted"
+        );
+        assert_eq!(egress.request_bodies().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_mcp_initialize_response_without_result() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_SEARCH_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"query":"rust async"});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![Ok(
+            RecordingEgress::ok_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1
+            })),
+        )]));
+
+        let error = executor
+            .dispatch(request(&capability, &scope, &input, Some(egress.clone())))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
+        assert_eq!(egress.request_bodies().len(), 1);
     }
 
     #[tokio::test]
