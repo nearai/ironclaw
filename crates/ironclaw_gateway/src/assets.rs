@@ -35,6 +35,8 @@ pub const APP_JS: &str = concat!(
     "\n",
     include_str!("../static/js/core/setup-wizard.js"),
     "\n",
+    include_str!("../static/js/core/api-tokens.js"),
+    "\n",
     include_str!("../static/js/core/sse.js"),
     "\n",
     include_str!("../static/js/surfaces/chat.js"),
