@@ -27,6 +27,7 @@ use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
+use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
@@ -397,6 +398,45 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
         })
         .with_trigger_poller_settings(trigger_poller)
         .with_model_gateway_override(model_gateway);
+
+    build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+/// Same as [`build_runtime_with`], but with an explicit
+/// [`ToolDisclosureMode`] instead of the implicit `Off` default. Kept
+/// separate (rather than adding a parameter to `build_runtime_with`) because
+/// `build_runtime_with` has 8 existing call sites for concerns unrelated to
+/// tool disclosure — churning all of them to thread through a mode they never
+/// vary would be unnecessary here.
+async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static>(
+    root: &tempfile::TempDir,
+    model_gateway: Arc<G>,
+    trigger_poller: TriggerPollerSettings,
+    tool_disclosure: ToolDisclosureMode,
+) -> RebornRuntime {
+    let host_home_root = root.path().join("host-home");
+    std::fs::create_dir_all(&host_home_root).expect("host home root");
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::LocalDevYolo,
+        USER,
+        root.path().join("local-dev"),
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access: true,
+        },
+    )
+    .expect("local-yolo runtime input")
+    .with_local_dev_confirmed_host_home_root(host_home_root);
+
+    let input = RebornRuntimeInput::from_services(input)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "trigger-e2e-source".to_string(),
+            reply_target_binding_id: "trigger-e2e-reply".to_string(),
+        })
+        .with_trigger_poller_settings(trigger_poller)
+        .with_model_gateway_override(model_gateway)
+        .with_tool_disclosure(tool_disclosure);
 
     build_reborn_runtime(input).await.expect("runtime builds")
 }
@@ -1322,10 +1362,37 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// production deny constant accidentally dropping one of the other three).
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
+    scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Off).await;
+}
+
+/// Same coverage as `scheduled_trigger_fire_cannot_invoke_trigger_mutators`,
+/// but with the runtime built under `ToolDisclosureMode::Bridged` instead of
+/// the default `Off`.
+///
+/// This is not a redundant copy of the `Off` variant above. PR #5515
+/// self-review: the deny decorator (`PerSurfaceCapabilityDenyDecorator` /
+/// `CapabilitySurfaceDenyFilter`) is deliberately wired in `runtime.rs`
+/// *after* the conditional `ToolDisclosureCapabilityDecorator` so the
+/// mutator denial stays outermost — and therefore still wins — even when
+/// bridged tool disclosure is enabled. Before this test, `Bridged` had
+/// exactly one usage anywhere in the repo (an unrelated system-prompt test),
+/// so nothing exercised that decorator-ordering composition end-to-end; a
+/// decorator-order or bridged-disclosure regression could have re-exposed
+/// `trigger_create`/`remove`/`pause`/`resume` without any whole-path test
+/// failing. Keep this alongside the `Off` variant rather than folding it in
+/// — it pins the composition order, not just the deny outcome.
+#[tokio::test]
+async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators_with_bridged_disclosure() {
+    scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Bridged).await;
+}
+
+async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
+    tool_disclosure: ToolDisclosureMode,
+) {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(TriggerMutatorAttemptGateway::default());
 
-    let runtime = build_runtime_with(
+    let runtime = build_runtime_with_tool_disclosure(
         &root,
         Arc::clone(&gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
@@ -1334,6 +1401,7 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
                 ..Default::default()
             },
         ),
+        tool_disclosure,
     )
     .await;
 
