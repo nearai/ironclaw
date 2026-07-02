@@ -219,10 +219,17 @@ pub(super) async fn build_runtime_mounts(
             setup_service: Arc::clone(&setup_service),
         });
 
+    let channel_connection_resume =
+        crate::channel_connection_resume::build_channel_connection_resume_service(
+            Arc::clone(&parts.local_runtime.turn_state),
+            Arc::clone(&parts.turn_coordinator),
+        );
+
     Ok(SlackHostBetaMounts {
         events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
         commands,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
+            .with_channel_connection_resume(channel_connection_resume),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: None,

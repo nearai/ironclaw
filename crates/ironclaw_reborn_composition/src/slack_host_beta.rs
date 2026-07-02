@@ -740,6 +740,11 @@ pub fn build_slack_host_beta_mounts(
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
         ));
+    let channel_connection_resume =
+        crate::channel_connection_resume::build_channel_connection_resume_service(
+            Arc::clone(&local_runtime.turn_state),
+            runtime.webui_turn_coordinator(),
+        );
     if outbound_delivery_provider_already_registered {
         let personal_connection_scope = SlackPersonalConnectionScope {
             installation_id: config.installation_id.clone(),
@@ -748,7 +753,8 @@ pub fn build_slack_host_beta_mounts(
         return Ok(SlackHostBetaMounts {
             events,
             commands,
-            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
+                .with_channel_connection_resume(Arc::clone(&channel_connection_resume)),
             channel_routes,
             tenant_id: config.tenant_id.clone(),
             personal_connection_scope: Some(personal_connection_scope.clone()),
@@ -786,7 +792,8 @@ pub fn build_slack_host_beta_mounts(
     Ok(SlackHostBetaMounts {
         events,
         commands,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
+            .with_channel_connection_resume(channel_connection_resume),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: Some(personal_connection_scope.clone()),
