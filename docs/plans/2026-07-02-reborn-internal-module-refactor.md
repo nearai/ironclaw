@@ -156,7 +156,7 @@ cargo fmt --check
 # G2 lint, zero warnings
 cargo clippy --all --benches --tests --examples --all-features
 # G3 full-feature build+test of the crate and its consumers
-cargo test -p ironclaw_reborn_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support"
+cargo test -p ironclaw_reborn_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support,postgres"
 cargo test -p ironclaw_reborn_webui_ingress
 cargo build -p ironclaw_reborn_cli
 # G4 boundary tests (the load-bearing architectural contract)
@@ -171,7 +171,10 @@ cargo test
 
 Flake discrimination: known cross-binary parallel flakes (budget_e2e `f1_happy_path`,
 webui_v2_e2e `nearai_provider_save*`, runtime nearai env-var/keychain races) pass with
-`--test-threads=1`; a failure that persists serially is a real regression.
+`--test-threads=1`; a failure that persists serially is a real regression. `--test-threads=1`
+is only a *discriminator*, not the fix — the durable fix is serializing env-mutating tests
+through the canonical `ironclaw_common::env_helpers::lock_env()`; see the "shipping speed"
+lever on hermetic tests. Do not adopt `--test-threads=1` as the default runner.
 
 ### 4.2 Structural gates (assert the refactor is actually happening)
 
@@ -183,8 +186,11 @@ grep -cE '^\s*(pub )?mod [a-z_0-9]+;' crates/ironclaw_reborn_composition/src/lib
 find crates/ironclaw_reborn_composition/src -name '*.rs' ! -name '*tests*' -exec wc -l {} + | sort -rn | head -5
 # S3 no new crates: workspace member count unchanged (76)
 grep -c '^    "' Cargo.toml   # or: cargo metadata | jq '.workspace_members | length'
-# S4 public-surface freeze: the pub-use snapshot diff must be EMPTY
-awk '/^pub use/{p=1} p{print} p&&/;/{p=0}' crates/ironclaw_reborn_composition/src/lib.rs > "$TMPDIR/pubuse.after"
+# S4 public-surface freeze: the pub-use snapshot diff must be EMPTY.
+# Captures each `pub use` block AND any #[cfg(...)]/attributes immediately above it,
+# so a silently dropped/changed feature gate on an export is caught, not missed.
+awk '/^#\[/{attr=(attr ? attr "\n" : "") $0; next} /^pub use/{p=1; if(attr){print attr; attr=""}} p{print; if(/;/){p=0}} !p{attr=""}' \
+  crates/ironclaw_reborn_composition/src/lib.rs > "$TMPDIR/pubuse.after"
 diff docs/plans/composition-pubuse.snapshot "$TMPDIR/pubuse.after"
 # S5 move-purity: diff must be ≥90% renames/moves (logic changes ≈ 0)
 git diff --find-renames=90% --stat main...HEAD
