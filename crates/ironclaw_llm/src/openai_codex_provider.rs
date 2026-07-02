@@ -9,7 +9,6 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::error::LlmError;
@@ -551,21 +550,30 @@ struct ParsedResponse {
     finish_reason: FinishReason,
 }
 
-/// SSE event data from the Responses API.
-#[derive(Debug, Deserialize)]
-struct SseEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(flatten)]
-    data: serde_json::Value,
-}
-
 /// Tracking state for an in-progress function call.
 #[derive(Debug, Default)]
 struct FunctionCallState {
     call_id: String,
     name: String,
     arguments: String,
+}
+
+/// Resolve the effective SSE event type, mirroring `codex_chatgpt`'s
+/// `resolve_sse_event_type`: an `event:` line wins when present and isn't
+/// the generic `message` type; otherwise fall back to the JSON body's
+/// top-level `type` field (the legacy data-only framing).
+fn resolve_sse_event_type<'a>(
+    event_type: &'a str,
+    value: &'a serde_json::Value,
+) -> std::borrow::Cow<'a, str> {
+    if !event_type.is_empty() && event_type != "message" {
+        return std::borrow::Cow::Borrowed(event_type);
+    }
+    value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(event_type))
 }
 
 /// Parse the full SSE response body into a `ParsedResponse`.
@@ -579,12 +587,22 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     let mut active_function_calls: std::collections::HashMap<String, FunctionCallState> =
         std::collections::HashMap::new();
     let mut response_status: Option<String> = None;
+    let mut current_event = String::new();
 
     for line in body.lines() {
         let line = line.trim();
 
         // Skip empty lines and comments
         if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+
+        // Track the `event:` line framing used by the documented Responses
+        // API (`event: <type>\ndata: {...}`). The data payload under this
+        // framing may omit the top-level `type` field entirely, so the
+        // event type must be resolved from whichever source is available.
+        if let Some(ev) = line.strip_prefix("event:") {
+            current_event = ev.trim().to_string();
             continue;
         }
 
@@ -603,18 +621,20 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
         }
 
         // Parse JSON
-        let event: SseEvent = match serde_json::from_str(data_str) {
-            Ok(e) => e,
+        let value: serde_json::Value = match serde_json::from_str(data_str) {
+            Ok(v) => v,
             Err(e) => {
                 tracing::trace!(data = data_str, error = %e, "Skipping unparseable SSE event");
                 continue;
             }
         };
 
-        match event.event_type.as_str() {
+        let event_type = resolve_sse_event_type(current_event.as_str(), &value);
+
+        match event_type.as_ref() {
             // Text output
             "response.output_text.delta" => {
-                if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
+                if let Some(delta) = value.get("delta").and_then(|d| d.as_str()) {
                     text_content.push_str(delta);
                 }
             }
@@ -622,12 +642,12 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 if crate::responses_reasoning::apply_summary_event(
                     &mut reasoning_summary,
                     event_type,
-                    &event.data,
+                    &value,
                 ) => {}
 
             // Output item added (could be message or function_call)
             "response.output_item.added" => {
-                if let Some(item) = event.data.get("item") {
+                if let Some(item) = value.get("item") {
                     let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     if item_type == "function_call" {
                         let item_id = item
@@ -660,12 +680,8 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Function call arguments streaming
             "response.function_call_arguments.delta" => {
-                if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
-                    let item_id = event
-                        .data
-                        .get("item_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                if let Some(delta) = value.get("delta").and_then(|d| d.as_str()) {
+                    let item_id = value.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(state) = active_function_calls.get_mut(item_id) {
                         state.arguments.push_str(delta);
                     }
@@ -675,12 +691,8 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
             // Function call arguments done
             "response.function_call_arguments.done" => {
                 // Arguments are finalized, item_id used to match
-                if let Some(args_str) = event.data.get("arguments").and_then(|a| a.as_str()) {
-                    let item_id = event
-                        .data
-                        .get("item_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                if let Some(args_str) = value.get("arguments").and_then(|a| a.as_str()) {
+                    let item_id = value.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(state) = active_function_calls.get_mut(item_id) {
                         state.arguments = args_str.to_string();
                     }
@@ -689,7 +701,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Output item done (finalize function call)
             "response.output_item.done" => {
-                if let Some(item) = event.data.get("item") {
+                if let Some(item) = value.get("item") {
                     let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     if item_type == "function_call" {
                         let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -741,7 +753,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Response completed
             "response.completed" => {
-                if let Some(response) = event.data.get("response") {
+                if let Some(response) = value.get("response") {
                     // Extract usage
                     if let Some(usage) = response.get("usage") {
                         input_tokens = usage
@@ -762,8 +774,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Response failed
             "response.failed" => {
-                let reason = event
-                    .data
+                let reason = value
                     .get("response")
                     .and_then(|r| r.get("status_details"))
                     .and_then(|d| d.get("error"))
@@ -778,13 +789,11 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Error event
             "error" => {
-                let code = event
-                    .data
+                let code = value
                     .get("code")
                     .and_then(|c| c.as_str())
                     .unwrap_or("unknown");
-                let message = event
-                    .data
+                let message = value
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error");
@@ -1138,6 +1147,41 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
         assert!(result.is_ok());
         let parsed = result.unwrap();
         assert_eq!(parsed.text_content, "hello");
+    }
+
+    #[test]
+    fn test_parse_sse_event_line_framing() {
+        // OpenAI's documented Responses API framing is `event: <type>\ndata: {...}`,
+        // where the data payload may omit the top-level `type` field entirely
+        // (it's carried by the `event:` line instead).
+        let sse_body = "event: response.output_text.delta\ndata: {\"delta\":\"Hello \"}\n\nevent: response.output_text.delta\ndata: {\"delta\":\"world!\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n";
+        let parsed = parse_sse_response(sse_body).unwrap();
+        assert_eq!(parsed.text_content, "Hello world!");
+        assert_eq!(parsed.input_tokens, 10);
+        assert_eq!(parsed.output_tokens, 5);
+        assert_eq!(parsed.finish_reason, FinishReason::Stop);
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_event_line_failed_response() {
+        let sse_body = "event: response.failed\ndata: {\"response\":{\"status_details\":{\"error\":{\"message\":\"Model overloaded\"}}}}\n";
+        let result = parse_sse_response(sse_body);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Model overloaded"));
+    }
+
+    #[test]
+    fn test_parse_sse_mixed_event_and_data_only_framing() {
+        // event-line framing and legacy data-only-`type` framing must coexist
+        // within the same stream.
+        let sse_body = "event: response.output_text.delta\ndata: {\"delta\":\"Hello \"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"world!\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n";
+        let parsed = parse_sse_response(sse_body).unwrap();
+        assert_eq!(parsed.text_content, "Hello world!");
+        assert_eq!(parsed.input_tokens, 12);
+        assert_eq!(parsed.output_tokens, 6);
+        assert_eq!(parsed.finish_reason, FinishReason::Stop);
     }
 
     #[tokio::test]
