@@ -1,0 +1,81 @@
+name: OpenWiki Update
+
+# Regenerates the narrative code wiki (openwiki/) and auto-lands it on main.
+#
+# Decisions (see docs/plans/2026-07-02 discovery rollout):
+#   - Provider: Anthropic via ANTHROPIC_API_KEY (already a repo secret).
+#   - Publish: auto-commit to main via an auto-merged PR. The wiki change is
+#     docs-only, so the required checks (Code Style, Tests (Reborn)) pass as
+#     no-ops and the PR merges without a human.
+#
+# One-time setup required for hands-off auto-merge:
+#   - Settings -> General -> "Allow auto-merge" must be enabled.
+#   - The PR is opened via the GH_RELEASES_MANAGER GitHub App (not GITHUB_TOKEN)
+#     so the required-check workflows actually trigger on it — a GITHUB_TOKEN-opened
+#     PR does not trigger other workflows, which would stall auto-merge forever.
+#   - OPENWIKI_MODEL_ID must match OpenWiki's Anthropic model resolution; if the
+#     run errors on the model, adjust the string (e.g. an "anthropic/"/"anthropic:"
+#     prefix, or claude-haiku-4-5-20251001 for a cheaper pass).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 1"   # Mondays 08:00 UTC (weekly)
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
+          private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install OpenWiki
+        run: npm install --global openwiki
+
+      - name: Regenerate wiki
+        run: openwiki --update --print
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENWIKI_MODEL_ID: claude-sonnet-4-6
+
+      - name: Open auto-merge PR
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.app.outputs.token }}
+          add-paths: openwiki
+          branch: openwiki/update
+          delete-branch: true
+          commit-message: "docs: update OpenWiki wiki"
+          title: "docs: update OpenWiki wiki"
+          labels: documentation
+          body: |
+            Automated OpenWiki narrative-docs refresh (`openwiki/`).
+
+            Precise structural discovery lives in the codebase-memory graph;
+            this is the prose "what/why" layer agents read for orientation.
+
+      - name: Enable auto-merge
+        if: steps.cpr.outputs.pull-request-number
+        run: gh pr merge --squash --auto "${{ steps.cpr.outputs.pull-request-number }}"
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
