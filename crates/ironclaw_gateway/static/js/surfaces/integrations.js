@@ -85,6 +85,7 @@ function renderIntegrations(extensions, registryEntries) {
         blurb: entry.description || (catalog && catalog.blurb) || '',
         glyph: catalog && catalog.glyph,
         icon: catalog && catalog.icon,
+        lucideIcon: entry.lucideIcon,
         installed,
         state,
         mock: false,
@@ -185,6 +186,14 @@ function renderIntegrationCard(item) {
     icon.setAttribute('aria-hidden', 'true');
     icon.loading = 'lazy';
     header.appendChild(icon);
+  } else if (item.lucideIcon) {
+    // Non-brand entries (HTTP, headless browser, custom MCP servers)
+    // carry a purposeful lucide mark instead of a letter chip.
+    const glyph = document.createElement('span');
+    glyph.className = 'integration-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.innerHTML = lucideGlyphSvg(item.lucideIcon, 16);
+    header.appendChild(glyph);
   } else if (item.glyph) {
     const glyph = document.createElement('span');
     glyph.className = 'integration-glyph';
@@ -192,11 +201,10 @@ function renderIntegrationCard(item) {
     glyph.textContent = item.glyph;
     header.appendChild(glyph);
   } else {
-    // Registry-only entries (custom tools/MCP servers) get a neutral chip.
     const fallback = document.createElement('span');
     fallback.className = 'integration-glyph';
     fallback.setAttribute('aria-hidden', 'true');
-    fallback.textContent = (item.label || '?').charAt(0).toUpperCase();
+    fallback.innerHTML = lucideGlyphSvg('sparkles', 16);
     header.appendChild(fallback);
   }
 

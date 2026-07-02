@@ -297,6 +297,7 @@ window.NUX_BILLING = {
     skills: [
       {
         name: 'summarize',
+        icon: 'list',
         version: '1.2.0',
         trust: 'Trusted',
         description: 'Condense long content — pages, threads, transcripts — into clean key points.',
@@ -305,6 +306,7 @@ window.NUX_BILLING = {
       },
       {
         name: 'web-research',
+        icon: 'globe',
         version: '2.0.1',
         trust: 'Trusted',
         description: 'Search the web, cross-check sources, and synthesize findings with citations.',
@@ -313,6 +315,7 @@ window.NUX_BILLING = {
       },
       {
         name: 'daily-briefing',
+        icon: 'sunrise',
         version: '0.9.4',
         trust: 'Installed',
         description: 'Compose a morning briefing from calendar, email, and open tasks.',
@@ -327,12 +330,12 @@ window.NUX_BILLING = {
   // owner, version, stars, downloads, updatedAt, installed }], installed:
   // [...] }). An empty query returns the featured shelf.
   var SKILL_CATALOG = [
-    { slug: 'nearai/inbox-zero', name: 'inbox-zero', version: '1.4.2', owner: 'nearai', stars: 412, downloads: 12800, updatedAt: Date.now() - 3 * 86400000, description: 'Triage email into Action / FYI / Ignore, draft replies, and keep the inbox at zero.' },
-      { slug: 'nearai/meeting-prep', name: 'meeting-prep', version: '2.1.0', owner: 'nearai', stars: 356, downloads: 9400, updatedAt: Date.now() - 6 * 86400000, description: 'Brief you on attendees, company context, and recent news before every meeting.' },
-    { slug: 'clawhub/changelog-writer', name: 'changelog-writer', version: '0.8.0', owner: 'clawhub', stars: 288, downloads: 7600, updatedAt: Date.now() - 12 * 86400000, description: 'Turn merged PRs into a crisp weekly changelog, grouped by feature area.' },
-    { slug: 'community/kpi-digest', name: 'kpi-digest', version: '1.0.3', owner: 'community', stars: 190, downloads: 5100, updatedAt: Date.now() - 20 * 86400000, description: 'Pull metrics from Sheets or an API and post a formatted digest to your channel.' },
-    { slug: 'community/pr-review-buddy', name: 'pr-review-buddy', version: '0.6.1', owner: 'community', stars: 173, downloads: 4300, updatedAt: Date.now() - 8 * 86400000, description: 'First-pass review notes on open pull requests: risky diffs, missing tests, nits.' },
-    { slug: 'nearai/site-monitor', name: 'site-monitor', version: '1.1.0', owner: 'nearai', stars: 240, downloads: 6900, updatedAt: Date.now() - 15 * 86400000, description: 'Watch a page or endpoint and alert with a diff summary the moment it changes.' },
+    { slug: 'nearai/inbox-zero', name: 'inbox-zero', icon: 'inbox', version: '1.4.2', owner: 'nearai', stars: 412, downloads: 12800, updatedAt: Date.now() - 3 * 86400000, description: 'Triage email into Action / FYI / Ignore, draft replies, and keep the inbox at zero.' },
+      { slug: 'nearai/meeting-prep', name: 'meeting-prep', icon: 'calendar-clock', version: '2.1.0', owner: 'nearai', stars: 356, downloads: 9400, updatedAt: Date.now() - 6 * 86400000, description: 'Brief you on attendees, company context, and recent news before every meeting.' },
+    { slug: 'clawhub/changelog-writer', name: 'changelog-writer', icon: 'file-diff', version: '0.8.0', owner: 'clawhub', stars: 288, downloads: 7600, updatedAt: Date.now() - 12 * 86400000, description: 'Turn merged PRs into a crisp weekly changelog, grouped by feature area.' },
+    { slug: 'community/kpi-digest', name: 'kpi-digest', icon: 'bar-chart', version: '1.0.3', owner: 'community', stars: 190, downloads: 5100, updatedAt: Date.now() - 20 * 86400000, description: 'Pull metrics from Sheets or an API and post a formatted digest to your channel.' },
+    { slug: 'community/pr-review-buddy', name: 'pr-review-buddy', icon: 'git-pull-request', version: '0.6.1', owner: 'community', stars: 173, downloads: 4300, updatedAt: Date.now() - 8 * 86400000, description: 'First-pass review notes on open pull requests: risky diffs, missing tests, nits.' },
+    { slug: 'nearai/site-monitor', name: 'site-monitor', icon: 'radar', version: '1.1.0', owner: 'nearai', stars: 240, downloads: 6900, updatedAt: Date.now() - 15 * 86400000, description: 'Watch a page or endpoint and alert with a diff summary the moment it changes.' },
   ];
 
   // Registry entries backing Discover / the setup wizard / Integrations.
@@ -347,8 +350,8 @@ window.NUX_BILLING = {
     { name: 'google_sheets', display_name: 'Google Sheets', kind: 'wasm_tool', description: 'Append rows and build reports.' },
     { name: 'github', display_name: 'GitHub', kind: 'wasm_tool', description: 'Watch repos, releases, and issues.' },
     { name: 'linear', display_name: 'Linear', kind: 'wasm_tool', description: 'Create and update tickets from chat.' },
-    { name: 'http', display_name: 'HTTP', kind: 'native', description: 'Fetch URLs and call APIs.' },
-    { name: 'browser', display_name: 'Browser', kind: 'mcp_server', description: 'Drive a headless browser for research.' },
+    { name: 'http', display_name: 'HTTP', kind: 'native', lucideIcon: 'globe', description: 'Fetch URLs and call APIs.' },
+    { name: 'browser', display_name: 'Browser', kind: 'mcp_server', lucideIcon: 'app-window', description: 'Drive a headless browser for research.' },
   ];
 
   function getTurns(threadId) {
@@ -1370,6 +1373,7 @@ window.NUX_BILLING = {
       if (!already) {
         state.skills.push({
           name: short,
+          icon: (known && known.icon) || 'sparkles',
           version: (known && known.version) || '1.0.0',
           trust: 'Installed',
           description: (known && known.description) || 'Installed from ' + ((body && body.url) || 'ClawHub') + '.',

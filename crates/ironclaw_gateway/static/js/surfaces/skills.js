@@ -64,8 +64,10 @@ function skillTrustLabel(skill) {
   return String((skill && skill.trust) || 'Installed');
 }
 
-function skillGlyphSvg() {
-  return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>';
+// Each skill carries a purposeful lucide mark (`icon` on the wire) —
+// distinct per skill, sparkle only as the fallback.
+function skillGlyphSvg(skill) {
+  return lucideGlyphSvg((skill && skill.icon) || 'sparkles', 15);
 }
 
 function loadSkills() {
@@ -104,7 +106,7 @@ function renderSkillRow(skill) {
 
   var glyph = document.createElement('span');
   glyph.className = 'skill-row-glyph';
-  glyph.innerHTML = skillGlyphSvg();
+  glyph.innerHTML = skillGlyphSvg(skill);
   row.appendChild(glyph);
 
   var main = document.createElement('div');
@@ -231,7 +233,7 @@ function renderCatalogSkillRow(entry, installedNames) {
 
   var glyph = document.createElement('span');
   glyph.className = 'skill-row-glyph';
-  glyph.innerHTML = skillGlyphSvg();
+  glyph.innerHTML = skillGlyphSvg(entry);
   row.appendChild(glyph);
 
   var main = document.createElement('div');
