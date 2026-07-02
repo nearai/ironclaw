@@ -112,6 +112,30 @@ Same-name/different-concept collisions are also violations — rename one;
 unique names are load-bearing for grep/agent discovery (see the naming-trap
 examples: two `projection`s, `lifecycle.rs` that is skill management).
 
+## Traits — an abstraction must earn its keep
+
+The same discipline applies to traits. A trait is justified by exactly one of:
+
+1. **Polymorphism** — 2+ production implementors (62% of the workspace's 352
+   traits, measured 2026-07).
+2. **Dependency inversion** — a port defined in a lower crate, implemented by
+   a higher one. Single-impl BY DESIGN; "only one implementor" is the wrong
+   metric here — deleting it re-couples the layers the boundary tests protect.
+3. **Test seam** — the double/stub is the second implementor.
+4. **`dyn` injection point** — object-safe surface wired at composition
+   (includes security attenuation surfaces like the hooks gate sinks).
+
+A trait with one same-crate impl, no double, no `dyn` use, and no inversion is
+**ceremony** — call the concrete type; delete the trait. Judged 2026-07: only
+8 of 352 traits (2.3%) failed this test (4 ceremony, 4 dead) — listed in
+`docs/plans/2026-07-02-type-dedup-backlog.md`. New single-impl traits need
+their §-reason stated in the PR description; reviewers may block on it.
+
+Caution when auditing mechanically: naive `impl X for` grepping misses
+generic/blanket impls, qualified paths, and macro-generated impls — verify by
+reading before calling anything ceremony (two of our ten candidates turned
+out to be mocked seams).
+
 ## What this rule does NOT do
 
 Field-addition pain ("one new field touches trait + facade + wire + JS") is

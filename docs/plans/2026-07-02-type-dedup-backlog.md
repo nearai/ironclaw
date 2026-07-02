@@ -90,6 +90,31 @@ independent-evolution rationale, or collapsing into an import:
 - The `capabilities::*Request` ↔ `host_runtime::RuntimeCapability*Request`
   family — documented layered facade (+idempotency_key, non_exhaustive).
 
+## Trait cleanup (judged 2026-07-02)
+
+Full-workspace trait audit (352 traits in crates/): 219 multi-impl, 31
+cross-crate DIP seams, 30 test-seamed, 48 dyn-injection singles — all judged
+keep. Removable (agent-verified by reading defs, impls, call sites):
+
+| Trait | Verdict | Action |
+|---|---|---|
+| `reborn_traces::TraceRedactor` | CEREMONY (high) | callers already use `DeterministicTraceRedactor` concretely; drop trait + `as _` imports |
+| `filesystem::FilesystemCatalog` | CEREMONY (med) | make methods inherent on `CompositeRootFilesystem` |
+| `network::NetworkPolicyEnforcer` | CEREMONY (med) | only `Static` impl, used concretely in egress.rs |
+| `reborn::ModelRouteProviderPool` | CEREMONY (med) | do LAST — `?Sized` bounds suggest intended dyn-readiness |
+| `conversations::ConversationBindingServiceExt` | DEAD (high) | empty ext trait, zero methods |
+| `turns::AgentLoopHost` | DEAD (high) | empty alias of `AgentLoopDriverHost`, zero users |
+| `reborn::SubagentResultTombstoneStore` | DEAD (med) | never constructed/consumed |
+| `common::TrustedConstructionWitness` | DEAD (med) | verify sealed-witness intent before deleting |
+
+Explicitly KEEP despite single/zero regex-visible impls: `mcp::McpClient` and
+`scripts::ScriptBackend` (test doubles the naive scan missed),
+`hooks::{Privileged,Restricted}GateSink` (tier-split security attenuation),
+the `loop_support`/`product_workflow` Arc<dyn> ports (composition implements
+them — dependency inversion), `run_state::RunStateApprovalStore` (documented
+durable-backend extension point), `trust::TrustChangeListener` (documented
+observer scaffolding).
+
 ## Execution notes
 
 - Each cluster is one behavior-preserving PR: pick owner → import → delete
