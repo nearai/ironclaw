@@ -1682,6 +1682,112 @@ mod tests {
         assert!(!response.error);
     }
 
+    /// Build an `McpHostHttpResponse` with a caller-chosen `content-type` and
+    /// raw body bytes — the two inputs `parse_mcp_response` sniffs to pick the
+    /// SSE vs plain-JSON branch. Fixtures below are hand-authored (there are no
+    /// live-captured MCP response bodies under `tests/fixtures/`), but their
+    /// framings mirror what a spec-compliant Streamable-HTTP MCP server emits.
+    fn mcp_response(content_type: &str, body: &[u8]) -> McpHostHttpResponse {
+        McpHostHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), content_type.to_string())],
+            body: body.to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: body.len() as u64,
+            redaction_applied: false,
+        }
+    }
+
+    /// Format matrix for the single `parse_mcp_response` dispatch that every
+    /// JSON-RPC leg (`initialize`/`tools/list`/`tools/call`) funnels through.
+    /// The client advertises `Accept: application/json, text/event-stream`
+    /// (two content types), so the parser must accept BOTH framings for the
+    /// same logical response — this pins that parity at the dispatch entry
+    /// point, not just at `parse_mcp_sse_response` (already covered above).
+    #[test]
+    fn parse_mcp_response_accepts_both_advertised_framings() {
+        let id = Some(7u64);
+        let ok_body = br#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
+
+        // Plain JSON framing (content-type application/json).
+        let json = parse_mcp_response(&mcp_response("application/json", ok_body), id)
+            .expect("plain JSON framing parses");
+        assert_eq!(json.result, Some(json!({"ok": true})));
+        assert!(!json.error);
+
+        // SSE single-event framing (content-type text/event-stream).
+        let sse_single = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream",
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE single-event framing parses");
+        assert_eq!(sse_single.result, Some(json!({"ok": true})));
+
+        // SSE multi-event framing with a leading keepalive ping — the real
+        // frame ordering a streaming server emits.
+        let sse_multi = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream; charset=utf-8",
+                b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE multi-event framing parses past the keepalive");
+        assert_eq!(sse_multi.result, Some(json!({"ok": true})));
+    }
+
+    /// Error-object framing (a JSON-RPC `error` member) is surfaced as
+    /// `error == true` — in BOTH framings — rather than mis-parsed as success
+    /// or dropped. This is the recoverable, model-visible tool-error leg.
+    #[test]
+    fn parse_mcp_response_flags_error_object_in_both_framings() {
+        let id = Some(3u64);
+        let json_err = parse_mcp_response(
+            &mcp_response(
+                "application/json",
+                br#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"bad"}}"#,
+            ),
+            id,
+        )
+        .expect("JSON error-object is a valid response, not a parse failure");
+        assert!(json_err.error, "plain-JSON error object flags error");
+
+        let sse_err = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream",
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad\"}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE error-object is a valid response, not a parse failure");
+        assert!(sse_err.error, "SSE-framed error object flags error");
+    }
+
+    /// Empty / malformed bodies are rejected in both framings (mutation guard:
+    /// a parser that returned an empty-`result` success here would flip these
+    /// `Err`s to `Ok`). An empty plain-JSON body has no JSON value; an SSE body
+    /// with only keepalives has no `data:` payload carrying the expected id.
+    #[test]
+    fn parse_mcp_response_rejects_empty_bodies_in_both_framings() {
+        let id = Some(9u64);
+        assert!(
+            parse_mcp_response(&mcp_response("application/json", b""), id).is_err(),
+            "empty plain-JSON body must not parse as a success"
+        );
+        assert!(
+            parse_mcp_response(
+                &mcp_response("text/event-stream", b"event: ping\ndata:\n\n"),
+                id,
+            )
+            .is_err(),
+            "SSE body with only keepalives (no id-matching data) must not parse"
+        );
+    }
+
     fn valid_tool(name: &str, input_schema: Value) -> Value {
         json!({
             "name": name,

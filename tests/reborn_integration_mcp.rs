@@ -87,6 +87,54 @@ async fn mcp_tool_call_reaches_mock_server() {
     assert_recorded_tools_call(&server, "search", "needle-xyz-42");
 }
 
+/// Format-matrix (C-WIREFMT): the mock MCP server answers every id-bearing leg
+/// (`initialize` → `tools/list` → `tools/call`) with SSE framing
+/// (`Content-Type: text/event-stream`, `data:`-wrapped, keepalive-ping
+/// prefixed). The client advertises `Accept: application/json, text/event-stream`
+/// (`crates/ironclaw_mcp/src/lib.rs`), so this is a legal framing the real
+/// `parse_mcp_response` dispatch must handle end-to-end — through a real reqwest
+/// response's headers reaching `response_is_sse`, not just the hand-built
+/// responses in the crate-tier `parse_mcp_response_accepts_both_advertised_framings`.
+/// Twin of `mcp_tool_call_reaches_mock_server`, which exercises the plain-JSON
+/// framing of the same Accept header (the second required fixture: 2 advertised
+/// content types → ≥2 response-format fixtures).
+#[tokio::test]
+async fn mcp_tool_call_over_sse_framed_responses() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": ["mock result"]}),
+    }])
+    .await;
+    server.enable_sse_framing();
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call(
+                "mock-mcp.search",
+                serde_json::json!({"query": "needle-sse-99"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search for something")
+        .await
+        .expect("turn completes");
+    h.assert_reply_contains("done")
+        .await
+        .expect("final reply finalized over SSE-framed handshake");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool invoked despite SSE framing on every leg");
+    // Prove the SSE-framed handshake actually round-tripped over HTTP with the
+    // scripted arguments intact — the real client parsed the SSE `initialize`
+    // and `tools/list` legs and reached `tools/call`.
+    assert_recorded_tools_call(&server, "search", "needle-sse-99");
+}
+
 /// Guards `assert_mcp_tool_called` against vacuous pass: when no MCP tool ran
 /// (plain echo turn on the default backend), the assertion must return `Err`.
 #[tokio::test]
