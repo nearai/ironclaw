@@ -706,6 +706,12 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // rebuild provider calls only from stored replay metadata.
         "crates/ironclaw_reborn/src/model_gateway.rs",
         "crates/ironclaw_agent_loop/src/executor/capability_helpers.rs",
+        // Progressive tool disclosure is itself a model-protocol boundary: the
+        // catalog/selector and the bridging decorator map provider tool names
+        // (advertised, deferred, and synthetic bridge names) to/from capability
+        // ids and rebuild provider calls for the resolved target.
+        "crates/ironclaw_reborn/src/tool_disclosure.rs",
+        "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or local-dev provider tools.
         "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",

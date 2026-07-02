@@ -538,6 +538,8 @@ jobs:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
       REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
+      REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE || '1' }}
+      REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MODEL || vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
       IRONCLAW_REBORN_GOOGLE_CLIENT_ID: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID || secrets.GOOGLE_OAUTH_CLIENT_ID }}
       IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI: ${{ vars.IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI || vars.GOOGLE_OAUTH_REDIRECT_URI }}
       IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT: ${{ vars.IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT || vars.GOOGLE_ALLOWED_HD }}
@@ -652,6 +654,32 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref || steps.default_reborn_webui_v2_target.outputs.checkout_ref }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: >
+          steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.target_ref != ''
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+          path: .canonical-live-qa-harness
+      - name: Restore canonical Reborn WebUI v2 live QA harness
+        if: >
+          steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.target_ref != ''
+        run: |
+          set -euo pipefail
+          harness_ref="$(git -C .canonical-live-qa-harness rev-parse HEAD)"
+          rm -rf scripts/reborn_webui_v2_live_qa scripts/live-canary
+          cp -a .canonical-live-qa-harness/scripts/reborn_webui_v2_live_qa scripts/
+          cp -a .canonical-live-qa-harness/scripts/live-canary scripts/
+          cp .canonical-live-qa-harness/tests/e2e/pyproject.toml tests/e2e/pyproject.toml
+          mkdir -p tests/e2e/ironclaw_e2e.egg-info
+          cp .canonical-live-qa-harness/tests/e2e/ironclaw_e2e.egg-info/PKG-INFO tests/e2e/ironclaw_e2e.egg-info/PKG-INFO
+          cp .canonical-live-qa-harness/tests/e2e/ironclaw_e2e.egg-info/requires.txt tests/e2e/ironclaw_e2e.egg-info/requires.txt
+          rm -rf .canonical-live-qa-harness
+          echo "REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF=${harness_ref}" >> "${GITHUB_ENV}"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:

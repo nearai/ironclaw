@@ -9,111 +9,27 @@
 //! freeze time 3 days ahead so a just-created account appears idle without an
 //! actual wait.  Design spec §9 build-order, step 8.
 
+// The support tree is large and shared; a single-test file exercises only a
+// slice of it, so suppress dead-code warnings on the includes.
+#[allow(dead_code)]
+#[path = "support/reborn/mod.rs"]
+mod reborn_support;
+#[allow(dead_code)]
+mod support;
+
 use chrono::{Duration, Utc};
-use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountLookupRequest, NewAuthFlow,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
-};
+use ironclaw_auth::{AuthProductScope, AuthSurface, CredentialAccountLookupRequest};
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::build_google_oauth_product_auth_for_test,
+    CredentialRefreshSettings, test_support::build_google_oauth_product_auth_for_test,
 };
-use secrecy::SecretString;
-
-/// Build a 64-character hex string from a repeated byte value.
-fn hex64(fill: u8) -> String {
-    format!("{fill:02x}").repeat(32)
-}
+use reborn_support::oauth_flow::connect_google_account;
 
 fn test_scope() -> AuthProductScope {
     let resource =
         ResourceScope::local_default(UserId::new("test-user").unwrap(), InvocationId::new())
             .expect("local_default scope must build");
     AuthProductScope::new(resource, AuthSurface::Callback)
-}
-
-/// Run the standard Google OAuth connect flow and return the persisted
-/// `CredentialAccount` from the store.
-async fn connect_google_account(
-    bundle: &ironclaw_reborn_composition::test_support::OAuthProductAuthTestBundle,
-    scope: &AuthProductScope,
-    fill: u8,
-) -> ironclaw_auth::CredentialAccount {
-    let provider = AuthProviderId::new("google").unwrap();
-    let state_hash = OpaqueStateHash::new(hex64(fill)).unwrap();
-    let pkce_hash = PkceVerifierHash::new(hex64(fill.wrapping_add(1))).unwrap();
-    let code_hash = AuthorizationCodeHash::new(hex64(fill.wrapping_add(2))).unwrap();
-    let expires_at = Utc::now() + Duration::minutes(5);
-
-    let flow = bundle
-        .services
-        .flow_manager()
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider.clone(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: OAuthAuthorizationUrl::new(
-                    "https://accounts.google.com/o/oauth2/auth",
-                )
-                .unwrap(),
-                expires_at,
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: Some(state_hash.clone()),
-            pkce_verifier_hash: Some(pkce_hash.clone()),
-            expires_at,
-        })
-        .await
-        .expect("create_flow must succeed");
-
-    let response = bundle
-        .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope: scope.clone(),
-            flow_id: flow.id,
-            opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
-                provider_request: OAuthProviderCallbackRequest {
-                    provider: provider.clone(),
-                    account_label: ironclaw_auth::CredentialAccountLabel::new("Google Account")
-                        .unwrap(),
-                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                        "google-auth-code".to_string(),
-                    ))
-                    .unwrap(),
-                    authorization_code_hash: code_hash,
-                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                        "google-pkce-verifier".to_string(),
-                    ))
-                    .unwrap(),
-                    pkce_verifier_hash: pkce_hash,
-                    scopes: vec![ProviderScope::new("email").unwrap()],
-                },
-            },
-        })
-        .await
-        .expect("handle_oauth_callback must succeed");
-
-    let account_id = response
-        .credential_account_id
-        .expect("completed callback must carry a credential_account_id");
-
-    bundle
-        .services
-        .credential_account_service()
-        .get_account(CredentialAccountLookupRequest::new(
-            scope.clone(),
-            account_id,
-        ))
-        .await
-        .expect("get_account must not error")
-        .expect("credential account must be persisted after a successful OAuth callback")
 }
 
 /// Positive test: a sweep with a frozen clock 3 days ahead (past the 2-day
@@ -177,11 +93,11 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
 
     // The sweep's exchange must use the refresh_token grant (not a second
     // authorization-code exchange) — proves the refresh path, not a re-connect.
-    let refresh_bodies = bundle.egress.captured_bodies();
-    let refresh_body = String::from_utf8_lossy(&refresh_bodies[1]);
-    assert!(
-        refresh_body.contains("refresh_token"),
-        "sweep token exchange must use the refresh_token grant; body: {refresh_body}"
+    let grant_types = bundle.egress.captured_grant_types();
+    assert_eq!(
+        grant_types.get(1).map(String::as_str),
+        Some("refresh_token"),
+        "sweep token exchange must use the refresh_token grant; grant_types: {grant_types:?}"
     );
 
     // Step 5 — re-read the account through the durable account service and prove

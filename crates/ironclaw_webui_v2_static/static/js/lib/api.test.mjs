@@ -8,6 +8,7 @@ import {
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
   listAutomations,
+  listThreads,
   pauseAutomation,
   resumeAutomation,
 } from "./api.js";
@@ -19,6 +20,7 @@ test("listAutomations reads through the v2 automations route", async () => {
     setItem: () => {},
     removeItem: () => {},
   };
+  globalThis.window = { location: { origin: "http://localhost" } };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ automations: [] }), {
@@ -56,6 +58,35 @@ test("listAutomations propagates api errors from the automations route", async (
     assert.equal(error.body, "temporarily unavailable");
     return true;
   });
+});
+
+test("listThreads can request approval-only threads", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ threads: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const response = await listThreads({
+    limit: 100,
+    needsApproval: true,
+    candidateThreadId: "thread-active",
+  });
+
+  assert.deepEqual(response, { threads: [] });
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/threads?limit=100&needs_approval=true&candidate_thread_id=thread-active",
+  );
 });
 
 test("automation mutations use encoded v2 automation routes", async () => {

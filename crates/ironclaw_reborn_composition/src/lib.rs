@@ -882,6 +882,8 @@ where
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
+    #[error("invalid reborn production configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]

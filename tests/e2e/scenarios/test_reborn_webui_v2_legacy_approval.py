@@ -106,9 +106,9 @@ async def _open_stubbed_approval_thread(
                 "features": {"reborn_projects": False},
                 "attachments": {
                     "accept": ["text/plain"],
-                    "max_files_per_message": 4,
-                    "max_bytes_per_file": 1048576,
-                    "max_bytes_per_message": 4194304,
+                    "max_count": 4,
+                    "max_file_bytes": 1048576,
+                    "max_total_bytes": 4194304,
                 },
             },
         )
@@ -191,7 +191,7 @@ async def _emit_approval_gate(page, *, allow_always=True, gate_ref=GATE_REF):
                 "scope": {"label": "Workspace"},
                 "details": [
                     {"label": "Command", "value": long_command},
-                    {"label": "Directory", "value": "/tmp/reborn-approval"},
+                    {"label": "Directory", "value": "[workspace]/reborn-approval"},
                 ],
             },
         },
@@ -215,7 +215,7 @@ async def test_reborn_legacy_approval_card_renders_details_and_expands_payload(
         await expect(card).to_contain_text("Allow shell to inspect the workspace?")
         await expect(card).to_contain_text("Command")
         await expect(card).to_contain_text("Directory")
-        await expect(card).to_contain_text("/tmp/reborn-approval")
+        await expect(card).to_contain_text("[workspace]/reborn-approval")
         await expect(card.get_by_role("button", name="Approve")).to_be_visible()
         await expect(card.get_by_role("button", name="Deny")).to_be_visible()
         await expect(card.get_by_label("Always allow builtin.shell without asking")).to_be_visible()
@@ -482,7 +482,7 @@ async def test_reborn_legacy_pending_approval_does_not_block_other_thread(
             "true",
         )
 
-        await page.locator("#gateway-sidebar button").filter(
+        await page.locator(SEL_V2["sidebar_button"]).filter(
             has_text="Approval Thread B"
         ).first.click()
         await expect(

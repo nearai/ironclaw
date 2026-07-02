@@ -2,6 +2,7 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import { useT } from "../../../lib/i18n.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
   fetchExtensions,
@@ -12,10 +13,32 @@ import {
   fetchExtensionSetup,
   submitExtensionSetup,
   startExtensionOauth,
+  fetchPairingRequests,
+  approvePairingCode,
 } from "../lib/extensions-api.js";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+function isHttpsAuthUrl(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function openAuthUrl(url, popup = null) {
+  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    return { ok: true, popup };
+  }
+  return {
+    ok: true,
+    popup: window.open(url, "_blank", "noopener,noreferrer"),
+  };
+}
 
 function packageId(item) {
   return item?.package_ref?.id || null;
@@ -37,6 +60,7 @@ function catalogSort(a, b) {
 }
 
 export function useExtensions() {
+  const t = useT();
   const queryClient = useQueryClient();
 
   const statusQuery = useQuery({
@@ -48,16 +72,19 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    refetchOnMount: "always",
   });
 
   const connectableChannelsQuery = useQuery({
     queryKey: ["connectable-channels"],
     queryFn: listConnectableChannels,
+    refetchOnMount: "always",
   });
 
   const invalidate = React.useCallback(() => {
@@ -73,22 +100,39 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, kind }) => {
+    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         const message = isChannelExtensionKind(kind)
           ? `${displayName || "Channel"} installed. Connect the account using the setup panel below.`
           : res.message ||
             res.instructions ||
-            `${displayName || "Extension"} installed`;
+            t("extensions.installedSuccess", {
+              name: displayName || t("extensions.defaultName"),
+            });
         setActionResult({
           type: "success",
           message,
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
+        } else if (
+          !res.auth_url &&
+          configureAfterInstall &&
+          typeof onNeedsSetup === "function"
+        ) {
+          onNeedsSetup({
+            packageRef,
+            displayName,
+            active: false,
+            activationStatus: "setup_required",
+            onboardingState: "setup_required",
+          });
         }
       } else {
-        setActionResult({ type: "error", message: res.message || "Install failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.installFailed") });
       }
       invalidate();
     },
@@ -107,18 +151,29 @@ export function useExtensions() {
           message:
             res.message ||
             res.instructions ||
-            `${displayName || "Extension"} activated`,
+            t("extensions.activatedSuccess", {
+              name: displayName || t("extensions.defaultName"),
+            }),
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
         }
       } else if (res.auth_url) {
-        window.open(res.auth_url, "_blank", "noopener,noreferrer");
-        setActionResult({ type: "info", message: "Opening authentication…" });
+        if (openAuthUrl(res.auth_url).ok) {
+          setActionResult({ type: "info", message: t("extensions.openingAuth") });
+        } else {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
+        }
       } else if (res.awaiting_token) {
-        setActionResult({ type: "info", message: "Configuration required" });
+        setActionResult({ type: "info", message: t("extensions.configurationRequired") });
       } else {
-        setActionResult({ type: "error", message: res.message || "Activation failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.activationFailed") });
       }
       invalidate();
     },
@@ -131,9 +186,14 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => removeExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} removed` });
+        setActionResult({
+          type: "success",
+          message: t("extensions.removedSuccess", {
+            name: displayName || t("extensions.defaultName"),
+          }),
+        });
       } else {
-        setActionResult({ type: "error", message: res.message || "Remove failed" });
+        setActionResult({ type: "error", message: res.message || t("extensions.removeFailed") });
       }
       invalidate();
     },
@@ -192,6 +252,14 @@ export function useExtensions() {
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
+  const remove = React.useCallback(
+    (extension) => {
+      const name = extension?.displayName || extension?.packageRef?.id || "this extension";
+      if (!window.confirm(`Remove ${name}?`)) return;
+      removeMutation.mutate(extension);
+    },
+    [removeMutation]
+  );
 
   return {
     status,
@@ -211,7 +279,7 @@ export function useExtensions() {
     clearResult,
     install: installMutation.mutate,
     activate: activateMutation.mutate,
-    remove: removeMutation.mutate,
+    remove,
     invalidate,
   };
 }
@@ -237,7 +305,13 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secrets, fields }) => submitExtensionSetup(packageRef, secrets, fields),
+    mutationFn: ({ secrets, fields }) =>
+      submitExtensionSetup(packageRef, secrets, fields).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "Setup failed");
+        }
+        return res;
+      }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
@@ -301,13 +375,19 @@ export function useOauthSetup(packageRef) {
 
   return useMutation({
     mutationFn: ({ secret, popup }) =>
-      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+      startExtensionOauth(packageRef, secret).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "OAuth setup failed");
+        }
+        if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
+          throw new Error("Authorization URL must use HTTPS.");
+        }
+        return { res, popup };
+      }),
     onSuccess: ({ res, popup }) => {
       let authPopup = popup;
-      if (res.authorization_url && popup && !popup.closed) {
-        popup.location.href = res.authorization_url;
-      } else if (res.authorization_url) {
-        authPopup = window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      if (res.authorization_url) {
+        authPopup = openAuthUrl(res.authorization_url, popup).popup;
       } else if (popup && !popup.closed) {
         popup.close();
       }
@@ -320,4 +400,32 @@ export function useOauthSetup(packageRef) {
       if (popup && !popup.closed) popup.close();
     },
   });
+}
+
+export function usePairing(channel, options = {}) {
+  const query = useQuery({
+    queryKey: ["pairing", channel],
+    queryFn: () => fetchPairingRequests(channel),
+    enabled: Boolean(channel) && options.enabled !== false,
+    refetchInterval: 5000,
+  });
+
+  const queryClient = useQueryClient();
+
+  const approveMutation = useMutation({
+    mutationFn: ({ code }) => approvePairingCode(channel, code),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pairing", channel] });
+      queryClient.invalidateQueries({ queryKey: ["extensions"] });
+    },
+  });
+
+  return {
+    requests: query.data?.requests || [],
+    isLoading: query.isLoading,
+    approve: approveMutation.mutate,
+    isApproving: approveMutation.isPending,
+    result: approveMutation.isSuccess ? approveMutation.data : null,
+    error: approveMutation.isError ? approveMutation.error : null,
+  };
 }

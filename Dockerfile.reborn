@@ -31,6 +31,7 @@ FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY skills/ skills/
 COPY tests/ tests/
 COPY wit/ wit/
@@ -50,13 +51,14 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres \
+    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state \
     --recipe-path recipe.json
 
 FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY migrations/ migrations/
 COPY skills/ skills/
 COPY tests/ tests/
@@ -69,7 +71,7 @@ RUN mkdir -p src \
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres \
+    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state \
     --bin ironclaw-reborn
 
 FROM debian:bookworm-slim AS runtime

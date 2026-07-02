@@ -82,3 +82,8 @@ tests/fixtures/llm_traces/live/*.log
 # Local test artifacts
 .anvil/
 .codegraph/
+
+# codebase-memory knowledge graph — build artifact, not source.
+# Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
+# See CLAUDE.md -> "Code Discovery".
+.codebase-memory/

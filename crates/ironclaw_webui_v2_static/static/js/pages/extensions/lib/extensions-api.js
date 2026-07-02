@@ -4,6 +4,7 @@
 //   projection and maps those operations to the extension registry.
 
 import { apiFetch, setupExtension } from "../../../lib/api.js";
+import { redeemPairingCode } from "./pairing-api.js";
 
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
@@ -53,6 +54,13 @@ export function startExtensionOauth(packageRef, secret) {
     }
   );
 }
+export function fetchPairingRequests() {
+  return Promise.resolve({ requests: [] });
+}
+export function approvePairingCode(channel, code) {
+  return redeemPairingCode(channel, code);
+}
+
 function packageId(packageRef) {
   const id = typeof packageRef === "string" ? packageRef : packageRef?.id;
   if (!id) {

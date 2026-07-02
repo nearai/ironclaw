@@ -651,25 +651,22 @@ impl DynamicSlackTriggeredRunDeliveryHook {
 #[async_trait::async_trait]
 impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
-        let hook = self.clone();
-        tokio::spawn(async move {
-            match hook.current_driver().await {
-                Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
-                Ok(None) => {
-                    tracing::debug!(
-                        %run_id,
-                        "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %run_id,
-                        %error,
-                        "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
-                    );
-                }
+        match self.current_driver().await {
+            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+            Ok(None) => {
+                tracing::debug!(
+                    %run_id,
+                    "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
+                );
             }
-        });
+            Err(error) => {
+                tracing::warn!(
+                    %run_id,
+                    %error,
+                    "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
+                );
+            }
+        }
     }
 }
 

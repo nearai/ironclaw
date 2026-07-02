@@ -177,6 +177,16 @@ impl RebornLocalExtensionManagementPort {
         }
     }
 
+    /// Test-support access to the extension installation store.
+    ///
+    /// Mirrors the `installation_store` field that `build_local_runtime` wires
+    /// in when constructing `RebornLocalExtensionManagementPort`. For tests
+    /// only — zero bytes shipped in production builds.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn installation_store_for_test(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
     pub(crate) async fn search(
         &self,
         query: &str,
@@ -1193,7 +1203,15 @@ fn activation_success_message(
     if visible_capability_ids.is_empty() {
         return "Extension activation succeeded. No model-visible tools were published by this extension; follow any extension-specific setup or connection UI before claiming new capabilities are available.".to_string();
     }
-    "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.".to_string()
+    let mut message = String::from(
+        "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.",
+    );
+    message.push_str(
+        " These tools are now callable by exact name — invoke one directly with tool_call(name=\"<tool>\", arguments={ ... }), or tool_describe(name=\"<tool>\") first if you need its full schema. Do NOT call tool_search for these; you already have their names: ",
+    );
+    message.push_str(&visible_capability_ids.join(", "));
+    message.push('.');
+    message
 }
 
 // Build the structured connect requirement for an inbound channel. The Slack copy
@@ -1236,7 +1254,6 @@ fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool 
             && host_api.section.as_str() == "product_adapter.inbound"
     })
 }
-
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductWorkflowError> {
@@ -1462,6 +1479,43 @@ mod tests {
             Some(&payload)
         ));
         assert!(!extension_search_has_ready_result(Some(&payload)));
+    }
+
+    #[test]
+    fn activation_message_enumerates_published_tools_by_exact_name() {
+        // Regression: the model only sees a *count* of deferred tools, so after
+        // activating an extension it must be handed the exact tool names or it
+        // assumes they are unavailable and gives up. The success message must name
+        // every published capability and steer the model to direct invocation.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid package ref");
+        let package = fixture_extension_package().package;
+        let visible_capability_ids = vec!["fixture.search".to_string()];
+        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+        assert!(message.contains("fixture.search"));
+        assert!(
+            message.contains("callable by exact name"),
+            "must steer the model to tool_call by name, got: {message}"
+        );
+        assert!(
+            message.contains("Do NOT call tool_search for these"),
+            "must stop the model from re-searching for already-named tools, got: {message}"
+        );
+    }
+
+    #[test]
+    fn activation_message_without_published_tools_keeps_the_base_message_only() {
+        // Channel-only / tool-less extensions publish no model tools; the message
+        // must not invent an empty tool list or the direct-invocation guidance.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid package ref");
+        let package = fixture_extension_package().package;
+        let message = activation_success_message(&package_ref, &package, &[]);
+        assert!(message.contains("Extension activation succeeded"));
+        assert!(
+            !message.contains("callable by exact name"),
+            "no tools published ⇒ no direct-invocation guidance, got: {message}"
+        );
     }
 
     #[tokio::test]

@@ -766,6 +766,13 @@ export function useChat(threadId) {
           content,
           attachments: wireAttachments,
         });
+        if (response?.outcome !== "rejected_busy") {
+          touchThreadInCache({
+            threadId: response?.thread_id || sendThreadId,
+            messageContent: renderContent,
+            updatedAt: pendingRecord.timestamp,
+          });
+        }
         // Refresh the sidebar only while the cached entry is missing
         // or title-less. Once the first-message title has appeared,
         // repeated sends do not need to refetch the whole thread list.

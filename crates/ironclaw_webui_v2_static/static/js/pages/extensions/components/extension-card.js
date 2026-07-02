@@ -144,7 +144,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   } else if (primaryAction === "activate") {
     primaryActions.push({
       id: "activate",
-      label: "Activate",
+      label: t("extensions.activate"),
       run: () => onActivate(configurePayload),
     });
   }
@@ -156,10 +156,18 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       run: () => onConfigure(configurePayload),
     });
   }
-  if (canManage && isChannelExtensionKind(ext.kind) && (state === "setup_required" || state === "failed")) {
+  const hasOverflowConfigureAction = overflowActions.some(
+    (action) => action.id === "configure"
+  );
+  if (
+    canManage &&
+    primaryAction !== "configure" &&
+    isChannelExtensionKind(ext.kind) &&
+    (state === "setup_required" || state === "failed")
+  ) {
     overflowActions.push({
       id: "setup",
-      label: "Setup",
+      label: t("extensions.setup"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -167,11 +175,12 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (
     canManage &&
     isChannelExtensionKind(ext.kind) &&
+    !hasOverflowConfigureAction &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
     overflowActions.push({
       id: "reconfigure",
-      label: "Reconfigure",
+      label: t("extensions.reconfigure"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -179,7 +188,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage) {
     overflowActions.push({
       id: "remove",
-      label: t("common.remove") || "Remove",
+      label: t("common.remove"),
       icon: "trash",
       danger: true,
       run: () => onRemove(configurePayload),
@@ -239,7 +248,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
                 />
               </button>
             `
-          : html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">No capabilities</span>`}
+          : html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">${t("extensions.noCapabilities")}</span>`}
         <span className="flex-1"></span>
         ${primary &&
         html`
@@ -259,6 +268,9 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
   const kindLabel = t(`extensions.kind.${entry.kind}`) || KIND_LABELS[entry.kind] || entry.kind;
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
+  const configureAfterInstall = Boolean(
+    entry.needs_setup || entry.has_auth || isChannelExtensionKind(entry.kind)
+  );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
@@ -306,11 +318,17 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
           <${Button}
             variant="outline"
             size="sm"
-            onClick=${() => onInstall({ packageRef: entry.package_ref, displayName, kind: entry.kind })}
+            onClick=${() =>
+              onInstall({
+                packageRef: entry.package_ref,
+                displayName,
+                kind: entry.kind,
+                configureAfterInstall,
+              })}
             disabled=${isBusy}
           >
             <${Icon} name="plus" className="mr-1.5 h-3.5 w-3.5" />
-            Install
+            ${t("extensions.install")}
           <//>
         `}
       </div>

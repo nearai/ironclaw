@@ -258,10 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn slack_connect_actions_live_only_in_extensions_assets() {
+    fn chat_omits_connect_action_while_extensions_render_slack_setup_ui() {
         let chat = asset_text("js/pages/chat/chat.js");
         assert!(!chat.contains("ChannelConnectCard"));
         assert!(!chat.contains("channelConnectAction"));
+        assert!(!chat.contains("dismissChannelConnectAction"));
 
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(!use_chat.contains("resolveConnectAction"));
@@ -549,6 +550,11 @@ mod tests {
         assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
         assert!(auth.contains("setIsSessionChecking(true);"));
         assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(
+            auth.contains(
+                "globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve)"
+            )
+        );
         assert!(!auth.contains("isAdmin: false"));
 
         let sidebar_nav = asset_text("js/components/sidebar-nav.js");

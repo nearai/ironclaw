@@ -360,7 +360,9 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process_output::{COMMAND_MAX_OUTPUT_SIZE, SavedCommandOutputSanitization};
+    use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
+    #[cfg(unix)]
+    use crate::process_output::SavedCommandOutputSanitization;
     use std::sync::Mutex;
 
     #[derive(Debug)]

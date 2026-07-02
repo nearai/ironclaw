@@ -177,6 +177,29 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
 });
 
+test("useChatEvents: skill activation projection stays out of chat transcript", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            skill_activation: {
+              id: "activation-1",
+              skill_names: ["github"],
+              feedback: ["github: activated after model selection"],
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.messages, []);
+});
+
 test("useChatEvents: auth gate stays visible through progress events", () => {
   const runId = "run-auth-1";
   const authGate = {
@@ -679,6 +702,56 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+});
+
+test("useChatEvents: repeated failed projection updates existing error content", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: (input) =>
+      input.failureSummary || input.failureCategory || "run failed",
+  });
+
+  harness.setCurrentActiveRun({
+    runId: "run-failed-update",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed-update",
+              status: "failed",
+              failure_category: "driver_invalid_request",
+            },
+          },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed-update",
+              status: "failed",
+              failure_category: "driver_protocol_violation",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-failed-update");
+  assert.equal(harness.messages[0].content, "driver_protocol_violation");
 });
 
 test("useChatEvents: typed failed event appends visible error", () => {

@@ -25,6 +25,21 @@ import {
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events.js";
 
+const STATE_SLOT = Object.freeze({
+  cooldownUntil: 0,
+  now: 1,
+  activeRun: 2,
+  isProcessing: 3,
+  pendingGate: 4,
+  pendingOnboarding: 5,
+  busyGateNotice: 6,
+  stateThreadId: 7,
+});
+
+function stateUpdatesFor(updates, slot) {
+  return updates.filter((update) => update.index === slot);
+}
+
 function useChatSourceForTest() {
   const source = readFileSync(
     new URL("../hooks/useChat.js", import.meta.url),
@@ -61,6 +76,8 @@ function runUseChatSource(context) {
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
   }
+  if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
+  if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
 }
 
@@ -359,6 +376,33 @@ test("useChat.send: stamps render attachments on the optimistic message", async 
       preview_url: "data:image/png;base64,cG5n",
     },
   ]);
+});
+
+test("useChat.send: touches sidebar cache without refetching thread list", async () => {
+  const threadId = "thread-1";
+  const { context } = createSendCaptureContext();
+  let touched = null;
+
+  context.queryClient.invalidateQueries = () => {
+    throw new Error("send should not refetch the full thread list");
+  };
+  context.queryClient.getQueryData = () => ({
+    threads: [{ id: threadId, title: "Existing title" }],
+  });
+  context.touchThreadInCache = (update) => {
+    touched = update;
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("raw wire content", {
+    displayContent: "visible sidebar title",
+  });
+
+  assert.equal(touched.threadId, threadId);
+  assert.equal(touched.messageContent, "visible sidebar title");
+  assert.match(touched.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("useChat.send: target-thread send does not append into active thread", async () => {

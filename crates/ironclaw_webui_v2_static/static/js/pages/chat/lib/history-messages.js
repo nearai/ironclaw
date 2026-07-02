@@ -186,6 +186,17 @@ export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
   const errorKind = preview.error_kind || null;
   const activityOrder = numericActivityOrder(preview.activity_order);
+  const hasFailureDetail = !!(
+    preview.output_summary ||
+    preview.output_preview ||
+    preview.result_ref
+  );
+  const toolError =
+    preview.output_summary ||
+    preview.output_preview ||
+    toolErrorText(errorKind) ||
+    preview.result_ref ||
+    null;
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
@@ -200,13 +211,12 @@ export function toolCardFromPreview(preview) {
     toolResultPreview: failed
       ? null
       : preview.output_preview || preview.output_summary || null,
-    toolError: failed
-      ? toolErrorText(errorKind) ||
-        preview.output_summary ||
-        preview.output_preview ||
-        preview.result_ref ||
-        null
-      : null,
+    // Prefer the backend's failure summary/preview (which carries actionable
+    // detail like invalid-input field issues) over the bare error kind, so the
+    // Error tab shows "Invalid input: field — missing required field" rather
+    // than just "invalid_input". Falls back to the kind when no summary exists.
+    toolError: failed ? toolError : null,
+    toolErrorIsBareKind: failed && !!errorKind && !hasFailureDetail,
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
@@ -229,6 +239,7 @@ export function toolCardFromPreview(preview) {
 export function toolCardFromActivity(activity) {
   const activityOrder = numericActivityOrder(activity.activity_order);
   const errorKind = activity.error_kind || null;
+  const hasErrorDetail = !!activity.error_detail;
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
@@ -238,7 +249,11 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: toolErrorText(errorKind),
+    // Prefer the backend's sanitized failure summary (e.g. "invalid JSON: ...")
+    // over the bare error kind, so a live failed tool card shows the real
+    // reason. Falls back to the kind when no detail is present.
+    toolError: activity.error_detail || toolErrorText(errorKind),
+    toolErrorIsBareKind: !!errorKind && !hasErrorDetail,
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,

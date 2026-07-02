@@ -299,6 +299,14 @@ pub struct CapabilityActivityProjection {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized display detail derived from `RuntimeEvent.error_summary`.
+    ///
+    /// This intentionally uses the product-facing `error_detail` wire name:
+    /// consumers render it as optional per-tool failure detail, not as the
+    /// durable event's source summary field. Projection replay re-runs the
+    /// runtime-event sanitizer before populating this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     #[serde(default)]
     pub first_cursor: EventCursor,
     pub last_cursor: EventCursor,

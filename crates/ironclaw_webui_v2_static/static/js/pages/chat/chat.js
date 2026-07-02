@@ -1,7 +1,5 @@
 import { React, html } from "../../lib/html.js";
-import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
-import { Icon } from "../../design-system/icons.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -53,6 +51,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  globalAutoApproveEnabled = false,
 }) {
   const t = useT();
   const {
@@ -122,6 +121,7 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  const logsPath = activeThreadId ? buildScopedLogsPath({ threadId: activeThreadId }) : null;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -130,15 +130,6 @@ export function Chat({
       !activeThreadHasGate &&
       !activeThreadHasOnboarding
   );
-  const activeRunLogsPath =
-    activeThreadId &&
-    activeRun?.runId &&
-    activeRun.threadId === activeThreadId
-      ? buildScopedLogsPath(
-          { threadId: activeThreadId, runId: activeRun.runId },
-          { absolute: true },
-        )
-      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
       if (activeThreadHasGate) {
@@ -251,19 +242,6 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
-        ${isProcessing && !pendingGate && activeRunLogsPath && html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <${Link}
-              to=${activeRunLogsPath}
-              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-              title=${t("nav.logs")}
-            >
-              <${Icon} name="list" className="h-3.5 w-3.5" />
-              ${t("nav.logs")}
-            <//>
-          </div>
-        `}
-
         ${historyLoadError &&
         html`
           <div
@@ -299,6 +277,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
+            logsPath=${logsPath}
             pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
@@ -349,6 +328,7 @@ export function Chat({
               : html`
               <${ApprovalCard}
                 gate=${pendingGate}
+                globalAutoApproveEnabled=${globalAutoApproveEnabled}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>

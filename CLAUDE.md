@@ -2,6 +2,35 @@
 
 **IronClaw** is a secure personal AI assistant — user-first security, self-expanding tools, defense in depth, multi-channel access with proactive background execution.
 
+## Code Discovery — Query the Knowledge Graph First
+
+This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server): ~464k nodes / ~2.5M edges spanning all of `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+
+**Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
+
+**Freshness (check at the start of a discovery task):** run `bash scripts/codebase-graph.sh status` — it compares the graph's indexed commit against `HEAD`. Then:
+- **Missing** → `index_repository(repo_path=".")` once to build it.
+- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository` to fully refresh.
+- The graph is a point-in-time index — verify anything it asserts against live code before acting.
+
+**Discovery recipes (use these instead of `Grep` for code structure):**
+- Where a symbol is defined → `search_graph(name_pattern=…)`, then `get_code_snippet(qualified_name=…)`
+- Who calls X / what X calls → `trace_path(function_name=…, mode="calls")`
+- How a value flows across layers → `trace_path(mode="data_flow")`
+- Cross-crate / cross-service path (the reborn 5-layer feature flow) → `trace_path(mode="cross_service")`
+- Structure of an area → `get_architecture(…)`; graph-augmented text search → `search_code(pattern=…)`
+- Arbitrary structural queries → `query_graph(<Cypher>)`
+
+`Grep`/`Glob`/`Read` remain correct for text, config, and non-code files — and for reading a file the graph pointed you to. For *code structure*, the graph comes first.
+
+**Narrative orientation (what/why, not where):** prose docs for each subsystem live in `openwiki/` — an auto-generated wiki kept fresh by `.github/workflows/openwiki-update.yml`. For *"what does this subsystem do / how does this flow work"* questions, `Read` the relevant `openwiki/` page; use the graph for precise structure. Do not hand-edit `openwiki/` — it is regenerated. The two layers are complementary: `openwiki/` = prose map, the graph = exact index.
+
+## Where to Build — Reborn-First
+
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (`reborn_cli`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+
+`src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
+
 ## Build & Test
 
 ```bash
