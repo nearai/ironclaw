@@ -90,7 +90,7 @@ export GOOGLE_OAUTH_CLIENT_SECRET=<your-client-secret>
 运行以下命令安装扩展：
 
 ```bash
-ironclaw registry install google-calendar
+ironclaw registry install google_calendar
 ```
 
 </Step>
@@ -100,7 +100,7 @@ ironclaw registry install google-calendar
 向 IronClaw 提供您的 OAuth 凭证：
 
 ```bash
-ironclaw tool auth google-calendar
+ironclaw tool auth google_calendar
 ```
 
 按照提示粘贴 `credentials.json` 文件内容，或者提供该文件的路径。IronClaw 会为您打开一个浏览器窗口来授权访问日历。授权完成后，token 会被安全存储。
