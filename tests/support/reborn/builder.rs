@@ -111,6 +111,10 @@ pub struct RebornIntegrationHarnessBuilder {
     /// E-GATEWAY: when set, the model call parks until released, enabling a
     /// mid-turn cancel test. Threaded into the degenerate one-thread group.
     park_gate: Option<ParkingModelGate>,
+    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
+    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
+    /// group. See [`RebornThreadBuilder::fail_model`].
+    fail_model: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -145,6 +149,14 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
         self.park_gate = Some(gate);
+        self
+    }
+
+    /// Fail this harness's model call unconditionally with a fixed, non-retryable
+    /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
+    /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
+    pub fn fail_model(mut self) -> Self {
+        self.fail_model = true;
         self
     }
 
@@ -298,6 +310,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .park_model_opt(self.park_gate)
+            .fail_model_opt(self.fail_model)
             .build()
             .await
     }
@@ -389,6 +402,7 @@ impl RebornIntegrationHarness {
             safety_context: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
+            fail_model: false,
         }
     }
 
@@ -403,6 +417,20 @@ impl RebornIntegrationHarness {
     /// — the caller drives the wait (`wait_for_status`). Used by approval/auth flows
     /// where the turn blocks on a gate rather than completing.
     pub async fn submit_turn_async(&self, text: &str) -> HarnessResult<TurnRunId> {
+        match self.submit_turn_ack(text).await? {
+            ProductInboundAck::Accepted {
+                submitted_run_id, ..
+            } => Ok(submitted_run_id),
+            other => Err(format!("expected accepted inbound ack, got {other:?}").into()),
+        }
+    }
+
+    /// Submit a user turn and return the raw `ProductInboundAck` — `Accepted` OR
+    /// `RejectedBusy` (thread already has an active run). Most callers want
+    /// `submit_turn_async`, which narrows to `Accepted` and errors on any other
+    /// ack; this is the seam for C-ERRORS' busy-reject test, which needs to
+    /// observe `RejectedBusy` without that narrowing turning it into an `Err`.
+    pub async fn submit_turn_ack(&self, text: &str) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -411,13 +439,7 @@ impl RebornIntegrationHarness {
             text,
             ProductTriggerReason::DirectChat,
         )?;
-        let ack = self.workflow.accept_inbound(envelope).await?;
-        match ack {
-            ProductInboundAck::Accepted {
-                submitted_run_id, ..
-            } => Ok(submitted_run_id),
-            other => Err(format!("expected accepted inbound ack, got {other:?}").into()),
-        }
+        Ok(self.workflow.accept_inbound(envelope).await?)
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning

@@ -2455,6 +2455,27 @@ async fn build_local_dev_root_filesystem(
 /// any on-disk path assertion all derive from this constant.
 pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
+/// Open (or create) the local-dev libSQL database file at `root` — just the
+/// connection, no migrations/mount. One owner for the `libsql::Builder::new_local`
+/// sequence: [`build_default_local_dev_database_roots`] (production) and the
+/// C-DURABLE test-support trigger-repository reopen
+/// (`open_local_dev_trigger_repository_for_test`) both call this rather than
+/// each opening their own connection to the same file.
+#[cfg(feature = "libsql")]
+async fn open_local_dev_libsql_database(
+    root: &Path,
+) -> Result<Arc<libsql::Database>, RebornBuildError> {
+    let db_path = root.join(LOCAL_DEV_DB_FILENAME);
+    Ok(Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev libSQL database could not be opened: {error}"),
+            })?,
+    ))
+}
+
 // `pub(crate)` so the `test_support` accessor
 // (`build_default_local_dev_database_roots_for_test`) can call this
 // without duplicating the 4-step libSQL setup sequence (Builder →
@@ -2466,15 +2487,7 @@ pub(crate) async fn build_default_local_dev_database_roots(
 ) -> Result<LocalDevDurableBackend, RebornBuildError> {
     #[cfg(feature = "libsql")]
     {
-        let db_path = root.join(LOCAL_DEV_DB_FILENAME);
-        let db = Arc::new(
-            libsql::Builder::new_local(&db_path)
-                .build()
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("local-dev libSQL database could not be opened: {error}"),
-                })?,
-        );
+        let db = open_local_dev_libsql_database(root).await?;
         let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
         database.run_migrations().await?;
         mount_local_dev_database_roots(composite, database)?;
@@ -2567,6 +2580,41 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
             reason: format!("extension installation state could not be reopened: {error}"),
         })?;
     Ok(Arc::new(store))
+}
+
+/// Test-only (C-DURABLE seam): open a FRESH, independent
+/// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
+/// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
+/// (same on-disk root; a sibling capability store). Reuses
+/// [`mount_default_local_dev_database_roots`] + the production [`crate::wrap_scoped`]
+/// so the reopen mounts + scopes the SAME way `build_local_runtime` does when it
+/// first builds `approval_requests` — the reopen path never drifts from
+/// production. Tests only; zero bytes in production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_approval_request_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn ironclaw_run_state::ApprovalRequestStore>, RebornBuildError> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
+}
+
+/// Test-only (C-DURABLE seam): open a FRESH, independent
+/// [`ironclaw_triggers::TriggerRepository`] at an existing local-dev
+/// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`].
+/// Reuses [`open_local_dev_libsql_database`] (the same libSQL-open sequence
+/// production uses) AND delegates to [`local_dev_trigger_repository`] for
+/// repository construction + migrations, so the reopen path shares the SAME
+/// construction code as production local-dev wiring — never a second place to
+/// update if trigger repository setup changes. Tests only; zero bytes in
+/// production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_trigger_repository_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let db = open_local_dev_libsql_database(storage_root).await?;
+    local_dev_trigger_repository(&LocalDevDurableBackend::LibSql(db)).await
 }
 
 fn mount_local_dev_memory_root<F>(
