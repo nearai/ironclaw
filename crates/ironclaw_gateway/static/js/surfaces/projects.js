@@ -731,6 +731,61 @@ function loadMissions() {
 // Kanban board: one column per status with the count in the column header
 // (replaces the old count tiles + flat list). Cards open the task detail
 // sheet; statuses change through the sheet's pause/resume actions.
+// Null state for Tasks: explains what tasks ARE and offers three one-click
+// starters (curated use cases) that drop the prompt into chat. Rendered
+// lazily so the starter list always reflects NUX_DATA.
+function renderTasksEmptyState(container) {
+  var useCases = (typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [];
+  var starterIds = ['daily-briefing', 'keyword-monitor', 'deploy-watcher'];
+  var starters = starterIds
+    .map(function(id) {
+      return useCases.find(function(u) { return u.id === id; });
+    })
+    .filter(Boolean);
+
+  var html =
+    '<div class="tasks-empty-hero" aria-hidden="true">'
+    + '<div class="tasks-empty-ghost">'
+    + ['todo', 'doing', 'done'].map(function(col, i) {
+      return '<div class="tasks-empty-ghost-col">'
+        + '<span class="tasks-empty-ghost-dot c' + i + '"></span>'
+        + '<span class="tasks-empty-ghost-bar w1"></span>'
+        + (i !== 2 ? '<span class="tasks-empty-ghost-bar w2"></span>' : '')
+        + '</div>';
+    }).join('')
+    + '</div>'
+    + '</div>'
+    + '<div class="tasks-empty-title">' + escapeHtml(I18n.t('tasks.emptyTitle')) + '</div>'
+    + '<div class="tasks-empty-desc">' + escapeHtml(I18n.t('tasks.emptyDesc')) + '</div>'
+    + '<div class="tasks-empty-label">' + escapeHtml(I18n.t('tasks.emptyStartersLabel')) + '</div>'
+    + '<div class="tasks-empty-starters">';
+
+  starters.forEach(function(u) {
+    html += '<button type="button" class="tasks-empty-starter" data-starter-prompt="'
+      + escapeHtml(u.prompt) + '">'
+      + '<span class="tasks-empty-starter-icon">' + taskIconSvg(u.title + ' ' + u.description, 16) + '</span>'
+      + '<span class="tasks-empty-starter-body">'
+      + '<span class="tasks-empty-starter-title">' + escapeHtml(u.title) + '</span>'
+      + '<span class="tasks-empty-starter-desc">' + escapeHtml(u.description) + '</span>'
+      + '</span>'
+      + '<span class="tasks-empty-starter-arrow" aria-hidden="true">'
+      + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>'
+      + '</span>'
+      + '</button>';
+  });
+
+  html += '</div>'
+    + '<div class="tasks-empty-footnote">' + escapeHtml(I18n.t('tasks.emptyFootnote')) + '</div>';
+
+  container.innerHTML = html;
+  container.querySelectorAll('[data-starter-prompt]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      switchTab('chat');
+      prefillChatPrompt(btn.getAttribute('data-starter-prompt'));
+    });
+  });
+}
+
 function renderMissionsList(missions) {
   var board = document.getElementById('tasks-kanban');
   var empty = document.getElementById('missions-empty');
@@ -740,7 +795,8 @@ function renderMissionsList(missions) {
   if (!missions || missions.length === 0) {
     board.innerHTML = '';
     if (body) body.style.display = 'none';
-    empty.style.display = 'block';
+    renderTasksEmptyState(empty);
+    empty.style.display = 'flex';
     return;
   }
 

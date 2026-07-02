@@ -1,5 +1,164 @@
 /* ── Tasks surface: kanban board, detail sheet, floating chat heads ────── */
 
+/* ── Null state: ghost kanban + one-click starters ── */
+
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 560px;
+  margin: 8vh auto 0;
+  padding: 0 var(--v2-space-6) var(--v2-space-8);
+  text-align: center;
+}
+
+.tasks-empty-hero {
+  margin-bottom: var(--v2-space-5);
+}
+
+.tasks-empty-ghost {
+  display: flex;
+  gap: var(--v2-space-2);
+}
+
+.tasks-empty-ghost-col {
+  width: 74px;
+  padding: var(--v2-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  border: 1px dashed var(--border-hover);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-soft);
+}
+
+.tasks-empty-ghost-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--v2-radius-full);
+}
+
+.tasks-empty-ghost-dot.c0 { background: var(--accent); opacity: 0.75; }
+.tasks-empty-ghost-dot.c1 { background: var(--warning); opacity: 0.75; }
+.tasks-empty-ghost-dot.c2 { background: var(--success); opacity: 0.75; }
+
+.tasks-empty-ghost-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--v2-surface-muted);
+}
+
+.tasks-empty-ghost-bar.w1 { width: 70%; }
+.tasks-empty-ghost-bar.w2 { width: 45%; }
+
+.tasks-empty-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: var(--heading-tracking);
+  color: var(--text);
+  margin-bottom: var(--v2-space-2);
+}
+
+.tasks-empty-desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: var(--v2-space-6);
+}
+
+.tasks-empty-label {
+  align-self: flex-start;
+  font-family: var(--font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: var(--v2-space-2);
+}
+
+.tasks-empty-starters {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+  background: var(--bg);
+  overflow: hidden;
+  text-align: left;
+}
+
+.tasks-empty-starter {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-3);
+  width: 100%;
+  padding: var(--v2-space-3) var(--v2-space-4);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-sans);
+  transition: background var(--transition-fast);
+}
+
+.tasks-empty-starter:last-child { border-bottom: none; }
+
+.tasks-empty-starter:hover { background: var(--hover-surface); }
+
+.tasks-empty-starter-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: var(--v2-radius-xs);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.tasks-empty-starter-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tasks-empty-starter-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tasks-empty-starter-desc {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-empty-starter-arrow {
+  color: var(--text-dimmed);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.tasks-empty-starter:hover .tasks-empty-starter-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.tasks-empty-footnote {
+  margin-top: var(--v2-space-4);
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-dimmed);
+}
+
 /* Kanban board */
 
 .tasks-kanban {

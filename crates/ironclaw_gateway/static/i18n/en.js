@@ -131,6 +131,10 @@ I18n.register('en', {
 
   // Tasks surface (missions + jobs)
   'tasks.subtitle': 'Everything your agent is working on \u2014 recurring missions and one-off jobs.',
+  'tasks.emptyTitle': 'No tasks yet',
+  'tasks.emptyDesc': 'Tasks are the work your agent runs on its own \u2014 schedules, monitors, and event triggers. Describe one in chat and it shows up here with its runs and status.',
+  'tasks.emptyStartersLabel': 'Start with one of these',
+  'tasks.emptyFootnote': 'Or just tell the agent what to take off your plate \u2014 in your own words.',
   'tasks.threads': 'threads',
   'tasks.columnEmpty': 'Nothing here yet',
   'tasks.openFullPage': 'Open full page',

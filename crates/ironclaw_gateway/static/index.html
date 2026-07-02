@@ -461,9 +461,9 @@
             <div class="tasks-kanban" id="tasks-kanban"></div>
             <div class="missions-activity-col" id="missions-activity-col"></div>
           </div>
-          <div class="empty-state" id="missions-empty" style="display:none">
-            <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
-          </div>
+          <!-- Actionable null state: ghost kanban + starter automations
+               (populated by renderTasksEmptyState in projects.js). -->
+          <div class="tasks-empty" id="missions-empty" style="display:none"></div>
           <div class="mission-detail" id="mission-detail" style="display:none"></div>
         </div>
       </div>
