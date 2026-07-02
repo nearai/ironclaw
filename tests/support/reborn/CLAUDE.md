@@ -236,8 +236,11 @@ Commons capture and skill learning hang off in production. Off by default
 (`turn_event_sink: None`, matching every pre-existing test).
 
 - `assert_turn_event_recorded(kind)` — at least one recorded `TurnLifecycleEvent`
-  of that `TurnEventKind` (e.g. `Completed`). The sink is group-shared, not
-  baseline-sliced; match on `run_id` if a group thread needs scoping.
+  of that `TurnEventKind` (e.g. `Completed`). The sink is group-shared, but the
+  harness records `baseline_turn_event_count` at construction and
+  `recorded_turn_events` slices `[baseline..]` (R2), so each thread only sees
+  events its own turns published — a sibling thread's earlier event can't make
+  this assertion pass.
 
 ### Attachments (multimodal)
 
