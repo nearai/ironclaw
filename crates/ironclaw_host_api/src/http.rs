@@ -273,9 +273,36 @@ pub struct CapabilityHostHttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub network_policy: NetworkPolicy,
+    /// Host-derived credential injection plan (authority-bearing).
+    ///
+    /// Same contract as [`RuntimeHttpEgressRequest::credential_injections`]:
+    /// runtime lanes and guest/plugin code must not invent it from untrusted
+    /// input — it is derived by upstream capability/obligation composition.
     pub credential_injections: Vec<RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
     pub timeout_ms: Option<u32>,
+}
+
+impl CapabilityHostHttpRequest {
+    /// Translate into the runtime-lane [`RuntimeHttpEgressRequest`] for the given
+    /// `runtime`. Single owner of this mapping so a field added to either type is
+    /// updated in one place rather than in each capability host by hand.
+    pub fn into_runtime_request(self, runtime: RuntimeKind) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime,
+            scope: self.scope,
+            capability_id: self.capability_id,
+            method: self.method,
+            url: self.url,
+            headers: self.headers,
+            body: self.body,
+            network_policy: self.network_policy,
+            credential_injections: self.credential_injections,
+            response_body_limit: self.response_body_limit,
+            save_body_to: None,
+            timeout_ms: self.timeout_ms,
+        }
+    }
 }
 
 pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_body_limit_exceeded";

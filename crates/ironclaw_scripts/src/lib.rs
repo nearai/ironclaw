@@ -18,8 +18,7 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, MountView,
     ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope, ResourceUsage,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -171,20 +170,10 @@ where
         &self,
         request: CapabilityHostHttpRequest,
     ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
-        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Script,
-            scope: request.scope,
-            capability_id: request.capability_id,
-            method: request.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
-            network_policy: request.network_policy,
-            credential_injections: request.credential_injections,
-            response_body_limit: request.response_body_limit,
-            save_body_to: None,
-            timeout_ms: request.timeout_ms,
-        }))
+        AssertUnwindSafe(
+            self.egress
+                .execute(request.into_runtime_request(RuntimeKind::Script)),
+        )
         .catch_unwind()
         .await
         .map_err(|_| ScriptHostHttpError::Egress {

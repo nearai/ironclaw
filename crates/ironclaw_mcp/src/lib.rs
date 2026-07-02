@@ -24,8 +24,8 @@ use ironclaw_host_api::{
     NetworkPolicy, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
     ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeCredentialInjection,
     RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -215,20 +215,10 @@ where
         &self,
         request: CapabilityHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError> {
-        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Mcp,
-            scope: request.scope,
-            capability_id: request.capability_id,
-            method: request.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
-            network_policy: request.network_policy,
-            credential_injections: request.credential_injections,
-            response_body_limit: request.response_body_limit,
-            save_body_to: None,
-            timeout_ms: request.timeout_ms,
-        }))
+        AssertUnwindSafe(
+            self.egress
+                .execute(request.into_runtime_request(RuntimeKind::Mcp)),
+        )
         .catch_unwind()
         .await
         .map_err(|_| McpHostHttpError::Egress {
