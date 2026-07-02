@@ -72,7 +72,7 @@ export function Modal({
     >
       <!-- Dim layer -->
       <div
-        className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+        className="absolute inset-0 bg-[var(--v2-scrim)] backdrop-blur-sm"
         onClick=${onClose}
         aria-hidden="true"
       />

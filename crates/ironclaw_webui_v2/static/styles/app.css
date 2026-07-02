@@ -55,6 +55,17 @@
   --v2-rail:    #f5f5f7;
   --v2-input-bg: #ffffff;
 
+  /* Code surface — a distinct role from input-bg: inline code and
+     code blocks sit on a grey wash even where inputs are white
+     (nux light --code-bg). */
+  --v2-code-bg: #f0f0f2;
+
+  /* Shadows — the nux LIGHT elevation scale is much softer than
+     dark's (reconciled with the onboarding demo, PR #5565). */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+
   /* Typography — nux light ink */
   --v2-text:        #1a1a2e;
   --v2-text-strong: #090909;
@@ -109,6 +120,15 @@
 
   --v2-rail:     #0f0f11;
   --v2-input-bg: #111113;
+
+  /* Code surface (nux dark --code-bg; coincides with input-bg in
+     dark, diverges in light — hence its own role). */
+  --v2-code-bg: #111113;
+
+  /* nux dark elevation scale */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
+  --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
 
   --v2-text:        #e0e0e0;
   --v2-text-strong: var(--text-primary, #fafafa);
@@ -204,14 +224,16 @@
   --v2-tracking-tight: -0.02em; /* headings (nux --heading-tracking) */
   --v2-tracking-display: -0.04em; /* oversized display headings */
 
-  /* Shadows — nux layered elevation scale (sm/md/lg), plus the card
-     shadow themed via --v2-card-shadow above and the primary-button
-     hover glow from the landing button language. */
-  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
-  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
-  --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+  /* Shadows — --v2-shadow-sm/md/lg are THEMED (defined per theme
+     above; the light scale is much softer). Only the modal shadow
+     and the primary-button hover glow are theme-independent. */
   --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
   --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Scrims. `soft` sits behind side sheets / task panels (the demo's
+     task-sheet scrim); the heavier default sits behind modals. */
+  --v2-scrim:      rgba(0, 0, 0, 0.55);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.3);
 
   /* Motion — the nux restrained-motion system. Purposeful, quick,
      and token-driven: pick a duration + easing pair below; never a
@@ -553,7 +575,7 @@ input:focus, select:focus, textarea:focus {
 .markdown-body li             { margin-bottom: 0.25em; }
 .markdown-body code {
   font-family: "Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
-  font-size: 0.9em; background: var(--v2-surface-muted);
+  font-size: 0.9em; background: var(--v2-code-bg);
   padding: 0.15em 0.4em; border-radius: 4px;
 }
 .markdown-code-frame {
@@ -564,7 +586,7 @@ input:focus, select:focus, textarea:focus {
   overflow: hidden;
 }
 .markdown-body pre {
-  background: var(--v2-surface-soft); border: 1px solid var(--v2-panel-border);
+  background: var(--v2-code-bg); border: 1px solid var(--v2-panel-border);
   border-radius: 8px; box-sizing: border-box; width: 100%; max-width: 100%;
   min-width: 0; padding: 0.75em 1em;
   overflow-x: auto; white-space: pre; margin-bottom: 0.75em;

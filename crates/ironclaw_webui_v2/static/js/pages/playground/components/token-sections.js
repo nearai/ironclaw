@@ -352,6 +352,36 @@ export function ZIndexSection({ theme }) {
         <code className="font-mono text-[0.75rem]">z-10 / z-20 / z-40 / z-50 / z-[60]</code>${" "}
         matching this ladder. Never introduce a new raw z-index value.
       </p>
+
+      <${SectionTitle}>Scrims (overlay layer)<//>
+      <div className="flex flex-wrap gap-6">
+        ${["--v2-scrim-soft", "--v2-scrim"].map((name) => {
+          const value = readToken(name);
+          return html`
+            <div key=${name + theme} className="flex w-60 flex-col gap-2">
+              <div className="relative h-28 overflow-hidden rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]">
+                <div className="flex flex-col gap-2 p-4">
+                  <div className="h-2 w-3/4 rounded-full bg-[var(--v2-surface-muted)]" />
+                  <div className="h-2 w-1/2 rounded-full bg-[var(--v2-surface-muted)]" />
+                  <div className="h-2 w-2/3 rounded-full bg-[var(--v2-surface-muted)]" />
+                </div>
+                <div
+                  className="absolute inset-0"
+                  style=${{ background: `var(${name})` }}
+                />
+                <div className="absolute inset-y-0 right-0 w-2/5 rounded-l-[var(--v2-radius-md)] border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-lg)]" />
+              </div>
+              <${TokenName}>${name}<//>
+              <${TokenValue}>${value}<//>
+              <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">
+                ${name === "--v2-scrim-soft"
+                  ? "Behind side sheets / task panels"
+                  : "Behind modals (with backdrop blur)"}
+              </span>
+            </div>
+          `;
+        })}
+      </div>
     </div>
   `;
 }

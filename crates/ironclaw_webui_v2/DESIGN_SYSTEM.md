@@ -46,6 +46,26 @@ Reconciliation decisions made here:
   legacy v2's ad-hoc 15px/1.2rem/1.35rem/2.2rem sizes; 12px caption
   and 28px stat sizes are kept from v2 components.
 
+Second-round reconciliation with the onboarding-demo adoption
+([PR #5565](https://github.com/nearai/ironclaw/pull/5565)), which
+flagged four deliberate divergences:
+
+- **Light shadow scale (adopted):** `--v2-shadow-sm/md/lg` are now
+  **themed**, not universal. The demo's much softer light-mode scale
+  (0.04–0.1 alpha, matching nux's own light theme block) is correct —
+  dark-weight shadows read muddy on white. Dark keeps the original
+  scale.
+- **Code surface (new token):** `--v2-code-bg` is a distinct role
+  from `--v2-input-bg`. They coincide in dark (`#111113`) but diverge
+  in light (grey `#f0f0f2` code wash vs. white inputs), so forcing
+  one onto the other was wrong. Markdown code styles now use it.
+- **Soft scrim (new tokens):** `--v2-scrim-soft` (`rgba(0,0,0,0.3)`,
+  the demo task-sheet scrim, for side sheets/panels) and `--v2-scrim`
+  (`rgba(0,0,0,0.55)`, the modal dim — `Modal` now consumes it).
+- **Third-party brand colors (rule, not tokens):** Gmail/Slack/
+  Telegram etc. are intentionally outside the semantic system — see
+  the brand-colors rule in §2.
+
 **Live reference:** open `/v2/playground` in any running WebUI — it
 renders every token and every component state below, in both themes.
 
@@ -92,6 +112,24 @@ add a token first — do not inline the raw value.
 - The legacy `iron-*` / `signal` / `copper` Tailwind aliases in
   `index.html` are compat shims for old pages. Do not use them in new
   code.
+- Code (inline + blocks) sits on `--v2-code-bg`, not `input-bg` or a
+  surface tint — the roles diverge in light mode.
+- **Third-party brand colors** (Gmail red, Slack aubergine, Telegram
+  blue, provider logos, …) are deliberately *outside* the semantic
+  token system: they are owned by the brands, don't theme, and must
+  not be remapped. The rule:
+  - Allowed **only** for rendering a third party's own mark, chip, or
+    connect affordance — never for IronClaw UI meaning (a "danger"
+    red is `--v2-danger-text`, even if it happens to look like
+    Gmail's red).
+  - They live in **one** brand-colors constant per surface (e.g. a
+    `BRAND_COLORS` map in a `*-logos.js` / brand module, like
+    `pages/onboarding/provider-logos.js`), never scattered inline.
+  - The token ratchet still counts them; the brand module's
+    occurrences are carried in `scripts/design-tokens-baseline.json`.
+    Adding a new brand raises that one file's baseline in the same
+    PR — a visible, reviewable diff — rather than being silently
+    exempt.
 
 ## 3. Typography
 
@@ -132,9 +170,14 @@ add a token first — do not inline the raw value.
   cards 16px (the nux button/card radius), large cards 20px, modals
   and hero surfaces 24px, pills `full`. Never a new radius value.
 - Shadows come from the nux layered scale: `--v2-shadow-sm/md/lg`
-  for lifts, the themed `--v2-card-shadow` (via `Card`),
-  `--v2-shadow-modal` for dialogs, and `--v2-shadow-accent-hover`
-  only on the primary button. Nothing else invents a shadow.
+  for lifts (themed — the light scale is much softer, so never
+  hardcode a shadow that "looks right" in one theme), the themed
+  `--v2-card-shadow` (via `Card`), `--v2-shadow-modal` for dialogs,
+  and `--v2-shadow-accent-hover` only on the primary button. Nothing
+  else invents a shadow.
+- Overlay dims come from the scrim tokens: `--v2-scrim` behind
+  modals (what `Modal` renders), `--v2-scrim-soft` behind side
+  sheets / task panels. Both sit on the overlay/modal layers below.
 - Z-index is a five-layer ladder — `raised(10) → sticky(20) →
   overlay(40) → modal(50) → toast(60)`. Pick the layer that names
   your surface. Never invent a number between layers.

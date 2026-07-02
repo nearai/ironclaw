@@ -27,6 +27,7 @@ export const COLOR_TOKENS = [
       { var: "--v2-surface-muted", note: "Strong insets, code chips, skeletons" },
       { var: "--v2-rail", note: "Rails and input wells (dark)" },
       { var: "--v2-input-bg", note: "Form control background" },
+      { var: "--v2-code-bg", note: "Inline code + code block surface" },
     ],
   },
   {
@@ -71,7 +72,7 @@ export const COLOR_TOKENS = [
     ],
   },
   {
-    group: "Action ramp & glass",
+    group: "Action ramp, glass & scrims",
     tokens: [
       { var: "--v2-btn-primary-bg", note: "Primary button gradient (brand ramp)" },
       { var: "--v2-btn-primary-bg-hover", note: "Primary hover gradient" },
@@ -79,6 +80,8 @@ export const COLOR_TOKENS = [
       { var: "--v2-btn-secondary-border", note: "Outline button border" },
       { var: "--v2-btn-secondary-bg", note: "Outline button frosted fill" },
       { var: "--v2-glass-bg", note: "Glass chrome fill (with --v2-glass-blur)" },
+      { var: "--v2-scrim", note: "Modal backdrop dim" },
+      { var: "--v2-scrim-soft", note: "Side sheet / task panel scrim" },
     ],
   },
 ];
@@ -120,11 +123,12 @@ export const TYPE_TOKENS = [
   { var: "--v2-font-size-display", note: "Page headings, desktop (36px)", sample: "Automations" },
 ];
 
-/** Shadow tokens — nux layered elevation scale. */
+/** Shadow tokens — nux layered elevation scale (sm/md/lg + card are
+ * themed: the light-mode scale is much softer than dark's). */
 export const SHADOW_TOKENS = [
-  { var: "--v2-shadow-sm", note: "Subtle lift: rows, small chips" },
-  { var: "--v2-shadow-md", note: "Raised controls, popovers" },
-  { var: "--v2-shadow-lg", note: "Floating panels, sheets" },
+  { var: "--v2-shadow-sm", note: "Subtle lift: rows, small chips (themed)" },
+  { var: "--v2-shadow-md", note: "Raised controls, popovers (themed)" },
+  { var: "--v2-shadow-lg", note: "Floating panels, sheets (themed)" },
   { var: "--v2-card-shadow", note: "Card elevation (themed per mode)" },
   { var: "--v2-shadow-modal", note: "Modal / dialog elevation" },
   { var: "--v2-shadow-accent-hover", note: "Primary button hover glow" },
