@@ -645,7 +645,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             def get_by_role(self, _role, **_kwargs):
                 return FakeApprove()
 
-        text = asyncio.run(
+        reply = asyncio.run(
             run_live_qa._wait_for_assistant_reply(
                 FakePage(),
                 marker=None,
@@ -654,8 +654,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+        text = reply.text_excerpt
         self.assertIn("routine", text.lower())
         self.assertIn("emails", text.lower())
+        self.assertFalse(reply.semantic_judge_used)
+        self.assertEqual(reply.semantic_judge_reason, "literal_required_text_matched")
 
     def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
         response_text = (
@@ -685,7 +688,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
         ):
-            text = asyncio.run(
+            reply = asyncio.run(
                 run_live_qa._wait_for_assistant_reply(
                     self._fake_assistant_reply_page(response_text),
                     marker=None,
@@ -695,7 +698,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
             )
 
+        text = reply.text_excerpt
         self.assertIn("Trigger ID", text)
+        self.assertTrue(reply.semantic_judge_used)
+        self.assertEqual(reply.semantic_judge_reason, "semantic_judge_completed")
+        self.assertEqual(reply.semantic_judge["confidence"], 0.91)
         self.assertEqual(captured["required_text"], ["routine"])
         self.assertIn("hourly Hacker News", captured["semantic_goal"])
 
@@ -920,7 +927,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             await action(FakePage())
 
         async def fake_wait_for_assistant_reply(_page, **_kwargs):
-            return "Slack is connected"
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt="Slack is connected",
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+            )
 
         async def fake_approve_visible_tool_gate(_page):
             return None
@@ -2494,6 +2505,86 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertNotIn(secret_path, paths)
             self.assertEqual(payload["entries"][1]["contents"]["content"], "hello live trace")
 
+    def test_write_green_run_explanation_records_success_reasons(self):
+        results = [
+            run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:literal_case",
+                success=True,
+                latency_ms=1,
+                details={
+                    "case": "literal_case",
+                    "required_text": ["routine"],
+                    "text_excerpt": "Routine created successfully.",
+                    "semantic_judge_used": False,
+                    "semantic_judge_reason": "literal_required_text_matched",
+                },
+            ),
+            run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:semantic_case",
+                success=True,
+                latency_ms=1,
+                details={
+                    "case": "semantic_case",
+                    "required_text": ["routine"],
+                    "text_excerpt": "Schedule: every hour. Trigger ID: trigger-123.",
+                    "semantic_judge_used": True,
+                    "semantic_judge_reason": "semantic_judge_completed",
+                    "semantic_judge": {
+                        "completed": True,
+                        "confidence": 0.91,
+                        "reason": "The response confirms the scheduled task.",
+                        "evidence": ["Trigger ID: trigger-123"],
+                    },
+                },
+            ),
+            run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:side_effect_case",
+                success=True,
+                latency_ms=1,
+                details={
+                    "case": "side_effect_case",
+                    "delivery_verified": True,
+                },
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            path = run_live_qa.write_green_run_explanation(output_dir, results)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["total_cases"], 3)
+        self.assertEqual(payload["successful_cases"], 3)
+        self.assertEqual(payload["failed_cases"], 0)
+        self.assertEqual(payload["successful_cases_matching_required_text_literally"], 1)
+        self.assertEqual(payload["successful_cases_using_semantic_judge"], 1)
+        self.assertIn("All 3 cases were green", payload["why_things_were_green"])
+        cases_by_name = {case["case"]: case for case in payload["cases"]}
+        self.assertEqual(
+            cases_by_name["literal_case"]["success_reasons"],
+            ["literal_required_text_matched"],
+        )
+        self.assertEqual(
+            cases_by_name["semantic_case"]["success_reasons"],
+            ["semantic_judge_completed"],
+        )
+        self.assertEqual(
+            cases_by_name["side_effect_case"]["success_reasons"],
+            ["case_success_from_non_text_assertions"],
+        )
+        self.assertEqual(
+            cases_by_name["semantic_case"]["semantic_judge_summary"],
+            {
+                "completed": True,
+                "confidence": 0.91,
+                "reason": "The response confirms the scheduled task.",
+                "enabled": None,
+            },
+        )
+
     def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
         async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
             return run_live_qa.ProbeResult(
@@ -2567,6 +2658,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue((output_dir / "traces" / "case_a.json").exists())
             self.assertTrue((output_dir / "traces" / "case_b.json").exists())
             self.assertTrue((output_dir / "traces" / "index.json").exists())
+            self.assertTrue((output_dir / "green-run-explanation.json").exists())
+            green_explanation = json.loads(
+                (output_dir / "green-run-explanation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(green_explanation["successful_cases"], 2)
 
 
 if __name__ == "__main__":

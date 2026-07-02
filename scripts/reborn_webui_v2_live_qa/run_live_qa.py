@@ -796,6 +796,14 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
             await browser.close()
 
 
+@dataclass(frozen=True)
+class AssistantReplyWaitResult:
+    text_excerpt: str
+    semantic_judge_used: bool
+    semantic_judge_reason: str
+    semantic_judge: dict[str, object] | None = None
+
+
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
     details = {"case": case_name, **details}
     if case_name in QA_SHEET_CASES:
@@ -812,6 +820,17 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
+
+
+def _record_assistant_reply_wait_result(
+    observed: dict[str, object],
+    reply: AssistantReplyWaitResult,
+) -> None:
+    observed["text_excerpt"] = reply.text_excerpt
+    observed["semantic_judge_used"] = reply.semantic_judge_used
+    observed["semantic_judge_reason"] = reply.semantic_judge_reason
+    if reply.semantic_judge is not None:
+        observed["semantic_judge"] = reply.semantic_judge
 
 
 async def _live_chat_case(
@@ -856,12 +875,15 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
@@ -968,12 +990,15 @@ async def _live_chat_with_extensions_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
 
     try:
@@ -1004,7 +1029,7 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
-) -> str:
+) -> AssistantReplyWaitResult:
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
@@ -1031,7 +1056,11 @@ async def _wait_for_assistant_reply(
             normalized = text.lower()
             marker_matches = not marker or marker in text
             if marker_matches and _required_text_matches(normalized, required_text):
-                return text[-2000:]
+                return AssistantReplyWaitResult(
+                    text_excerpt=text[-2000:],
+                    semantic_judge_used=False,
+                    semantic_judge_reason="literal_required_text_matched",
+                )
         await asyncio.sleep(0.5)
     main_text = ""
     try:
@@ -1048,7 +1077,12 @@ async def _wait_for_assistant_reply(
             semantic_goal=semantic_goal,
         )
         if _semantic_judge_passed(semantic_judge):
-            return last_text[-2000:]
+            return AssistantReplyWaitResult(
+                text_excerpt=last_text[-2000:],
+                semantic_judge_used=True,
+                semantic_judge_reason="semantic_judge_completed",
+                semantic_judge=semantic_judge,
+            )
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
@@ -3335,11 +3369,14 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            observed["text_excerpt"] = await _wait_for_assistant_reply(
-                page,
-                marker=None,
-                required_text=["slack"],
-                timeout=180.0,
+            _record_assistant_reply_wait_result(
+                observed,
+                await _wait_for_assistant_reply(
+                    page,
+                    marker=None,
+                    required_text=["slack"],
+                    timeout=180.0,
+                ),
             )
             deadline = time.monotonic() + 180.0
             while time.monotonic() < deadline:
@@ -3772,6 +3809,144 @@ def write_trace_index(output_dir: Path, traces: list[dict[str, object]]) -> Path
     return path
 
 
+def write_green_run_explanation(output_dir: Path, results: list[ProbeResult]) -> Path:
+    path = output_dir / "green-run-explanation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cases: list[dict[str, object]] = []
+    successful_cases = 0
+    failed_cases = 0
+    literal_required_text_matched_count = 0
+    semantic_judge_used_count = 0
+
+    for result in results:
+        details = result.details if isinstance(result.details, dict) else {}
+        case_name = str(details.get("case") or result.mode.rsplit(":", 1)[-1])
+        required_text = _required_text_from_details(details.get("required_text"))
+        text_excerpt = str(details.get("text_excerpt") or "")
+        literal_required_text_matched = bool(required_text) and _required_text_matches(
+            text_excerpt,
+            required_text,
+        )
+        semantic_judge_used = bool(details.get("semantic_judge_used"))
+
+        if result.success:
+            successful_cases += 1
+            if literal_required_text_matched:
+                literal_required_text_matched_count += 1
+            if semantic_judge_used:
+                semantic_judge_used_count += 1
+        else:
+            failed_cases += 1
+
+        cases.append(
+            {
+                "case": case_name,
+                "mode": result.mode,
+                "success": result.success,
+                "blocked": bool(details.get("blocked")),
+                "required_text": required_text,
+                "text_excerpt_present": bool(text_excerpt),
+                "literal_required_text_matched": literal_required_text_matched,
+                "semantic_judge_used": semantic_judge_used,
+                "semantic_judge_reason": details.get("semantic_judge_reason"),
+                "semantic_judge_summary": _semantic_judge_summary(details),
+                "success_reasons": _green_success_reasons(
+                    result=result,
+                    required_text=required_text,
+                    literal_required_text_matched=literal_required_text_matched,
+                    semantic_judge_used=semantic_judge_used,
+                ),
+            }
+        )
+
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "why_things_were_green": _green_run_summary(
+            total_cases=len(results),
+            successful_cases=successful_cases,
+            failed_cases=failed_cases,
+            literal_required_text_matched_count=literal_required_text_matched_count,
+            semantic_judge_used_count=semantic_judge_used_count,
+        ),
+        "total_cases": len(results),
+        "successful_cases": successful_cases,
+        "failed_cases": failed_cases,
+        "successful_cases_matching_required_text_literally": (
+            literal_required_text_matched_count
+        ),
+        "successful_cases_using_semantic_judge": semantic_judge_used_count,
+        "cases": cases,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _required_text_from_details(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str) and value:
+        return [value]
+    return []
+
+
+def _semantic_judge_summary(details: dict[str, object]) -> dict[str, object] | None:
+    semantic_judge = details.get("semantic_judge")
+    if not isinstance(semantic_judge, dict):
+        return None
+    return {
+        "completed": semantic_judge.get("completed"),
+        "confidence": semantic_judge.get("confidence"),
+        "reason": semantic_judge.get("reason"),
+        "enabled": semantic_judge.get("enabled"),
+    }
+
+
+def _green_success_reasons(
+    *,
+    result: ProbeResult,
+    required_text: list[str],
+    literal_required_text_matched: bool,
+    semantic_judge_used: bool,
+) -> list[str]:
+    if not result.success:
+        return []
+    reasons: list[str] = []
+    if literal_required_text_matched:
+        reasons.append("literal_required_text_matched")
+    if semantic_judge_used:
+        reasons.append("semantic_judge_completed")
+    if not required_text:
+        reasons.append("case_success_from_non_text_assertions")
+    if not reasons:
+        reasons.append("case_success_from_non_text_assertions")
+    return reasons
+
+
+def _green_run_summary(
+    *,
+    total_cases: int,
+    successful_cases: int,
+    failed_cases: int,
+    literal_required_text_matched_count: int,
+    semantic_judge_used_count: int,
+) -> str:
+    if failed_cases:
+        status = f"{successful_cases} of {total_cases} cases were green; {failed_cases} failed."
+    else:
+        status = f"All {total_cases} cases were green."
+    literal = (
+        f"{literal_required_text_matched_count} successful cases matched their "
+        "required text literally."
+    )
+    if semantic_judge_used_count:
+        judge = (
+            f"{semantic_judge_used_count} successful cases used the semantic judge fallback."
+        )
+    else:
+        judge = "No successful cases used the semantic judge fallback."
+    return f"{status} {literal} {judge}"
+
+
 def write_preflight(output_dir: Path, prepared_home: PreparedRebornHome) -> Path:
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -4041,8 +4216,13 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
+    green_explanation_path = write_green_run_explanation(args.output_dir, results)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)
     print(f"[reborn-webui-v2-live-qa] trace_index={trace_index_path}", flush=True)
+    print(
+        f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+        flush=True,
+    )
     return 0 if all(result.success for result in results) else 1
 
 
@@ -4089,6 +4269,11 @@ def main() -> int:
             details={"error": str(exc)},
         )
         write_results(args.output_dir, [failed], "")
+        green_explanation_path = write_green_run_explanation(args.output_dir, [failed])
+        print(
+            f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+            flush=True,
+        )
         print(f"[reborn-webui-v2-live-qa] {exc}", file=sys.stderr, flush=True)
         return 1
 
