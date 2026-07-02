@@ -528,25 +528,34 @@ fi
 OPTIONAL_ARC_EXEMPT_RE=$(arch_exempt_re "optional_arc")
 OPTIONAL_ARC_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$OPTIONAL_ARC_EXEMPT_RE" '
     function flush() {
-        if (file != "" && has_pair && !has_exempt) print file
+        if (file == "") return
+        for (name in fields) {
+            if (builders[name] && (field_added[name] || builder_added[name]) && !field_exempt[name] && !builder_exempt[name]) {
+                print file
+                break
+            }
+        }
     }
-    function reset_hunk() {
+    function reset_file() {
         delete fields
         delete field_added
+        delete field_exempt
         delete builders
         delete builder_added
-        has_pair = 0
-        has_exempt = 0
+        delete builder_exempt
+        pending_exempt = 0
     }
     function mark_field(name, added) {
         fields[name] = 1
         if (added) field_added[name] = 1
-        if (builders[name] && (added || builder_added[name])) has_pair = 1
+        if (pending_exempt) field_exempt[name] = 1
+        pending_exempt = 0
     }
     function mark_builder(name, added) {
         builders[name] = 1
         if (added) builder_added[name] = 1
-        if (fields[name] && (added || field_added[name])) has_pair = 1
+        if (pending_exempt) builder_exempt[name] = 1
+        pending_exempt = 0
     }
     function option_field(line) {
         sub(/^\+[[:space:]]*/, "", line)
@@ -563,20 +572,24 @@ OPTIONAL_ARC_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$OPTI
     /^\+\+\+ b\// {
         flush()
         file = substr($0, 7)
-        reset_hunk()
+        reset_file()
         next
     }
     /^\+\+\+ / { flush(); file = ""; next }
-    /^@@ / { flush(); reset_hunk(); next }
+    /^@@ / { next }
+    /^[+ ].*arch-exempt:/ && $0 ~ exempt { pending_exempt = 1 }
     /^[+ ].*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*Option<Arc/ {
+        line_exempt = ($0 ~ exempt)
         field = option_field($0)
         mark_field(field, $0 ~ /^\+/)
+        if (line_exempt) field_exempt[field] = 1
     }
     /^[+ ].*fn[[:space:]]+with_[A-Za-z0-9_]*[[:space:]]*\(/ {
+        line_exempt = ($0 ~ exempt)
         builder = builder_name($0)
         mark_builder(builder, $0 ~ /^\+/)
+        if (line_exempt) builder_exempt[builder] = 1
     }
-    /^[+ ].*arch-exempt:/ && $0 ~ exempt { has_exempt = 1 }
     END { flush() }
 ')
 if [ -n "$OPTIONAL_ARC_HITS" ]; then
@@ -592,15 +605,15 @@ PARALLEL_DISPATCH_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="
         if (match(line, /safety_layer\.scan_[A-Za-z0-9_]*[[:space:]]*\(/)) return substr(line, RSTART, RLENGTH)
         return ""
     }
-    /^\+\+\+ b\// { prev = ""; hunk_exempt = 0; file = substr($0, 7); next }
-    /^(---|@@)/ { prev = ""; hunk_exempt = 0; next }
+    /^\+\+\+ b\// { prev = ""; file = substr($0, 7); next }
+    /^(---|@@)/ { prev = ""; next }
     /^\+/ {
-        if ($0 ~ exempt) hunk_exempt = 1
+        if ($0 ~ exempt) file_exempt[file] = 1
         key = call_key($0)
         if (key != "") {
             seen[file SUBSEP key]++
         }
-        if (key != "" && seen[file SUBSEP key] > 1 && !hunk_exempt && prev !~ exempt && $0 !~ exempt) {
+        if (key != "" && seen[file SUBSEP key] > 1 && !file_exempt[file] && prev !~ exempt && $0 !~ exempt) {
             print $0
         }
         prev = $0

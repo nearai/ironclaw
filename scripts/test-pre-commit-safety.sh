@@ -425,6 +425,17 @@ assert_precommit_allows "ARCH-SPRAWL: optional Arc and unrelated with-builder in
     "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n}\n" \
     "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n    baz: Option<Arc<dyn Baz>>,\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n    fn with_cache(mut self, enabled: bool) -> Self {\n        self\n    }\n}\n"
 
+assert_precommit_blocks "ARCH-SPRAWL: same-name optional Arc and with-builder in separate hunks still block" \
+    "src/runtime.rs" \
+    "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n}\n" \
+    "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n    baz: Option<Arc<dyn Baz>>,\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n    fn with_baz(mut self, baz: Arc<dyn Baz>) -> Self {\n        self.baz = Some(baz);\n        self\n    }\n}\n" \
+    "ARCH-SPRAWL"
+
+assert_precommit_allows "ARCH-SPRAWL: annotated optional Arc and with-builder in separate hunks are accepted" \
+    "src/runtime.rs" \
+    "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n}\n" \
+    "use std::sync::Arc;\ntrait Baz {}\n// arch-exempt: optional_arc, feature-gated runtime adapter, plan #2800\nstruct Runtime {\n    baz: Option<Arc<dyn Baz>>,\n}\n\n\n\n\n\n\n\n\nimpl Runtime {\n    fn with_baz(mut self, baz: Arc<dyn Baz>) -> Self {\n        self.baz = Some(baz);\n        self\n    }\n}\n"
+
 assert_precommit_allows "ARCH-SPRAWL: optional Arc and unrelated with-builder in same hunk are allowed" \
     "src/runtime.rs" \
     "use std::sync::Arc;\ntrait Baz {}\nstruct Runtime {\n}\nimpl Runtime {\n}\n" \
@@ -474,10 +485,21 @@ assert_precommit_blocks "ARCH-SPRAWL: repeated dispatcher calls need arch-exempt
     "fn execute_one(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\nfn execute_two(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n" \
     "ARCH-SPRAWL"
 
+assert_precommit_blocks "ARCH-SPRAWL: repeated dispatcher calls in separate hunks need arch-exempt plan" \
+    "src/runtime.rs" \
+    "fn existing() {}\n\n\n\n\n\n\n\n\n" \
+    "fn existing() {}\nfn execute_one(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n\n\n\n\n\n\n\n\nfn execute_two(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n" \
+    "ARCH-SPRAWL"
+
 assert_precommit_allows "ARCH-SPRAWL: annotated repeated dispatcher calls are accepted" \
     "src/runtime.rs" \
     "fn existing() {}\n" \
     "// arch-exempt: parallel_dispatch, temporary split while gateway lands, plan #2800\nfn execute_one(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\nfn execute_two(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n"
+
+assert_precommit_allows "ARCH-SPRAWL: annotated repeated dispatcher calls in separate hunks are accepted" \
+    "src/runtime.rs" \
+    "fn existing() {}\n\n\n\n\n\n\n\n\n" \
+    "fn existing() {}\n// arch-exempt: parallel_dispatch, temporary split while gateway lands, plan #2800\nfn execute_one(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n\n\n\n\n\n\n\n\nfn execute_two(dispatcher: &Dispatcher, request: Request) {\n    dispatcher.dispatch(request);\n}\n"
 
 echo ""
 echo "Passed: $PASS, Failed: $FAIL"
