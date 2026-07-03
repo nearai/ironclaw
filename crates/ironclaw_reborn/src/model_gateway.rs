@@ -61,6 +61,7 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 fn trace_model_latency_ok(
@@ -871,6 +872,15 @@ where
                 "reborn model gateway resolved provider tool definitions"
             );
         }
+        if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+            let est_tool_schema_tokens = estimate_tool_schema_tokens(&tool_definitions);
+            debug!(
+                target: CONTEXT_SHADOW_TARGET,
+                tool_definition_count = tool_definitions.len(),
+                est_tool_schema_tokens,
+                "reborn tool surface shadow measurement"
+            );
+        }
         if !tool_definitions.is_empty() {
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
@@ -1121,6 +1131,17 @@ fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDe
     }
 }
 
+fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
+    definitions.iter().fold(0_u32, |total, definition| {
+        let schema = serde_json::json!({
+            "name": definition.name.as_str(),
+            "description": definition.description.as_str(),
+            "parameters": &definition.parameters,
+        });
+        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+    })
+}
+
 #[tracing::instrument(
     level = "debug",
     skip(response, capabilities, replay_identity),
@@ -1193,26 +1214,54 @@ async fn tool_response_to_host(
                 )
             })
             .collect::<Result<Vec<_>, HostManagedModelError>>()?;
-        if provider_calls
-            .iter()
-            .any(|provider_call| !advertised_tool_names.contains(&provider_call.name))
-        {
+        if !provider_calls_are_advertised_or_resolvable(
+            &advertised_tool_names,
+            capabilities.as_ref(),
+            &provider_calls,
+        ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
         for provider_call in &provider_calls {
-            capabilities
-                .validate_provider_tool_call(provider_call)
-                .map_err(map_provider_tool_output_error)?;
+            if let Err(error) = capabilities.validate_provider_tool_call(provider_call) {
+                // Fail loud: this rejection otherwise discards the whole response
+                // (budget released, no dispatch) and the run eventually fails with
+                // no trace of which call or why. Log before mapping/propagating.
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_call_id = provider_call.id.as_str(),
+                    error_kind = ?error.kind,
+                    // The safe_summary is layer-distinct ("outside the
+                    // model-visible capability view" = visible filter, "targets a
+                    // disabled capability" = deny filter, etc.), so it names which
+                    // port in the chain rejected the call.
+                    reason = error.safe_summary.as_str(),
+                    "reborn model gateway rejected provider tool call during validation"
+                );
+                return Err(map_provider_tool_output_error(error));
+            }
         }
         for provider_call in provider_calls {
-            let candidate = capabilities
+            let rejected_tool_name = provider_call.name.clone();
+            let rejected_provider_call_id = provider_call.id.clone();
+            match capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
-                .map_err(map_provider_tool_output_error)?;
-            candidates.push(candidate);
+            {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) => {
+                    debug!(
+                        tool_name = rejected_tool_name.as_str(),
+                        provider_call_id = rejected_provider_call_id.as_str(),
+                        error_kind = ?error.kind,
+                        reason = error.safe_summary.as_str(),
+                        "reborn model gateway rejected provider tool call during registration"
+                    );
+                    return Err(map_provider_tool_output_error(error));
+                }
+            }
         }
         debug!(
             capability_call_count = candidates.len(),
@@ -1268,6 +1317,36 @@ async fn tool_response_to_host(
             "model response did not complete cleanly",
         )),
     }
+}
+
+fn provider_calls_are_advertised_or_resolvable(
+    advertised_tool_names: &HashSet<ProviderToolName>,
+    capabilities: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+    provider_calls: &[ProviderToolCall],
+) -> bool {
+    for provider_call in provider_calls {
+        if advertised_tool_names.contains(&provider_call.name) {
+            continue;
+        }
+        match capabilities.provider_tool_call_capability_ids(provider_call) {
+            Ok(ids) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_capability_id = ids.provider_capability_id.as_str(),
+                    "reborn model gateway accepted resolvable unadvertised provider tool call"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    safe_summary = error.safe_summary.as_str(),
+                    "reborn model gateway rejected unresolved unadvertised provider tool call"
+                );
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1568,10 +1647,80 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+/// Env flag gating [`collapse_repeated_failure_observations`].
+///
+/// Defaults **off**: unset / empty / unrecognized leaves the replayed context
+/// byte-identical to the pre-feature path. An operator opts in with `on`, `1`,
+/// or `true`. Kept as a separate knob from `REBORN_TOOL_DISCLOSURE` because this
+/// context-dedup pass runs in the shared `convert_messages` path independently of
+/// tool disclosure.
+pub const REBORN_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
+
+fn collapse_repeated_failures_enabled() -> bool {
+    collapse_repeated_failures_from_raw(std::env::var(REBORN_COLLAPSE_REPEATED_FAILURES_ENV).ok())
+}
+
+/// Pure resolution of the collapse flag from a raw env value, so the default-off
+/// contract is testable without mutating process env.
+fn collapse_repeated_failures_from_raw(raw: Option<impl AsRef<str>>) -> bool {
+    match raw {
+        Some(value) => {
+            let value = value.as_ref().trim();
+            value.eq_ignore_ascii_case("on")
+                || value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
+
+/// Collapse runs of identical *error* tool observations in the replayed context.
+///
+/// A model that repeats the same failing call accumulates byte-for-byte identical
+/// error observations — one per attempt — and every one is replayed into every
+/// later prompt. That both bloats context and drowns the model in copies of its
+/// own failure so it cannot tell it is looping. Keep the FIRST and LAST occurrence
+/// of each identical error intact (first for original detail, last because it is
+/// most recent and carries any repair hints) and replace the ones in between with
+/// a compact marker. Nothing is dropped — every tool-result message stays, so
+/// provider tool-call/result pairing is preserved; only the observation *content*
+/// of interior duplicates shrinks. Success observations and a lone repeat are
+/// never touched (the 3+ threshold leaves the first/last-only case alone).
+fn collapse_repeated_failure_observations(messages: &mut [HostManagedModelMessage]) {
+    let mut occurrences: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if let Some(HostManagedToolResultContent::Reference { envelope }) =
+            message.tool_result_content.as_ref()
+            && let Some(fingerprint) = envelope.error_observation_fingerprint()
+        {
+            occurrences.entry(fingerprint).or_default().push(index);
+        }
+    }
+    for indices in occurrences.values() {
+        if indices.len() < 3 {
+            continue;
+        }
+        for &index in &indices[1..indices.len() - 1] {
+            if let Some(HostManagedToolResultContent::Reference { envelope }) =
+                messages[index].tool_result_content.as_mut()
+            {
+                envelope.collapse_to_repeated_error_marker();
+            }
+        }
+    }
+}
+
 fn convert_messages(
-    messages: Vec<HostManagedModelMessage>,
+    mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
+    // Off by default (see REBORN_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
+    // interior duplicate error observations when an operator opts in, so the
+    // replayed context is otherwise byte-identical to the pre-feature path.
+    if collapse_repeated_failures_enabled() {
+        collapse_repeated_failure_observations(&mut messages);
+    }
     let mut converted = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
@@ -1976,6 +2125,119 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
         );
+    }
+
+    fn error_tool_result_message(
+        result_ref: &str,
+        observation: serde_json::Value,
+    ) -> HostManagedModelMessage {
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            result_ref,
+            ironclaw_threads::ToolResultSafeSummary::new("tool failed").expect("safe summary"),
+            observation,
+        )
+        .expect("valid observation envelope");
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool failed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        }
+    }
+
+    fn tool_result_observation(message: &HostManagedModelMessage) -> serde_json::Value {
+        match message
+            .tool_result_content
+            .as_ref()
+            .expect("tool result content")
+        {
+            HostManagedToolResultContent::Reference { envelope } => envelope
+                .model_observation
+                .clone()
+                .expect("model observation"),
+            other => panic!("expected reference, got {other:?}"),
+        }
+    }
+
+    fn generic_error_observation() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with invalid_input.",
+            "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+            "trust": "untrusted_tool_output",
+        })
+    }
+
+    #[test]
+    fn collapse_repeated_failures_flag_defaults_off_and_opts_in_explicitly() {
+        // Unset / empty / unrecognized => off (byte-identical replayed context).
+        assert!(!collapse_repeated_failures_from_raw(None::<&str>));
+        assert!(!collapse_repeated_failures_from_raw(Some("")));
+        assert!(!collapse_repeated_failures_from_raw(Some("off")));
+        assert!(!collapse_repeated_failures_from_raw(Some("garbage")));
+        // Explicit truthy values opt in.
+        assert!(collapse_repeated_failures_from_raw(Some("on")));
+        assert!(collapse_repeated_failures_from_raw(Some("1")));
+        assert!(collapse_repeated_failures_from_raw(Some("true")));
+        assert!(collapse_repeated_failures_from_raw(Some(" TRUE ")));
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_keeps_first_and_last_only() {
+        let error_obs = generic_error_observation();
+        let success_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "ok",
+            "detail": {"kind": "generic_failure", "failure_kind": "none"},
+            "trust": "untrusted_tool_output",
+        });
+        // Four identical failures (each its own result_ref) plus a success.
+        let mut messages = vec![
+            error_tool_result_message("result:err_1.1", error_obs.clone()),
+            error_tool_result_message("result:err_1.2", error_obs.clone()),
+            error_tool_result_message("result:err_1.3", error_obs.clone()),
+            error_tool_result_message("result:err_1.4", error_obs.clone()),
+            error_tool_result_message("result:ok_1.5", success_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // First and last identical errors keep full detail.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[3]), error_obs);
+        // Interior duplicates collapse to the compact, schema-valid marker.
+        for index in [1usize, 2] {
+            let failure_kind = tool_result_observation(&messages[index])
+                .get("detail")
+                .and_then(|detail| detail.get("failure_kind"))
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string);
+            assert_eq!(failure_kind.as_deref(), Some("repeated_error_elided"));
+        }
+        // Success observation is never touched.
+        assert_eq!(tool_result_observation(&messages[4]), success_obs);
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_leaves_a_single_repeat_alone() {
+        let error_obs = generic_error_observation();
+        let mut messages = vec![
+            error_tool_result_message("result:err_2.1", error_obs.clone()),
+            error_tool_result_message("result:err_2.2", error_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // Below the 3+ threshold: both copies stay intact.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[1]), error_obs);
     }
 
     fn user_message_with_images(

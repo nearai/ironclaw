@@ -68,7 +68,8 @@ use ironclaw_reborn::milestone_events::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
+    RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
+    build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -356,7 +357,7 @@ mod skills;
 
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
@@ -844,6 +845,58 @@ pub(crate) fn wrap_project_create_capability_for_test(
         inner,
         project_service,
         fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
+/// Test-support forwarder (E-SKILL seam): build the local-dev filesystem skill
+/// context source exactly as production does in [`build_reborn_runtime`], and
+/// hand back just the `HostSkillContextSource` (for prompt injection) plus the
+/// `activation_source` (backing `skill_activate`) that `test_support.rs` needs.
+/// Reuses the private [`local_dev_filesystem_skill_context_source`] so the
+/// wiring never drifts, but deliberately does NOT return the internal
+/// [`LocalDevSkillContextSource`] struct — that type (and its
+/// `execution_adapter` field) stays private to this module; only the two
+/// fields an external caller actually consumes cross the boundary. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
+) -> Result<
+    (
+        Arc<dyn HostSkillContextSource>,
+        Arc<LocalDevSelectableSkillContextSource>,
+    ),
+    RebornRuntimeError,
+> {
+    let built = local_dev_filesystem_skill_context_source(
+        local_runtime,
+        tenant_id,
+        regex_skill_activation_enabled,
+    )?;
+    Ok((built.source, built.activation_source))
+}
+
+/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
+/// synthetic-capability wrap. Bridges the private `local_dev` module to
+/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_skill_activation_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_skill_activation_capability_for_test(
+        inner,
+        skill_activation_source,
         run_context,
         input_resolver,
         result_writer,
@@ -1491,20 +1544,15 @@ impl RebornRuntime {
     /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
     /// is intentionally read-only (it backs setup-marker reads — see
     /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
-    /// an attachment through it fails closed with `PermissionDenied`. Build a
-    /// read-write view over the same root using the read-write `workspace_mounts`
-    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
-    /// attachment is addressable at its recorded `storage_key`.
+    /// an attachment through it fails closed with `PermissionDenied`. Delegates
+    /// to `RebornServices::read_write_workspace_filesystem` — the single owner
+    /// of this recipe, shared with the `local_dev_attachment_test_support_for_test`
+    /// C-ATTACH test seam so the two views can never drift apart.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services.local_runtime.as_ref().map(|rt| {
-            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
-                Arc::clone(&rt.extension_filesystem),
-                rt.workspace_mounts.clone(),
-            ))
-        })
+        self.services.read_write_workspace_filesystem()
     }
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
@@ -2689,6 +2737,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
+        tool_disclosure,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -3311,6 +3360,10 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    // Resolve the disclosure mode once so the runtime config and the system-prompt
+    // disclosure-protocol injection agree on a single value.
+    let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3347,10 +3400,12 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            text_only_driver: Default::default(),
+            host: Default::default(),
+            tool_disclosure: resolved_tool_disclosure,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
-            ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -3363,6 +3418,7 @@ pub async fn build_reborn_runtime(
                 DefaultSystemPromptIdentitySource::try_new(
                     local_runtime.local_dev_storage_root.clone(),
                     local_runtime.default_system_prompt_path.clone(),
+                    resolved_tool_disclosure.is_bridged(),
                 )
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: error.to_string(),
@@ -8532,6 +8588,100 @@ output_schema_ref = "schemas/write.output.json"
         );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Caller-level regression for the production attachment-landing path:
+    /// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
+    /// `build_webui_services`/`build_openai_compat_route_mount` call — through
+    /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
+    /// through the same `ProjectScopedAttachmentReader` production wires
+    /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
+    /// shared `RebornServices::read_write_workspace_filesystem` recipe via the
+    /// `local_dev_attachment_test_support_for_test` seam, but never call through
+    /// this `RebornRuntime` wrapper itself; this closes that gap so a future
+    /// regression in the wrapper (not just the shared recipe) fails a test
+    /// instead of only breaking WebUI/OpenAI-compatible attachment landing in
+    /// production.
+    #[tokio::test]
+    async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "attachment mount ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-attachment-mount-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-attachment-mount-tenant".to_string(),
+            agent_id: "runtime-attachment-mount-agent".to_string(),
+            source_binding_id: "runtime-attachment-mount-source".to_string(),
+            reply_target_binding_id: "runtime-attachment-mount-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let read_write_filesystem = runtime
+            .webui_workspace_filesystem()
+            .expect("local-dev runtime composes a read-write webui workspace filesystem");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        // Mirrors production's `attachment_read_port` wiring (read-only
+        // `workspace_filesystem`), so the read side is the same authority a
+        // vision-capable model's multimodal part would resolve through.
+        let read_port = crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+            &local_runtime.workspace_filesystem,
+        ));
+        let lander =
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(read_write_filesystem);
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
+            agent_id: AgentId::new("runtime-attachment-mount-agent").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
+            mission_id: None,
+        };
+        let refs = ironclaw_product_workflow::InboundAttachmentLander::land(
+            &lander,
+            &thread_scope,
+            "msg-attachment-mount",
+            vec![ironclaw_attachments::InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("mount-check.png".to_string()),
+                bytes: b"attachment-mount-bytes".to_vec(),
+            }],
+        )
+        .await
+        .expect("landing through the production webui workspace filesystem succeeds");
+        let storage_key = refs[0]
+            .storage_key
+            .as_deref()
+            .expect("landed attachment carries a storage_key");
+
+        let read_back = ironclaw_loop_support::LoopAttachmentReadPort::read_attachment_bytes(
+            &read_port,
+            &thread_scope.to_resource_scope(),
+            storage_key,
+        )
+        .await
+        .expect("reading the landed attachment back through the read port succeeds");
+
+        assert_eq!(read_back, b"attachment-mount-bytes".to_vec());
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

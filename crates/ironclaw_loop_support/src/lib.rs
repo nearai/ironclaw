@@ -62,6 +62,7 @@ pub use capability_port::{
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+    PerSurfaceCapabilityDenyDecorator,
 };
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
@@ -820,6 +821,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
         Ok(VisibleCapabilitySurface {
             version: empty_surface_version()?,
             descriptors: Vec::new(),
+            callable_capability_ids: None,
         })
     }
 

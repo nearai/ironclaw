@@ -246,6 +246,32 @@ impl ToolResultReferenceEnvelope {
         }
     }
 
+    /// Fingerprint for an *error* observation, used to detect identical repeated
+    /// failures across the replayed transcript. Returns `None` for success
+    /// observations or references with no model-visible observation, so only
+    /// genuine errors are ever considered for collapsing.
+    pub fn error_observation_fingerprint(&self) -> Option<String> {
+        let observation = self.model_observation.as_ref()?;
+        if observation
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            != Some("error")
+        {
+            return None;
+        }
+        Some(observation.to_string())
+    }
+
+    /// Replace this reference's model-visible observation with a compact,
+    /// schema-valid marker noting that an identical error was elided to save
+    /// context. Used to collapse the *interior* duplicates of a repeated failing
+    /// call while its first and latest occurrences keep full detail. The marker
+    /// still validates and round-trips, and the reference (and its provider
+    /// tool-call pairing) is otherwise untouched.
+    pub fn collapse_to_repeated_error_marker(&mut self) {
+        self.model_observation = Some(repeated_error_elided_observation());
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err("tool result reference envelope version is unsupported".to_string());
@@ -371,6 +397,19 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
         return Err("tool result summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+/// A schema-valid error observation used to replace the interior duplicates of a
+/// repeated failing tool call. Compact by design: the model only needs to know
+/// the same error happened again, not a full re-copy of its detail.
+fn repeated_error_elided_observation() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        "status": "error",
+        "summary": "(Earlier identical tool error elided to save context; the same failure occurred several times \u{2014} see its first and latest occurrences.)",
+        "detail": {"kind": "generic_failure", "failure_kind": "repeated_error_elided"},
+        "trust": "untrusted_tool_output",
+    })
 }
 
 fn validate_model_observation(value: &serde_json::Value) -> Result<(), String> {
@@ -834,6 +873,63 @@ mod tests {
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
         ToolResultSafeSummary,
     };
+
+    #[test]
+    fn collapse_to_repeated_error_marker_produces_valid_observation() {
+        let error_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with invalid_input.",
+            "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+            "trust": "untrusted_tool_output",
+        });
+        let mut envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.2",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            error_obs,
+        )
+        .expect("error observation envelope");
+        assert!(envelope.error_observation_fingerprint().is_some());
+
+        envelope.collapse_to_repeated_error_marker();
+
+        // The collapsed marker is itself a valid error observation that round-trips.
+        envelope
+            .validate()
+            .expect("collapsed observation validates");
+        let observation = envelope.model_observation.as_ref().expect("observation");
+        assert_eq!(
+            observation
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            observation
+                .get("detail")
+                .and_then(|detail| detail.get("failure_kind"))
+                .and_then(serde_json::Value::as_str),
+            Some("repeated_error_elided")
+        );
+    }
+
+    #[test]
+    fn error_observation_fingerprint_is_none_for_success() {
+        let success_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "ok",
+            "detail": {"kind": "generic_failure", "failure_kind": "none"},
+            "trust": "untrusted_tool_output",
+        });
+        let success = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.3",
+            ToolResultSafeSummary::new("tool ok").expect("summary"),
+            success_obs,
+        )
+        .expect("success observation envelope");
+        assert!(success.error_observation_fingerprint().is_none());
+    }
 
     #[test]
     fn safe_summary_rejects_control_characters() {

@@ -17,6 +17,7 @@ use ironclaw_product_adapters::{
     EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
     ProductAdapterId, ProtocolHttpEgress,
 };
+use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
@@ -25,7 +26,6 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
-use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
     SlackV2AdapterConfig, slack_request_signature_auth_requirement,

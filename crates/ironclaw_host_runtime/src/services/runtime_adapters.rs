@@ -19,7 +19,94 @@ use super::{
     WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
     WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
-use crate::FirstPartyCapabilityError;
+use crate::{
+    FirstPartyCapabilityError,
+    latency::{
+        RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
+        trace_runtime_error, trace_runtime_ok,
+    },
+};
+
+type FirstPartyLatencyFields = RuntimeLatencyFields;
+
+fn first_party_latency_fields<F, G>(
+    request: &RuntimeAdapterRequest<'_, F, G>,
+) -> Option<FirstPartyLatencyFields>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    RuntimeLatencyFields::from_json_input(
+        request.capability_id,
+        &request.scope,
+        request.descriptor.runtime.as_str(),
+        &request.input,
+    )
+}
+
+fn trace_first_party_latency_ok(
+    operation: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    output_bytes: u64,
+    used_prepared_reservation: bool,
+) {
+    trace_runtime_ok(
+        "first_party_runtime_adapter",
+        operation,
+        fields,
+        started_at,
+        RuntimeLatencyMetrics {
+            output_bytes,
+            used_prepared_reservation,
+            ..RuntimeLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_first_party_latency_error(
+    operation: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    used_prepared_reservation: bool,
+) {
+    trace_runtime_error(
+        "first_party_runtime_adapter",
+        operation,
+        fields,
+        started_at,
+        error_kind,
+        RuntimeLatencyMetrics {
+            used_prepared_reservation,
+            ..RuntimeLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_first_party_stage_and_dispatch_error(
+    stage: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    stage_started_at: Option<std::time::Instant>,
+    dispatch_started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    used_prepared_reservation: bool,
+) {
+    trace_first_party_latency_error(
+        stage,
+        fields,
+        stage_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+    trace_first_party_latency_error(
+        "dispatch",
+        fields,
+        dispatch_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+}
 
 pub(super) struct ServiceResolvedRuntimeAdapter<T> {
     inner: Arc<T>,
@@ -232,7 +319,11 @@ where
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let latency_fields = first_party_latency_fields(&request);
+        let dispatch_started_at = latency_started_at();
+        let used_prepared_reservation = request.resource_reservation.is_some();
         tracing::debug!("first-party runtime adapter dispatch started");
+        let lookup_started_at = latency_started_at();
         let Some(handler) = self.registry.get(request.capability_id) else {
             if let Some(reservation) = request.resource_reservation
                 && let Err(error) = request.governor.release(reservation.id)
@@ -244,28 +335,60 @@ where
                 );
             }
             tracing::debug!("first-party runtime adapter missing handler");
+            trace_first_party_stage_and_dispatch_error(
+                "lookup_handler",
+                latency_fields.as_ref(),
+                lookup_started_at,
+                dispatch_started_at,
+                RuntimeDispatchErrorKind::UndeclaredCapability.as_str(),
+                used_prepared_reservation,
+            );
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
                 detail: None,
             });
         };
+        trace_first_party_latency_ok(
+            "lookup_handler",
+            latency_fields.as_ref(),
+            lookup_started_at,
+            0,
+            used_prepared_reservation,
+        );
 
+        let plan_started_at = latency_started_at();
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
+                let kind = planner_error_kind(&error);
                 tracing::debug!(
-                    error_kind = %planner_error_kind(&error),
+                    error_kind = %kind,
                     "first-party runtime adapter policy planning failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "plan_capability",
+                    latency_fields.as_ref(),
+                    plan_started_at,
+                    dispatch_started_at,
+                    kind.as_str(),
+                    used_prepared_reservation,
+                );
                 DispatchError::FirstParty {
-                    kind: planner_error_kind(&error),
+                    kind,
                     safe_summary: None,
                     detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "plan_capability",
+            latency_fields.as_ref(),
+            plan_started_at,
+            0,
+            used_prepared_reservation,
+        );
         tracing::debug!(
             filesystem_backend = ?plan.filesystem_backend,
             process_backend = ?plan.process_backend,
@@ -273,6 +396,7 @@ where
             secret_mode = ?plan.secret_mode,
             "first-party runtime adapter policy plan resolved"
         );
+        let resolve_started_at = latency_started_at();
         let services = self
             .invocation_services
             .resolve(InvocationServicesResolutionRequest {
@@ -288,22 +412,63 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "resolve_services",
+                    latency_fields.as_ref(),
+                    resolve_started_at,
+                    dispatch_started_at,
+                    error.kind().as_str(),
+                    used_prepared_reservation,
+                );
                 DispatchError::FirstParty {
                     kind: error.kind(),
                     safe_summary: None,
                     detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "resolve_services",
+            latency_fields.as_ref(),
+            resolve_started_at,
+            0,
+            used_prepared_reservation,
+        );
         tracing::debug!("first-party runtime adapter services resolved");
 
-        let used_prepared_reservation = request.resource_reservation.is_some();
+        let reserve_started_at = latency_started_at();
         let reservation = match request.resource_reservation {
-            Some(reservation) => reservation,
+            Some(reservation) => {
+                trace_first_party_latency_ok(
+                    "reserve_resources",
+                    latency_fields.as_ref(),
+                    reserve_started_at,
+                    0,
+                    used_prepared_reservation,
+                );
+                reservation
+            }
             None => request
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
+                .inspect(|_| {
+                    trace_first_party_latency_ok(
+                        "reserve_resources",
+                        latency_fields.as_ref(),
+                        reserve_started_at,
+                        0,
+                        used_prepared_reservation,
+                    );
+                })
                 .map_err(|_| {
                     tracing::debug!("first-party runtime adapter resource reservation failed");
+                    trace_first_party_stage_and_dispatch_error(
+                        "reserve_resources",
+                        latency_fields.as_ref(),
+                        reserve_started_at,
+                        dispatch_started_at,
+                        RuntimeDispatchErrorKind::Resource.as_str(),
+                        used_prepared_reservation,
+                    );
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
                         safe_summary: None,
@@ -333,6 +498,7 @@ where
             reservation_id = %reservation_id,
             "first-party runtime adapter invoking handler"
         );
+        let handler_started_at = latency_started_at();
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
@@ -344,12 +510,33 @@ where
         .catch_unwind()
         .await
         {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                trace_first_party_latency_ok(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    0,
+                    used_prepared_reservation,
+                );
+                result
+            }
             Ok(Err(error)) => {
                 tracing::debug!(
                     reservation_id = %reservation_id,
                     is_auth_required = error.is_auth_required(),
                     "first-party runtime adapter handler failed"
+                );
+                let error_kind = error
+                    .kind()
+                    .map(RuntimeDispatchErrorKind::as_str)
+                    .unwrap_or("auth_required");
+                trace_first_party_stage_and_dispatch_error(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    dispatch_started_at,
+                    error_kind,
+                    used_prepared_reservation,
                 );
                 if let Err(acct_err) =
                     guard.account_failed(error.usage(), first_party_resource_error)
@@ -388,6 +575,14 @@ where
                     reservation_id = %reservation_id,
                     "first-party runtime adapter handler panicked"
                 );
+                trace_first_party_stage_and_dispatch_error(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::Backend.as_str(),
+                    used_prepared_reservation,
+                );
                 // Dropping `guard` releases the reservation.
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
@@ -397,12 +592,21 @@ where
             }
         };
 
+        let serialize_started_at = latency_started_at();
         let output_bytes = serde_json::to_vec(&result.output)
             .map(|bytes| bytes.len() as u64)
             .map_err(|_| {
                 tracing::debug!(
                     reservation_id = %reservation_id,
                     "first-party runtime adapter output serialization failed"
+                );
+                trace_first_party_stage_and_dispatch_error(
+                    "serialize_output",
+                    latency_fields.as_ref(),
+                    serialize_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::OutputDecode.as_str(),
+                    used_prepared_reservation,
                 );
                 // Dropping `guard` releases the reservation.
                 DispatchError::FirstParty {
@@ -411,6 +615,13 @@ where
                     detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "serialize_output",
+            latency_fields.as_ref(),
+            serialize_started_at,
+            output_bytes,
+            used_prepared_reservation,
+        );
         let mut usage = result.usage;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
         // Happy path: reconcile inline so we preserve the existing
@@ -418,8 +629,18 @@ where
         // hands reservation ownership back from the guard; both reconcile
         // outcomes settle the reservation below.
         let reconcile_id = guard.disarm();
+        let reconcile_started_at = latency_started_at();
         let receipt = match request.governor.reconcile(reconcile_id, usage.clone()) {
-            Ok(receipt) => receipt,
+            Ok(receipt) => {
+                trace_first_party_latency_ok(
+                    "reconcile_resources",
+                    latency_fields.as_ref(),
+                    reconcile_started_at,
+                    output_bytes,
+                    used_prepared_reservation,
+                );
+                receipt
+            }
             Err(_) => {
                 tracing::debug!(
                     reservation_id = %reconcile_id,
@@ -432,6 +653,14 @@ where
                         "failed to release first-party resource reservation after reconcile failure"
                     );
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "reconcile_resources",
+                    latency_fields.as_ref(),
+                    reconcile_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::Resource.as_str(),
+                    used_prepared_reservation,
+                );
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
                     safe_summary: None,
@@ -443,6 +672,13 @@ where
             reservation_id = %reconcile_id,
             output_bytes,
             "first-party runtime adapter dispatch completed"
+        );
+        trace_first_party_latency_ok(
+            "dispatch",
+            latency_fields.as_ref(),
+            dispatch_started_at,
+            output_bytes,
+            used_prepared_reservation,
         );
 
         Ok(RuntimeAdapterResult {

@@ -4636,6 +4636,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })

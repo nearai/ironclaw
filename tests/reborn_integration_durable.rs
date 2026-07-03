@@ -1,0 +1,53 @@
+//! Reborn integration test — cross-reopen capability durability (E-DURABLE seam).
+//!
+//! Installs an extension through a real turn, then reopens a FRESH, independent
+//! `ExtensionInstallationStore` at the capability harness's on-disk storage root
+//! and asserts the install survived — proving capability-produced state persists
+//! to disk, not just to in-memory state. Parallels
+//! `assert_reply_persists_after_reopen` for capability state.
+
+#[allow(dead_code)]
+#[path = "support/reborn/mod.rs"]
+mod reborn_support;
+#[allow(dead_code)]
+mod support;
+
+use reborn_support::group::RebornIntegrationGroup;
+use reborn_support::reply::RebornScriptedReply;
+use serde_json::json;
+
+#[tokio::test]
+async fn extension_install_survives_independent_reopen() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let harness = group
+        .thread("conv-durable")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "github"}),
+            ),
+            RebornScriptedReply::text("installed"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn("install github")
+        .await
+        .expect("turn completes");
+    // Live install succeeded this run.
+    harness
+        .assert_tool_result_contains("\"installed\":true")
+        .await
+        .expect("install reported success");
+
+    // Reopen an independent store at the same on-disk path; the install must
+    // still be there.
+    harness
+        .assert_extension_install_persists_after_reopen("github")
+        .await
+        .expect("installed extension survives an independent reopen");
+}

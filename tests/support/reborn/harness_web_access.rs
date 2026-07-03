@@ -1,0 +1,162 @@
+//! Reborn integration-test harness — first-party `web-access.*` scaffolding
+//! (C-WEBACCESS).
+//!
+//! `web-access.search` / `web-access.get_content` are `RuntimeKind::FirstParty`
+//! capabilities, not MCP-extension capabilities — this module does NOT reuse
+//! `harness_mcp.rs`'s `McpRuntime` scaffolding. The real dispatch logic is
+//! `ironclaw_first_party_extensions::web_access::WebAccessExecutor::dispatch`,
+//! which itself speaks MCP JSON-RPC by hand over three sequential
+//! `RuntimeHttpEgress` calls (`initialize` → `notifications/initialized` →
+//! `tools/call`) to the Exa MCP endpoint. This harness wires the real
+//! production handler registration,
+//! `ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers`
+//! (`crates/ironclaw_reborn_composition/src/web_access.rs`, `pub` since the
+//! self-review that landed this file), instead of duplicating the
+//! `FirstPartyCapabilityHandler` dispatch/error-mapping glue here. Only the
+//! manifest/schema loading below and the trust/network policy further down
+//! remain harness-local — those are test-support concerns (reading assets
+//! off disk, scoping a test-only trust policy), not business logic that
+//! production owns.
+//!
+//! `web_access_extension_package()` mirrors `github.rs`'s
+//! `extension_registry()` pattern exactly: it reads the REAL production
+//! `crates/ironclaw_first_party_extensions/assets/web-access/manifest.toml`
+//! off disk via `ExtensionManifest::parse_with_host_api_contracts` and builds
+//! the package via `ExtensionPackage::from_manifest`, instead of hand-
+//! authoring a synthetic manifest/schema. That construction is pure in-memory
+//! — the capability schema `$ref`s are resolved later, at capability-surface-
+//! descriptor build time, against the real schema files on disk mounted at
+//! `/system/extensions/web-access` by `LocalDevRootMounts::web_access_assets()`
+//! (`harness.rs::local_dev_root_filesystem`).
+//!
+//! web-access declares zero `runtime_credentials` and never sets
+//! `credential_injections`, so no credential-injecting authorizer is needed —
+//! `HostRuntimeCapabilityHarness::web_access_tools` (in `harness.rs`) wires the
+//! plain default `GrantAuthorizer`, the same authorizer `core_builtin_tools()`
+//! uses for `builtin.http` (also a `Network`-effect capability).
+
+#![allow(dead_code)] // Test-only scaffolding; not every consumer exercises every helper.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_first_party_extensions::{EXA_MCP_HOST, NETWORK_EGRESS_LIMIT};
+use ironclaw_host_api::{
+    EffectKind, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, VirtualPath,
+};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityRegistry,
+    HostRuntime, HostRuntimeServices, default_host_api_contract_registry,
+    default_host_port_catalog,
+};
+use ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers;
+use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+
+use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_root_filesystem};
+
+type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Extension id (== manifest `service`) for the real production web-access
+/// package (its manifest/schema assets are loaded from disk, not test-only).
+pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
+
+/// Build the `ExtensionPackage` for the real `web-access` provider by parsing
+/// its production manifest off disk, mirroring `github.rs`'s
+/// `extension_registry()` construction 1:1 via
+/// `ExtensionManifest::parse_with_host_api_contracts` and
+/// `ExtensionPackage::from_manifest`. The two capability manifests,
+/// `web-access.search` and `web-access.get_content`, and their real JSON
+/// Schema refs come from the manifest itself — no hand-authored schema.
+pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
+        ManifestSource::HostBundled,
+        &default_host_port_catalog()?,
+        &default_host_api_contract_registry()?,
+    )?;
+    Ok(ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?,
+    )?)
+}
+
+/// Filesystem location of the real production `web-access` extension assets
+/// (manifest + JSON schemas), mirroring `github.rs`'s `asset_root()`.
+pub(super) fn asset_root() -> PathBuf {
+    repo_root().join("crates/ironclaw_first_party_extensions/assets/web-access")
+}
+
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Trust policy admitting the test-only `web-access` provider as first-party,
+/// kept aligned with the shape of `first_party_trust_policy()`/
+/// `github_first_party_trust_policy()` in `harness.rs` — a harness-local
+/// `AdminConfig` construction with a `web-access`-specific effect list, not a
+/// call into either function (the manifest, by contrast, is asset-backed —
+/// see `web_access_extension_package()` above). The manifest path must match
+/// the `PackageSource::LocalManifest` key the host runtime derives from
+/// `web_access_extension_package()`'s root.
+pub(super) fn web_access_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
+    Ok(HostTrustPolicy::new(vec![Box::new(
+        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
+            PackageId::new(WEB_ACCESS_PROVIDER_ID)?,
+            format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}/manifest.toml"),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![EffectKind::DispatchCapability, EffectKind::Network],
+            None,
+        )]),
+    )])?)
+}
+
+/// Network policy restricted to the Exa MCP host, kept aligned with the
+/// production policy inputs from private `exa_mcp_network_policy()`
+/// (`crates/ironclaw_first_party_extensions/src/web_access.rs`, not `pub`) —
+/// re-declared here rather than imported.
+pub(super) fn exa_mcp_test_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: EXA_MCP_HOST.to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(NETWORK_EGRESS_LIMIT),
+    }
+}
+
+/// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// (`harness.rs`) that wires the `web-access` package registry plus the real
+/// production `FirstPartyCapabilityRegistry` registration for both
+/// capability ids, instead of the built-in first-party handler set.
+pub(super) fn local_dev_host_runtime_with_web_access(
+    storage_root: PathBuf,
+    package_registry: ExtensionRegistry,
+    http_egress: Arc<RecordingRuntimeHttpEgress>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut handlers = FirstPartyCapabilityRegistry::new();
+    register_bundled_web_access_first_party_handlers(&mut handlers)?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(package_registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::web_access_assets())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(handlers))
+    .with_first_party_http_egress(http_egress)
+    .with_trust_policy(Arc::new(web_access_first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}

@@ -1,5 +1,7 @@
 # ironclaw_oauth guardrails
 
+> **v1-only today.** Sole consumer is the root `ironclaw` crate. Reborn auth (`ironclaw_auth` + composition's oauth modules) has its own OAuth handling and does not use this crate; it retires — or gets adopted deliberately — with the v1 cleanup.
+
 - Owns the loopback OAuth callback listener (port 9876), branded landing pages, and `OAUTH_CALLBACK_HOST` binding rules. That is the entire scope.
 - Do **not** add provider-specific OAuth (Anthropic, Gemini, GitHub Copilot, OpenAI Codex, NEAR AI, MCP) — those flows live with the consumer that owns the credential and depend on this crate for the transport.
 - Do **not** add token storage, refresh logic, PKCE/device-code orchestration, secrets handling, or HTTP client work — keep those concerns in the calling crate. This crate is a callback transport.

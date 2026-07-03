@@ -522,6 +522,29 @@ impl RebornServices {
         Arc::clone(&self.secret_store)
     }
 
+    /// Read-write project-scoped workspace filesystem, built over
+    /// `local_runtime.extension_filesystem` + `local_runtime.workspace_mounts`.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `local_runtime.workspace_filesystem`:
+    /// that handle is intentionally read-only (it backs setup-marker reads —
+    /// see `local_dev_setup_marker_workspace_filesystem_is_read_only`), so
+    /// writing through it fails closed with `PermissionDenied`.
+    ///
+    /// Single owner of this recipe — both `RebornRuntime::webui_workspace_filesystem`
+    /// (production attachment landing) and `local_dev_attachment_test_support_for_test`
+    /// (C-ATTACH test seam) call this rather than each rebuilding the view, so the
+    /// two can never drift apart.
+    pub(crate) fn read_write_workspace_filesystem(
+        &self,
+    ) -> Option<Arc<ScopedFilesystem<LocalDevRootFilesystem>>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::clone(&local_runtime.extension_filesystem),
+            local_runtime.workspace_mounts.clone(),
+        )))
+    }
+
     #[cfg(feature = "test-support")]
     pub fn local_dev_approval_test_parts(&self) -> Option<RebornLocalDevApprovalTestParts> {
         let local_runtime = self.local_runtime.as_ref()?;
@@ -585,6 +608,45 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::clone(&local_runtime.project_service))
     }
+
+    /// Test-support access to the attachment read port + inbound lander backing
+    /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
+    /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
+    /// that handle is intentionally read-only (it backs setup-marker reads), which
+    /// is fine for reading. The lander is built over the SAME read-write view
+    /// `RebornRuntime::webui_workspace_filesystem` uses in production, via the
+    /// shared [`Self::read_write_workspace_filesystem`] helper — landing through
+    /// the read-only `workspace_filesystem` handle fails closed with
+    /// `PermissionDenied`. Bundled into one accessor (rather than two, mirroring
+    /// `local_dev_profile_filesystem_for_test` / `local_dev_project_service_for_test`
+    /// above) because the two are always populated together. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
+        Some(AttachmentTestSupport {
+            read_port: Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+                    &local_runtime.workspace_filesystem,
+                )),
+            ),
+            lander: Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentLander::new(
+                    read_write_workspace_filesystem,
+                ),
+            ),
+        })
+    }
+}
+
+/// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]
+/// (C-ATTACH seam). Test-support only — zero bytes shipped in production builds.
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct AttachmentTestSupport {
+    pub read_port: Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>,
+    pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]
@@ -2455,6 +2517,27 @@ async fn build_local_dev_root_filesystem(
 /// any on-disk path assertion all derive from this constant.
 pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
+/// Open (or create) the local-dev libSQL database file at `root` — just the
+/// connection, no migrations/mount. One owner for the `libsql::Builder::new_local`
+/// sequence: [`build_default_local_dev_database_roots`] (production) and the
+/// C-DURABLE test-support trigger-repository reopen
+/// (`open_local_dev_trigger_repository_for_test`) both call this rather than
+/// each opening their own connection to the same file.
+#[cfg(feature = "libsql")]
+async fn open_local_dev_libsql_database(
+    root: &Path,
+) -> Result<Arc<libsql::Database>, RebornBuildError> {
+    let db_path = root.join(LOCAL_DEV_DB_FILENAME);
+    Ok(Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev libSQL database could not be opened: {error}"),
+            })?,
+    ))
+}
+
 // `pub(crate)` so the `test_support` accessor
 // (`build_default_local_dev_database_roots_for_test`) can call this
 // without duplicating the 4-step libSQL setup sequence (Builder →
@@ -2466,15 +2549,7 @@ pub(crate) async fn build_default_local_dev_database_roots(
 ) -> Result<LocalDevDurableBackend, RebornBuildError> {
     #[cfg(feature = "libsql")]
     {
-        let db_path = root.join(LOCAL_DEV_DB_FILENAME);
-        let db = Arc::new(
-            libsql::Builder::new_local(&db_path)
-                .build()
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("local-dev libSQL database could not be opened: {error}"),
-                })?,
-        );
+        let db = open_local_dev_libsql_database(root).await?;
         let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
         database.run_migrations().await?;
         mount_local_dev_database_roots(composite, database)?;
@@ -2532,6 +2607,76 @@ fn local_dev_project_filesystem(
         )?;
     }
     Ok(filesystem)
+}
+
+/// Test-only (E-DURABLE seam): open a FRESH, independent
+/// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
+/// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
+/// handle rather than reusing the live one. Reuses the production
+/// [`local_dev_project_filesystem`] mounts and [`FilesystemExtensionInstallationStore::default_state_path`]
+/// so the reopen reads the exact on-disk `/system/extensions` state the running
+/// harness wrote (mirrors the production install-store load in
+/// [`build_reborn_services`], above at the `extension_installation_store` binding).
+/// The store's virtual state path has no identity dependency for local-dev
+/// profiles, so no tenant/user context is needed. Tests only; zero bytes in
+/// production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_local_dev_extension_installation_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
+    let workspace_root = storage_root.join("workspace");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_dev_project_filesystem(
+        storage_root,
+        &workspace_root,
+        None,
+    )?);
+    let state_path =
+        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state path invalid: {error}"),
+            }
+        })?;
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be reopened: {error}"),
+        })?;
+    Ok(Arc::new(store))
+}
+
+/// Test-only (C-DURABLE seam): open a FRESH, independent
+/// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
+/// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
+/// (same on-disk root; a sibling capability store). Reuses
+/// [`mount_default_local_dev_database_roots`] + the production [`crate::wrap_scoped`]
+/// so the reopen mounts + scopes the SAME way `build_local_runtime` does when it
+/// first builds `approval_requests` — the reopen path never drifts from
+/// production. Tests only; zero bytes in production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_approval_request_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn ironclaw_run_state::ApprovalRequestStore>, RebornBuildError> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
+}
+
+/// Test-only (C-DURABLE seam): open a FRESH, independent
+/// [`ironclaw_triggers::TriggerRepository`] at an existing local-dev
+/// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`].
+/// Reuses [`open_local_dev_libsql_database`] (the same libSQL-open sequence
+/// production uses) AND delegates to [`local_dev_trigger_repository`] for
+/// repository construction + migrations, so the reopen path shares the SAME
+/// construction code as production local-dev wiring — never a second place to
+/// update if trigger repository setup changes. Tests only; zero bytes in
+/// production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_trigger_repository_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let db = open_local_dev_libsql_database(storage_root).await?;
+    local_dev_trigger_repository(&LocalDevDurableBackend::LibSql(db)).await
 }
 
 fn mount_local_dev_memory_root<F>(
