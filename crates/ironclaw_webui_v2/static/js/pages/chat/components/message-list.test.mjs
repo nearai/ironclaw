@@ -34,6 +34,11 @@ function messageListSourceForTest() {
   return `${lines.join("\n")}
 globalThis.__testExports = {
   BOTTOM_FOLLOW_THRESHOLD_PX,
+  FLOATING_CONTROL_BOTTOM_OFFSET_PX,
+  FLOATING_CONTROL_SIZE_PX,
+  FLOATING_CONTROL_SPACER_HEIGHT_PX,
+  FLOATING_CONTROL_STYLE,
+  FLOATING_CONTROL_SPACER_STYLE,
   distanceFromBottom,
   isNearBottom,
   scrollToBottom,
@@ -169,6 +174,14 @@ test("MessageList observes content growth from streamed markdown layout", () => 
 });
 
 test("MessageList renders a floating thread logs shortcut", () => {
+  const {
+    FLOATING_CONTROL_BOTTOM_OFFSET_PX,
+    FLOATING_CONTROL_SIZE_PX,
+    FLOATING_CONTROL_SPACER_HEIGHT_PX,
+    FLOATING_CONTROL_STYLE,
+    FLOATING_CONTROL_SPACER_STYLE,
+  } = loadHelpers();
+
   assert.match(
     messageListSource,
     /import \{ Link \} from "react-router";/,
@@ -191,32 +204,41 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /<div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">/,
-    "floating logs control should be clipped to the transcript area, not the composer",
+    /<div className="relative flex min-h-0 min-w-0 flex-1">/,
+    "message-list should keep the transcript area as the floating-control anchor",
+  );
+  assert.doesNotMatch(
+    messageListSource,
+    /bottom-\[\$\{|h-\[\$\{|bottom-\[128px\]|h-\[164px\]/,
+    "floating controls should not rely on Tailwind generated arbitrary classes",
+  );
+  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 128);
+  assert.equal(FLOATING_CONTROL_SIZE_PX, 36);
+  assert.equal(
+    FLOATING_CONTROL_SPACER_HEIGHT_PX,
+    FLOATING_CONTROL_BOTTOM_OFFSET_PX + FLOATING_CONTROL_SIZE_PX,
+    "spacer height should track the floating control offset plus control size",
+  );
+  assert.equal(FLOATING_CONTROL_STYLE.bottom, 128);
+  assert.equal(FLOATING_CONTROL_SPACER_STYLE.height, 164);
+  assert.match(
+    messageListSource,
+    /className="shrink-0"[\s\S]*style=\$\{FLOATING_CONTROL_SPACER_STYLE\}/,
+    "floating logs control should reserve style-driven end-of-content space to clear the composer",
   );
   assert.match(
     messageListSource,
-    /const FLOATING_CONTROL_OFFSET_PX = 128;[\s\S]*const FLOATING_CONTROL_SIZE_PX = 36;[\s\S]*const FLOATING_CONTROL_OFFSET_CLASS = `bottom-\[\$\{FLOATING_CONTROL_OFFSET_PX\}px\]`;[\s\S]*FLOATING_CONTROL_OFFSET_PX \+ FLOATING_CONTROL_SIZE_PX/,
-    "floating controls should share one numeric offset and spacer relationship",
-  );
-  assert.match(
-    messageListSource,
-    /className=\$\{`\$\{FLOATING_CONTROL_SPACER_CLASS\} shrink-0`\}/,
-    "floating logs control should reserve enough end-of-content space to clear the composer",
-  );
-  assert.match(
-    messageListSource,
-    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute \$\{FLOATING_CONTROL_OFFSET_CLASS\} right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
     "floating logs button classes should live in a module-level constant",
   );
   assert.match(
     messageListSource,
-    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute \$\{FLOATING_CONTROL_OFFSET_CLASS\} left-1\/2[\s\S]*className=\$\{JUMP_TO_BOTTOM_BUTTON_CLASS\}/,
-    "jump-to-latest should use the same composer-safe offset as the floating logs control",
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*style=\$\{FLOATING_CONTROL_STYLE\}[\s\S]*<\$\{Icon\} name="logs"/,
+    "thread logs shortcut should render as a visible bottom-right icon button",
   );
   assert.match(
     messageListSource,
-    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*<\$\{Icon\} name="logs"/,
-    "thread logs shortcut should render as a visible bottom-right icon button",
+    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute left-1\/2[\s\S]*className=\$\{JUMP_TO_BOTTOM_BUTTON_CLASS\}[\s\S]*style=\$\{FLOATING_CONTROL_STYLE\}/,
+    "jump-to-latest should use the same composer-safe offset as the floating logs control",
   );
 });
