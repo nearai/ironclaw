@@ -114,6 +114,13 @@ DOES; these divergences from the expected rows are documented, not silently fixe
    the runner maps to retryable host-stage failures. The enum origins are
    legacy-`text_loop_driver`-only, confirming §1.4.
 
+5. **`interrupted_unexpectedly` is lost at the runner boundary.** The planned
+   driver's `map_executor_error` maps an in-flight `Cancelled` host error to
+   `interrupted_unexpectedly`, but runner sanitization projects the run failure
+   as `driver_failed` — the category is overwritten before it reaches the user
+   (binary-level divergence test locks both sides). Candidate follow-up:
+   preserve the driver-mapped category through runner sanitization.
+
 ## 5. Definition of 100% coverage (acceptance)
 
 Every variant has exactly one of:

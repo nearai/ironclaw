@@ -525,6 +525,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_inflight_model_cancelled_maps_to_interrupted_unexpectedly_without_cancel_signal() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .fail_model_with(AgentLoopHostErrorKind::Cancelled)
+            .build();
+
+        let result = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(AgentLoopDriverError::Failed {
+                reason_kind: "interrupted_unexpectedly".to_string()
+            })
+        );
+        assert_eq!(
+            host.observe_cancellation(),
+            None,
+            "scripted in-flight model cancellation must not depend on cooperative cancellation"
+        );
+        assert!(
+            host.call_log().contains(&MockHostCall::StreamModel),
+            "the driver must reach the in-flight model call before mapping cancellation"
+        );
+    }
+
     #[test]
     fn executor_model_credential_diagnostics_map_to_credentials_category() {
         let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
@@ -892,6 +930,7 @@ mod tests {
         match result.expect("resume should return a terminal failed loop exit") {
             LoopExit::Failed(failed) => {
                 assert_eq!(failed.reason_kind, LoopFailureKind::CheckpointUnavailable);
+                assert_eq!(failed.reason_kind.as_str(), "checkpoint_unavailable");
                 assert!(
                     failed.exit_id.as_str().ends_with("-checkpoint-unavailable"),
                     "checkpoint resume failures should use a checkpoint-specific exit id"
