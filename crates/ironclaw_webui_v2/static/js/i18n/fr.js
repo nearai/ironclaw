@@ -175,7 +175,7 @@ registerPack("fr", {
   "tool.exitRunning": "en cours d'exécution…",
   "tool.statusOk": "ok",
   "tool.statusDeclined": "refusé",
-  "tool.statusError": "err",
+  "tool.statusError": "erreur",
   "tool.statusRunning": "en cours",
   "tool.riskRead": "lit",
   "tool.riskWrite": "écrit des fichiers",
