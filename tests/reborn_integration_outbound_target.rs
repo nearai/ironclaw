@@ -11,9 +11,12 @@
 //! - `target_set` happy path (settings decision `Allow` via default-ON
 //!   auto-approve → facade succeeds).
 //! - `target_set` settings-`Deny` → `Failed{policy_denied}` (a `Disabled` tool
-//!   override, `outbound_delivery.rs:184`).
+//!   override, `OutboundDeliveryTargetSetHandler`'s
+//!   `OutboundDeliveryApprovalSettingsDecision::Deny` → `PolicyDenied` arm in
+//!   `runtime/local_dev/outbound_delivery.rs`).
 //! - `target_set` facade `NotFound` → `Failed{invalid_input}` (unknown target,
-//!   `outbound_delivery.rs:212`).
+//!   `OutboundDeliveryTargetSetHandler`'s `NotFound` →
+//!   `CapabilityFailureKind::InvalidInput` arm in the same file).
 //! - `target_set` approval gate: `Ask` (auto-approve disabled) → real
 //!   `BlockedApproval` gate → approve → resume applies the preference; deny →
 //!   resume leaves the preference unchanged.

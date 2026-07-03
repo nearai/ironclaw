@@ -54,8 +54,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, TurnActor, TurnRunId,
+    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, TurnRunId,
     TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
@@ -463,23 +462,13 @@ impl RebornIntegrationHarness {
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
-        let response = self
-            .coordinator
-            .resume_turn(ResumeTurnRequest {
-                scope: scope.clone(),
-                actor: TurnActor::new(self.binding.actor_user_id.clone()),
-                run_id,
-                gate_resolution_ref: gate_ref,
-                precondition,
-                source_binding_ref: SourceBindingRef::new("src:resume")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
-                idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
-                resume_disposition,
-            })
-            .await?;
-        if response.status != TurnStatus::Queued {
-            return Err(format!("expected resumed run to queue, got {:?}", response.status).into());
-        }
-        Ok(())
+        self.resume_run_in_scope_impl(
+            scope.clone(),
+            run_id,
+            gate_ref,
+            resume_disposition,
+            precondition,
+        )
+        .await
     }
 }

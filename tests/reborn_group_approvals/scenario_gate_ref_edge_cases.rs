@@ -40,22 +40,22 @@ pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<
     // still-blocked `gate_ref`.
     let stale_gate_ref = GateRef::new("gate:approval-00000000-0000-0000-0000-000000000000")
         .expect("valid bounded gate ref string");
-    assert_ne!(
-        gate_ref.as_str(),
-        stale_gate_ref.as_str(),
-        "the stale ref fixture must not coincidentally match the real gate ref"
-    );
+    if gate_ref.as_str() == stale_gate_ref.as_str() {
+        return Err("the stale ref fixture must not coincidentally match the real gate ref".into());
+    }
 
     // Resolve the REAL approval (succeeds), but resume with the STALE ref.
     let err = h
         .approve_gate_with_stale_resume_ref(run_id, &gate_ref, &stale_gate_ref)
         .await
-        .expect_err("resuming with a stale gate ref must fail");
+        .err()
+        .ok_or("expected err: resuming with a stale gate ref must fail")?;
     let err_text = err.to_string();
-    assert!(
-        err_text.contains("gate resolution reference mismatch"),
-        "expected the InvalidRequest gate-mismatch reason, got: {err_text}"
-    );
+    if !err_text.contains("gate resolution reference mismatch") {
+        return Err(
+            format!("expected the InvalidRequest gate-mismatch reason, got: {err_text}").into(),
+        );
+    }
 
     // Non-vacuity follow-up: the run is STILL blocked (the failed stale-ref
     // resume never reached the point of clearing the gate) — resuming with
@@ -90,11 +90,14 @@ pub async fn missing_gate_bare_resolve(g: &RebornIntegrationGroup) -> HarnessRes
     let err = h
         .approve_gate(run_id, &bogus_gate_ref)
         .await
-        .expect_err("resolving a never-issued gate ref must fail");
+        .err()
+        .ok_or("expected err: resolving a never-issued gate ref must fail")?;
     let err_text = err.to_string();
-    assert!(
-        err_text.contains("approval gate was not recorded by the host runtime harness"),
-        "expected the harness's own request-not-found rejection, got: {err_text}"
-    );
+    if !err_text.contains("approval gate was not recorded by the host runtime harness") {
+        return Err(format!(
+            "expected the harness's own request-not-found rejection, got: {err_text}"
+        )
+        .into());
+    }
     Ok(())
 }

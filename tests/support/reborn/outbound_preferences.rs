@@ -154,7 +154,9 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
 
 /// The `NotFound` the production handler maps to
 /// `CapabilityOutcome::Failed(InvalidInput)` ("outbound delivery target is not
-/// available") — see `outbound_delivery.rs:212`.
+/// available") — see `OutboundDeliveryTargetSetHandler`'s `NotFound` →
+/// `CapabilityFailureKind::InvalidInput` arm in
+/// `runtime/local_dev/outbound_delivery.rs`.
 fn target_not_found() -> RebornServicesError {
     RebornServicesError {
         code: RebornServicesErrorCode::NotFound,

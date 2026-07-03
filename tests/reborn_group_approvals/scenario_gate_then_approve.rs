@@ -51,15 +51,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let err = h
         .approve_gate(run_id, &gate_ref)
         .await
-        .expect_err("re-approving an already-resolved gate must fail");
+        .err()
+        .ok_or("expected err: re-approving an already-resolved gate must fail")?;
     let err_text = err.to_string();
-    assert!(
-        err_text.contains("approval request is not pending"),
-        "expected the NotPending resolver error text, got: {err_text}"
-    );
-    assert!(
-        err_text.contains("Approved"),
-        "expected the resolved ApprovalStatus::Approved token in the error, got: {err_text}"
-    );
+    if !err_text.contains("approval request is not pending") {
+        return Err(format!("expected the NotPending resolver error text, got: {err_text}").into());
+    }
+    if !err_text.contains("Approved") {
+        return Err(format!(
+            "expected the resolved ApprovalStatus::Approved token in the error, got: {err_text}"
+        )
+        .into());
+    }
     Ok(())
 }

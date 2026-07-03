@@ -1206,6 +1206,28 @@ impl RebornIntegrationHarness {
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
+        self.resume_run_in_scope_impl(
+            self.turn_scope.clone(),
+            run_id,
+            gate_ref,
+            resume_disposition,
+            precondition,
+        )
+        .await
+    }
+
+    /// Shared implementation behind both `resume_run` (resumes in
+    /// `self.turn_scope`) and `triggered_submit.rs`'s `resume_run_in_scope`
+    /// (resumes in an explicit, possibly different, `TurnScope` for
+    /// triggered/non-thread runs).
+    pub(crate) async fn resume_run_in_scope_impl(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        resume_disposition: Option<GateResumeDisposition>,
+        precondition: ResumeTurnPrecondition,
+    ) -> HarnessResult<()> {
         // Key on `(run_id, gate_ref)`, NOT `run_id` alone: a C-JOURNEY chained
         // turn can resume the SAME run twice in a row (e.g. an approval gate
         // resolved, immediately followed by the auth gate the re-dispatched
@@ -1221,7 +1243,7 @@ impl RebornIntegrationHarness {
         let response = self
             .coordinator
             .resume_turn(ResumeTurnRequest {
-                scope: self.turn_scope.clone(),
+                scope,
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
