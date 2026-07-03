@@ -1685,7 +1685,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
             config = (
-                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "C0QA"\n'
+                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "D0QA"\n'
                 'subject_user_id = "user:web"\n'
             )
 

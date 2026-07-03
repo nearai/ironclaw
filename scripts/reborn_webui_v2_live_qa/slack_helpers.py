@@ -307,7 +307,9 @@ def _config_has_slack_channel_route(
 
 def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> bool:
     return any(
-        route.get("subject_user_id") == user_id and bool(route.get("channel_id"))
+        route.get("subject_user_id") == user_id
+        and bool(route.get("channel_id"))
+        and not str(route.get("channel_id") or "").startswith("D")
         for route in _slack_channel_routes(config_text)
     )
 
