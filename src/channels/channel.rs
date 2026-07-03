@@ -43,8 +43,8 @@ pub struct IncomingMessage {
     ///
     /// This is the *external* channel-supplied thread identifier (e.g. a
     /// Telegram chat id, Slack `thread_ts`, or web-UI UUID string) — **not**
-    /// the internal engine [`ironclaw_engine::ThreadId`] UUID. Conversion to
-    /// the internal id happens in `SessionManager::resolve_thread`.
+    /// the internal session thread UUID. Conversion to the internal id happens
+    /// in `SessionManager::resolve_thread`.
     pub thread_id: Option<ExternalThreadId>,
     /// Stable channel/chat/thread scope for this conversation.
     pub conversation_scope_id: Option<String>,

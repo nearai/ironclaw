@@ -24,9 +24,7 @@ cargo run
 # 3. Exit — the fixture is written on shutdown.
 
 # 4. Add a snapshot test that replays the fixture and asserts the
-#    ReplayOutcome shape. Example pattern in tests/e2e_engine_v2.rs:
-#        snapshot_single_tool_echo (engine v2),
-#    or in tests/e2e_bug_bash_snapshots.rs:
+#    ReplayOutcome shape. Example pattern in tests/e2e_bug_bash_snapshots.rs:
 #        snapshot_summarization_uses_tools (engine v1).
 ```
 

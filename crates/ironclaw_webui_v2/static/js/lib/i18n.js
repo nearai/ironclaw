@@ -1,4 +1,5 @@
 import { React, html } from "./html.js";
+import { interpolateParams } from "./i18n-format.js";
 
 const STORAGE_KEY = "ironclaw_language";
 
@@ -76,8 +77,7 @@ function ensurePack(lang) {
 // bundled English pack and finally the raw key.
 function translate(pack, key, params = {}) {
   const text = pack?.[key] || packs["en"]?.[key] || key;
-  if (!params || typeof text !== "string") return text;
-  return text.replace(/\{(\w+)\}/g, (match, k) => (params[k] !== undefined ? params[k] : match));
+  return interpolateParams(text, params);
 }
 
 const I18nContext = React.createContext({
