@@ -56,6 +56,22 @@ impl RebornIntegrationGroup {
         Self::builder().live_auth_gate().await
     }
 
+    /// C-JOURNEY convergence seam: group surfacing BOTH an unseeded GitHub
+    /// capability (raises `TurnStatus::BlockedAuth`, resolvable with
+    /// `resolve_auth_gate`/`deny_auth_gate`) AND real file-tool approval
+    /// stores (`write_file`/`read_file` at `PermissionMode::Ask`, raises
+    /// `TurnStatus::BlockedApproval`, resolvable with `approve_gate`/`deny_gate`)
+    /// on the SAME `build_reborn_services` runtime — unlike `live_auth_gate`
+    /// (a separate, lower-level `HostRuntimeServices` build with a hardcoded
+    /// credential resolver and no run_state store), this group's auth gate
+    /// resolves through the REAL `ProductAuthRuntimeCredentialResolver`, so
+    /// `resolve_auth_gate`'s happy-path resume actually completes. Auto-approve
+    /// is disabled for the group scope at construction so gated file-tool calls
+    /// raise real `BlockedApproval` gates.
+    pub async fn live_auth_and_approval() -> HarnessResult<Self> {
+        Self::builder().live_auth_and_approval().await
+    }
+
     /// Group with the local-dev synthetic `project_create` capability wired
     /// (E-PROJ seam). Auto-approve is enabled.
     pub async fn project_lifecycle() -> HarnessResult<Self> {
@@ -174,6 +190,37 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools_auth_required().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
+    }
+
+    /// Build an auth+approval convergence group. See
+    /// [`RebornIntegrationGroup::live_auth_and_approval`]. Cannot go through
+    /// `build_with_capability` — like `live_approvals`, the capability's
+    /// executor user must be aligned to `base`'s canonical binding subject
+    /// user (`.with_user_id`) so dispatch-time capability resolution
+    /// (approval persistence AND the seeded GitHub credential account's
+    /// visibility scope) matches the run's actual `(tenant, user)`, not the
+    /// constructor's fixed test user.
+    pub async fn live_auth_and_approval(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let subject_user = base.canonical_subject_user()?;
+        let host_runtime = HostRuntimeCapabilityHarness::file_and_github_auth_tools()
+            .await?
+            .with_user_id(subject_user);
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        let group = self.into_group(base, capability).await?;
+        // `file_and_github_auth_tools` already disabled auto-approve under its
+        // OWN fixed constructor user (before `.with_user_id` reassigned it);
+        // disable it again under the run's REAL capability scope, mirroring
+        // `live_approvals`'s alignment above.
+        let scope = group
+            .shared
+            .auto_approve_scope()
+            .expect("live_auth_and_approval always uses HostRuntime; scope is always Some");
+        let arc = group
+            .capability_harness()
+            .expect("live_auth_and_approval always uses HostRuntime");
+        arc.disable_global_auto_approve(scope).await?;
+        Ok(group)
     }
 
     /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].

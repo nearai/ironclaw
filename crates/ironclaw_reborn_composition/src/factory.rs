@@ -89,7 +89,8 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProductWorkflowError,
+    ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -584,6 +585,30 @@ impl RebornServices {
     pub fn local_dev_project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::clone(&local_runtime.project_service))
+    }
+
+    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
+    /// github) directly into the local-dev active-extension registry + trust
+    /// policy, bypassing the multi-turn `builtin.extension_install` →
+    /// `builtin.extension_activate` capability handshake. Reaches the SAME
+    /// `ActiveExtensionPublisher::publish` step `activate()` calls
+    /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
+    /// so a harness that needs a bundled capability (like `github.*`)
+    /// reachable for dispatch without scripting install/activate turns can
+    /// seed it at construction time. Returns `None` for production-profile
+    /// compositions without a local-dev runtime (mirrors
+    /// `extension_installation_store_for_test`).
+    #[cfg(feature = "test-support")]
+    pub fn publish_bundled_extension_for_test(
+        &self,
+        package: &ironclaw_extensions::ExtensionPackage,
+    ) -> Option<Result<(), ProductWorkflowError>> {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(
+            extension_management
+                .active_extensions_for_test()
+                .publish(package),
+        )
     }
 }
 
