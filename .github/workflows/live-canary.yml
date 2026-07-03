@@ -61,6 +61,11 @@ on:
         type: string
         required: false
         default: ""
+      use_target_harness:
+        description: "Use target_ref's Reborn WebUI v2 live QA harness instead of restoring the canonical main harness."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -657,7 +662,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         with:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
@@ -666,7 +672,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         run: |
           set -euo pipefail
           harness_ref="$(git -C .canonical-live-qa-harness rev-parse HEAD)"
