@@ -1726,6 +1726,15 @@ struct HostRuntimeHarnessOptions {
     /// tool call never reaches `invoke_capability`). Empty for every harness
     /// that surfaces no bundled WASM capability.
     activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
+    /// C-SYNTH `project_create` fault-injection seam: wrap the real
+    /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
+    /// in `FaultInjectingProjectService` before it reaches
+    /// `wrap_project_create_capability_for_test`, so a `create_project` call
+    /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
+    /// `ProjectServiceError::Denied` instead of reaching the real store.
+    /// Only `project_tools_with_fault_injection()` sets this; every other
+    /// harness leaves the real service unwrapped.
+    project_service_fault_injection: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1741,6 +1750,7 @@ impl HostRuntimeHarnessOptions {
             outbound_target_facade: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
+            project_service_fault_injection: false,
         }
     }
 
@@ -1770,6 +1780,11 @@ impl HostRuntimeHarnessOptions {
 
     fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
         self.activate_bundled_extensions_for_test.push(package);
+        self
+    }
+
+    fn with_project_service_fault_injection(mut self) -> Self {
+        self.project_service_fault_injection = true;
         self
     }
 }
@@ -2205,6 +2220,45 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
+    /// C-SYNTH `project_create` fault-injection arm: same surface as
+    /// `project_tools()`, but the real `Arc<dyn ProjectService>` is wrapped in
+    /// `FaultInjectingProjectService`
+    /// (`with_project_service_fault_injection`) so a `create_project` call
+    /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
+    /// `ProjectServiceError::Denied` — proving the real capability
+    /// dispatch's `project_service_outcome` `Unavailable` arm (a
+    /// model-visible, recoverable `Failed` tool error, not a terminal driver
+    /// crash) end-to-end, not just at the unit level. Any other
+    /// `create_project` name still reaches the real store.
+    pub(crate) async fn project_tools_with_fault_injection() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
+            "reborn-e2e-project-tools-fault-injection",
+            vec![CapabilityId::new(
+                ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
+            )?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-project-tools-fault-injection-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_project_service_fault_injection(),
+        )
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
     /// C-SYNTH outbound: harness surfacing the two local-dev synthetic
     /// `outbound_delivery_*` capabilities over an injected
     /// [`FakeOutboundPreferencesFacade`] double.
@@ -2563,6 +2617,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
+            project_service_fault_injection,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2612,7 +2667,19 @@ impl HostRuntimeCapabilityHarness {
         // before `services.host_runtime` is moved out below (E-PROFILE / E-PROJ /
         // C-ATTACH seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
-        let project_service = services.local_dev_project_service_for_test();
+        // C-SYNTH `project_create` fault-injection seam: wrap the real service
+        // in `FaultInjectingProjectService` only when the harness opted in
+        // (`with_project_service_fault_injection`) — every other harness keeps
+        // the real service unwrapped and behaves exactly as before.
+        let project_service: Option<Arc<dyn ProjectService>> =
+            services.local_dev_project_service_for_test().map(|inner| {
+                if project_service_fault_injection {
+                    super::project_service_fault::FaultInjectingProjectService::wrapping(inner)
+                        as Arc<dyn ProjectService>
+                } else {
+                    inner
+                }
+            });
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
@@ -3495,6 +3562,46 @@ impl HostRuntimeCapabilityHarness {
         let dir = self
             .storage_root_for_test()
             .join("system")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir)?;
+        let body = format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        );
+        std::fs::write(dir.join("SKILL.md"), body)?;
+        Ok(())
+    }
+
+    /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
+    /// USER-scoped skill (writes
+    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`,
+    /// mirroring the runtime.rs composition-test layout) so a name shared with
+    /// a system-scoped skill (`seed_system_skill_for_test`) resolves to TWO
+    /// Trusted candidates under different `SkillSourceKind`s — `System` root
+    /// and `User` root both default to `SkillTrust::Trusted`
+    /// (`FilesystemSkillBundleRoot::system`/`user`,
+    /// `crates/ironclaw_loop_support/src/filesystem_skill_bundle_source.rs`),
+    /// so `select_named_skill_activations`'s `active_candidates` filter
+    /// (`trust == Trusted`) admits both, and
+    /// `validate_explicit_mentions_are_unambiguous` then rejects the shared
+    /// name as `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user`
+    /// must be the SAME `(tenant, actor_user_id)` the driving thread's run
+    /// resolves under (`harness.binding`), or the user root never matches the
+    /// run's own scoped `/skills` mount. Tests only.
+    pub(crate) fn seed_user_skill_for_test(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        let dir = self
+            .storage_root_for_test()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("users")
+            .join(user.as_str())
             .join("skills")
             .join(name);
         std::fs::create_dir_all(&dir)?;

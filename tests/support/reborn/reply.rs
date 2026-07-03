@@ -78,6 +78,38 @@ impl RebornScriptedReply {
         }
     }
 
+    /// Scripts one model turn carrying MULTIPLE tool calls in a single
+    /// assistant response (a "parallel" tool-calls turn — multiple
+    /// `tool_calls[]` entries from ONE model call, as opposed to separate
+    /// sequential turns). Each `(capability_id, arguments)` pair gets its own
+    /// `'.' → "__"` provider-seam encoding and its own sequentially-counted
+    /// `call-N` id (same counter `tool_call` uses, so ids stay unique across
+    /// both constructors within a run). Still counts as exactly ONE script
+    /// entry per the harness's "one entry per model call" discipline — the
+    /// caller must follow it with exactly one more entry (the post-execution
+    /// model call reacting to however many tool results come back).
+    pub fn tool_calls<'a>(calls: impl IntoIterator<Item = (&'a str, serde_json::Value)>) -> Self {
+        let tool_calls = calls
+            .into_iter()
+            .map(|(capability_id, arguments)| TraceToolCall {
+                id: format!("call-{}", NEXT_TOOL_CALL_ID.fetch_add(1, Ordering::Relaxed)),
+                name: capability_id.replace('.', "__"),
+                arguments,
+            })
+            .collect();
+        Self {
+            step: TraceStep {
+                request_hint: None,
+                response: TraceResponse::ToolCalls {
+                    tool_calls,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+                expected_tool_results: Vec::new(),
+            },
+        }
+    }
+
     /// Consume into the underlying replay step (crate-internal seam used by
     /// `scripted_provider::scripted_trace_llm`).
     pub(crate) fn into_step(self) -> TraceStep {

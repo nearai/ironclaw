@@ -25,6 +25,7 @@ mod support;
 
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
+mod scenario_triggered_chained_gate;
 mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
 
@@ -131,6 +132,20 @@ async fn triggered_gate_group() {
     report.record(
         "triggered_gate_wrong_scope_resume_rejected",
         scenario_triggered_gate::run_wrong_scope_resume_rejected(&g_wrong_scope).await,
+    );
+
+    // C-JOURNEY (wave-4 carry-over): a triggered fire whose run raises a
+    // gate, gets resolved, then CHAINS into a SECOND gate/action in the SAME
+    // run — pins ScheduledTrigger origin propagation across BOTH resume hops
+    // (not just the first) plus reply persistence. Own group: two gates over
+    // the group's shared approval store should not be attributed to the
+    // single-gate arms above.
+    let g_chained = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("chained-gate-arm group builds");
+    report.record(
+        "triggered_gate_chained_approve",
+        scenario_triggered_chained_gate::run_chained_approve(&g_chained).await,
     );
 
     report.assert_all_passed();
