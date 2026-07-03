@@ -394,6 +394,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-workflow-canary
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM channels
@@ -431,6 +436,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-deterministic-replay
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -474,6 +484,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-public-smoke
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -692,6 +707,12 @@ jobs:
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           key: live-canary-reborn-webui-v2-live-qa
+      - name: Setup distributed sccache
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         run: cargo install cargo-component --locked || true
@@ -792,6 +813,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-persona-rotating
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -900,6 +926,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-provider-${{ matrix.provider }}
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -964,6 +995,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-release-public-full
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -1006,6 +1042,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-upgrade
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Run upgrade canary lane
         env:
           LANE: upgrade-canary

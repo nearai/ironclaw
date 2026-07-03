@@ -191,6 +191,11 @@ jobs:
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ matrix.name == 'all-features' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') }}
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
@@ -244,6 +249,11 @@ jobs:
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Setup distributed sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
       - name: Test Reborn CLI binary crate

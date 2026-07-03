@@ -1,0 +1,61 @@
+name: Setup distributed sccache
+description: Install sccache and configure the OVH distributed compiler backend when credentials are available.
+
+inputs:
+  scheduler-url:
+    description: HTTPS URL for the sccache-dist scheduler.
+    required: false
+    default: ""
+  auth-token:
+    description: Token for the sccache-dist scheduler.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Skip unavailable distributed sccache
+      if: ${{ inputs.auth-token == '' }}
+      shell: bash
+      run: echo "::notice title=Distributed sccache skipped::SCCACHE_DIST_AUTH_TOKEN is unavailable; using local compilation."
+
+    - name: Install sccache
+      if: ${{ inputs.auth-token != '' }}
+      uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+      with:
+        version: v0.16.0
+
+    - name: Configure distributed sccache
+      if: ${{ inputs.auth-token != '' }}
+      shell: bash
+      env:
+        SCCACHE_DIST_SCHEDULER_URL: ${{ inputs.scheduler-url }}
+        SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.auth-token }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${SCCACHE_DIST_SCHEDULER_URL}" ]]; then
+          echo "::error title=Missing scheduler URL::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
+          exit 1
+        fi
+
+        if [[ "${SCCACHE_DIST_SCHEDULER_URL}" != https://* ]]; then
+          echo "::error title=Insecure scheduler URL::SCCACHE_DIST_SCHEDULER_URL must use https://"
+          exit 1
+        fi
+
+        mkdir -p "${HOME}/.config/sccache"
+        cat > "${HOME}/.config/sccache/config" <<EOF
+        [dist]
+        scheduler_url = "${SCCACHE_DIST_SCHEDULER_URL}"
+        toolchains = []
+        toolchain_cache_size = 5368709120
+
+        [dist.auth]
+        type = "token"
+        token = "${SCCACHE_DIST_AUTH_TOKEN}"
+        EOF
+        chmod 600 "${HOME}/.config/sccache/config"
+        echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+        sccache --stop-server || true
+        sccache --dist-status
