@@ -11,7 +11,7 @@
 //! | interactive_approval_journey          | interactive   | approval → approval           | approve, deny, follow-up |
 //! | auth_then_approval_journey            | interactive   | (approval→auth) → approval    | approve+resolve, approve, follow-up |
 //! | auth_deny_then_retry_journey          | interactive   | (approval→auth) → (approval→auth) | approve+deny, approve+resolve |
-//! | multi_actor_gate_isolation (IGNORED)  | interactive×2 | approval (A) / approval (B)   | blocked — see below |
+//! | multi_actor_gate_isolation            | interactive×2 | approval (A) / approval (B)   | per-actor gate + resume isolation |
 //!
 //! Shared turn-script helpers keep permutations from fanning out into N
 //! near-identical fully-expanded scenarios (see each scenario module).
@@ -57,19 +57,17 @@
 //!   lives in `reborn_integration_triggered_submit` and the sibling triggered
 //!   lane; a chained triggered journey needs a scripted-gateway-for-trigger-scope
 //!   seam that does not exist here.
-//! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`, marked
-//!   `#[ignore]`): a distinct actor's GATED capability turn dies with
-//!   `driver_protocol_violation` because the capability harness on THIS base
-//!   hardcodes ONE execution user (the group's canonical subject user), so actor
-//!   B's gated dispatch is scoped to A's user and the approval-gate persistence
-//!   mismatches B's run scope. Production isolates capability dispatch by run
-//!   owner correctly; the missing piece is a HARNESS seam
-//!   (`scope_capability_by_run_owner`) authored in the parallel C-MULTIUSER
-//!   wave-3 lane and not yet merged to this base. Kept as a RED `#[ignore]`d
-//!   test (`multi_actor_gate_isolation_blocked`) so the intended coverage is
-//!   pinned and un-ignores the moment that seam lands. See `TODO(reborn-multiuser-gate)`.
-//!   (Plain — non-gated — distinct-actor isolation already works and is covered
-//!   by `reborn_group_multiuser::two_actors_own_threads`.)
+//! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): NOW ACTIVE in
+//!   the wave-3 fold. It runs on `RebornIntegrationGroup::multiuser_approvals()`,
+//!   whose per-actor capability dispatch (the C-MULTIUSER
+//!   `scope_capability_by_run_owner` harness seam, merged from the sibling lane)
+//!   scopes each actor's gated write to ITS OWN run owner — so actor B no longer
+//!   dies with `driver_protocol_violation` under actor A's user. The scenario
+//!   disables auto-approve for each owner (that group defaults auto-approve ON
+//!   per owner) so both actors raise a real `BlockedApproval`, then pins that
+//!   gate resolution + resume state stay bound to the raising actor. (Plain —
+//!   non-gated — distinct-actor isolation is covered by
+//!   `reborn_group_multiuser::two_actors_own_threads`.)
 
 #[allow(dead_code)]
 #[path = "../support/reborn/mod.rs"]
@@ -134,17 +132,16 @@ async fn journeys_group_auth_convergence_e2e() {
     report.assert_all_passed();
 }
 
-/// RED, `#[ignore]`d: the multi-actor GATED journey. Currently fails with
-/// `driver_protocol_violation` on actor B's gated turn because this base's
-/// capability harness hardcodes one execution user, so a distinct actor's gated
-/// dispatch cannot be scoped to its own run owner. Un-ignore once the
-/// C-MULTIUSER `scope_capability_by_run_owner` harness seam merges to main.
-/// See the module-level "Deferred / blocked permutations" note.
-/// TODO(reborn-multiuser-gate): un-ignore after the capability-owner-scoping seam lands.
+/// The multi-actor GATED journey (un-ignored in the wave-3 fold now the
+/// C-MULTIUSER `scope_capability_by_run_owner` harness seam has merged). Uses
+/// `multiuser_approvals()` — file-approval tools with per-actor capability
+/// dispatch — so a distinct actor's gated write is scoped to ITS OWN run owner
+/// (no more `driver_protocol_violation`); the scenario disables auto-approve for
+/// each owner so both actors raise a real `BlockedApproval` gate, then proves
+/// gate resolution + resume state stay bound to the RAISING actor.
 #[tokio::test]
-#[ignore = "blocked: needs unmerged C-MULTIUSER scope_capability_by_run_owner harness seam"]
-async fn multi_actor_gate_isolation_blocked() {
-    let g = RebornIntegrationGroup::live_approvals()
+async fn multi_actor_gate_isolation() {
+    let g = RebornIntegrationGroup::multiuser_approvals()
         .await
         .expect("group builds");
     scenario_multi_actor_gate_isolation::run(&g)

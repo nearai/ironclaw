@@ -66,6 +66,25 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         return Err("with_actor_id seam no-op: both threads resolved the same owner".into());
     }
 
+    // The `multiuser_approvals` group scopes capability dispatch by run owner
+    // (C-MULTIUSER `scope_capability_by_run_owner` seam) and defaults auto-approve
+    // ON per owner, so each actor's gate only fires once its OWN `(tenant, user)`
+    // scope is set OFF. Disable both explicitly BEFORE any turn so BOTH actors
+    // raise a real `BlockedApproval` gate under their own owner — the state whose
+    // per-actor binding this scenario pins.
+    let owner_a = a
+        .binding
+        .subject_user_id
+        .as_ref()
+        .ok_or("actor A binding has no subject user id")?;
+    let owner_b = b
+        .binding
+        .subject_user_id
+        .as_ref()
+        .ok_or("actor B binding has no subject user id")?;
+    g.disable_auto_approve_for_owner(owner_a).await?;
+    g.disable_auto_approve_for_owner(owner_b).await?;
+
     // Actor A: raise + approve + complete.
     let (run_a, gate_a) = a
         .submit_turn_until_blocked("ACTOR_A write the file")
