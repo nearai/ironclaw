@@ -830,7 +830,7 @@ async fn wait_for_gate_route(
             if let Some(record) = route_store
                 .load_delivered_gate_route(tenant, user, gate_ref)
                 .await
-                .expect("load gate route")
+                .expect("load gate route") // safety: test-only poll loop; a store error means a broken test double
             {
                 return record;
             }
@@ -838,7 +838,7 @@ async fn wait_for_gate_route(
         }
     })
     .await
-    .expect("driver records the delivered gate route within 5 s")
+    .expect("driver records the delivered gate route within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
 }
 
 /// Poll `egress`'s recorded requests until at least one Slack
@@ -882,7 +882,7 @@ async fn wait_for_approval_prompt_messages(
         }
     })
     .await
-    .expect("driver posts the approval-prompt chat.postMessage within 5 s")
+    .expect("driver posts the approval-prompt chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
 }
 
 /// Full trigger→gate→approve twin of the live canary, at the crate tier.
