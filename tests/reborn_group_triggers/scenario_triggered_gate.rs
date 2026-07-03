@@ -16,7 +16,8 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::TurnStatus;
+use ironclaw_host_api::TenantId;
+use ironclaw_turns::{ResumeTurnPrecondition, TurnStatus};
 use serde_json::json;
 
 /// Approve arm: triggered fire → gate raised → approve → gated write re-runs
@@ -113,6 +114,108 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Side-effect proof (mirrors the interactive deny arm).
     h.assert_workspace_file_absent("triggered-denied.txt")
+        .await?;
+    Ok(())
+}
+
+/// C-DENYEDGE (row 1): a resume request carrying the RIGHT `run_id` but a
+/// MUTATED `TurnScope` (different tenant) must be rejected, not silently
+/// resolved against the wrong tenant's run.
+///
+/// Drives a triggered fire to a real `BlockedApproval` gate exactly like
+/// [`run_approve`], then attempts to resume the SAME `run_id` under a
+/// scope with a different `tenant_id`. `InMemoryTurnStateStore::resume_turn_once`
+/// (`crates/ironclaw_turns/src/memory/mod.rs`) looks the run up by `run_id`
+/// alone, then checks `record.scope != request.scope` BEFORE consulting the
+/// gate/precondition/actor at all — so a mis-scoped resume against an
+/// otherwise-valid pending gate deterministically hits
+/// `TurnError::ScopeNotFound` (`#[error("turn run not found")]`), and the
+/// taken-out record is unconditionally reinserted afterward regardless of
+/// outcome, so the run's `BlockedApproval` state is untouched by the
+/// rejected attempt.
+///
+/// This drives `resume_run_in_scope` (the resume-only tail
+/// `approve_gate_in_scope`/`deny_gate_in_scope` share) rather than those two
+/// helpers themselves: both first resolve the approval request in the
+/// (scope-independent) local-dev approval store via
+/// `capability_recorder.approve_local_dev_gate`/`deny_local_dev_gate`, which
+/// is keyed on `gate_ref` alone and would irreversibly flip the approval
+/// record to `Approved`/`Denied` even though the resume itself is rejected —
+/// corrupting the approval-store state this scenario's non-vacuity check
+/// depends on being still-`Pending`. The resume-only call isolates the
+/// assertion to exactly the mechanism under test (the `TurnScope` equality
+/// check inside `resume_turn_once`) and leaves the gate genuinely live for
+/// the real resume that follows.
+pub async fn run_wrong_scope_resume_rejected(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let h = g.thread("conv-triggered-gate-wrong-scope").build().await?;
+
+    let submission = h
+        .submit_triggered_turn_scripted(
+            "write the scheduled report",
+            [
+                RebornScriptedReply::tool_call(
+                    "builtin.write_file",
+                    json!({"path": "/workspace/triggered-wrong-scope.txt", "content": "triggered wrong-scope write"}),
+                ),
+                RebornScriptedReply::text("report written after approval"),
+            ],
+        )
+        .await?;
+
+    let state = h
+        .wait_for_status_in_scope(
+            &submission.turn_scope,
+            submission.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await?;
+    let gate_ref = state
+        .gate_ref
+        .ok_or("blocked triggered run missing gate ref")?;
+    if !gate_ref.as_str().starts_with("gate:approval-") {
+        return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
+    }
+
+    // Same run_id, DIFFERENT tenant_id — the attacker-controlled scope.
+    let mut mutated_scope = submission.turn_scope.clone();
+    mutated_scope.tenant_id = TenantId::new("wrong-tenant-scope-attack")?;
+
+    // The idempotency key inside `resume_run_in_scope` is scope-qualified by
+    // the turn store (`RunIdempotencyKey { scope, run_id, key }`), so this
+    // rejected attempt under the mutated scope cannot replay-collide with the
+    // real resume below.
+    let err = h
+        .resume_run_in_scope(
+            &mutated_scope,
+            submission.run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+        .err()
+        .ok_or("expected mis-scoped resume to be rejected with ScopeNotFound, but it queued")?;
+    // Pin the EXACT `TurnError::ScopeNotFound` Display string
+    // (`crates/ironclaw_turns/src/status.rs:403-404`), not just `.is_err()` —
+    // a discriminating negative assertion.
+    if err.to_string() != "turn run not found" {
+        return Err(format!(
+            "expected TurnError::ScopeNotFound (\"turn run not found\"), got: {err}"
+        )
+        .into());
+    }
+
+    // Non-vacuity: the mutated-scope call didn't corrupt run state, and the
+    // gate is still genuinely live under the REAL scope/gate_ref.
+    h.approve_gate_in_scope(&submission.turn_scope, submission.run_id, &gate_ref)
+        .await?;
+    h.wait_for_status_in_scope(
+        &submission.turn_scope,
+        submission.run_id,
+        TurnStatus::Completed,
+    )
+    .await?;
+    h.assert_workspace_file_contains("triggered-wrong-scope.txt", "triggered wrong-scope write")
         .await?;
     Ok(())
 }

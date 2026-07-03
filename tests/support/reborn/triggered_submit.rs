@@ -449,7 +449,13 @@ impl RebornIntegrationHarness {
     /// creator IS `binding.actor_user_id` (`submit_triggered_turn` builds the
     /// fire from it), so the approving user and the trigger creator coincide,
     /// as in production's approval-resolution path.
-    async fn resume_run_in_scope(
+    ///
+    /// `pub(crate)` (not just a private tail of `approve_gate_in_scope`/
+    /// `deny_gate_in_scope`) so deny-edge scenarios can drive a resume with a
+    /// deliberately WRONG scope without rebuilding the `ResumeTurnRequest` by
+    /// hand — a coordinator-level rejection (`TurnError`) propagates out
+    /// unchanged for the caller to pin.
+    pub(crate) async fn resume_run_in_scope(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,

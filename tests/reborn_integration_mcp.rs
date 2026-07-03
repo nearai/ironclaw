@@ -234,6 +234,58 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
+/// Error path — MCP `tools/call` returns a valid, successful JSON-RPC response
+/// whose parsed `result` payload exceeds the host's MCP output-size limit
+/// (`McpRuntimeConfig::default().max_output_bytes` = 1 MiB, wired by
+/// `build_loopback_mcp_runtime` in `tests/support/reborn/harness_mcp.rs`). The
+/// client surfaces this as `Failed{OutputTooLarge}` (recoverable, model-visible
+/// — `reason` token `"output_too_large"`), and the run completes. Distinct wire
+/// path from both cases above: this trips neither the HTTP status gate nor the
+/// JSON-RPC error-field guard — the HTTP call and JSON-RPC parse both succeed —
+/// it trips the POST-parse `output_bytes > max_output_bytes` check in
+/// `McpRuntime::execute_extension_json` (`crates/ironclaw_mcp/src/lib.rs`),
+/// which is a wholly different mechanism from an HTTP-egress
+/// `response_body_limit` rejection: `LoopbackMcpRuntimeHttpEgress` (this
+/// harness's test-only egress) never enforces `response_body_limit` against the
+/// real bytes it reads back, so only this post-parse size check is reachable at
+/// this test tier — a genuinely oversized HTTP response body would just be read
+/// in full and only then rejected once parsed.
+#[tokio::test]
+async fn mcp_tool_call_output_too_large_surfaces_failed() {
+    // `content` serializes (inside the mock server's `{"content":[{"type":
+    // "text","text": <json-string>}]}` wrapper) to roughly `oversized_len + 60`
+    // bytes — comfortably over the 1 MiB (1_048_576 byte) limit with a wide
+    // margin so the exact escaping/wrapper overhead can't make this test flaky.
+    let oversized_len = 1_200_000usize;
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": ["x".repeat(oversized_len)]}),
+    }])
+    .await;
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn completes");
+    assert_recorded_tools_call(&server, "search", "x");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool call reached the server before the output-size rejection");
+    h.assert_tool_error(ToolErrorClass::Failed, "output_too_large")
+        .await
+        .expect("oversized MCP output surfaced as a model-visible Failed tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
 // MCP "auth mismatch" (HTTP 401/403) is deliberately NOT covered here: unlike
 // the two cases above, a 401/403 maps to `McpClientError::AuthRequired` — an
 // auth *gate* (park-and-resume), not a model-visible `Failed`/`Denied` tool

@@ -24,6 +24,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_trigger_persists_after_reopen;
+mod scenario_trigger_self_create_denied;
 mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
 
@@ -76,6 +77,16 @@ async fn triggers_group_e2e() {
     // services-shell disposition, not an authorable harness seam; do not
     // reconstruct it here.
 
+    // C-DENYEDGE row 4: a scheduled-trigger fire must not be able to create
+    // its own follow-up trigger. Uses THIS group's `triggers()` capability
+    // port (trigger_create is wired) driven through a triggered-origin run
+    // (`submit_triggered_turn_scripted`), independent of `verbs_lifecycle`'s
+    // own trigger name/thread.
+    report.record(
+        "trigger_self_create_denied",
+        scenario_trigger_self_create_denied::run(&g).await,
+    );
+
     report.assert_all_passed();
 }
 
@@ -107,6 +118,19 @@ async fn triggered_gate_group() {
     report.record(
         "triggered_gate_deny",
         scenario_triggered_gate::run_deny(&g_deny).await,
+    );
+
+    // C-DENYEDGE row 1: a resume for the right run_id but a mutated
+    // (wrong-tenant) TurnScope must be rejected with ScopeNotFound, and the
+    // gate must remain live/resolvable afterward. Own group: mutating the
+    // approval store mid-scenario should not be attributed to the approve/
+    // deny arms above.
+    let g_wrong_scope = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("wrong-scope-arm group builds");
+    report.record(
+        "triggered_gate_wrong_scope_resume_rejected",
+        scenario_triggered_gate::run_wrong_scope_resume_rejected(&g_wrong_scope).await,
     );
 
     report.assert_all_passed();

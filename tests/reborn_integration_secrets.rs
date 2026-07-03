@@ -27,7 +27,7 @@ use ironclaw_reborn_composition::test_support::{
     build_local_dev_secret_store_for_test, mount_local_dev_database_roots_for_test,
 };
 use ironclaw_reborn_composition::wrap_scoped;
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
 
 use reborn_support::harness::test_product_scope;
@@ -152,5 +152,85 @@ async fn secret_read_back_fails_for_unknown_handle() {
     assert!(
         result.is_err(),
         "lease_once for an unknown handle must return Err, not vacuously succeed"
+    );
+}
+
+/// Prove secrets don't leak across tenants: leasing a secret under a scope
+/// that differs ONLY in `tenant_id` (same host user, agent, and project)
+/// must fail, and must fail with the same discriminating error as the
+/// unknown-handle case above — `FilesystemSecretStore::read_secret`
+/// (`crates/ironclaw_secrets/src/filesystem_store.rs`) enforces this via
+/// `same_scope_owner`, which compares `tenant_id`/`user_id`/`agent_id`/
+/// `project_id` on the stored secret against the caller's scope and treats
+/// any mismatch as "not found" — the same code path a genuinely unknown
+/// handle hits, not a distinct "forbidden" branch. That is still a real,
+/// discriminating assertion: it proves the tenant mismatch is what's
+/// gating the read (not some unrelated store failure), and the
+/// non-vacuity check below proves the store isn't just broadly broken.
+///
+/// (A same-tenant-different-user cross-read is a distinct mechanic — same
+/// `same_scope_owner` comparison, different axis — and is intentionally
+/// left for a separate test; this one isolates the tenant dimension only,
+/// per the C-DENYEDGE row-2 scope.)
+#[tokio::test]
+async fn secret_read_back_fails_for_wrong_tenant_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // Build the store and write one secret under a known handle/scope.
+    let mut composite = CompositeRootFilesystem::new();
+    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+        .await
+        .expect("build default local-dev db roots");
+    let composite = Arc::new(composite);
+    let scoped = wrap_scoped(Arc::clone(&composite));
+    let store =
+        build_local_dev_secret_store_for_test(dir.path(), scoped).expect("build secret store");
+
+    let scope = test_product_scope(
+        "tenant-itest",
+        "host-user",
+        "agent-itest",
+        Some("project-itest"),
+    );
+    let handle = SecretHandle::new("test-api-key").expect("valid secret handle");
+    let material = SecretMaterial::from("sk-live-42".to_string());
+
+    store
+        .put(scope.clone(), handle.clone(), material, None)
+        .await
+        .expect("put secret");
+
+    // Same handle, same user/agent/project — only tenant_id differs.
+    let wrong_tenant_scope = test_product_scope(
+        "tenant-OTHER",
+        "host-user",
+        "agent-itest",
+        Some("project-itest"),
+    );
+
+    let result = store.lease_once(&wrong_tenant_scope, &handle).await;
+    assert!(
+        matches!(result, Err(SecretStoreError::UnknownSecret { .. })),
+        "cross-tenant lease must fail closed with UnknownSecret (owner-scope mismatch \
+         treated as not-found), got: {result:?}"
+    );
+
+    // Non-vacuity: the SAME secret leased under the ORIGINAL, correct scope
+    // must still succeed and return the correct material — proves the store
+    // isn't broadly broken/empty, and that the tenant mismatch specifically
+    // is what gated the read above.
+    let lease = store
+        .lease_once(&scope, &handle)
+        .await
+        .expect("lease_once on correct tenant scope must succeed");
+    let read_material = store
+        .consume(&scope, lease.id)
+        .await
+        .expect("consume lease on correct tenant scope must succeed");
+    assert_eq!(
+        read_material.expose_secret(),
+        "sk-live-42",
+        "secret material under the correct tenant scope must be unaffected by the \
+         rejected cross-tenant attempt"
     );
 }

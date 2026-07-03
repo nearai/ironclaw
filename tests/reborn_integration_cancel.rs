@@ -174,3 +174,78 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
         "expected LoopFailureKind::ModelError, got {failure:?}"
     );
 }
+
+/// Regression guard, `Failed`-path sibling of
+/// `cancelled_run_does_not_block_a_second_turn_on_the_same_thread`: whatever
+/// per-thread busy/admission lock a run holds must be released when the run
+/// reaches `TurnStatus::Failed`, not just `Cancelled`. If that release leaked
+/// (same "wedge class" as PR #5206's leaked WASM permit/reservation bugs), a
+/// second submit on the SAME thread right after would come back
+/// `RejectedBusy` instead of being admitted.
+///
+/// This cannot mirror the cancel-path test's shape exactly (second turn
+/// reaching `Completed`): `fail_model()` swaps in `ErrLlm` — see
+/// `tests/support/reborn/scripted_provider.rs` — as this thread's ENTIRE raw
+/// model provider, unconditionally, for every future call (no per-call
+/// counting; `ErrLlm::complete`/`complete_with_tools` always return
+/// `LlmError::ContextLengthExceeded`). There is also no builder seam to swap
+/// in a fresh, successful script for a second turn on the same thread: a
+/// second `RebornIntegrationGroup::thread(...)` build for the same
+/// `conversation_id` would resolve the same `TurnScope` and panic on
+/// `ScopeRegistryGateway::register`'s duplicate-registration guard (see
+/// `tests/support/reborn/scope_gateway.rs::duplicate_register_for_same_scope_panics`).
+/// So the second turn here also fails (same `"model_error"` category) — the
+/// regression signal is that it is *admitted* (`Accepted`, not `RejectedBusy`)
+/// and reaches its own terminal status promptly rather than hanging or being
+/// silently dropped, proving the lock was genuinely released and not just
+/// accepted-then-stuck.
+#[tokio::test]
+async fn failed_run_does_not_block_a_second_turn_on_the_same_thread() {
+    let harness = RebornIntegrationHarness::test_default()
+        .fail_model()
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("do something")
+        .await
+        .expect("first turn submitted");
+    harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("first turn reaches Failed after a non-retryable provider error");
+
+    let ack = harness
+        .submit_turn_ack("do another thing")
+        .await
+        .expect("the second submit itself does not error");
+    assert!(
+        matches!(ack, ProductInboundAck::Accepted { .. }),
+        "expected the second submit to be accepted after the first run Failed \
+         (busy lock released), got {ack:?}"
+    );
+    let run_id_2 = match ack {
+        ProductInboundAck::Accepted {
+            submitted_run_id, ..
+        } => submitted_run_id,
+        other => unreachable!("checked Accepted above, got {other:?}"),
+    };
+
+    let state = harness
+        .wait_for_status(run_id_2, TurnStatus::Failed)
+        .await
+        .expect(
+            "second turn on the same thread still reaches a terminal status \
+             after the first run Failed and released the busy lock",
+        );
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("a Failed run must carry a failure detail");
+    assert_eq!(
+        failure.category(),
+        "model_error",
+        "expected LoopFailureKind::ModelError on the second run too, got {failure:?}"
+    );
+}

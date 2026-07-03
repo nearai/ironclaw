@@ -1009,6 +1009,54 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Test-support variant of [`approve_gate`](Self::approve_gate) for the
+    /// stale-gate-ref-resume regression guard (C-DENYEDGE row 7): resolves the
+    /// LOCAL-DEV approval using `real_gate_ref` (so the approval-store lookup
+    /// succeeds, unlike passing a bogus ref straight through `approve_gate`,
+    /// which fails earlier inside `approve_local_dev_gate`'s own request-id
+    /// lookup) but issues the COORDINATOR resume with a DIFFERENT
+    /// `stale_gate_ref`. This reaches `resume_turn_once`'s
+    /// `record.gate_ref.as_ref() != Some(&request.gate_resolution_ref)` check —
+    /// `TurnError::InvalidRequest { reason: "gate resolution reference mismatch" }` —
+    /// a path `approve_gate` itself can never reach because it always resolves
+    /// and resumes with the SAME gate_ref.
+    pub async fn approve_gate_with_stale_resume_ref(
+        &self,
+        run_id: TurnRunId,
+        real_gate_ref: &GateRef,
+        stale_gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        self.capability_recorder
+            .approve_local_dev_gate(real_gate_ref)
+            .await?;
+        self.resume_run(
+            run_id,
+            stale_gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
+    /// Resume-only companion to
+    /// [`approve_gate_with_stale_resume_ref`](Self::approve_gate_with_stale_resume_ref):
+    /// issues the coordinator resume for `gate_ref` WITHOUT re-running the
+    /// local-dev approval resolve step. Needed for a non-vacuity follow-up
+    /// after a failed stale-ref resume attempt — the approval record is
+    /// already `Approved` at that point (the resolve step succeeded before
+    /// the stale-ref resume failed), so calling `approve_gate` again would
+    /// hit the double-resolve `NotPending` error instead of completing the
+    /// still-blocked run.
+    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
     /// Deny a blocked approval gate and resume the run (the user-declines path).
     /// Resolves the persisted request to `Denied` (no lease) and resumes with
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
