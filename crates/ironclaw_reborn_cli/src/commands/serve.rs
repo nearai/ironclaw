@@ -14,6 +14,8 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
     build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
 };
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_composition::{IronhubRegisterRouteState, ironhub_register_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
@@ -441,6 +443,12 @@ impl ServeCommand {
             #[cfg(feature = "root-llm-provider")]
             if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
+            }
+            #[cfg(feature = "webui-v2-beta")]
+            if runtime.ironhub_register_enabled() {
+                let register_state = IronhubRegisterRouteState::new(Arc::clone(&bundle.api));
+                serve_config = serve_config
+                    .with_public_route_mount(ironhub_register_route_mount(register_state));
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);

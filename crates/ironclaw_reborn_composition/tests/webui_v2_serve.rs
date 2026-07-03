@@ -20,19 +20,20 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    IronhubRegisterRequest, LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    IronhubRegisterRouteState, PublicRouteMount, RebornReadiness, RebornWebuiBundle,
+    WebuiAuthenticator, WebuiServeConfig, ironhub_register_route_mount, webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -247,10 +248,22 @@ struct StubServices {
     // calling the facade, so this captures whatever the path
     // extractor delivered.
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
+    ironhub_register_calls: Mutex<Vec<IronhubRegisterRequest>>,
 }
 
 #[async_trait]
 impl RebornServicesApi for StubServices {
+    async fn ironhub_register(
+        &self,
+        request: IronhubRegisterRequest,
+    ) -> Result<(), RebornServicesError> {
+        self.ironhub_register_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(())
+    }
+
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1972,4 +1985,62 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         .await
         .expect("oneshot");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ironhub_register_route_rejects_malformed_body_with_400() {
+    let services = Arc::new(StubServices::default());
+    let mount = ironhub_register_route_mount(IronhubRegisterRouteState::new(services.clone()));
+
+    let response = mount
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ironhub/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{not json"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        services.ironhub_register_calls.lock().expect("lock").len(),
+        0,
+        "facade must not be called for a malformed body"
+    );
+}
+
+#[tokio::test]
+async fn ironhub_register_route_dispatches_valid_body_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let mount = ironhub_register_route_mount(IronhubRegisterRouteState::new(services.clone()));
+
+    let response = mount
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ironhub/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"uid":"u","aid":"a","ts":1700000000,"nonce":"n","sig":"sig-1"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.ironhub_register_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1, "facade called exactly once");
+    assert_eq!(calls[0].uid, "u");
+    assert_eq!(calls[0].aid, "a");
+    assert_eq!(calls[0].ts, 1_700_000_000);
+    assert_eq!(calls[0].nonce, "n");
+    assert_eq!(calls[0].sig, "sig-1");
 }

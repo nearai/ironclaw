@@ -136,6 +136,7 @@ pub(crate) struct IronHubService {
     egress: IronHubEgress,
     scope: ResourceScope,
     manifest_url: String,
+    catalog_host: Option<String>,
     #[cfg(test)]
     manifest_verify_keys: &'static [(&'static str, &'static str)],
 }
@@ -183,12 +184,14 @@ impl IronHubService {
         egress: IronHubEgress,
         scope: ResourceScope,
     ) -> Self {
+        let manifest_url = resolve_manifest_url();
         Self {
             skill_management,
             extension_management,
             egress,
             scope,
-            manifest_url: resolve_manifest_url(),
+            catalog_host: manifest_host(&manifest_url),
+            manifest_url,
             #[cfg(test)]
             manifest_verify_keys: super::model::MANIFEST_VERIFY_KEYS,
         }
@@ -197,6 +200,7 @@ impl IronHubService {
     #[cfg(test)]
     pub(crate) fn with_manifest_url(mut self, manifest_url: impl Into<String>) -> Self {
         self.manifest_url = manifest_url.into();
+        self.catalog_host = manifest_host(&self.manifest_url);
         self
     }
 
@@ -222,7 +226,7 @@ impl IronHubService {
     }
 
     async fn search(&self, query: &str) -> Result<LifecycleProductResponse, IronHubCommandError> {
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         let query = query.trim().to_ascii_lowercase();
         let tools = manifest
             .tools
@@ -251,7 +255,7 @@ impl IronHubService {
         &self,
         kind: Option<IronHubEntryKind>,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         match kind {
             Some(IronHubEntryKind::Skill) => {
                 let skills = manifest
@@ -315,7 +319,7 @@ impl IronHubService {
         hint: Option<IronHubEntryKind>,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         let kind = classify(&manifest, name, hint)?;
         let response = match kind {
             IronHubEntryKind::Tool => {
@@ -356,7 +360,10 @@ impl IronHubService {
         options: IronHubInstallOptions,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = match options.private_manifest_url.as_deref() {
+            Some(private_url) => Arc::new(self.download_and_verify_manifest(private_url).await?),
+            None => self.fetch_manifest_cached(&self.manifest_url).await?,
+        };
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options)?;
         let lock_key = format!("{}:{name}", kind.as_str());
@@ -436,27 +443,36 @@ impl IronHubService {
         }
     }
 
-    async fn fetch_manifest_cached(&self) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
+    async fn fetch_manifest_cached(
+        &self,
+        url: &str,
+    ) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
         let now = Instant::now();
-        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+        if let Some(hit) = manifest_cache_get(url, now) {
             return Ok(hit);
         }
-        let fetch_lock = manifest_fetch_lock(&self.manifest_url);
+        let fetch_lock = manifest_fetch_lock(url);
         let _fetch_guard = fetch_lock.lock().await;
         let now = Instant::now();
-        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+        if let Some(hit) = manifest_cache_get(url, now) {
             return Ok(hit);
         }
-        let manifest = Arc::new(self.fetch_manifest().await?);
-        manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
+        let manifest = Arc::new(self.download_and_verify_manifest(url).await?);
+        manifest_cache_put(url, Arc::clone(&manifest), now);
         Ok(manifest)
     }
 
-    async fn fetch_manifest(&self) -> Result<IronHubManifest, IronHubCommandError> {
-        validate_artifact_url("hub-manifest", "manifest_url", &self.manifest_url)?;
-        let envelope = self
-            .download_url(&self.manifest_url, MAX_SIGNED_MANIFEST_BYTES)
-            .await?;
+    async fn download_and_verify_manifest(
+        &self,
+        url: &str,
+    ) -> Result<IronHubManifest, IronHubCommandError> {
+        validate_artifact_url(
+            "hub-manifest",
+            "manifest_url",
+            url,
+            self.catalog_host.as_deref(),
+        )?;
+        let envelope = self.download_url(url, MAX_SIGNED_MANIFEST_BYTES).await?;
         #[cfg(not(test))]
         let verified_manifest = verify_signed_manifest(&envelope);
         #[cfg(test)]
@@ -474,7 +490,7 @@ impl IronHubService {
             serde_json::from_slice(&bytes).map_err(|error| IronHubCommandError::Catalog {
                 reason: format!("manifest parse failed: {error}"),
             })?;
-        enforce_manifest_monotonic(&self.manifest_url, &manifest)?;
+        enforce_manifest_monotonic(url, &manifest)?;
         Ok(manifest)
     }
 
@@ -483,7 +499,7 @@ impl IronHubService {
         artifact: &IronHubArtifact,
         max_bytes: u64,
     ) -> Result<Vec<u8>, IronHubCommandError> {
-        validate_artifact(artifact, max_bytes)?;
+        validate_artifact(artifact, max_bytes, self.catalog_host.as_deref())?;
         let bytes = self.download_url(&artifact.url, max_bytes).await?;
         let actual = sha256_hex(&bytes);
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
@@ -510,7 +526,7 @@ impl IronHubService {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
-            network_policy: network_policy_for_url(url, max_bytes)?,
+            network_policy: network_policy_for_url(url, max_bytes, self.catalog_host.as_deref())?,
             credential_injections: Vec::new(),
             response_body_limit: Some(max_bytes),
             save_body_to: None,
@@ -550,6 +566,18 @@ fn resolve_manifest_url() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_IRONHUB_MANIFEST_URL.to_string())
+}
+
+fn manifest_host(url: &str) -> Option<String> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string));
+    if host.is_none() {
+        tracing::debug!(
+            "ironhub manifest url has no parseable host; catalog host pinning disabled"
+        );
+    }
+    host
 }
 
 fn manifest_cache_get(url: &str, now: Instant) -> Option<Arc<IronHubManifest>> {
@@ -601,10 +629,11 @@ fn enforce_manifest_monotonic(
             reason: format!("manifest generated_at is not RFC3339: {error}"),
         })?
         .with_timezone(&Utc);
+    let key = manifest_replay_key(url, manifest);
     let mut guard = MANIFEST_LAST_SEEN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(previous) = guard.get(url)
+    if let Some(previous) = guard.get(&key)
         && generated_at < *previous
     {
         return Err(IronHubCommandError::Catalog {
@@ -615,8 +644,18 @@ fn enforce_manifest_monotonic(
             ),
         });
     }
-    guard.insert(url.to_string(), generated_at);
+    guard.insert(key, generated_at);
     Ok(())
+}
+
+fn manifest_replay_key(url: &str, manifest: &IronHubManifest) -> String {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_default();
+    // Length-prefix the host so a manifest-supplied repo containing the
+    // separator cannot collide with another (host, repo) pair.
+    format!("{}|{host}|{}", host.len(), manifest.repo)
 }
 
 fn install_lock(key: &str) -> Arc<AsyncMutex<()>> {

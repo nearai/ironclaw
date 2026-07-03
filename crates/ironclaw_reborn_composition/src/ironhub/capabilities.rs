@@ -180,6 +180,9 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
+                        // Private-manifest installs stay on the signed deep-link and
+                        // CLI paths; model-invoked installs use the public catalog.
+                        private_manifest_url: None,
                     },
                 }
             }
