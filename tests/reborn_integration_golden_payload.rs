@@ -9,6 +9,15 @@
 //! and tool-result feed-back. See `tests/support/reborn/golden.rs` for the
 //! canonicalization + single-filter normalization rationale. Regenerate drift
 //! with `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
+//!
+//! This is the dedicated suite for watching prompt-construction drift: base
+//! system-prompt assembly, context/capability surfacing (communication
+//! context, capability surface), message appending across turns, and (once
+//! reachable — see the "(e) Compaction" blocker note below) compaction — on a
+//! deliberately small, curated set of scenarios (full payload matches are
+//! expensive to review and maintain; substring checks elsewhere cover
+//! everything else). Add a new scenario here only when an existing one can't
+//! absorb it — see root `CLAUDE.md` Testing Discipline.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -17,6 +26,7 @@ mod reborn_support;
 mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::comm_context::RecordingCommunicationContextProvider;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
@@ -93,3 +103,69 @@ async fn golden_multi_turn_history() {
         .await
         .expect("final reply matches exactly");
 }
+
+/// (d) Context surfacing: a wired `CommunicationContextProvider` PLUS the real
+/// builtin capability surface, on one plain-text turn. Pins byte-for-byte how
+/// the communication/context section and the capability surface render into
+/// the system prompt alongside each other (a single-value substring check,
+/// e.g. `assert_model_request_contains`, cannot see whether the two sections
+/// interleave, reorder, or duplicate content).
+#[tokio::test]
+async fn golden_context_surfacing() {
+    let provider = RecordingCommunicationContextProvider::with_target_and_channel(
+        "reborn-golden-target",
+        "slack",
+        "reborn-golden-channel",
+    );
+    let h = RebornIntegrationHarness::test_default()
+        .with_communication_context_provider(provider)
+        .with_builtin_http_tools()
+        .script([RebornScriptedReply::text("context noted")])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("what's my delivery target?")
+        .await
+        .expect("turn completes");
+    h.assert_golden_payload("context_surfacing");
+    h.assert_reply_eq("context noted")
+        .await
+        .expect("final reply matches exactly");
+}
+
+// (e) Compaction: NOT implemented — blocked. Investigated the byte-cap-overflow
+// force-compaction path (`ByteCapStrategy` / `PostCapabilityStage`,
+// crates/ironclaw_agent_loop/src/executor/post_capability.rs:73-91) end-to-end
+// through this harness with a scripted `builtin.http` result exceeding the
+// 32,000-byte cap (crates/ironclaw_agent_loop/src/strategies/compaction.rs:190-213,
+// `ByteCapStrategy::with_defaults`). Confirmed via instrumented local runs (not
+// committed) that `pending_capability_bytes` correctly accumulates past the cap
+// and `state.compaction_state.force_compact_on_next_iteration` /
+// `skip_model_this_iteration` DO get set, and that `PromptStage`
+// (crates/ironclaw_agent_loop/src/executor/prompt.rs:219-241) correctly detects
+// the flag on the very next iteration and enters `PromptCompactionStep`.
+//
+// The wall: `PromptCompactionStep::run` decides via
+// `self.ctx.planner.compaction().should_compact(..)`
+// (crates/ironclaw_agent_loop/src/executor/prompt.rs:442-446), and the Reborn
+// `DefaultPlanner` wires that seam to `ActiveTaskPreservingCompactionStrategy`,
+// not the bare `DefaultCompactionStrategy`
+// (crates/ironclaw_agent_loop/src/default_planner.rs:339).
+// `ActiveTaskPreservingCompactionStrategy::should_compact`
+// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61)
+// never reads `state.compaction_state.force_compact_on_next_iteration` at all —
+// it always falls through to `active_task_preserving_user_boundary`, which
+// requires a genuine accumulated tail of at least `preserve_tail_tokens`
+// (8,000 tokens, `DefaultCompactionStrategy::DEFAULT_PRESERVE_TAIL_TOKENS`) of
+// real message content plus `minimum_tail_messages`/`minimum_compacted_messages`
+// (3 each) before it will trigger at all. The byte-cap-overflow force path
+// (`CompactionInitiator::CapabilityResultOverflow`) is consequently a dead
+// letter under the strategy Reborn's `default_planner.rs` actually installs —
+// it sets state flags this strategy's `should_compact` never consults.
+//
+// Exercising compaction here would need either a production fix (out of scope
+// per this suite's test-only mandate) or inflating the scripted transcript to a
+// genuine ~8,000+ token natural tail, which no longer tests the reported
+// byte-cap mechanism, would make the golden snapshot unreviewable, and is
+// fragile against token-estimation drift. Reporting the blocker instead of
+// faking the scenario.
