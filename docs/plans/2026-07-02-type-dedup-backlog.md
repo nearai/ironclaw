@@ -70,7 +70,6 @@ independent-evolution rationale, or collapsing into an import:
 `WebUiCancelReason`/`SanitizedCancelReason` · `RebornResumeGateResponse`/`ResumeTurnResponse` ·
 `ProductionWiringComponent`/`RebornReadinessDiagnosticComponent` ·
 `RebornCancelRunResponse`/`turns::CancelRunResponse` (strips one serde-skip field) ·
-`CapabilityDisplayPreviewView`/`ViewInput` (field-identical, same file) ·
 `PendingGateKind`/`LoopGateKind` (Resource vs ResourceWait rename — lockstep hazard) ·
 `PendingAuthResume` (flatten → embed `CapabilityCallCandidate`) ·
 `DispatchInputIssue`/`CapabilityInputIssue` (identical incl. code enums, identity mapper).

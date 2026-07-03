@@ -11,6 +11,13 @@ coincidental shape. Judge each pair by reading the definitions before acting.
 See .claude/rules/type-placement.md; judged backlog (2026-07):
 docs/plans/2026-07-02-type-dedup-backlog.md.
 
+Deliberately a regex PRE-FILTER, not an AST parse. It approximates fields (it
+does not resolve generics, macro-generated/derived fields, cfg-gated variants,
+or type aliases), so it will miss some pairs and mis-shape others. That is
+acceptable because it only proposes a shortlist for human/agent judging — it is
+never a source of truth. For authoritative structural queries use the
+codebase-memory graph (search_graph / query_graph), not this script.
+
 Usage: python3 scripts/check-type-duplicates.py [--jaccard 0.6] [--min-items 3]
 """
 import argparse
