@@ -308,14 +308,12 @@ impl RebornLocalExtensionManagementPort {
         self.load_installation(&extension_id, &installation_id)
             .await?;
         let package = self.lifecycle_package(&extension_id).await?;
-        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        let requirements = package_runtime_credential_auth_requirements(&package);
+        #[cfg(feature = "slack-v2-host-beta")]
+        let mut requirements = requirements;
         #[cfg(feature = "slack-v2-host-beta")]
         if is_public_slack_package_ref(package_ref) {
-            if let Some(companion) = self.slack_user_companion_package()? {
-                requirements.extend(package_runtime_credential_auth_requirements(
-                    &companion.package,
-                ));
-            }
+            self.append_slack_user_companion_credential_requirements(&mut requirements)?;
         }
         Ok(requirements)
     }
@@ -405,23 +403,8 @@ impl RebornLocalExtensionManagementPort {
         self.install_available_locked(available).await?;
         #[cfg(feature = "slack-v2-host-beta")]
         if is_public_slack_package_ref(&package_ref) {
-            if let Some(companion) = self.slack_user_companion_package()? {
-                if !self
-                    .extension_installed_or_manifest_present(&companion.package.id)
-                    .await?
-                {
-                    if let Err(error) = self.install_available_locked(companion).await {
-                        if let Err(rollback_error) = self.remove_locked(package_ref.clone()).await {
-                            return Err(compensation_failure(
-                                "Slack install failed to install internal user-tool package and public Slack rollback failed",
-                                error,
-                                rollback_error,
-                            ));
-                        }
-                        return Err(error);
-                    }
-                }
-            }
+            self.install_slack_user_companion_available_locked(&package_ref)
+                .await?;
         }
 
         Ok(response_with_payload(
@@ -560,6 +543,47 @@ impl RebornLocalExtensionManagementPort {
             return Ok(());
         }
         self.install_available_locked(companion).await
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    fn append_slack_user_companion_credential_requirements(
+        &self,
+        requirements: &mut Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(companion) = self.slack_user_companion_package()? else {
+            return Ok(());
+        };
+        requirements.extend(package_runtime_credential_auth_requirements(
+            &companion.package,
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    async fn install_slack_user_companion_available_locked(
+        &self,
+        public_package_ref: &LifecyclePackageRef,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(companion) = self.slack_user_companion_package()? else {
+            return Ok(());
+        };
+        if self
+            .extension_installed_or_manifest_present(&companion.package.id)
+            .await?
+        {
+            return Ok(());
+        }
+        if let Err(error) = self.install_available_locked(companion).await {
+            if let Err(rollback_error) = self.remove_locked(public_package_ref.clone()).await {
+                return Err(compensation_failure(
+                    "Slack install failed to install internal user-tool package and public Slack rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn activate_inner(
@@ -972,6 +996,7 @@ impl RebornLocalExtensionManagementPort {
         Ok(())
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     async fn extension_installed_or_manifest_present(
         &self,
         extension_id: &ExtensionId,
@@ -1341,6 +1366,7 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 fn append_companion_visible_capabilities(
     response: &mut LifecycleProductResponse,
     companion_response: &LifecycleProductResponse,

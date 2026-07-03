@@ -14,8 +14,8 @@ use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
-    EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
-    ProductAdapterId, ProtocolHttpEgress,
+    EgressCredentialHandle, OutboundDeliverySink, ProductAdapter, ProductAdapterId,
+    ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
@@ -27,8 +27,8 @@ use ironclaw_product_workflow::{
     StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
-    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
-    SlackV2AdapterConfig, slack_request_signature_auth_requirement,
+    SLACK_API_HOST, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
+    slack_request_signature_auth_requirement,
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
@@ -130,13 +130,9 @@ pub struct SlackHostBetaConfig {
     pub installation_id: AdapterInstallationId,
     pub team_id: SlackTeamId,
     pub installation_selector: SlackInstallationSelector,
-    /// Optional Slack actor retained only for legacy static personal-binding
-    /// tests/config. Tenant app host-beta resolution uses durable personal
-    /// bindings and does not require a preselected Slack user.
-    pub slack_actor: Option<ExternalActorRef>,
-    /// Host/runtime user used for Slack host-mediated state, legacy static
-    /// Slack actor mapping, and backward-compatible shared-route fallback when
-    /// `shared_subject_user_id` is not configured.
+    /// Host/runtime user used for Slack host-mediated state and
+    /// backward-compatible shared-route fallback when `shared_subject_user_id`
+    /// is not configured.
     pub user_id: UserId,
     /// Optional user scope that owns Slack shared-channel execution, tools,
     /// skills, and memory in this beta route. Personal DM routes still use the
@@ -169,7 +165,6 @@ pub struct SlackHostBetaConfigInput {
     pub installation_id: String,
     pub team_id: SlackTeamId,
     pub api_app_id: Option<String>,
-    pub slack_user_id: Option<String>,
     pub user_id: UserId,
     pub shared_subject_user_id: Option<UserId>,
     pub channel_routes: Vec<SlackHostBetaChannelRoute>,
@@ -191,7 +186,6 @@ pub struct SlackHostBetaLegacySetup {
     pub installation_id: String,
     pub team_id: String,
     pub api_app_id: String,
-    pub slack_user_id: Option<String>,
     pub user_id: UserId,
     pub shared_subject_user_id: Option<UserId>,
     pub channel_routes: Vec<SlackHostBetaChannelRoute>,
@@ -240,13 +234,6 @@ impl SlackHostBetaConfig {
             }
             slack_channel_route_key(&team_id, route)?;
         }
-        let slack_actor = input
-            .slack_user_id
-            .map(|slack_user_id| {
-                ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id, None::<String>)
-                    .map_err(|reason| invalid_config("slack_user_id", reason.to_string()))
-            })
-            .transpose()?;
         Ok(Self {
             tenant_id: input.tenant_id,
             agent_id: input.agent_id,
@@ -254,7 +241,6 @@ impl SlackHostBetaConfig {
             installation_id,
             team_id,
             installation_selector,
-            slack_actor,
             user_id: input.user_id,
             shared_subject_user_id: input.shared_subject_user_id,
             channel_routes: input.channel_routes,
@@ -274,7 +260,6 @@ impl std::fmt::Debug for SlackHostBetaConfig {
             .field("installation_id", &self.installation_id)
             .field("team_id", &self.team_id)
             .field("installation_selector", &self.installation_selector)
-            .field("slack_actor", &self.slack_actor)
             .field("user_id", &self.user_id)
             .field("shared_subject_user_id", &self.shared_subject_user_id)
             .field("channel_routes", &self.channel_routes)
@@ -295,10 +280,6 @@ fn slack_outbound_delivery_target_provider_key(config: &SlackHostBetaConfig) -> 
     hash_slack_mount_field(&mut hasher, config.installation_id.as_str());
     hash_slack_mount_field(&mut hasher, config.team_id.as_str());
     hash_slack_installation_selector(&mut hasher, &config.installation_selector);
-    hash_slack_mount_field(
-        &mut hasher,
-        config.slack_actor.as_ref().map_or("", ExternalActorRef::id),
-    );
     hash_slack_mount_field(&mut hasher, config.user_id.as_str());
     hash_slack_mount_field(
         &mut hasher,
@@ -739,12 +720,9 @@ pub fn build_slack_host_beta_mounts(
     let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
-    let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(
-        config.installation_id.clone(),
-        config.slack_actor.clone(),
-        config.user_id.clone(),
-        Arc::new(SlackUserIdentityActorResolver::new(state.clone())),
-    ));
+    let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
+        SlackUserIdentityActorResolver::new(state.clone()),
+    )));
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
@@ -959,7 +937,7 @@ fn build_slack_installation_record_with_resolvers(
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<SlackInstallationRecord, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
-    // scopes host-mediated Slack bot-token egress and legacy static actor
+    // scopes host-mediated Slack bot-token egress and shared-route fallback
     // mapping. Shared Slack channel execution is configured separately.
     tracing::warn!(
         "Slack host-beta uses in-memory conversation bindings; Slack conversation binding continuity is lost on process restart"
@@ -1154,39 +1132,12 @@ fn slack_declared_egress_targets(
 
 #[derive(Clone)]
 struct SlackHostBetaActorUserResolver {
-    installation_id: AdapterInstallationId,
-    legacy_slack_actor: Option<ExternalActorRef>,
-    legacy_user_id: UserId,
     cached_identity: Arc<dyn ProductActorUserResolver>,
 }
 
 impl SlackHostBetaActorUserResolver {
-    fn new(
-        installation_id: AdapterInstallationId,
-        legacy_slack_actor: Option<ExternalActorRef>,
-        legacy_user_id: UserId,
-        cached_identity: Arc<dyn ProductActorUserResolver>,
-    ) -> Self {
-        Self {
-            installation_id,
-            legacy_slack_actor,
-            legacy_user_id,
-            cached_identity,
-        }
-    }
-
-    fn resolve_legacy_static_actor(
-        &self,
-        request: &ProductActorUserResolutionRequest,
-    ) -> Option<UserId> {
-        let legacy_actor = self.legacy_slack_actor.as_ref()?;
-        if request.adapter_id.as_str() == SLACK_V2_ADAPTER_ID
-            && request.installation_id == self.installation_id
-            && request.external_actor_ref == *legacy_actor
-        {
-            return Some(self.legacy_user_id.clone());
-        }
-        None
+    fn new(cached_identity: Arc<dyn ProductActorUserResolver>) -> Self {
+        Self { cached_identity }
     }
 }
 
@@ -1202,9 +1153,6 @@ impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if let Some(user_id) = self.resolve_legacy_static_actor(&request) {
-            return Ok(Some(user_id));
-        }
         if let Some(user_id) = self
             .cached_identity
             .resolve_product_actor_user(request.clone())
@@ -1253,6 +1201,7 @@ mod tests {
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
     use ironclaw_turns::{
         GetRunStateRequest, ReplyTargetBindingRef, TurnCoordinator, TurnRunId, TurnScope,
@@ -3687,7 +3636,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: SlackTeamId::new(TEAM),
             api_app_id: None,
-            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: Vec::new(),
@@ -3709,13 +3657,10 @@ mod tests {
     }
 
     #[test]
-    fn slack_host_beta_config_keeps_optional_legacy_slack_actor() {
+    fn slack_host_beta_config_does_not_carry_static_slack_actor() {
         let config = config();
 
         assert_eq!(config.installation_id.as_str(), INSTALLATION);
-        let slack_actor = config.slack_actor.as_ref().expect("legacy actor");
-        assert_eq!(slack_actor.kind(), SLACK_USER_ACTOR_KIND);
-        assert_eq!(slack_actor.id(), SLACK_USER);
         assert_eq!(config.user_id, UserId::new(USER).expect("user id"));
         assert_eq!(config.signing_secret.expose_secret(), SECRET);
         assert_eq!(config.bot_token.expose_secret(), "xoxb-host-token");
@@ -3730,7 +3675,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
-            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: vec![
@@ -3769,32 +3713,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn layered_resolver_preserves_configured_legacy_slack_actor_mapping() {
-        let resolver = SlackHostBetaActorUserResolver::new(
-            AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            Some(
-                ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>)
-                    .expect("actor"),
-            ),
-            UserId::new(USER).expect("user"),
-            Arc::new(FailingProductActorUserResolver),
-        );
-        let request = ProductActorUserResolutionRequest::new(
-            ProductAdapterId::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
-            AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>)
-                .expect("actor"),
-        );
-
-        let resolved = resolver
-            .resolve_product_actor_user(request)
-            .await
-            .expect("resolver succeeds");
-
-        assert_eq!(resolved, Some(UserId::new(USER).expect("user")));
-    }
-
     fn config() -> SlackHostBetaConfig {
         SlackHostBetaConfig::new(SlackHostBetaConfigInput {
             tenant_id: TenantId::new(TENANT).expect("tenant"),
@@ -3803,7 +3721,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
-            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: vec![SlackHostBetaChannelRoute::new(
@@ -3824,7 +3741,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
-            slack_user_id: None,
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: Vec::new(),
@@ -3845,7 +3761,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: TEAM.to_string(),
             api_app_id: API_APP.to_string(),
-            slack_user_id: None,
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: Vec::new(),
@@ -3860,7 +3775,6 @@ mod tests {
             installation_id: INSTALLATION.to_string(),
             team_id: SlackTeamId::new(TEAM),
             api_app_id: Some(API_APP.to_string()),
-            slack_user_id: Some(SLACK_USER.to_string()),
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: Some(UserId::new(SHARED_SUBJECT).expect("shared subject")),
             channel_routes: Vec::new(),
@@ -4396,21 +4310,6 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
             Ok(Some(self.user_id.clone()))
-        }
-    }
-
-    #[derive(Debug)]
-    struct FailingProductActorUserResolver;
-
-    #[async_trait::async_trait]
-    impl ProductActorUserResolver for FailingProductActorUserResolver {
-        async fn resolve_product_actor_user(
-            &self,
-            _request: ProductActorUserResolutionRequest,
-        ) -> Result<Option<UserId>, ProductWorkflowError> {
-            Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "fallback should not be called".into(),
-            })
         }
     }
 

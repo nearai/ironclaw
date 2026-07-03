@@ -82,6 +82,7 @@ impl ServeCommand {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        #[cfg(feature = "slack-v2-host-beta")]
         let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
         let runtime_input = built.inner;
         let boot_config = context.boot_config();
@@ -514,8 +515,11 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
-            if let Some(slot) = slack_personal_lazy_slot {
-                serve_config = serve_config.with_slack_personal_oauth(slot);
+            #[cfg(feature = "slack-v2-host-beta")]
+            {
+                if let Some(slot) = slack_personal_lazy_slot {
+                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                }
             }
             if let Some(value) = csp_override {
                 serve_config = serve_config

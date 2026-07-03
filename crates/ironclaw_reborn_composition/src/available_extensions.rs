@@ -74,7 +74,7 @@ const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_EXTENSION_ID: &str = "slack";
+pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_USER_EXTENSION_ID: &str = "slack_user";
 #[cfg(feature = "slack-v2-host-beta")]
@@ -93,6 +93,11 @@ const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
     "users:read",
     "chat:write",
 ];
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
+    SLACK_PERSONAL_OAUTH_SETUP_SCOPES
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {

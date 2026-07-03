@@ -8,17 +8,20 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_reborn_composition::OAuthRedirectUri;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, OAuthClientConfig, OAuthRedirectUri, OperatorLogLayer, PollSettings,
-    RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
-    RebornRuntimeIdentity, RebornRuntimeInput, SlackPersonalSetupServiceSlot, TurnRunnerSettings,
-    build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
+    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
+    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
@@ -541,6 +544,7 @@ pub(crate) fn build_runtime_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
+    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
@@ -587,18 +591,21 @@ pub(crate) fn build_runtime_input_with_options(
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
+        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
     })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
     pub(crate) inner: RebornRuntimeInput,
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
@@ -649,6 +656,7 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot =
         if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
             let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
@@ -664,6 +672,7 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
+        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
         config_file,
     })
@@ -769,11 +778,13 @@ pub(crate) fn resolve_google_oauth_config_from_env()
     resolve_google_oauth_config(optional_nonempty_env)
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
 -> anyhow::Result<Option<OAuthRedirectUri>> {
     resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 fn resolve_slack_personal_oauth_redirect_uri(
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> anyhow::Result<Option<OAuthRedirectUri>> {

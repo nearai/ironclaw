@@ -1059,48 +1059,48 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    if let Some(check) = provider_identity_check.take() {
-                        if let Err(error) = check(exchange.provider_identity.clone()).await {
-                            let error_code = error.code();
-                            if let Err(cleanup_error) = self
-                                .provider_client
-                                .cleanup_exchange(
-                                    OAuthProviderExchangeContext {
-                                        scope: request.scope.clone(),
-                                        flow_id: request.flow_id,
-                                    },
-                                    &exchange,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    flow_id = %request.flow_id,
-                                    check_error_code = ?error_code,
-                                    cleanup_error_code = ?cleanup_error.code(),
-                                    "reborn auth callback provider identity check failed and token cleanup failed"
-                                );
-                            }
-                            if let Err(fail_error) = self
-                                .flow_manager
-                                .fail_oauth_callback(
-                                    &request.scope,
-                                    OAuthCallbackFailureInput {
-                                        flow_id: request.flow_id,
-                                        opaque_state_hash: request.opaque_state_hash.clone(),
-                                        error: error_code,
-                                    },
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    flow_id = %request.flow_id,
-                                    check_error_code = ?error_code,
-                                    fail_error_code = ?fail_error.code(),
-                                    "reborn auth callback provider identity check failed and flow failure update failed"
-                                );
-                            }
-                            return Err(error.into());
+                    if let Some(check) = provider_identity_check.take()
+                        && let Err(error) = check(exchange.provider_identity.clone()).await
+                    {
+                        let error_code = error.code();
+                        if let Err(cleanup_error) = self
+                            .provider_client
+                            .cleanup_exchange(
+                                OAuthProviderExchangeContext {
+                                    scope: request.scope.clone(),
+                                    flow_id: request.flow_id,
+                                },
+                                &exchange,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                flow_id = %request.flow_id,
+                                check_error_code = ?error_code,
+                                cleanup_error_code = ?cleanup_error.code(),
+                                "reborn auth callback provider identity check failed and token cleanup failed"
+                            );
                         }
+                        if let Err(fail_error) = self
+                            .flow_manager
+                            .fail_oauth_callback(
+                                &request.scope,
+                                OAuthCallbackFailureInput {
+                                    flow_id: request.flow_id,
+                                    opaque_state_hash: request.opaque_state_hash.clone(),
+                                    error: error_code,
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                flow_id = %request.flow_id,
+                                check_error_code = ?error_code,
+                                fail_error_code = ?fail_error.code(),
+                                "reborn auth callback provider identity check failed and flow failure update failed"
+                            );
+                        }
+                        return Err(error.into());
                     }
                     provider_identity = exchange.provider_identity.clone();
                     let exchange_for_cleanup = exchange.clone();
@@ -1111,7 +1111,9 @@ impl RebornProductAuthServices {
                             OAuthCallbackInput {
                                 flow_id: request.flow_id,
                                 opaque_state_hash: request.opaque_state_hash.clone(),
-                                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                                outcome: ProviderCallbackOutcome::Authorized {
+                                    exchange: Box::new(exchange),
+                                },
                             },
                         )
                         .await

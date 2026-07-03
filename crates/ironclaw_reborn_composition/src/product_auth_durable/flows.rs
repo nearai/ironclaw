@@ -135,6 +135,7 @@ where
                 return Err(AuthProductError::ProviderDenied);
             }
             ProviderCallbackOutcome::Authorized { exchange } => {
+                let exchange = *exchange;
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }

@@ -981,7 +981,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code"),
@@ -991,7 +991,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -1156,7 +1156,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("s"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("c"),
@@ -1166,7 +1166,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
                         scopes: vec![],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -1788,7 +1788,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                 flow_id: flow1.id,
                 opaque_state_hash: state_hash("state1"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code1"),
@@ -1798,7 +1798,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -1893,7 +1893,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                 flow_id: flow2.id,
                 opaque_state_hash: state_hash("state2"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code2"),
@@ -1903,7 +1903,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -2005,7 +2005,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                 flow_id: flow1.id,
                 opaque_state_hash: state_hash("state1"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code1"),
@@ -2015,7 +2015,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -2077,7 +2077,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                 flow_id: flow2.id,
                 opaque_state_hash: state_hash("state2"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code2"),
@@ -2087,7 +2087,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -2282,7 +2282,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("s2"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("c2"),
@@ -2292,7 +2292,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )
@@ -3177,7 +3177,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("cas-s"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("cas-c"),
@@ -3187,7 +3187,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
                         provider_identity: None,
-                    },
+                    }),
                 },
             },
         )

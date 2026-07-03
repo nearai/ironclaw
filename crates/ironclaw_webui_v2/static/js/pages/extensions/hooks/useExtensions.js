@@ -37,9 +37,11 @@ function openAuthUrl(url, popup = null) {
     popup.location.href = url;
     return { ok: true, popup };
   }
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
   return {
-    ok: true,
-    popup: window.open(url, "_blank", "noopener,noreferrer"),
+    ok: Boolean(opened),
+    popup: opened || null,
+    reason: opened ? null : "popup_blocked",
   };
 }
 
@@ -474,10 +476,9 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           complete();
           return;
         }
-        if (
-          (popup && popup.closed) ||
-          Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS
-        ) {
+        const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
+        const popupClosedBeforeCallback = popup && popup.closed && !requireCallbackCompletion;
+        if (popupClosedBeforeCallback || timedOut) {
           stopWatcher();
           refreshSetupState();
         }
@@ -508,7 +509,15 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     onSuccess: ({ res, popup }, variables) => {
       let authPopup = popup;
       if (res.authorization_url) {
-        authPopup = openAuthUrl(res.authorization_url, popup).popup;
+        const opened = openAuthUrl(res.authorization_url, popup);
+        authPopup = opened.popup;
+        if (!opened.ok) {
+          throw new Error(
+            opened.reason === "popup_blocked"
+              ? "Authorization popup was blocked."
+              : "Authorization URL must use HTTPS.",
+          );
+        }
       } else if (popup && !popup.closed) {
         popup.close();
       }

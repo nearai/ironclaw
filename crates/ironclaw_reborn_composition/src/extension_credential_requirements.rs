@@ -72,17 +72,16 @@ pub(crate) fn can_merge_lifecycle_credential_setup(
     existing: &LifecycleExtensionCredentialSetup,
     candidate: &LifecycleExtensionCredentialSetup,
 ) -> bool {
-    match (existing, candidate) {
+    matches!(
+        (existing, candidate),
         (
             LifecycleExtensionCredentialSetup::ManualToken,
             LifecycleExtensionCredentialSetup::ManualToken,
+        ) | (
+            LifecycleExtensionCredentialSetup::OAuth { .. },
+            LifecycleExtensionCredentialSetup::OAuth { .. },
         )
-        | (
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-        ) => true,
-        _ => false,
-    }
+    )
 }
 
 pub(crate) fn merge_lifecycle_credential_setup(
@@ -111,17 +110,16 @@ fn can_merge_runtime_credential_setup(
     existing: &RuntimeCredentialAccountSetup,
     candidate: &RuntimeCredentialAccountSetup,
 ) -> bool {
-    match (existing, candidate) {
+    matches!(
+        (existing, candidate),
         (
             RuntimeCredentialAccountSetup::ManualToken,
             RuntimeCredentialAccountSetup::ManualToken,
+        ) | (
+            RuntimeCredentialAccountSetup::OAuth { .. },
+            RuntimeCredentialAccountSetup::OAuth { .. },
         )
-        | (
-            RuntimeCredentialAccountSetup::OAuth { .. },
-            RuntimeCredentialAccountSetup::OAuth { .. },
-        ) => true,
-        _ => false,
-    }
+    )
 }
 
 fn merge_runtime_credential_auth_requirement(

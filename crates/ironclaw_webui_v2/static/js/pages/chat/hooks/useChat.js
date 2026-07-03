@@ -89,9 +89,11 @@ function openAuthUrl(url, popup = null) {
     popup.location.href = url;
     return { ok: true, popup };
   }
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
   return {
-    ok: true,
-    popup: window.open(url, "_blank", "noopener,noreferrer"),
+    ok: Boolean(opened),
+    popup: opened || null,
+    reason: opened ? null : "popup_blocked",
   };
 }
 
@@ -371,6 +373,7 @@ export function useChat(threadId) {
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
   const pendingOnboardingOauthFlowRef = React.useRef(null);
+  const sendRef = React.useRef(null);
   // Source tool-message ids whose pairing panel the user dismissed. Keyed by
   // the durable `tool-<invocation_id>`, so a dismissal survives re-renders and
   // timeline reloads and the still-present activation tool-result does not
@@ -645,21 +648,70 @@ export function useChat(threadId) {
     const browserWindow =
       typeof window !== "undefined" ? window : globalThis?.window || null;
     if (!browserWindow) return;
+    let serverCheckInFlight = false;
+    const finishCompletion = async (pending) => {
+      if (!pending || pending.completing) return;
+      pendingOnboardingOauthFlowRef.current = { ...pending, completing: true };
+      const onboarding = pendingOnboardingRef.current;
+      const threadForResume =
+        pending.threadId || onboarding?.threadId || threadId || null;
+      let sourceCleared = false;
+      if (connectionEventMatchesOnboarding({ channel: pending.channel }, onboarding)) {
+        if (threadForResume && !onboarding?.requestId) {
+          const sendForResume = sendRef.current;
+          if (typeof sendForResume !== "function") {
+            pendingOnboardingOauthFlowRef.current = pending;
+            return;
+          }
+          const continuation = await sendForResume(
+            channelConnectionContinuationMessage(pending.channel),
+            {
+              threadId: threadForResume,
+              bypassPendingOnboarding: true,
+            },
+          );
+          if (!continuation || continuation.outcome === "rejected_busy") {
+            pendingOnboardingOauthFlowRef.current = pending;
+            return;
+          }
+        }
+        clearOnboardingAfterChannelConnected(onboarding);
+        sourceCleared = true;
+      }
+      pendingOnboardingOauthFlowRef.current = null;
+      await notifyChannelConnected({
+        channel: pending.channel,
+        sourceThreadId: sourceCleared ? threadForResume : null,
+        source: "chat-oauth",
+      });
+    };
     const handleCompletion = (payload) => {
       const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending) return;
       if (!payload || payload.flowId !== pending.flowId) return;
       if (payload.status !== "completed") return;
-      pendingOnboardingOauthFlowRef.current = null;
-      const onboarding = pendingOnboardingRef.current;
-      if (connectionEventMatchesOnboarding({ channel: pending.channel }, onboarding)) {
-        clearOnboardingAfterChannelConnected(onboarding);
-      }
-      notifyChannelConnected({
-        channel: pending.channel,
-        sourceThreadId: pending.threadId || null,
-        source: "chat-oauth",
+      Promise.resolve(finishCompletion(pending)).catch(() => {
+        pendingOnboardingOauthFlowRef.current = pending;
       });
+    };
+    const pollServerState = () => {
+      const pending = pendingOnboardingOauthFlowRef.current;
+      if (!pending || pending.completing || serverCheckInFlight) return;
+      serverCheckInFlight = true;
+      Promise.resolve(fetchExtensions())
+        .then((snapshot) => {
+          const extensions = Array.isArray(snapshot)
+            ? snapshot
+            : snapshot?.extensions || [];
+          if (channelConnectionIsSatisfied(extensions, pending.channel)) {
+            return finishCompletion(pending);
+          }
+          return null;
+        })
+        .catch(() => null)
+        .finally(() => {
+          serverCheckInFlight = false;
+        });
     };
 
     let channel = null;
@@ -680,13 +732,14 @@ export function useChat(threadId) {
           browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
         ),
       );
+      pollServerState();
     }, 500);
     return () => {
       browserWindow.clearInterval(timer);
       if (channel) channel.close();
       browserWindow.removeEventListener?.("storage", onStorage);
     };
-  }, [clearOnboardingAfterChannelConnected]);
+  }, [clearOnboardingAfterChannelConnected, threadId]);
 
   const handleEvent = useChatEvents({
     threadId,
@@ -1058,6 +1111,7 @@ export function useChat(threadId) {
       setActiveRun,
     ],
   );
+  sendRef.current = send;
 
   const resumeOnboardingAfterChannelConnected = React.useCallback(
     async (onboarding, event = {}) => {
@@ -1315,7 +1369,11 @@ export function useChat(threadId) {
       }
       const opened = openAuthUrl(response.authorization_url, popup);
       if (!opened.ok) {
-        throw new Error("Authorization URL must use HTTPS.");
+        throw new Error(
+          opened.reason === "popup_blocked"
+            ? "Authorization popup was blocked."
+            : "Authorization URL must use HTTPS.",
+        );
       }
       pendingOnboardingOauthFlowRef.current = {
         flowId: response.flow_id,

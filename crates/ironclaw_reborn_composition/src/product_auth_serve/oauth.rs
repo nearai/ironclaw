@@ -1,6 +1,8 @@
 //! OAuth start and callback handlers.
 
 use super::*;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
 use crate::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding::{
@@ -199,13 +201,16 @@ async fn start_slack_personal_oauth_flow(
     }
 
     let (client_id, redirect_uri) = state.slack_personal_oauth_credentials().await?;
+    if requester_extension.as_str() != SLACK_EXTENSION_ID {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
     let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let account_label = CredentialAccountLabel::new(request.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let requested_scopes = request
-        .scopes
-        .into_iter()
+    let requested_scopes = slack_personal_oauth_setup_scopes()
+        .iter()
+        .copied()
         .map(ProviderScope::new)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
@@ -1417,6 +1422,101 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.body.code, AuthErrorCode::MalformedCallback);
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_start_uses_server_scopes_not_client_supplied_scopes() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await);
+
+        let Json(start_response) = extension_oauth_start_handler(
+            State(state),
+            Extension(WebUiAuthenticatedCaller::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("user-alpha").expect("user"),
+                None,
+                None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: vec!["admin".to_string()],
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
+        )
+        .await
+        .expect("start slack oauth flow");
+
+        let parsed =
+            Url::parse(start_response.authorization_url.as_str()).expect("authorization url");
+        let user_scope = parsed
+            .query_pairs()
+            .find_map(|(name, value)| (name == "user_scope").then(|| value.into_owned()))
+            .expect("Slack user_scope");
+        let scopes = user_scope
+            .split_whitespace()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(!scopes.contains("admin"));
+        for expected in crate::available_extensions::slack_personal_oauth_setup_scopes() {
+            assert!(
+                scopes.contains(expected),
+                "server-authorized Slack scope `{expected}` should be requested"
+            );
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_start_rejects_non_slack_requester_extension() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await);
+
+        let error = extension_oauth_start_handler(
+            State(state),
+            Extension(WebUiAuthenticatedCaller::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("user-alpha").expect("user"),
+                None,
+                None,
+            )),
+            Path("notion".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: Vec::new(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
+        )
+        .await
+        .expect_err("Slack personal OAuth is only valid for the Slack package");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.body.code, AuthErrorCode::InvalidRequest);
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
