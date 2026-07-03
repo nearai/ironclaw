@@ -26,6 +26,28 @@ const MCP_INIT_BODY: &[u8] =
     br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#;
 const MCP_NOTIF_BODY: &[u8] = br#"{"accepted":true}"#;
 
+/// SSE-framed `initialize` result body with a leading keepalive `ping` event
+/// (`event: ping\ndata:\n`) before the real `message` event. Streamable-HTTP
+/// MCP servers may legally answer any leg this way because `web_access` sends
+/// `Accept: application/json, text/event-stream` on every request. Hand-authored
+/// (no live-captured MCP bodies exist under `tests/fixtures/`); the shape mirrors
+/// the production unit fixture in `web_access.rs::extracts_text_from_sse_mcp_response`.
+const MCP_INIT_BODY_SSE: &[u8] = b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{}}}\n\n";
+
+/// SSE-framed `tools/call` result wrapping the same `{"result":{"content":..}}`
+/// shape `mcp_tool_call_result_body` emits, as a single `data:` event.
+fn mcp_tool_call_result_body_sse(content_text: &str) -> Vec<u8> {
+    let json = json!({
+        "result": {
+            "content": [
+                {"type": "text", "text": content_text}
+            ]
+        }
+    })
+    .to_string();
+    format!("event: message\ndata: {json}\n\n").into_bytes()
+}
+
 /// Builds the `tools/call` JSON-RPC result body the scripted Exa MCP
 /// handshake's third leg returns:
 /// `{"result":{"content":[{"type":"text","text":"<content_text>"}]}}`. Both
@@ -151,6 +173,96 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .assert_tool_result_contains("This domain is for illustrative examples in documents.")
         .await
         .expect("scripted MCP fetch result surfaced back to the model");
+}
+
+/// Format-matrix regression (C-WIREFMT) through the REAL Reborn handler: the
+/// Exa MCP server answers `initialize` with SSE framing. `web-access.search`
+/// must still round-trip end-to-end (model -> capability -> `WebAccessExecutor`
+/// -> egress) and surface the result. Before the sibling-parity fix in
+/// `is_valid_mcp_initialize_response`, the JSON-only init parser rejected the
+/// SSE body and the handshake aborted before `tools/call`, so the search result
+/// never reached the model. This is the int-tier twin of the crate-tier
+/// `search_accepts_sse_framed_initialize_response`, exercising the full dispatch
+/// pipeline rather than the executor in isolation.
+#[tokio::test]
+async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY_SSE.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Tokio Async Runtime\nURL: https://tokio.rs\nText: Tokio is an async \
+                 runtime for Rust providing IO, networking, and scheduling.",
+            ),
+        ])
+        .script([
+            RebornScriptedReply::tool_call(
+                "web-access.search",
+                json!({"query": "rust async runtimes"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("search the web for rust async runtimes")
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.search")
+        .await
+        .expect("capability dispatched through the real executor over SSE-framed initialize");
+    harness
+        .assert_tool_result_contains(
+            "Tokio is an async runtime for Rust providing IO, networking, and scheduling.",
+        )
+        .await
+        .expect("SSE-framed initialize accepted so the handshake reached tools/call");
+}
+
+/// Sibling parity (C-WIREFMT): BOTH body-parsing legs — `initialize`
+/// (`is_valid_mcp_initialize_response`) and `tools/call` (`extract_mcp_text`) —
+/// are SSE-framed on the same handshake, proving each leg inherits the other's
+/// framing matrix rather than only the leg its author happened to test. Uses the
+/// richest framing (multi-event with a keepalive `ping` prelude) for both legs.
+#[tokio::test]
+async fn web_access_handshake_over_sse_framed_both_legs() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY_SSE.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body_sse(
+                "# Example Domain\nURL: https://example.com\n\nThis domain is for illustrative \
+                 examples in documents.",
+            ),
+        ])
+        .script([
+            RebornScriptedReply::tool_call(
+                "web-access.get_content",
+                json!({"url": "https://example.com"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("fetch the content at https://example.com")
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.get_content")
+        .await
+        .expect("capability dispatched with both handshake legs SSE-framed");
+    harness
+        .assert_tool_result_contains("This domain is for illustrative examples in documents.")
+        .await
+        .expect("SSE-framed tools/call result surfaced back to the model");
 }
 
 /// Guards `assert_egress_body_contains_any` against vacuous pass: when the
