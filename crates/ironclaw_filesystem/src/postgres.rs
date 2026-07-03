@@ -774,37 +774,50 @@ impl RootFilesystem for PostgresRootFilesystem {
             .transaction()
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        for prefix in virtual_path_prefixes(path)? {
-            let row = transaction
-                .query_opt(
-                    "SELECT is_dir FROM root_filesystem_entries WHERE path = $1",
-                    &[&prefix.as_str()],
-                )
-                .await
-                .map_err(|error| {
-                    db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
-                })?;
-            if row.is_some_and(|row| !row.get::<_, bool>("is_dir")) {
-                return Err(FilesystemError::Backend {
-                    path: prefix,
-                    operation: FilesystemOperation::CreateDirAll,
-                    reason: "file exists where directory is required".to_string(),
-                });
-            }
-            transaction
-                .execute(
-                    r#"
-                    INSERT INTO root_filesystem_entries (path, contents, is_dir)
-                    VALUES ($1, ''::bytea, TRUE)
-                    ON CONFLICT (path) DO NOTHING
-                    "#,
-                    &[&prefix.as_str()],
-                )
-                .await
-                .map_err(|error| {
-                    db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
-                })?;
+        let prefixes = virtual_path_prefixes(path)?;
+        let prefix_paths: Vec<String> = prefixes
+            .iter()
+            .map(|prefix| prefix.as_str().to_string())
+            .collect();
+
+        transaction
+            .execute(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                SELECT prefix.path, ''::bytea, TRUE
+                FROM UNNEST($1::text[]) AS prefix(path)
+                ON CONFLICT (path) DO NOTHING
+                "#,
+                &[&prefix_paths],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+
+        let file_conflict = transaction
+            .query_opt(
+                r#"
+                SELECT path
+                FROM root_filesystem_entries
+                WHERE path = ANY($1::text[]) AND is_dir = FALSE
+                LIMIT 1
+                "#,
+                &[&prefix_paths],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+        if let Some(row) = file_conflict {
+            let conflict_path = row
+                .try_get::<_, String>("path")
+                .ok()
+                .and_then(|raw| VirtualPath::new(raw).ok())
+                .unwrap_or_else(|| path.clone());
+            return Err(FilesystemError::Backend {
+                path: conflict_path,
+                operation: FilesystemOperation::CreateDirAll,
+                reason: "file exists where directory is required".to_string(),
+            });
         }
+
         transaction
             .commit()
             .await
