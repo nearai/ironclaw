@@ -33,14 +33,14 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, PendingApprovalInteractionView, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ConversationBindingService, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    InMemoryIdempotencyLedger, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    PendingApprovalInteractionView, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
@@ -774,10 +774,7 @@ impl TurnCoordinator for ScriptedTriggerCoordinator {
         unreachable!("triggered delivery driver never resumes turns")
     }
 
-    async fn cancel_run(
-        &self,
-        _request: CancelRunRequest,
-    ) -> Result<CancelRunResponse, TurnError> {
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unreachable!("approval-only triggered scenario never cancels the run")
     }
 
@@ -950,8 +947,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         dm_target,
         AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
-    let coordinator: Arc<dyn TurnCoordinator> =
-        Arc::new(ScriptedTriggerCoordinator::new(template));
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
 
     let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
         adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
