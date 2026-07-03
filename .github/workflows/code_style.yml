@@ -258,8 +258,9 @@ jobs:
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
         with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          # Keep this Wasmtime-heavy smoke target cache-only. sccache-dist can
+          # corrupt generated Wasmtime/Wiggle inputs and produce bogus type
+          # resolution failures.
           cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
           cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
           cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
