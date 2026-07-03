@@ -5,25 +5,27 @@
 The Reborn binary's process-execution story is three-quarters designed and one-quarter
 implemented:
 
-- `ProcessBackendKind` (`crates/ironclaw_host_api/src/runtime_policy.rs:403`) is a
+- `ProcessBackendKind` (`crates/ironclaw_host_api/src/runtime_policy.rs:412`) is a
   vocabulary enum: `None`, `Docker`, `Srt`, `SmolVm`, `LocalHost`, `TenantSandbox`,
   `OrgDedicatedRunner`. Only `LocalHost` and `TenantSandbox` have implementations;
-  `LocalInvocationServicesResolver::resolve()`
-  (`crates/ironclaw_host_runtime/src/invocation_services.rs:209-225`) rejects everything
-  else with `UnsupportedProcessBackend`.
+  `LocalInvocationServicesResolver::resolve()` rejects everything else with
+  `UnsupportedProcessBackend` (trait seam at
+  `crates/ironclaw_host_runtime/src/invocation_services.rs:104`; local implementation
+  at line 191).
 - The only `SandboxCommandTransport` implementation is
   `RebornScopedSandboxCommandTransport`
-  (`crates/ironclaw_host_runtime/src/sandbox_process.rs:220`): a **per-command ephemeral
+  (`crates/ironclaw_host_runtime/src/sandbox_process.rs:221`): a **per-command ephemeral
   Docker container**. Every `run_command` does create → start → wait → collect logs →
   force-remove. Nothing installed inside the container survives the command that
   installed it. `npm install -g foo && foo` works only if both halves are in the same
   command string; the next tool call starts from the bare image.
-- The binding is **not wired**. `RebornRuntimeProcessBinding` defaults to `None`
-  (`crates/ironclaw_reborn_composition/src/input.rs:105`), and neither
-  `ironclaw_reborn_cli` nor `ironclaw_reborn` ever constructs a
-  `TenantSandboxProcessPort` (grep: zero references outside `ironclaw_host_runtime`
-  itself and composition test fixtures). Meanwhile every hosted profile —
-  `HostedSafe`, `HostedDev`, `HostedYoloTenantScoped` — resolves to
+- The binding is **partially wired, but not complete enough for hosted use**.
+  `RebornRuntimeProcessBinding` defaults to `None`
+  (`crates/ironclaw_reborn_composition/src/input.rs:105`). Composition now has real
+  `TenantSandboxProcessPort` references (`error.rs`, `lib.rs`, `input.rs`,
+  `production_runtime_policy.rs`, `runtime.rs`, and local-dev/production tests), but
+  every hosted profile — `HostedSafe`, `HostedDev`, `HostedYoloTenantScoped` — resolves
+  to
   `ProcessBackendKind::TenantSandbox`
   (`crates/ironclaw_runtime_policy/src/resolver.rs:309-334`), so a hosted deployment
   today fails composition validation
@@ -79,11 +81,14 @@ IronClaw as an extension without a privilege-escalation path.**
 
 ## The backend-independent security contract
 
-Everything below holds for Docker today and must hold verbatim for any future backend.
-Security lives in the brokers and the promotion gate, **not** in container ephemerality.
-A persistent environment in which the agent installs arbitrary packages is
-**assumed compromised** (prompt injection, malicious transitive dependencies,
-typosquatted packages). The system stays secure anyway because:
+The following invariants define the **complete** security contract once all phases are
+complete and must hold verbatim for any future backend. Pre-existing invariants already
+enforced by the current ephemeral Docker sandbox or composition validation: **I1, I2,
+I3, I4**. Phase-gated additions: **I5** scope-isolated persistent state and **I6** disk
+metering/pids ceilings in Phase 2. Security lives in the brokers and the promotion gate,
+**not** in container ephemerality. A persistent environment in which the agent installs
+arbitrary packages is **assumed compromised** (prompt injection, malicious transitive
+dependencies, typosquatted packages). The system stays secure anyway because:
 
 | # | Invariant | Enforced where |
 |---|-----------|----------------|
@@ -358,15 +363,19 @@ because they live in `$HOME`; container lifecycle is unchanged.
 
 ```rust
 /// Docker named-volume identity for this scope's persistent home.
-/// Same sanitized identity material as container_name_prefix(); volumes
-/// and containers must never diverge on scope derivation (invariant I5).
+/// Same collision-resistant identity material as container_name_prefix();
+/// volumes and containers must never diverge on scope derivation (invariant I5).
 pub fn home_volume_name(&self) -> String {
     format!("ironclaw-reborn-home-{}", self.identity_slug())
 }
 ```
 
 (Refactor the existing `container_name_prefix()` internals into a shared
-`identity_slug()` so both call one sanitizer.)
+`identity_slug()` so both call one derivation function. The shared derivation must not
+be raw string concatenation or sanitization alone: build a canonical scope byte stream
+from length-prefixed `ResourceScope` components, feed it through a domain-separated
+collision-resistant digest such as BLAKE3, and use the digest-backed slug for both
+container and volume names.)
 
 **`sandbox_process.rs`** — config + launch changes:
 
@@ -481,6 +490,9 @@ whichever provider is live.
   other's home; (4) pids ceiling refuses work; host-side disk metering flips a
   scope to refusing once over the ceiling; (5) timeout restarts the environment
   and the next command still finds the home volume intact.
+- Timeout/kill error precedence: if command execution fails or times out and the
+  follow-up process-group/container cleanup also fails, log the cleanup failure as a
+  warning and return the original execution/timeout error to the caller.
 
 **Exit criteria:** a hosted agent can `npm i -g @some/cli` in one turn and use the CLI
 in a later run after a host restart, inside a container that still has read-only
@@ -530,11 +542,14 @@ Design points:
   `SandboxEgressPolicy::decide(scope, host, port)`; on allow, splice a TCP tunnel
   (TLS terminates at the destination — the broker does not MITM and cannot see or
   modify payload). Non-CONNECT requests are rejected with `405` and audited. DNS
-  resolution and private-IP/SSRF filtering go through `ironclaw_network`'s
-  resolver primitives (`is_private_or_loopback_ip` denial already exists at
-  `resolver.rs:58`) so the sandbox cannot reach link-local/RFC1918/metadata
-  endpoints even for allowed-looking names, including via DNS rebinding (connect to
-  the resolved-and-checked IP, not a re-resolved name).
+  resolution and SSRF filtering go through `ironclaw_network`'s checked resolver
+  primitives. The broker must always block cloud metadata addresses (for example
+  `169.254.169.254`), link-local, multicast, and other non-routable special-purpose
+  targets, including when an allowed name resolves there via DNS rebinding. Private and
+  loopback ranges are not blanket-denied: they are accepted only when explicitly
+  configured for legitimate self-hosted tenant destinations, and still pass the
+  metadata/link-local/multicast deny rules. Connect to the resolved-and-checked IP, not
+  a re-resolved name.
 - **Audit**: every decision (allow/deny, scope, host, byte counts out/in — preserve
   the `network_egress_bytes` outbound-only accounting invariant) emits through the
   existing host-runtime accounting path.
@@ -551,6 +566,9 @@ Typed, reviewable-in-one-place mapping from `NetworkMode` (already in
   `objects.githubusercontent.com`, `raw.githubusercontent.com`,
   `deb.nodesource.com` — plus per-tenant additions via product settings (additions
   are tenant-admin approved, normal settings flow).
+- The `NetworkMode` → base domain set function uses an exhaustive `match` with no
+  wildcard arm, so adding a network mode forces the allowlist decision to be revisited
+  at compile time.
 - Wildcard matching: **move `DomainPattern`/`DomainAllowlist` from
   `src/sandbox/proxy/allowlist.rs` into `ironclaw_network`** as their canonical home;
   the v1 proxy consumes them from there (re-export shim during migration). This is a
@@ -567,8 +585,10 @@ The per-scope socket creation hooks into `SandboxEnvironmentProvider::acquire`.
 
 ### 3.4 Tests
 
-- Policy unit tests: profile → decision matrix, private-IP/metadata denial even when
-  DNS for an allowed name resolves there (rebind protection via `ironclaw_network`).
+- Policy unit tests: profile → decision matrix; metadata/link-local/multicast denial
+  even when DNS for an allowed name resolves there; private/loopback denial unless the
+  tenant has an explicit self-hosted destination exception (rebind protection via
+  `ironclaw_network`).
 - Integration (Docker-gated): container with broker can `npm install` a real small
   package; non-CONNECT requests to the broker are rejected (`405`) so plain-HTTP
   egress is impossible by construction; same container cannot
@@ -846,6 +866,10 @@ Hard rules encoded in the gate, not in prompts:
 - Artifact path must resolve inside the requesting scope's workspace (reuse the
   workdir validation discipline from `resolve_container_workdir` — no `..`, no
   absolute host paths).
+- Before reading the artifact or invoking the promotion coordinator, the tool must
+  verify that the authenticated user owns the requested workspace/project scope. If the
+  ownership check fails, return an authorization error and do not read the artifact,
+  hash bytes, validate WASM, or call the coordinator.
 - Non-WASM artifacts are rejected at step 2 with a message pointing at decision 6
   (native binaries stay sandbox-local).
 - Trust level is pinned: there is **no parameter** by which the promotion tool can
@@ -959,7 +983,7 @@ backend inherits its acceptance tests.
 | Privilege escalation via promoted artifact | WASM-only, user trust pinned, deny-default capabilities, human approval per grant, hash-pinned re-promotion |
 | Resource exhaustion (disk fill, fork bomb, runaway build) | memory/cpu (existing), pids_limit, host-side disk metering, timeout via environment restart (disposable compute — no in-container enforcement) |
 | Container escape | Unchanged hardening: ro rootfs, cap_drop ALL, no-new-privileges, tmpfs /tmp; defense-in-depth accepted as Docker-grade until microVM backend lands |
-| Broker SSRF (DNS rebind to metadata/RFC1918) | `ironclaw_network` resolver + private-IP filtering in the broker connect path |
+| Broker SSRF (DNS rebind to metadata/link-local/multicast or unauthorized private targets) | `ironclaw_network` checked resolver + broker connect-path denial for metadata/link-local/multicast, with private/loopback allowed only by explicit self-hosted tenant configuration |
 | Secret theft via broker socket | Sockets are per-scope; the broker is CONNECT-only and contains no credential machinery at all — secrets exist only in the host-side egress pipeline (staged obligations), which the sandbox cannot reach |
 
 ## Sequencing & dependencies
