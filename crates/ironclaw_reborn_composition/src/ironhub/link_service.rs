@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, UserId};
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_product_workflow::{
-    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubInstallKind,
-    IronhubLinkError, IronhubLinkService, IronhubRegisterRequest, LifecyclePhase,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest, LifecyclePhase,
 };
 
 use crate::RebornBuildError;
@@ -15,10 +15,10 @@ use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::lifecycle::RebornLocalSkillManagementPort;
 
 use super::agent_link::{IronhubSharedKey, install_payload, register_payload, verify_signature};
-use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
+use super::model::{IronHubCommand, IronHubCommandError, IronHubInstallOptions};
 use super::service::IronHubService;
 
-const MAX_TIMESTAMP_DRIFT_SECS: i64 = 300;
+const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
 const INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
 
 static SEEN_INSTALL_NONCES: LazyLock<Mutex<HashMap<String, Instant>>> =
@@ -84,19 +84,17 @@ fn map_install_error(error: IronHubCommandError) -> IronhubLinkError {
 }
 
 fn timestamp_fresh(ts: u64) -> bool {
-    let drift = chrono::Utc::now().timestamp() - ts as i64;
-    drift.abs() <= MAX_TIMESTAMP_DRIFT_SECS
-}
-
-fn map_kind(kind: Option<IronhubInstallKind>) -> Option<IronHubEntryKind> {
-    kind.map(|kind| match kind {
-        IronhubInstallKind::Tool => IronHubEntryKind::Tool,
-        IronhubInstallKind::Skill => IronHubEntryKind::Skill,
-    })
+    let Ok(ts) = i64::try_from(ts) else {
+        // silent-ok: a timestamp beyond i64::MAX is never a live unix time; reject it.
+        return false;
+    };
+    chrono::Utc::now().timestamp().abs_diff(ts) <= MAX_TIMESTAMP_DRIFT_SECS
 }
 
 fn reject_replayed_nonce(nonce: &str) -> Result<(), IronhubLinkError> {
-    let ttl = Duration::from_secs(MAX_TIMESTAMP_DRIFT_SECS as u64);
+    // Keep nonces for twice the drift window so a hub clock ahead of ours
+    // cannot leave a request fresh after its nonce is evicted.
+    let ttl = Duration::from_secs(MAX_TIMESTAMP_DRIFT_SECS * 2);
     let now = Instant::now();
     let mut seen = SEEN_INSTALL_NONCES
         .lock()
@@ -117,11 +115,7 @@ impl IronhubLinkService for RebornIronhubLinkService {
         }
         // replay-ok: register has no local side effect, so an idempotent retry is
         // harmless; single-use is enforced on deliver_install only.
-        if verify_signature(
-            self.shared_key.as_str(),
-            &register_payload(&request),
-            &request.sig,
-        ) {
+        if verify_signature(&self.shared_key, &register_payload(&request), &request.sig) {
             Ok(())
         } else {
             Err(IronhubLinkError::InvalidSignature)
@@ -136,17 +130,13 @@ impl IronhubLinkService for RebornIronhubLinkService {
         if !timestamp_fresh(request.ts) {
             return Err(IronhubLinkError::StaleTimestamp);
         }
-        if !verify_signature(
-            self.shared_key.as_str(),
-            &install_payload(&request),
-            &request.sig,
-        ) {
+        if !verify_signature(&self.shared_key, &install_payload(&request), &request.sig) {
             return Err(IronhubLinkError::InvalidSignature);
         }
         reject_replayed_nonce(&request.nonce)?;
 
         let options = IronHubInstallOptions {
-            kind: map_kind(request.kind),
+            kind: None,
             force: false,
             acknowledge_unverified: false,
             expected_version: Some(request.version),
@@ -212,7 +202,6 @@ mod tests {
             nonce: nonce.to_string(),
             artifact_digest: "sha256:deadbeef".to_string(),
             sig,
-            kind: Some(IronhubInstallKind::Skill),
             private_manifest_url: None,
         }
     }
@@ -249,16 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn map_kind_maps_each_variant() {
-        assert!(matches!(
-            map_kind(Some(IronhubInstallKind::Tool)),
-            Some(IronHubEntryKind::Tool)
-        ));
-        assert!(matches!(
-            map_kind(Some(IronhubInstallKind::Skill)),
-            Some(IronHubEntryKind::Skill)
-        ));
-        assert!(map_kind(None).is_none());
+    fn timestamp_fresh_rejects_out_of_range_timestamps_without_panicking() {
+        assert!(!timestamp_fresh(u64::MAX));
+        assert!(!timestamp_fresh(i64::MAX as u64 + 1));
+        assert!(!timestamp_fresh(i64::MAX as u64));
     }
 
     #[test]

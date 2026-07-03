@@ -653,7 +653,9 @@ fn manifest_replay_key(url: &str, manifest: &IronHubManifest) -> String {
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))
         .unwrap_or_default();
-    format!("{host}|{}", manifest.repo)
+    // Length-prefix the host so a manifest-supplied repo containing the
+    // separator cannot collide with another (host, repo) pair.
+    format!("{}|{host}|{}", host.len(), manifest.repo)
 }
 
 fn install_lock(key: &str) -> Arc<AsyncMutex<()>> {

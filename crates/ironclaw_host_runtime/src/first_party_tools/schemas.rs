@@ -464,5 +464,10 @@ mod tests {
             None,
             "model-visible IronHub install must not self-acknowledge unverified community content"
         );
+        assert_eq!(
+            install["properties"].get("private_manifest_url"),
+            None,
+            "model-visible IronHub install must not choose a private manifest source"
+        );
     }
 }

@@ -4,13 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{RebornServicesError, RebornServicesErrorCode};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IronhubInstallKind {
-    Tool,
-    Skill,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct IronhubRegisterRequest {
     pub uid: String,
@@ -30,8 +23,6 @@ pub struct IronhubInstallDeliveryRequest {
     pub nonce: String,
     pub artifact_digest: String,
     pub sig: String,
-    #[serde(default)]
-    pub kind: Option<IronhubInstallKind>,
     #[serde(default)]
     pub private_manifest_url: Option<String>,
 }

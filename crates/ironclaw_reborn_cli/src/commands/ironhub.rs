@@ -90,9 +90,10 @@ struct IronHubInstallCommand {
     #[arg(long)]
     expected_artifact_digest: Option<String>,
 
-    /// Install from a private org-scoped signed manifest URL instead of the public catalog.
-    #[arg(long)]
-    private_manifest_url: Option<String>,
+    /// Install from a private org-scoped signed manifest URL read from this
+    /// file (keeps the tokenized URL off argv and out of shell history).
+    #[arg(long, value_name = "PATH")]
+    private_manifest_url_file: Option<std::path::PathBuf>,
 
     /// Output the lifecycle response as JSON.
     #[arg(long)]
@@ -140,7 +141,9 @@ impl IronHubCommand {
                         acknowledge_unverified: command.acknowledge_unverified,
                         expected_version: command.expected_version,
                         expected_artifact_digest: command.expected_artifact_digest,
-                        private_manifest_url: command.private_manifest_url,
+                        private_manifest_url: read_private_manifest_url(
+                            command.private_manifest_url_file.as_deref(),
+                        )?,
                     },
                 },
                 command.json,
@@ -164,6 +167,20 @@ impl From<IronHubKindArg> for IronHubEntryKind {
             IronHubKindArg::Skill => Self::Skill,
         }
     }
+}
+
+fn read_private_manifest_url(path: Option<&std::path::Path>) -> anyhow::Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let url = std::fs::read_to_string(path)
+        .with_context(|| format!("reading private manifest URL file {}", path.display()))?
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        anyhow::bail!("private manifest URL file {} is empty", path.display());
+    }
+    Ok(Some(url))
 }
 
 fn execute_ironhub_command(

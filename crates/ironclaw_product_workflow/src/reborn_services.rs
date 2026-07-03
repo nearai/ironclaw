@@ -60,8 +60,8 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use ironhub_link::{
-    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubInstallKind,
-    IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,

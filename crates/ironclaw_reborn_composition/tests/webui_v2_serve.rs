@@ -2039,5 +2039,8 @@ async fn ironhub_register_route_dispatches_valid_body_to_facade() {
     let calls = services.ironhub_register_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1, "facade called exactly once");
     assert_eq!(calls[0].uid, "u");
+    assert_eq!(calls[0].aid, "a");
+    assert_eq!(calls[0].ts, 1_700_000_000);
     assert_eq!(calls[0].nonce, "n");
+    assert_eq!(calls[0].sig, "sig-1");
 }

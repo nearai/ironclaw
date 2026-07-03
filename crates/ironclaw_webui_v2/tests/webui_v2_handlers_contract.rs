@@ -415,6 +415,11 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         request: IronhubInstallDeliveryRequest,
     ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
+        let slug = request.slug.clone();
+        self.ironhub_deliver_install_calls
+            .lock()
+            .expect("lock")
+            .push(request);
         if let Some(error) = self
             .next_ironhub_deliver_install_error
             .lock()
@@ -423,11 +428,6 @@ impl RebornServicesApi for StubServices {
         {
             return Err(error);
         }
-        let slug = request.slug.clone();
-        self.ironhub_deliver_install_calls
-            .lock()
-            .expect("lock")
-            .push(request);
         Ok(IronhubInstallDeliveryResult {
             installed: true,
             slug,
@@ -651,7 +651,7 @@ async fn ironhub_deliver_install_dispatches_through_facade() {
                 .uri("/api/webchat/v2/ironhub/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1"}"#,
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1","private_manifest_url":"https://hub.example/manifest/tok"}"#,
                 ))
                 .expect("request"),
         )
@@ -664,7 +664,17 @@ async fn ironhub_deliver_install_dispatches_through_facade() {
     let calls = services.ironhub_deliver_install_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1, "facade called exactly once");
     assert_eq!(calls[0].slug, "my-skill");
+    assert_eq!(calls[0].version, "1.0.0");
+    assert_eq!(calls[0].uid, "u");
+    assert_eq!(calls[0].aid, "a");
+    assert_eq!(calls[0].ts, 1_700_000_000);
+    assert_eq!(calls[0].nonce, "n");
     assert_eq!(calls[0].artifact_digest, "sha256:deadbeef");
+    assert_eq!(calls[0].sig, "sig-1");
+    assert_eq!(
+        calls[0].private_manifest_url.as_deref(),
+        Some("https://hub.example/manifest/tok")
+    );
 }
 
 #[tokio::test]
@@ -707,7 +717,7 @@ async fn ironhub_deliver_install_error_maps_to_http_status() {
         field: None,
         validation_code: None,
     });
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -724,6 +734,15 @@ async fn ironhub_deliver_install_error_maps_to_http_status() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        services
+            .ironhub_deliver_install_calls
+            .lock()
+            .expect("lock")
+            .len(),
+        1,
+        "handler dispatched to the facade before the error mapped"
+    );
 }
 
 #[tokio::test]
