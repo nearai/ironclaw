@@ -1,6 +1,9 @@
 name: OVH Runner Benchmark
 
 on:
+  push:
+    branches:
+      - codex/ovh-runner-benchmark
   workflow_dispatch:
     inputs:
       ref:
