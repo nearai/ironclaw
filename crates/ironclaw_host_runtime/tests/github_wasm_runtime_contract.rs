@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -213,7 +216,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
 }
 
 #[tokio::test]
-async fn host_runtime_services_restages_github_product_auth_for_multi_request_wasm_capability() {
+async fn wasm_github_product_auth_resolves_once_for_multi_request_dispatch() {
     let capability_id = CapabilityId::new("github.create_branch").unwrap();
     let scope = sample_scope(InvocationId::new());
     let source_sha = "abc123def4567890abc123def4567890abc123de";
@@ -224,6 +227,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     let secret_store = Arc::new(InMemorySecretStore::new());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_github_package()),
         Arc::new(filesystem_with_github_package()),
@@ -244,7 +248,8 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
-    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+    .with_runtime_credential_account_resolver(Arc::new(CountingRuntimeCredentialAccountResolver {
+        calls: Arc::clone(&resolver_calls),
         result: Ok(account_access_secret.clone()),
     }))
     .with_trust_policy(Arc::new(github_first_party_trust_policy()))
@@ -304,6 +309,160 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     assert_eq!(
         create_body,
         json!({"ref": "refs/heads/feature/matrix", "sha": source_sha})
+    );
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        1,
+        "authorized multi-request WASM dispatch must resolve product auth only during obligation staging"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_does_not_inject_optional_github_product_auth_without_obligation() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let expected_url =
+        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1";
+    let policy = github_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_optional_github_runtime_credentials()),
+        Arc::new(filesystem_with_github_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(CountingRuntimeCredentialAccountResolver {
+        calls: Arc::clone(&resolver_calls),
+        result: Ok(account_access_secret.clone()),
+    }))
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_should_not_be_used"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"repo": "nearai/ironclaw", "type": "issue", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(
+                completed.output,
+                json!({"total_count":0,"incomplete_results":false,"items":[]})
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(requests[0].url, expected_url);
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_no_authorization_header(&requests[0]);
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        0,
+        "omitted credential obligations must not consult product-auth accounts"
+    );
+}
+
+#[tokio::test]
+async fn wasm_github_required_product_auth_without_obligation_fails_before_network() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = github_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_github_package()),
+        Arc::new(filesystem_with_github_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy { policy },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(CountingRuntimeCredentialAccountResolver {
+        calls: Arc::clone(&resolver_calls),
+        result: Ok(account_access_secret.clone()),
+    }))
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_should_not_be_used"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"repo": "nearai/ironclaw", "type": "issue", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+            assert!(gate.required_secrets.is_empty());
+            assert!(gate.credential_requirements.is_empty());
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    assert!(
+        network.requests().is_empty(),
+        "required credential without staged obligation must block before HTTP dispatch"
+    );
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        0,
+        "omitted credential obligations must not consult product-auth accounts"
     );
 }
 
@@ -1784,6 +1943,30 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
 }
 
 #[derive(Debug)]
+struct CountingRuntimeCredentialAccountResolver {
+    calls: Arc<AtomicUsize>,
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for CountingRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.provider.as_str(), "github");
+        assert_eq!(request.requester_extension.as_str(), "github");
+        self.result
+            .clone()
+            .map(|handle| RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle,
+            })
+    }
+}
+
+#[derive(Debug)]
 struct FixedGoogleRuntimeCredentialAccountResolver {
     expected_requester_extension: ExtensionId,
     expected_scopes: Vec<String>,
@@ -1812,8 +1995,23 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
 }
 
 fn registry_with_github_package() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    registry_from_github_manifest(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
+    )
+}
+
+fn registry_with_optional_github_runtime_credentials() -> ExtensionRegistry {
+    let manifest = std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap();
+    let manifest = manifest.replace(
+        r#"target = { type = "header", name = "authorization", prefix = "Bearer " } }"#,
+        r#"target = { type = "header", name = "authorization", prefix = "Bearer " }, required = false }"#,
+    );
+    registry_from_github_manifest(&manifest)
+}
+
+fn registry_from_github_manifest(manifest: &str) -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        manifest,
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         &default_host_api_contract_registry().unwrap(),
@@ -1975,6 +2173,17 @@ fn assert_google_bearer_header(request: &NetworkHttpRequest, expected_token: &st
             "authorization".to_string(),
             format!("Bearer {expected_token}"),
         ))
+    );
+}
+
+fn assert_no_authorization_header(request: &NetworkHttpRequest) {
+    assert!(
+        request
+            .headers
+            .iter()
+            .all(|(name, _)| name != "authorization"),
+        "request must not include an authorization header: {:?}",
+        request.headers
     );
 }
 

@@ -980,18 +980,9 @@ where
                 descriptor.runtime == RuntimeKind::Wasm
                     && !descriptor.runtime_credentials.is_empty()
             });
-            let mut provider = SharedHostWasmRuntimeCredentials::new((*self.registry).clone());
-            if let (Some(secret_store), Some(account_resolver)) = (
-                self.secret_store.clone(),
-                self.runtime_credential_account_resolver.clone(),
-            ) {
-                provider = provider.with_product_auth_restaging(
-                    secret_store,
-                    Arc::clone(&self.secret_injection_store),
-                    account_resolver,
-                );
-            }
-            let provider = Arc::new(provider);
+            let provider = Arc::new(SharedHostWasmRuntimeCredentials::new(
+                (*self.registry).clone(),
+            ));
             self = self
                 .with_manifest_wasm_runtime_credentials(provider, has_current_manifest_credentials);
         }

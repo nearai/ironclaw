@@ -1,32 +1,25 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    future::Future,
-    sync::{Arc, LazyLock, Mutex, mpsc},
+    sync::{Arc, Mutex},
 };
 
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
-    CapabilityId, CredentialStageError, ExtensionId, NetworkTargetPattern,
-    RuntimeCredentialInjection, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    CapabilityId, ExtensionId, NetworkTargetPattern, RuntimeCredentialInjection,
+    RuntimeCredentialRequirementSource, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle,
 };
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
-use ironclaw_secrets::SecretStore;
 use ironclaw_wasm::{WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest};
-use tokio::runtime::Handle;
-
-use crate::{
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
-    obligations::RuntimeSecretInjectionStore,
-};
 
 /// Host-derived WASM credential provider built from validated extension manifests.
 ///
-/// This provider emits only host-approved staged-obligation injection plans. It
-/// never exposes raw secret material to WASM and never grants new authority; the
-/// matching staged secret material must already exist in the host egress handoff
-/// store for the scoped capability invocation.
+/// This provider emits manifest-derived staged-obligation injection plans. It
+/// never exposes raw secret material to WASM and never resolves product-auth
+/// accounts from the manifest by itself. Matching staged secret material must
+/// already exist in the host egress handoff store for the scoped capability
+/// invocation, which keeps `Decision.obligations` as the authority boundary.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HostWasmRuntimeCredentials {
     credentials: Vec<HostWasmRuntimeCredential>,
@@ -70,7 +63,6 @@ impl HostWasmRuntimeCredentials {
 pub(crate) struct SharedHostWasmRuntimeCredentials {
     registry: SharedExtensionRegistry,
     cache: Arc<Mutex<SharedCredentialCache>>,
-    restager: Option<RuntimeCredentialRestager>,
 }
 
 impl SharedHostWasmRuntimeCredentials {
@@ -78,22 +70,7 @@ impl SharedHostWasmRuntimeCredentials {
         Self {
             registry,
             cache: Arc::new(Mutex::new(SharedCredentialCache::default())),
-            restager: None,
         }
-    }
-
-    pub(crate) fn with_product_auth_restaging(
-        mut self,
-        secret_store: Arc<dyn SecretStore>,
-        secret_injections: Arc<RuntimeSecretInjectionStore>,
-        account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
-    ) -> Self {
-        self.restager = Some(RuntimeCredentialRestager {
-            secret_store,
-            secret_injections,
-            account_resolver,
-        });
-        self
     }
 }
 
@@ -103,7 +80,6 @@ impl fmt::Debug for SharedHostWasmRuntimeCredentials {
             .debug_struct("SharedHostWasmRuntimeCredentials")
             .field("registry", &self.registry)
             .field("cache", &self.cache)
-            .field("restager", &self.restager.as_ref().map(|_| "<configured>"))
             .finish()
     }
 }
@@ -112,79 +88,6 @@ impl fmt::Debug for SharedHostWasmRuntimeCredentials {
 struct SharedCredentialCache {
     registry_version: Option<u64>,
     credentials: HostWasmRuntimeCredentials,
-}
-
-#[derive(Clone)]
-struct RuntimeCredentialRestager {
-    secret_store: Arc<dyn SecretStore>,
-    secret_injections: Arc<RuntimeSecretInjectionStore>,
-    account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
-}
-
-impl fmt::Debug for RuntimeCredentialRestager {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RuntimeCredentialRestager")
-            .field("secret_store", &"[REDACTED]")
-            .field("secret_injections", &self.secret_injections)
-            .field("account_resolver", &"<resolver>")
-            .finish()
-    }
-}
-
-impl RuntimeCredentialRestager {
-    fn stage_for_request(
-        &self,
-        request: WasmRuntimeCredentialRequest,
-        credential: HostWasmRuntimeCredential,
-    ) -> Result<(), CredentialStageError> {
-        let restager = self.clone();
-        block_on_credential_restage(async move {
-            restager
-                .stage_for_request_async(&request, &credential)
-                .await
-        })
-    }
-
-    async fn stage_for_request_async(
-        &self,
-        request: &WasmRuntimeCredentialRequest,
-        credential: &HostWasmRuntimeCredential,
-    ) -> Result<(), CredentialStageError> {
-        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
-            &credential.source
-        else {
-            return Ok(());
-        };
-        let access_secret = self
-            .account_resolver
-            .resolve_access_secret(RuntimeCredentialAccountRequest {
-                scope: &request.scope,
-                provider,
-                setup,
-                provider_scopes: &credential.provider_scopes,
-                requester_extension: &credential.requester_extension,
-            })
-            .await?;
-        let lease = self
-            .secret_store
-            .lease_once(&access_secret.scope, &access_secret.handle)
-            .await
-            .map_err(crate::services::stage_secret_error)?;
-        let material = self
-            .secret_store
-            .consume(&access_secret.scope, lease.id)
-            .await
-            .map_err(crate::services::stage_secret_error)?;
-        self.secret_injections
-            .insert(
-                &request.scope,
-                &request.capability_id,
-                &credential.handle,
-                material,
-            )
-            .map_err(|_| CredentialStageError::Backend)
-    }
 }
 
 impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
@@ -205,7 +108,7 @@ impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
             }
             cache.credentials.clone()
         };
-        credentials.credential_injections_with_restager(request, self.restager.as_ref())
+        credentials.credential_injections(request)
     }
 }
 
@@ -214,15 +117,14 @@ impl WasmRuntimeCredentialProvider for HostWasmRuntimeCredentials {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
-        self.credential_injections_with_restager(request, None)
+        self.credential_injections_for_request(request)
     }
 }
 
 impl HostWasmRuntimeCredentials {
-    fn credential_injections_with_restager(
+    fn credential_injections_for_request(
         &self,
         request: &WasmRuntimeCredentialRequest,
-        restager: Option<&RuntimeCredentialRestager>,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
         let Ok(target) = network_target_for_url(&request.url) else {
             return Ok(Vec::new());
@@ -236,20 +138,6 @@ impl HostWasmRuntimeCredentials {
             .filter(|credential| target_matches_pattern(&target, &credential.audience));
         let mut injections = Vec::new();
         for credential in matching_credentials {
-            if let Some(restager) = restager {
-                restager
-                    .stage_for_request(request.clone(), credential.clone())
-                    .map_err(|error| {
-                        tracing::warn!(
-                            capability_id = %credential.capability_id,
-                            requester_extension = %credential.requester_extension,
-                            handle = %credential.handle,
-                            ?error,
-                            "failed to restage WASM runtime credential"
-                        );
-                        WasmHostError::Unavailable("credential_unavailable".to_string())
-                    })?;
-            }
             injections.push(RuntimeCredentialInjection {
                 handle: credential.handle.clone(),
                 source: RuntimeCredentialSource::StagedObligation {
@@ -288,67 +176,6 @@ pub(crate) fn wasm_runtime_credentials_from_registry(
             .collect(),
     )
 }
-
-fn block_on_credential_restage<F, T>(future: F) -> Result<T, CredentialStageError>
-where
-    F: Future<Output = Result<T, CredentialStageError>> + Send + 'static,
-    T: Send + 'static,
-{
-    // Credential restaging is driven from inside the synchronous WASM guest
-    // call, which the host runtime now runs on the blocking thread pool via
-    // `spawn_blocking`. `block_in_place` is the wrong tool from there (it
-    // targets tokio worker threads and, on a worker, would park it for the
-    // whole restage). Always route the on-runtime case through the dedicated
-    // single-thread restage runtime so the synchronous thread only blocks on a
-    // channel recv, never a turn worker.
-    match Handle::try_current() {
-        Ok(_) => run_credential_restage_on_worker(future),
-        Err(_) => run_credential_restage_future(future),
-    }
-}
-
-fn run_credential_restage_on_worker<F, T>(future: F) -> Result<T, CredentialStageError>
-where
-    F: Future<Output = Result<T, CredentialStageError>> + Send + 'static,
-    T: Send + 'static,
-{
-    let runtime = WASM_CREDENTIAL_RESTAGE_RUNTIME
-        .as_ref()
-        .map_err(|error| *error)?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    // Spawn on the worker runtime and recover the result via the join handle on
-    // a watchdog task, so a panicking restage future maps to
-    // `CredentialStageError::Backend` rather than dropping the sender and
-    // surfacing a misleading "recv on closed channel" error — consistent with
-    // the watchdog/panic-mapping pattern used by `run_runtime_http_egress_on_worker`.
-    let restage = runtime.spawn(future);
-    runtime.spawn(async move {
-        let result = restage.await.unwrap_or(Err(CredentialStageError::Backend));
-        let _ = sender.send(result);
-    });
-    receiver.recv().map_err(|_| CredentialStageError::Backend)?
-}
-
-fn run_credential_restage_future<F, T>(future: F) -> Result<T, CredentialStageError>
-where
-    F: Future<Output = Result<T, CredentialStageError>>,
-{
-    let runtime = WASM_CREDENTIAL_RESTAGE_RUNTIME
-        .as_ref()
-        .map_err(|error| *error)?;
-    runtime.block_on(future)
-}
-
-static WASM_CREDENTIAL_RESTAGE_RUNTIME: LazyLock<
-    Result<tokio::runtime::Runtime, CredentialStageError>,
-> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .thread_name("wasm-credential-restage")
-        .enable_all()
-        .build()
-        .map_err(|_| CredentialStageError::Backend)
-});
 
 #[cfg(test)]
 mod tests {
@@ -633,21 +460,5 @@ runtime_credentials = [
             thread_id: None,
             invocation_id: InvocationId::new(),
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn block_on_credential_restage_maps_panicking_future_to_backend_on_worker_runtime() {
-        // The multi-thread runtime means Handle::try_current() succeeds, so
-        // block_on_credential_restage routes through run_credential_restage_on_worker.
-        // That function spawns the future on the dedicated restage runtime and wraps
-        // a panicking / join-failed join handle with `.unwrap_or(Err(CredentialStageError::Backend))`,
-        // so a panic must surface as Backend rather than poisoning the process.
-        let result = block_on_credential_restage(async {
-            panic!("simulated restage panic");
-            #[allow(unreachable_code)]
-            Ok::<(), CredentialStageError>(())
-        });
-
-        assert_eq!(result, Err(CredentialStageError::Backend));
     }
 }
