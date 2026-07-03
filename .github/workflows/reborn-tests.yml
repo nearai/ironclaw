@@ -385,6 +385,7 @@ jobs:
           mkdir -p target/nextest-archive
           printf 'Archiving Reborn test target: %s\n' "${test_names[@]}"
           cargo nextest archive \
+            --no-default-features \
             --features libsql \
             "${archive_args[@]}" \
             --archive-file target/nextest-archive/reborn-nextest.tar.zst
