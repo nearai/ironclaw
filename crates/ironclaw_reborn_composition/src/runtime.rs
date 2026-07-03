@@ -3339,11 +3339,9 @@ pub async fn build_reborn_runtime(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         attachment_read_port: local_runtime.map(|rt| {
-            Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
-                    &rt.workspace_filesystem,
-                )),
-            ) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&rt.workspace_filesystem),
+            )) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
         }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
