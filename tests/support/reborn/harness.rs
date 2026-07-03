@@ -1675,6 +1675,14 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// parked `github.*` auth gate's `ProductAuthRuntimeCredentialResolver`
     /// lookup resolve on re-dispatch.
     product_auth: Option<Arc<RebornProductAuthServices>>,
+    /// W4-ASK-EACH-ONCE: local-dev per-tool permission override store (mirrors
+    /// `auto_approve_settings`). `Some` only for `new_with_options`-built
+    /// harnesses (which flow through `RebornServices`); `None` for the
+    /// lower-level constructors and the Echo backend. Lets a test install a
+    /// dynamic `ToolPermissionOverride::AskEachTime` override on any capability
+    /// via `set_ask_each_time_override_for_test`, independent of the
+    /// `outbound_target_tools()`-only `OutboundTargetToolsParts` copy.
+    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1958,6 +1966,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -2627,6 +2636,12 @@ impl HostRuntimeCapabilityHarness {
             None
         };
         let attachment_test_support = services.local_dev_attachment_test_support_for_test();
+        // W4-ASK-EACH-ONCE: capture the local-dev per-tool permission override
+        // store unconditionally (mirrors `auto_approve_settings` above), not just
+        // for `outbound_target_tools()`'s narrower `Some((facade, ..))` arm below
+        // -- any host-runtime-backed harness/group can now install a per-capability
+        // `AskEachTime` override via `set_ask_each_time_override_for_test`.
+        let tool_permission_overrides = services.local_dev_tool_permission_overrides_for_test();
         // C-SYNTH outbound: pair the injected facade double with the local-dev
         // settings stores production's `outbound_delivery_capabilities` consumes,
         // captured from `RebornServices` before the `host_runtime` move. Only
@@ -2686,6 +2701,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools,
             scope_capability_by_run_owner: false,
             product_auth,
+            tool_permission_overrides,
         })
     }
 
@@ -2837,6 +2853,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -2936,6 +2953,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3014,6 +3032,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3078,6 +3097,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3362,6 +3382,48 @@ impl HostRuntimeCapabilityHarness {
                     ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
                 )?,
                 state: ironclaw_approvals::CapabilityPermissionOverride::Disabled,
+                updated_by: Principal::User(user_id),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// W4-ASK-EACH-ONCE: install a `ToolPermissionOverride::AskEachTime`
+    /// override for `capability_id` under `(tenant_id, user_id)` via the real
+    /// local-dev per-tool permission override store -- generalizes
+    /// `disable_outbound_target_set_tool`'s shape (same scope-key
+    /// convention: `agent_id`/`project_id` unset, matching how
+    /// `StoreApprovalSettingsProvider::tool_override` looks the override up)
+    /// to any host-runtime-backed harness/group, not just
+    /// `outbound_target_tools()`. Drives the SAME
+    /// `require_approval_for_profile_policy` `tool_override` consultation
+    /// the #5306 fix reordered relative to the one-shot approval-lease check.
+    /// Errors if this harness wired no local-dev tool-permission-override
+    /// store (i.e. not built via `new_with_options`).
+    pub(crate) async fn set_ask_each_time_override_for_test(
+        &self,
+        capability_id: &CapabilityId,
+        tenant_id: TenantId,
+        user_id: UserId,
+    ) -> HarnessResult<()> {
+        let store = self
+            .tool_permission_overrides
+            .as_ref()
+            .ok_or("harness has no local-dev tool-permission-override store")?;
+        let scope = ResourceScope {
+            tenant_id,
+            user_id: user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        store
+            .set(ironclaw_approvals::CapabilityPermissionOverrideInput {
+                scope,
+                capability_id: capability_id.clone(),
+                state: ironclaw_approvals::CapabilityPermissionOverride::AskEachTime,
                 updated_by: Principal::User(user_id),
             })
             .await?;
