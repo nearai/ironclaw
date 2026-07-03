@@ -536,6 +536,49 @@ impl RebornIntegrationHarness {
         Ok(run_id)
     }
 
+    /// Submit a user turn carrying N inline attachments of any mime type, and
+    /// wait for it to complete (W4-ATTACH-VARIANTS). Generalizes
+    /// `submit_turn_with_image_attachment` to multiple attachments and
+    /// non-image kinds (e.g. `text/plain`, which `AttachmentKind::from_mime_type`
+    /// classifies as `Document` — its bytes are extracted to text by
+    /// `land_inbound_attachments` and rendered into the `<attachments>` block
+    /// `augment_model_content` appends to the message, rather than read back as
+    /// a multimodal part). Same production entry point
+    /// (`DefaultProductWorkflow::submit_inbound_with_attachments`) and lander
+    /// requirement as `submit_turn_with_image_attachment`.
+    pub async fn submit_turn_with_attachments(
+        &self,
+        text: &str,
+        attachments: Vec<(&str, &str, Vec<u8>)>,
+    ) -> HarnessResult<TurnRunId> {
+        if self.capability_recorder.attachment_test_support().is_none() {
+            return Err(
+                "no attachment lander wired — build the harness via RebornIntegrationGroup::attachment_tools()"
+                    .into(),
+            );
+        }
+        let (event_id, envelope) = self.build_user_envelope(text)?;
+        let inbound = attachments
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+                    id: format!("{event_id}-att-{index}"),
+                    mime_type: mime_type.to_string(),
+                    filename: Some(filename.to_string()),
+                    bytes,
+                },
+            )
+            .collect();
+        let ack = self
+            .workflow
+            .submit_inbound_with_attachments(envelope, inbound)
+            .await?;
+        let run_id = Self::run_id_from_ack(ack)?;
+        self.wait_for_status(run_id, TurnStatus::Completed).await?;
+        Ok(run_id)
+    }
+
     /// Build the synthetic inbound envelope `submit_turn_ack` and
     /// `submit_turn_with_image_attachment` both submit, plus the `event_id` it
     /// was minted from (attachment ids derive from it).
