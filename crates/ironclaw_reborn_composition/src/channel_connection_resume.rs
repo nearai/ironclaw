@@ -147,6 +147,14 @@ fn matches_channel_pairing(requirement: &RuntimeCredentialAuthRequirement, chann
     }
 }
 
+// Only the durable snapshot branch above can fail; the in-memory authority
+// returns an infallible snapshot. Gate this helper with the same cfg as that
+// call site so it isn't compiled (and flagged dead) under `inmemory-turn-state`
+// or no-DB builds.
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 fn resume_read_model_unavailable() -> ProductWorkflowError {
     ProductWorkflowError::Transient {
         reason: "channel-connection resume read model is unavailable".to_string(),
