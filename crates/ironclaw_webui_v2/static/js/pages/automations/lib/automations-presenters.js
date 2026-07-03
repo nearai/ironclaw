@@ -299,6 +299,7 @@ function normalizeAutomation(automation, t, locale) {
     recent_runs: recentRuns,
     has_running_run: recentRuns.some((run) => run.status === "running"),
     has_failed_runs: recentRuns.some((run) => run.status === "error"),
+    has_unattached_run_thread: recentRuns.some((run) => run.run_id && !run.thread_id),
   };
 
   return {
