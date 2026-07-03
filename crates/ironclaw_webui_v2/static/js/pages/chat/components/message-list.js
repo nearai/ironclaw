@@ -8,8 +8,16 @@ import { groupMessages } from "../lib/message-groups.js";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
+const FLOATING_CONTROL_OFFSET_PX = 128;
+const FLOATING_CONTROL_SIZE_PX = 36;
+const FLOATING_CONTROL_OFFSET_CLASS = `bottom-[${FLOATING_CONTROL_OFFSET_PX}px]`;
+const FLOATING_CONTROL_SPACER_CLASS = `h-[${
+  FLOATING_CONTROL_OFFSET_PX + FLOATING_CONTROL_SIZE_PX
+}px]`;
 const FLOATING_LOGS_BUTTON_CLASS =
-  "group absolute bottom-32 right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]";
+  `group absolute ${FLOATING_CONTROL_OFFSET_CLASS} right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]`;
+const JUMP_TO_BOTTOM_BUTTON_CLASS =
+  `absolute ${FLOATING_CONTROL_OFFSET_CLASS} left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]`;
 
 export function distanceFromBottom(el) {
   if (!el) return Number.POSITIVE_INFINITY;
@@ -256,7 +264,8 @@ export function MessageList({
               />`
         )}
         ${children}
-        ${logsPath && html`<div aria-hidden="true" className="h-40 shrink-0" />`}
+        ${logsPath &&
+        html`<div aria-hidden="true" className=${`${FLOATING_CONTROL_SPACER_CLASS} shrink-0`} />`}
       </div>
     </div>
     ${logsPath &&
@@ -276,7 +285,7 @@ export function MessageList({
         type="button"
         onClick=${jumpToBottom}
         aria-label=${t("chat.jumpToLatest")}
-        className="absolute bottom-4 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
+        className=${JUMP_TO_BOTTOM_BUTTON_CLASS}
       >
         <${Icon} name="arrowDown" className="h-3.5 w-3.5" />
         ${t("chat.jumpToLatest")}

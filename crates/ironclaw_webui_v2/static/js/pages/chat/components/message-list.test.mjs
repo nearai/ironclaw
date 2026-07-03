@@ -196,13 +196,23 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /\$\{logsPath && html`<div aria-hidden="true" className="h-40 shrink-0" \/>`\}/,
+    /const FLOATING_CONTROL_OFFSET_PX = 128;[\s\S]*const FLOATING_CONTROL_SIZE_PX = 36;[\s\S]*const FLOATING_CONTROL_OFFSET_CLASS = `bottom-\[\$\{FLOATING_CONTROL_OFFSET_PX\}px\]`;[\s\S]*FLOATING_CONTROL_OFFSET_PX \+ FLOATING_CONTROL_SIZE_PX/,
+    "floating controls should share one numeric offset and spacer relationship",
+  );
+  assert.match(
+    messageListSource,
+    /className=\$\{`\$\{FLOATING_CONTROL_SPACER_CLASS\} shrink-0`\}/,
     "floating logs control should reserve enough end-of-content space to clear the composer",
   );
   assert.match(
     messageListSource,
-    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-32 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute \$\{FLOATING_CONTROL_OFFSET_CLASS\} right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
     "floating logs button classes should live in a module-level constant",
+  );
+  assert.match(
+    messageListSource,
+    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute \$\{FLOATING_CONTROL_OFFSET_CLASS\} left-1\/2[\s\S]*className=\$\{JUMP_TO_BOTTOM_BUTTON_CLASS\}/,
+    "jump-to-latest should use the same composer-safe offset as the floating logs control",
   );
   assert.match(
     messageListSource,
