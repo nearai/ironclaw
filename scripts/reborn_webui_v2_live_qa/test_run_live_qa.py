@@ -1618,12 +1618,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             db_path = home / "local-dev" / "reborn-local-dev.db"
             with sqlite3.connect(db_path) as db:
+                dm_row = db.execute(
+                    """
+                    SELECT path, contents FROM root_filesystem_entries
+                    WHERE path LIKE '%/slack-personal-binding/dm-targets/%'
+                    """
+                ).fetchone()
                 row = db.execute(
                     """
                     SELECT path, contents FROM root_filesystem_entries
                     WHERE path LIKE '%/outbound/communication-preferences/%'
                     """
                 ).fetchone()
+            self.assertIsNotNone(dm_row)
+            self.assertEqual(
+                dm_row[0],
+                "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
+                "aW5zdGFsbC1hbHBoYQ/VDEyMw/dXNlcjp3ZWI.json",
+            )
             self.assertIsNotNone(row)
             preference = json.loads(row[1])
             self.assertTrue(row[0].endswith(".json"))

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
-import hashlib
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
@@ -361,6 +362,10 @@ def _binding_segment(name: str, value: str) -> str:
     return f"{name}:{len(value.encode('utf-8'))}:{value};"
 
 
+def _slack_host_state_path_segment(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
 def _slack_personal_dm_reply_target(
     *,
     installation_id: str,
@@ -454,8 +459,10 @@ def _seed_slack_personal_dm_target(
     _root_filesystem_create_table(db_path)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     path = (
-        "/tenant-shared/slack-personal-binding/dm-targets/"
-        f"{installation_id}/{team_id}/{auth_user_id}.json"
+        "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
+        f"{_slack_host_state_path_segment(installation_id)}/"
+        f"{_slack_host_state_path_segment(team_id)}/"
+        f"{_slack_host_state_path_segment(auth_user_id)}.json"
     )
     _put_root_filesystem_json(
         db_path,
