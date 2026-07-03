@@ -889,12 +889,6 @@ fn slack_channel_route_key(
     team_id: &SlackTeamId,
     route: &SlackHostBetaChannelRoute,
 ) -> Result<ProductConversationRouteKey, SlackHostBetaBuildError> {
-    if route.channel_id.starts_with('D') {
-        return Err(invalid_config(
-            "channel_routes",
-            "Slack shared-channel routes must not use DM channel IDs".to_string(),
-        ));
-    }
     ProductConversationRouteKey::new(Some(team_id.as_str().to_string()), route.channel_id.clone())
         .map_err(|reason| invalid_config("channel_routes", reason.to_string()))
 }
@@ -3540,33 +3534,6 @@ mod tests {
 
         assert!(
             error.to_string().contains("duplicate channel_id 'C0HOST'"),
-            "message: {error}"
-        );
-    }
-
-    #[test]
-    fn slack_host_beta_config_rejects_dm_channel_route() {
-        let error = SlackHostBetaConfig::new(SlackHostBetaConfigInput {
-            tenant_id: TenantId::new(TENANT).expect("tenant"),
-            agent_id: AgentId::new(AGENT).expect("agent"),
-            project_id: Some(ProjectId::new(PROJECT).expect("project")),
-            installation_id: INSTALLATION.to_string(),
-            team_id: SlackTeamId::new(TEAM),
-            api_app_id: Some(API_APP.to_string()),
-            slack_user_id: Some(SLACK_USER.to_string()),
-            user_id: UserId::new(USER).expect("user"),
-            shared_subject_user_id: None,
-            channel_routes: vec![SlackHostBetaChannelRoute::new(
-                "D0HOST",
-                UserId::new("user:first-subject").expect("first subject"),
-            )],
-            signing_secret: SecretString::from(SECRET),
-            bot_token: SecretString::from("xoxb-host-token"),
-        })
-        .expect_err("DM channel routes must fail closed");
-
-        assert!(
-            error.to_string().contains("channel_routes"),
             "message: {error}"
         );
     }

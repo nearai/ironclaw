@@ -70,9 +70,6 @@ impl SlackChannelRouteKey {
         team_id: String,
         channel_id: String,
     ) -> Result<Self, SlackChannelRouteError> {
-        if channel_id.starts_with('D') {
-            return Err(SlackChannelRouteError::InvalidRoute);
-        }
         ProductConversationRouteKey::new(Some(team_id.clone()), channel_id.clone())
             .map_err(|_| SlackChannelRouteError::InvalidRoute)?;
         Ok(Self {
@@ -1268,38 +1265,6 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(
-            store
-                .list_routes(
-                    &TenantId::new(TENANT).expect("tenant"),
-                    &AdapterInstallationId::new(INSTALLATION).expect("installation"),
-                    TEAM,
-                    0,
-                    DEFAULT_LIST_LIMIT,
-                )
-                .await
-                .expect("routes list")
-                .routes
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn route_admin_rejects_dm_channel_id_without_mutating_store() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
-        let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
-
-        let response = mount
-            .protected
-            .oneshot(request(
-                "PUT",
-                r#"{"channel_id":"D0HOST","subject_user_id":"user:eng-team-agent"}"#,
-                TENANT,
-            ))
-            .await
-            .expect("upsert responds");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(
             store
                 .list_routes(

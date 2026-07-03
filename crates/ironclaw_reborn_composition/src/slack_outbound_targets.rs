@@ -319,7 +319,6 @@ impl SlackHostBetaOutboundTargetProvider {
             .as_str()
             .strip_prefix(&self.shared_target_id_prefix)
             .filter(|channel_id| !channel_id.is_empty())
-            .filter(|channel_id| !is_slack_dm_channel_id(channel_id))
     }
 
     fn user_id_for_personal_target_id(
@@ -370,9 +369,6 @@ impl SlackHostBetaOutboundTargetProvider {
             return None;
         }
         if rest.is_empty() {
-            if is_slack_dm_channel_id(conversation_id) {
-                return None;
-            }
             return Some(ParsedSlackReplyTarget::SharedChannel {
                 channel_id: conversation_id.to_string(),
             });
@@ -403,9 +399,6 @@ impl SlackHostBetaOutboundTargetProvider {
         &self,
         channel_id: &str,
     ) -> Result<Option<SlackConfiguredChannelRoute>, RebornServicesError> {
-        if is_slack_dm_channel_id(channel_id) {
-            return Ok(None);
-        }
         let key = match SlackChannelRouteKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
@@ -663,16 +656,6 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
             // is suppressed (admin override takes precedence).
         }
         routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
-        routes.retain(|route| {
-            let keep = !is_slack_dm_channel_id(&route.channel_id);
-            if !keep {
-                tracing::warn!(
-                    channel_id = %route.channel_id,
-                    "Slack DM channel id was ignored in shared-channel outbound target routes"
-                );
-            }
-            keep
-        });
         let mut targets = routes
             .into_iter()
             .map(|route| self.entry_for_shared_channel_route(&route))
@@ -1004,10 +987,6 @@ fn slack_target_not_found_error() -> RebornServicesError {
         field: None,
         validation_code: None,
     }
-}
-
-fn is_slack_dm_channel_id(channel_id: &str) -> bool {
-    channel_id.starts_with('D')
 }
 
 fn slack_target_backend_error() -> RebornServicesError {
@@ -1373,64 +1352,6 @@ mod tests {
             target_ids
         );
         assert_eq!(listed.len(), 2, "exactly one shared + one DM target");
-    }
-
-    #[tokio::test]
-    async fn slack_list_outbound_delivery_targets_skips_dm_prefixed_shared_channel_routes() {
-        let routes = vec![
-            SlackConfiguredChannelRoute::new(
-                "D0HOST".to_string(),
-                UserId::new(USER).expect("user"),
-            ),
-            SlackConfiguredChannelRoute::new(
-                "C0HOST".to_string(),
-                UserId::new(USER).expect("user"),
-            ),
-        ];
-        let provider = SlackHostBetaOutboundTargetProvider::new(
-            provider_config(routes),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
-        );
-
-        let listed = provider
-            .list_outbound_delivery_targets(&caller())
-            .await
-            .expect("target list");
-
-        let target_ids: Vec<String> = listed
-            .iter()
-            .map(|entry| entry.summary.target_id.as_str().to_string())
-            .collect();
-        assert_eq!(
-            target_ids,
-            vec![format!("slack:shared-channel:{TEAM}:C0HOST")]
-        );
-    }
-
-    #[tokio::test]
-    async fn slack_shared_channel_target_id_rejects_dm_prefixed_channel_id() {
-        let provider = SlackHostBetaOutboundTargetProvider::new(
-            provider_config(vec![SlackConfiguredChannelRoute::new(
-                "D0HOST".to_string(),
-                UserId::new(USER).expect("user"),
-            )]),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
-        );
-        let target_id =
-            RebornOutboundDeliveryTargetId::new(format!("slack:shared-channel:{TEAM}:D0HOST"))
-                .expect("target id");
-
-        assert_eq!(provider.channel_id_for_target_id(&target_id), None);
-        let resolved = provider
-            .resolve_outbound_delivery_target(&caller(), &target_id)
-            .await
-            .expect("resolve succeeds");
-        assert!(
-            resolved.is_none(),
-            "D-prefixed IDs must not resolve through the shared-channel target path"
-        );
     }
 
     // ── shared_channel_routes cap guard ──────────────────────────────────────
