@@ -2,6 +2,8 @@ name: Live Canary
 run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
+  pull_request:
+    branches: [main]
   # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
   # Legacy canary lanes remain available through workflow_dispatch for
   # manual diagnosis, but do not run on cron.
@@ -502,6 +504,7 @@ jobs:
   reborn-webui-v2-live-qa:
     name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
     if: >
+      (github.event_name == 'pull_request' && github.head_ref == 'codex/main-ci-checks' && github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
     runs-on: ubuntu-latest
