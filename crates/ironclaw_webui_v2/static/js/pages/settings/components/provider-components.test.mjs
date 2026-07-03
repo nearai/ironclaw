@@ -160,6 +160,7 @@ function useProviderManagementActionsStub({ providers, activeProviderId }) {
 
 function renderProviderManagement({ providers, activeProviderId = "nearai", searchQuery = "" }) {
   const ProviderCard = "ProviderCard";
+  const reactState = {};
   const context = {
     Button: "Button",
     Card: "Card",
@@ -167,6 +168,24 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     ProviderCard,
     ProviderDialog: "ProviderDialog",
     ProviderLoginStatus: "ProviderLoginStatus",
+    React: {
+      useState: (() => {
+        let callIndex = 0;
+        return (initial) => {
+          const key = callIndex++;
+          if (!Object.hasOwn(reactState, key)) {
+            reactState[key] = typeof initial === "function" ? initial() : initial;
+          }
+          return [
+            reactState[key],
+            (next) => {
+              reactState[key] = typeof next === "function" ? next(reactState[key]) : next;
+            },
+          ];
+        };
+      })(),
+      useRef: (initial) => ({ current: initial }),
+    },
     SettingsSearchEmpty: "SettingsSearchEmpty",
     globalThis: {},
     groupProvidersByStatus,
@@ -379,11 +398,11 @@ test("ProviderManagement groups filtered providers through the render caller", (
   ]);
   assert.deepEqual(
     cardProps.map((props) => props.provider.id),
-    ["nearai", "openai", "anthropic"]
+    ["nearai", "nearai", "openai", "anthropic"]
   );
   assert.deepEqual(
     cardProps.map((props) => props.activeProviderId),
-    ["nearai", "nearai", "nearai"]
+    ["nearai", "nearai", "nearai", "nearai"]
   );
 });
 

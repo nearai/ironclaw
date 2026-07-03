@@ -338,6 +338,7 @@ registerPack("en", {
   "llm.providerUpdated": "Updated provider \"{name}\".",
   "llm.providers": "LLM providers",
   "llm.providersDesc": "Manage built-in and custom inference providers.",
+  "llm.selectProvider": "Select a provider",
   "onboarding.title": "Welcome to IronClaw",
   "onboarding.subtitle": "Choose an AI provider to get started. You can change or add more later in Settings.",
   "onboarding.setUp": "Set up",
