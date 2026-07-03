@@ -10,6 +10,7 @@ jobs:
   smoke:
     name: Verify distributed sccache
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
@@ -21,6 +22,7 @@ jobs:
       - name: Check required sccache settings
         shell: bash
         run: |
+          set -euo pipefail
           missing=0
           for name in SCCACHE_DIST_SCHEDULER_URL SCCACHE_DIST_AUTH_TOKEN; do
             if [[ -z "${!name:-}" ]]; then
@@ -28,6 +30,10 @@ jobs:
               missing=1
             fi
           done
+          if [[ -n "${SCCACHE_DIST_SCHEDULER_URL:-}" && "${SCCACHE_DIST_SCHEDULER_URL}" != https://* ]]; then
+            echo "::error title=Insecure scheduler URL::SCCACHE_DIST_SCHEDULER_URL must use https://"
+            missing=1
+          fi
           exit "$missing"
 
       - name: Install Rust
@@ -41,6 +47,7 @@ jobs:
       - name: Configure distributed sccache
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/.config/sccache"
           cat > "$HOME/.config/sccache/config" <<EOF
           [dist]

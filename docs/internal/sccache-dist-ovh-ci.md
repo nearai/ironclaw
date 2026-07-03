@@ -5,12 +5,12 @@ one Linux build server.
 
 ## Server
 
-- Host: `146.59.71.184`
-- SSH user: `ubuntu`
+- Host: `<private runbook>`
+- SSH user: `<private runbook>`
 - OS: Ubuntu 24.04 LTS
 - Hardware observed at setup: 24 logical CPUs, 62 GiB RAM, NVMe RAID root
-- Scheduler: `https://ns3211718.ip-146-59-71.eu`
-- Builder: `146.59.71.184:10501`
+- Scheduler: `SCCACHE_DIST_SCHEDULER_URL` GitHub repository variable
+- Builder: `<private runbook>`
 
 ## Services
 
@@ -38,7 +38,7 @@ secret `SCCACHE_DIST_AUTH_TOKEN`.
 Repository variable:
 
 ```text
-SCCACHE_DIST_SCHEDULER_URL=https://ns3211718.ip-146-59-71.eu
+SCCACHE_DIST_SCHEDULER_URL=https://<scheduler-host>
 ```
 
 Repository secret:
@@ -58,7 +58,7 @@ sccache Dist Smoke
 Expected status:
 
 ```json
-{"SchedulerStatus":["https://ns3211718.ip-146-59-71.eu/",{"num_servers":1,"num_cpus":24,"in_progress":0}]}
+{"SchedulerStatus":["https://<scheduler-host>/",{"num_servers":1,"num_cpus":24,"in_progress":0}]}
 ```
 
 ## Rollout
