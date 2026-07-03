@@ -126,6 +126,12 @@ export function useExtensions() {
           onNeedsSetup({
             packageRef,
             displayName,
+            // Carry `kind` so the modal can route a connectable channel to the
+            // Connect (pairing) panel — without it the modal can't tell this is
+            // a channel and falls through to "No configuration required".
+            kind,
+            // Freshly installed: the caller has not connected/paired yet.
+            authenticated: false,
             active: false,
             activationStatus: "setup_required",
             onboardingState: "setup_required",

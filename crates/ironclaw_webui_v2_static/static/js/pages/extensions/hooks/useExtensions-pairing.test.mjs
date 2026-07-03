@@ -94,6 +94,53 @@ test("useExtensions shows setup-panel copy after channel install succeeds", () =
   });
 });
 
+test("useExtensions install→configure hands the modal the channel kind (so it shows Connect, not 'no config')", () => {
+  const mutationConfigs = [];
+  const needsSetupPayloads = [];
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, () => {}],
+    },
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { mutate: () => {}, isPending: false, isSuccess: false, isError: false };
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") return { data: { extensions: [] }, isLoading: false };
+      if (queryKey[0] === "extension-registry") return { data: { entries: [] }, isLoading: false };
+      if (queryKey[0] === "connectable-channels") return { data: { channels: [] }, isLoading: false };
+      return { data: {}, isLoading: false };
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  context.globalThis.__testExports.useExtensions();
+  // Install a connectable channel with auto-configure — the modal is opened via
+  // onNeedsSetup. Its payload MUST carry `kind` or the modal cannot tell it is a
+  // channel and wrongly renders "No configuration required".
+  mutationConfigs[0].onSuccess(
+    { success: true },
+    {
+      displayName: "Slack",
+      kind: "channel",
+      packageRef: { kind: "extension", id: "slack" },
+      configureAfterInstall: true,
+      onNeedsSetup: (payload) => needsSetupPayloads.push(payload),
+    }
+  );
+
+  assert.equal(needsSetupPayloads.length, 1, "install-configure must open the modal");
+  assert.equal(needsSetupPayloads[0].kind, "channel");
+  assert.equal(needsSetupPayloads[0].authenticated, false);
+});
+
 test("useExtensions places uninstalled wasm_channel registry entry in channelRegistry not toolRegistry", () => {
   const context = {
     ...contextFor(
