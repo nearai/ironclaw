@@ -10,6 +10,7 @@ export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
 // Keep transcript-floating controls above the composer. The spacer mirrors the
 // offset plus the icon control size so the final message can scroll above them.
+// FLOATING_CONTROL_SIZE_PX must stay in sync with the logs button's `size-9`.
 const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 128;
 const FLOATING_CONTROL_SIZE_PX = 36;
 const FLOATING_CONTROL_SPACER_HEIGHT_PX =
