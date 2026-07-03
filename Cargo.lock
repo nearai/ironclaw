@@ -4812,8 +4812,10 @@ dependencies = [
 name = "ironclaw_observability"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde_json",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5044,6 +5046,7 @@ dependencies = [
  "clap_complete",
  "dotenvy",
  "hex",
+ "ironclaw_observability",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",

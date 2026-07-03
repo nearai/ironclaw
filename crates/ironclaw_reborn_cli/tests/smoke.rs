@@ -1490,6 +1490,93 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_emits_json_logs_when_ironclaw_reborn_log_format_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_LOG_FORMAT", "json")
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    let startup_log = loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not emit JSON listener startup log; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&line).unwrap_or_else(|error| {
+                        panic!("stderr line must be JSON in structured mode: {error}; line: {line}")
+                    });
+                if parsed["message"] == "WebChat v2 listener started" {
+                    break parsed;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before startup log; stderr: {stderr_text}");
+            }
+        }
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(startup_log["level"], "info");
+    assert_eq!(startup_log["service"], "ironclaw-reborn");
+    assert_eq!(startup_log["target"], "ironclaw::reborn::cli::serve");
+    assert_eq!(
+        startup_log["fields"]["env_token_var"],
+        "IRONCLAW_REBORN_WEBUI_TOKEN"
+    );
+    assert_eq!(
+        startup_log["fields"]["env_user_id_var"],
+        "IRONCLAW_REBORN_WEBUI_USER_ID"
+    );
+    assert!(
+        startup_log["fields"]["listen_addr"].as_str().is_some(),
+        "startup log should include listen_addr: {startup_log}"
+    );
+    assert!(
+        !stderr_text.contains("ironclaw-reborn: WebChat v2 listener"),
+        "structured mode must not mix the plain serve banner into stderr: {stderr_text}"
+    );
+}
+
 #[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
 #[test]
 fn serve_env_slack_enabled_mounts_slack_events_route() {

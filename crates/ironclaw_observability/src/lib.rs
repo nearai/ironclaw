@@ -3,6 +3,9 @@
 
 use std::time::Instant;
 
+mod structured_logs;
+
+pub use structured_logs::StructuredJsonLogLayer;
 pub use tracing;
 
 #[inline]

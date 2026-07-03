@@ -60,14 +60,24 @@ pub(crate) fn init_tracing() {
         "IRONCLAW_REBORN_OPERATOR_LOG",
         "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
     );
-    let _ = tracing_subscriber::registry()
-        .with(
-            fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_filter(stderr_filter),
-        )
-        .with(OperatorLogLayer.with_filter(operator_filter))
-        .try_init();
+    if structured_json_logs_enabled() {
+        let _ = tracing_subscriber::registry()
+            .with(
+                ironclaw_observability::StructuredJsonLogLayer::new("ironclaw-reborn")
+                    .with_filter(stderr_filter),
+            )
+            .with(OperatorLogLayer.with_filter(operator_filter))
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(stderr_filter),
+            )
+            .with(OperatorLogLayer.with_filter(operator_filter))
+            .try_init();
+    }
 }
 
 const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
@@ -82,6 +92,27 @@ const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
     ("tower_http", "warn"),
     ("ironclaw_llm", "info"),
 ];
+
+const REBORN_LOG_FORMAT_ENV: &str = "IRONCLAW_REBORN_LOG_FORMAT";
+
+pub(crate) fn structured_json_logs_enabled() -> bool {
+    log_format_env(REBORN_LOG_FORMAT_ENV)
+        .unwrap_or_else(|| railway_runtime_present() && !std::io::stderr().is_terminal())
+}
+
+fn log_format_env(key: &str) -> Option<bool> {
+    let value = std::env::var(key).ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "json" | "structured" | "structured-json" | "railway" => Some(true),
+        "text" | "plain" | "pretty" | "human" => Some(false),
+        _ => None,
+    }
+}
+
+fn railway_runtime_present() -> bool {
+    std::env::var_os("RAILWAY_DEPLOYMENT_ID").is_some()
+        || std::env::var_os("RAILWAY_SERVICE_ID").is_some()
+}
 
 fn reborn_env_filter(env_key: &str, default_filter: &str) -> tracing_subscriber::EnvFilter {
     let default_filter = protect_reborn_log_filter(default_filter);
@@ -1192,6 +1223,7 @@ mod tests {
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
         protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
+        structured_json_logs_enabled,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -1204,6 +1236,33 @@ mod tests {
             &std::path::PathBuf::from("/test/config.toml"),
         )
         .expect("must parse")
+    }
+
+    #[test]
+    fn structured_json_logs_enabled_respects_format_env() {
+        let _lock = lock_runtime_env();
+        let _deployment = EnvGuard::clear("RAILWAY_DEPLOYMENT_ID");
+        let _service = EnvGuard::clear("RAILWAY_SERVICE_ID");
+
+        {
+            let _format = EnvGuard::set("IRONCLAW_REBORN_LOG_FORMAT", "json");
+            assert!(structured_json_logs_enabled());
+        }
+
+        {
+            let _format = EnvGuard::set("IRONCLAW_REBORN_LOG_FORMAT", "structured-json");
+            assert!(structured_json_logs_enabled());
+        }
+
+        {
+            let _format = EnvGuard::set("IRONCLAW_REBORN_LOG_FORMAT", "text");
+            assert!(!structured_json_logs_enabled());
+        }
+
+        {
+            let _format = EnvGuard::set("IRONCLAW_REBORN_LOG_FORMAT", "definitely-not-json");
+            assert!(!structured_json_logs_enabled());
+        }
     }
 
     #[test]

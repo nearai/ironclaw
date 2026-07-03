@@ -97,6 +97,7 @@ impl ServeCommand {
             .unwrap_or("reborn-cli");
         let tenant_id = TenantId::new(tenant_raw)
             .map_err(|err| anyhow!("[identity].tenant `{tenant_raw}` is invalid: {err}"))?;
+        let structured_json_logs = crate::runtime::structured_json_logs_enabled();
 
         // Resolve env-bearer authenticator from the env-var names the
         // operator declared in `[webui]`. Values themselves are env-only
@@ -323,7 +324,7 @@ impl ServeCommand {
         // is a foot-gun. Operators can silence by setting
         // `--host 0.0.0.0` explicitly (we don't have a "yes I mean
         // it" flag yet — this is purely an attention nudge).
-        if !host.is_loopback() {
+        if !host.is_loopback() && !structured_json_logs {
             eprintln!(
                 "WARNING: WebChat v2 listener will bind to non-loopback address {host}. \
                  The default env-bearer authenticator is intended for single-operator \
@@ -334,7 +335,7 @@ impl ServeCommand {
         // see the same signal.
         if !host.is_loopback() {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %host,
                 "binding WebChat v2 listener on a non-loopback interface",
             );
@@ -475,13 +476,23 @@ impl ServeCommand {
             )
             .await?;
 
-            print_serve_banner(
-                listen_addr,
-                env_token_var,
-                env_user_id_var,
-                &allowed_origins_raw,
-                &bundle.readiness,
-            );
+            if structured_json_logs {
+                log_serve_banner(
+                    listen_addr,
+                    env_token_var,
+                    env_user_id_var,
+                    &allowed_origins_raw,
+                    &bundle.readiness,
+                );
+            } else {
+                print_serve_banner(
+                    listen_addr,
+                    env_token_var,
+                    env_user_id_var,
+                    &allowed_origins_raw,
+                    &bundle.readiness,
+                );
+            }
 
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
                 .with_default_agent_id(default_agent_id.clone());
@@ -883,6 +894,25 @@ fn print_serve_banner(
     }
     eprintln!("  readiness : {readiness:?}");
     eprintln!();
+}
+
+fn log_serve_banner(
+    listen_addr: SocketAddr,
+    env_token_var: &str,
+    env_user_id_var: &str,
+    allowed_origins: &[String],
+    readiness: &RebornReadiness,
+) {
+    tracing::info!(
+        target: "ironclaw::reborn::cli::serve",
+        %listen_addr,
+        env_token_var,
+        env_user_id_var,
+        allowed_origins_count = allowed_origins.len(),
+        allowed_origins = ?allowed_origins,
+        readiness = ?readiness,
+        "WebChat v2 listener started",
+    );
 }
 
 #[cfg(test)]
