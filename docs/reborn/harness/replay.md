@@ -10,7 +10,6 @@ Current replay assets include:
 
 - `tests/fixtures/llm_traces/README.md`;
 - `scripts/replay-snap.sh`;
-- `scripts/trace-coverage.sh`;
 - `.github/workflows/replay-gate.yml`;
 - `tests/snapshots/`;
 - `tests/support/LIVE_TESTING.md`.
@@ -88,6 +87,5 @@ Replay fixtures should prefer:
 
 ## Event coverage
 
-The existing `scripts/trace-coverage.sh` reports event coverage for current snapshots.
-
-A future Reborn-specific coverage script can build on the same pattern once Reborn durable event types and snapshots are stable.
+A future Reborn-specific coverage script can be added once Reborn durable event
+types and snapshots are stable.
