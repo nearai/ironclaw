@@ -1682,6 +1682,10 @@ mod tests {
         )
     }
 
+    fn clear_credential_refresh_env() -> EnvGuard {
+        EnvGuard::clear("IRONCLAW_CREDENTIAL_REFRESH_ENABLED")
+    }
+
     #[cfg(feature = "postgres")]
     fn clear_reborn_postgres_tls_env() -> (EnvGuard, EnvGuard) {
         (
@@ -2928,6 +2932,102 @@ default_project = "project-alpha"
 
         let _runtime_input = build_runtime_input(&config, RuntimeInputCaller::Serve)
             .expect("serve must accept default_project");
+    }
+
+    #[test]
+    fn build_runtime_input_maps_credential_refresh_caller_defaults() {
+        let _lock = lock_runtime_env();
+        let (_trigger_enabled, _trigger_interval) = clear_trigger_poller_env();
+        let _credential_refresh = clear_credential_refresh_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.clone().into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let run_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("run runtime input");
+        assert!(
+            !run_input.credential_refresh.enabled,
+            "run must keep proactive credential refresh disabled by default"
+        );
+
+        let serve_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("serve runtime input");
+        assert!(
+            serve_input.credential_refresh.enabled,
+            "serve must enable proactive credential refresh by default"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_maps_credential_refresh_env_overrides() {
+        let _lock = lock_runtime_env();
+        let (_trigger_enabled, _trigger_interval) = clear_trigger_poller_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let force_on = EnvGuard::set("IRONCLAW_CREDENTIAL_REFRESH_ENABLED", "true");
+        let run_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("run runtime input");
+        assert!(
+            run_input.credential_refresh.enabled,
+            "env force-on must reach runtime_input for run callers"
+        );
+        drop(force_on);
+
+        let kill_switch = EnvGuard::set("IRONCLAW_CREDENTIAL_REFRESH_ENABLED", "false");
+        let serve_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("serve runtime input");
+        assert!(
+            !serve_input.credential_refresh.enabled,
+            "env kill-switch must reach runtime_input for serve callers"
+        );
+        drop(kill_switch);
+    }
+
+    #[test]
+    fn build_runtime_input_rejects_invalid_credential_refresh_env() {
+        let _lock = lock_runtime_env();
+        let (_trigger_enabled, _trigger_interval) = clear_trigger_poller_env();
+        let _credential_refresh = EnvGuard::set("IRONCLAW_CREDENTIAL_REFRESH_ENABLED", "maybe");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("invalid credential refresh env must fail runtime input build"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_CREDENTIAL_REFRESH_ENABLED must be one of 1, true, 0, false"),
+            "{err:#}"
+        );
     }
 
     #[test]

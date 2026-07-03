@@ -1,4 +1,26 @@
-export function summarizeActivity(activity) {
+import { interpolateParams } from "../../../lib/i18n-format.js";
+
+const FALLBACK_TRANSLATIONS = {
+  "activity.title": "Activity",
+  "activity.summaryWithParts": "Activity - {parts}",
+  "activity.reasoning": "{count} reasoning",
+  "activity.reasonings": "{count} reasoning",
+  "activity.tool": "{count} tool",
+  "activity.tools": "{count} tools",
+  "activity.failed": "{count} failed",
+  "activity.failedPlural": "{count} failed",
+  "activity.declined": "{count} declined",
+  "activity.declinedPlural": "{count} declined",
+  "activity.running": "running",
+  "activity.separator": ", ",
+};
+
+function fallbackT(key, params = {}) {
+  const text = FALLBACK_TRANSLATIONS[key] || key;
+  return interpolateParams(text, params);
+}
+
+export function summarizeActivity(activity, t = fallbackT) {
   let reasoning = 0;
   let tools = 0;
   let failed = 0;
@@ -24,16 +46,32 @@ export function summarizeActivity(activity) {
   }
 
   const parts = [];
-  if (reasoning) parts.push(`${reasoning} reasoning`);
-  if (tools) parts.push(`${tools} ${tools === 1 ? "tool" : "tools"}`);
-  if (failed) parts.push(`${failed} failed`);
-  if (declined) parts.push(`${declined} declined`);
-  if (!failed && !declined && running) parts.push("running");
+  if (reasoning) {
+    parts.push(t(reasoning === 1 ? "activity.reasoning" : "activity.reasonings", {
+      count: reasoning,
+    }));
+  }
+  if (tools) parts.push(t(tools === 1 ? "activity.tool" : "activity.tools", { count: tools }));
+  if (failed) {
+    parts.push(t(failed === 1 ? "activity.failed" : "activity.failedPlural", {
+      count: failed,
+    }));
+  }
+  if (declined) {
+    parts.push(t(declined === 1 ? "activity.declined" : "activity.declinedPlural", {
+      count: declined,
+    }));
+  }
+  if (!failed && !declined && running) parts.push(t("activity.running"));
+  const localizedSeparator = t("activity.separator");
+  const separator = localizedSeparator === "activity.separator" ? ", " : localizedSeparator;
 
   return {
     hasError: failed > 0,
     hasDeclined: declined > 0,
-    label: `Activity${parts.length ? ` - ${parts.join(", ")}` : ""}`,
+    label: parts.length
+      ? t("activity.summaryWithParts", { parts: parts.join(separator) })
+      : t("activity.title"),
   };
 }
 
