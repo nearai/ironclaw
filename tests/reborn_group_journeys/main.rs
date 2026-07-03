@@ -50,13 +50,17 @@
 //! ## enabler notes and the lane report)
 //!
 //! - **Triggered-origin chained journey** (trigger fire → gate → resume →
-//!   follow-up): `submit_triggered_turn` resolves the trigger to its OWN scope,
-//!   for which no scripted model gateway is registered, so the triggered run
-//!   fails benignly on a scope-miss BEFORE reaching any tool call — it cannot
-//!   reach a gate on this base. The triggered path's single-turn origin coverage
-//!   lives in `reborn_integration_triggered_submit` and the sibling triggered
-//!   lane; a chained triggered journey needs a scripted-gateway-for-trigger-scope
-//!   seam that does not exist here.
+//!   follow-up): the scripted-gateway-for-trigger-scope seam this needs
+//!   (`RebornIntegrationHarness::submit_triggered_turn_scripted`) has since
+//!   landed from the sibling triggered lane — it mints the trigger's own scope
+//!   and registers a scripted gateway for it, so a triggered run can now be
+//!   driven to completion (see `reborn_integration_triggered_submit`). A CHAINED
+//!   triggered journey that additionally parks on a real approval/auth gate and
+//!   resumes is a documented FOLLOW-UP: resolving such a gate must reconcile the
+//!   trigger's minted owner scope with the journey approval helpers'
+//!   (`approve_gate`/`resolve_auth_gate`) binding scope, which is scenario-design
+//!   work deferred to the post-fold assertion-strengthening pass rather than
+//!   authored here. Single-turn triggered-origin coverage already exists.
 //! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): NOW ACTIVE in
 //!   the wave-3 fold. It runs on `RebornIntegrationGroup::multiuser_approvals()`,
 //!   whose per-actor capability dispatch (the C-MULTIUSER
