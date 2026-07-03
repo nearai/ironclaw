@@ -44,16 +44,23 @@ runs:
           exit 1
         fi
 
+        toml_basic_string() {
+          VALUE="$1" python3 -c 'import json, os; print(json.dumps(os.environ["VALUE"]))'
+        }
+
+        scheduler_url_toml="$(toml_basic_string "${SCCACHE_DIST_SCHEDULER_URL}")"
+        auth_token_toml="$(toml_basic_string "${SCCACHE_DIST_AUTH_TOKEN}")"
+
         mkdir -p "${HOME}/.config/sccache"
         {
           printf '%s\n' "[dist]"
-          printf 'scheduler_url = "%s"\n' "${SCCACHE_DIST_SCHEDULER_URL}"
+          printf 'scheduler_url = %s\n' "${scheduler_url_toml}"
           printf '%s\n' "toolchains = []"
           printf '%s\n' "toolchain_cache_size = 5368709120"
           printf '%s\n' ""
           printf '%s\n' "[dist.auth]"
           printf '%s\n' 'type = "token"'
-          printf 'token = "%s"\n' "${SCCACHE_DIST_AUTH_TOKEN}"
+          printf 'token = %s\n' "${auth_token_toml}"
         } > "${HOME}/.config/sccache/config"
         chmod 600 "${HOME}/.config/sccache/config"
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
