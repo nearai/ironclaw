@@ -10,7 +10,6 @@ import {
 } from "../hooks/useExtensions.js";
 import {
   extensionIsActive,
-  extensionLifecycleState,
   setupReadyForActivation,
 } from "../lib/extension-actions.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
@@ -59,11 +58,17 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       ? extension.packageRef
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
-  const lifecycleState = extensionLifecycleState(extension);
   const isSlackChannel = channelId.toLowerCase() === "slack";
-  const isPairingChannel =
-    isChannelExtensionKind(extension?.kind) &&
-    (lifecycleState === "pairing" || lifecycleState === "pairing_required");
+  // Connectable channels (Slack, Telegram, …) are configured by pairing a user
+  // account here — never by operator credential/OAuth fields, and never "no
+  // configuration required". A freshly-installed channel is in `setup_required`
+  // but still needs the user to connect, so render the Connect panel for any
+  // channel kind: a connect step before pairing, and a re-pair affordance once
+  // connected. Only genuinely-no-config non-channel extensions may fall through
+  // to the "no configuration required" branch below.
+  const isChannelExtension = isChannelExtensionKind(extension?.kind);
+  const isConnectedChannel = isChannelExtension && Boolean(extension?.authenticated);
+  const isPairingChannel = isChannelExtension;
   const channelPairingInstructions = isSlackChannel
     ? t("pairing.slackInstructions")
     : t("pairing.instructions");
@@ -116,6 +121,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         onClose=${onClose}
         title=${t("extensions.configureName").replace("{name}", extensionName)}
       >
+        ${isConnectedChannel &&
+        html`<p className="mb-2 text-xs leading-5 text-mint">
+          ${t("pairing.reconnectHint")}
+        </p>`}
         <p className="mb-4 text-sm leading-6 text-iron-300">
           ${channelPairingInstructions}
         </p>

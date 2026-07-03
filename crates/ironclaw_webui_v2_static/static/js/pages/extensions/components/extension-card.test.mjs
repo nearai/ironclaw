@@ -304,6 +304,36 @@ test("installed channel card omits generic Activate while installed MCP card kee
   );
 });
 
+test("setup-required primary action reads Connect for a channel and Configure for a credential extension", () => {
+  // A freshly-installed channel connects (pairs); a credential extension like
+  // GitHub configures a token. The primary action label must diverge by kind.
+  const channel = renderExtensionCard({
+    package_ref: { id: "slack" },
+    kind: "channel",
+    onboarding_state: "setup_required",
+    display_name: "Slack",
+  });
+  assert.equal(
+    renderedContainsValue(channel, "connect"),
+    true,
+    "unconnected channel should offer Connect, not Configure",
+  );
+  assert.equal(renderedContainsValue(channel, "configure"), false);
+
+  const credential = renderExtensionCard({
+    package_ref: { id: "github" },
+    kind: "mcp_server",
+    onboarding_state: "setup_required",
+    display_name: "GitHub",
+  });
+  assert.equal(
+    renderedContainsValue(credential, "configure"),
+    true,
+    "credential extension should keep Configure",
+  );
+  assert.equal(renderedContainsValue(credential, "connect"), false);
+});
+
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async (t) => {
   // --- Setup state: kind=channel, state=setup_required ---
   await t.test(
@@ -519,6 +549,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         kind: "channel",
         activation_status: "active",
+        authenticated: true,
         display_name: "Telegram",
       };
       const rendered = ExtensionCard({
@@ -533,7 +564,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const reconfigureAction = actions.find((a) => a.id === "reconfigure");
       assert.notEqual(reconfigureAction, undefined, "Reconfigure action must exist");
-      assert.equal(reconfigureAction.label, "reconfigure");
+      // A connected channel re-pairs via "Reconnect", not "Reconfigure".
+      assert.equal(reconfigureAction.label, "reconnect");
       reconfigureAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");

@@ -127,9 +127,21 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     displayName,
     kind: ext.kind,
     active: ext.active,
+    authenticated: ext.authenticated,
+    needs_setup: ext.needs_setup,
     activationStatus: ext.activation_status,
     onboardingState: ext.onboarding_state,
   };
+
+  // Connectable channels are configured by pairing (Connect/Reconnect), not by
+  // an operator credential form (Configure/Reconfigure). Pick the label by kind.
+  const configureLabel = isChannelExtensionKind(ext.kind)
+    ? ext.authenticated
+      ? t("extensions.reconnect")
+      : t("extensions.connect")
+    : ext.authenticated
+      ? t("extensions.reconfigure")
+      : t("extensions.configure");
 
   const primaryActions = [];
   const overflowActions = [];
@@ -138,7 +150,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (primaryAction === "configure") {
     primaryActions.push({
       id: "configure",
-      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
+      label: configureLabel,
       run: () => onConfigure(configurePayload),
     });
   } else if (primaryAction === "activate") {
@@ -151,7 +163,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
     overflowActions.push({
       id: "configure",
-      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
+      label: configureLabel,
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -180,7 +192,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   ) {
     overflowActions.push({
       id: "reconfigure",
-      label: t("extensions.reconfigure"),
+      label: configureLabel,
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });

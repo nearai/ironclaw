@@ -902,6 +902,7 @@ registerPack("zh-CN", {
   "pairing.slackInstructions": "在 Slack 中向 IronClaw Reborn 应用发送消息以获取配对代码，然后粘贴到这里。代码将在 10 分钟后过期。如果代码无效或已过期，请在 Slack 中运行 /pair 获取新代码。",
   "pairing.slackPlaceholder": "此处开始录入填入所需来自上述的 Slack 配对确认有效验证代码密码输入情况：",
   "pairing.connect": "点击通过去连接验证并校验这种配对工作",
+  "pairing.reconnectHint": "已连接 — 粘贴新代码以重新配对。",
   "pairing.slackSuccess": "针对所提供需要的 Slack 系统帐户，应用已被设置关联成功地进行接入且链接上系统上了！",
   "pairing.slackError": "Slack 配对代码无效或已过期。请在 Slack 中运行 /pair 获取新代码。",
 
@@ -1051,6 +1052,7 @@ registerPack("zh-CN", {
   "job.followupPlaceholder": "下发一条继续跟进的跟催动作到这个任务...",
   "common.noChatsMatch": "没找到与 \"{query}\" 匹配的对话",
   "extensions.configure": "配置",
+  "extensions.connect": "连接",
   "extensions.reconfigure": "重新配置",
   "extensions.configureName": "配置 {name}",
   "extensions.allInstalled": "所有已安装扩展",

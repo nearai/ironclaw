@@ -902,6 +902,7 @@ registerPack("fr", {
   "pairing.slackInstructions": "Envoyez un message à l'application IronClaw Reborn dans Slack pour obtenir un code de jumelage, puis collez-le ici. Les codes expirent au bout de 10 minutes. Si un code est invalide ou expiré, exécutez /pair dans Slack pour en obtenir un nouveau.",
   "pairing.slackPlaceholder": "Entrez le code d'appairage Slack…",
   "pairing.connect": "Connectez-vous",
+  "pairing.reconnectHint": "Connecté — collez un nouveau code pour réappairer.",
   "pairing.slackSuccess": "Compte Slack connecté.",
   "pairing.slackError": "Code d'appairage Slack invalide ou expiré. Exécutez /pair dans Slack pour en obtenir un nouveau.",
 
@@ -1051,6 +1052,7 @@ registerPack("fr", {
   "job.followupPlaceholder": "Envoyer une invite de suivi au travail en cours d'exécution",
   "common.noChatsMatch": "Aucun chat ne correspond à \"{query}\"",
   "extensions.configure": "Configurer",
+  "extensions.connect": "Connecter",
   "extensions.reconfigure": "Reconfigurer",
   "extensions.configureName": "Configurer {name}",
   "extensions.allInstalled": "Toutes les extensions installées",

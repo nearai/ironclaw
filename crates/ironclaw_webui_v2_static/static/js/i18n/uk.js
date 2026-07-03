@@ -902,6 +902,7 @@ registerPack("uk", {
   "pairing.slackInstructions": "Напишіть застосунку IronClaw Reborn у Slack, щоб отримати код сполучення, а потім вставте його тут. Термін дії кодів спливає через 10 хвилин. Якщо код недійсний або прострочений, виконайте /pair у Slack, щоб отримати новий.",
   "pairing.slackPlaceholder": "Введіть код сполучення Slack…",
   "pairing.connect": "Підключитися",
+  "pairing.reconnectHint": "Підключено — вставте новий код для повторного з'єднання.",
   "pairing.slackSuccess": "Обліковий запис Slack підключено.",
   "pairing.slackError": "Недійсний або прострочений код сполучення Slack. Виконайте /pair у Slack, щоб отримати новий.",
 
@@ -1051,6 +1052,7 @@ registerPack("uk", {
   "job.followupPlaceholder": "Надіслати запит до поточного завдання",
   "common.noChatsMatch": "Жодні чати не відповідають «{query}»",
   "extensions.configure": "Налаштувати",
+  "extensions.connect": "Підключити",
   "extensions.reconfigure": "Повторно налаштувати",
   "extensions.configureName": "Налаштувати {name}",
   "extensions.allInstalled": "Усі встановлені розширення",

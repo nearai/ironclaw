@@ -990,6 +990,7 @@ registerPack("en", {
   "pairing.slackInstructions": "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.",
   "pairing.slackPlaceholder": "Enter Slack pairing code…",
   "pairing.connect": "Connect",
+  "pairing.reconnectHint": "Connected — paste a new code to re-pair.",
   "pairing.slackSuccess": "Slack account connected.",
   "pairing.slackError": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
 
@@ -1142,6 +1143,7 @@ registerPack("en", {
   "common.noChatsMatch": "No chats match \"{query}\"",
   "extensions.configure": "Configure",
   "extensions.reconfigure": "Reconfigure",
+  "extensions.connect": "Connect",
   "extensions.configureName": "Configure {name}",
   "extensions.allInstalled": "All installed extensions",
   "mcp.installed": "Installed MCP servers",

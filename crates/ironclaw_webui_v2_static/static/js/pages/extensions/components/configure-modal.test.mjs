@@ -27,6 +27,7 @@ function renderModal({
   channel = undefined,
   displayName = "Slack",
   onboardingState = "pairing_required",
+  authenticated = false,
   onClose = () => {},
   onSaved,
   activate = async () => {},
@@ -98,6 +99,7 @@ function renderModal({
       kind,
       channel,
       onboarding_state: onboardingState,
+      authenticated,
     },
     onClose,
     onSaved,
@@ -123,14 +125,36 @@ test("ConfigureModal does not render the pairing panel for a non-channel extensi
   assert.doesNotMatch(body, /pairing\.slackInstructions/);
 });
 
-test("ConfigureModal does not route setup-required channels to the pairing panel", () => {
+test("ConfigureModal routes unconnected setup-required channels to the Connect panel", () => {
+  // A just-installed channel is in `setup_required` but still needs the user to
+  // connect (pair) — it must land on the Connect panel, never "no config".
   const { rendered } = renderModal({
     kind: "channel",
     onboardingState: "setup_required",
+    authenticated: false,
   });
 
-  assert.doesNotMatch(JSON.stringify(rendered), /pairing\.slackPlaceholder/);
-  assert.doesNotMatch(JSON.stringify(rendered), /pairing\.slackInstructions/);
+  const body = JSON.stringify(rendered);
+  assert.match(body, /pairing\.slackPlaceholder/);
+  assert.match(body, /pairing\.slackInstructions/);
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
+});
+
+test("ConfigureModal renders the Connect panel for the freshly-installed ground-truth state", () => {
+  // Exact ground-truth of a freshly-installed Slack channel:
+  // kind=channel, onboarding_state=setup_required, authenticated=false.
+  const { rendered } = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "slack" },
+    displayName: "Slack",
+    onboardingState: "setup_required",
+    authenticated: false,
+  });
+
+  const body = JSON.stringify(rendered);
+  assert.match(body, /pairing\.slackPlaceholder/);
+  assert.match(body, /pairing\.slackInstructions/);
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
 });
 
 test("ConfigureModal localizes channel pairing copy", () => {
