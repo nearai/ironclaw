@@ -1,0 +1,133 @@
+//! Permutation 3 — multi-actor journey: turn 1 is actor A, a subsequent turn is
+//! actor B (via `with_actor_id`), each hitting its OWN approval gate over the
+//! group's ONE shared coordinator. Pins that gate resolution + resume state stay
+//! bound to the RAISING actor's turn: approving A's gate does NOT resolve B's,
+//! and B's turn does not inherit A's approval — B still blocks on its own gate
+//! and must be resolved independently under B's actor.
+//!
+//! TODO(reborn-multiuser-gate): this scenario is driven by an `#[ignore]`d test
+//! (`multi_actor_gate_isolation_blocked` in `main.rs`) because actor B's GATED
+//! dispatch dies with `driver_protocol_violation` on THIS base — the capability
+//! harness hardcodes one execution user, so B's gated write is scoped to A's
+//! user and the approval persistence mismatches B's run scope. The fix is the
+//! parallel C-MULTIUSER `scope_capability_by_run_owner` harness seam (unmerged);
+//! un-ignore the driving test once it lands. Production already isolates
+//! capability dispatch by run owner correctly.
+//!
+//! Complementary to (not a duplicate of): `reborn_group_approvals`'s
+//! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
+//! and `reborn_group_multiuser`'s `two_actors_own_threads` (distinct actors, NO
+//! gate). This is distinct-actor × gate-resolution-binding — the axis neither
+//! covers.
+
+use super::reborn_support::builder::RebornIntegrationHarness;
+use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_turns::TurnStatus;
+use serde_json::json;
+
+/// Shared per-actor turn script: one gated write + one post-resume reply. Keeps
+/// the two actor arms from fanning out into copy-pasted scripts.
+fn gated_write_script(path: &str, reply: &str) -> [RebornScriptedReply; 2] {
+    [
+        RebornScriptedReply::tool_call(
+            "builtin.write_file",
+            json!({"path": path, "content": "ACTOR_PAYLOAD"}),
+        ),
+        RebornScriptedReply::text(reply),
+    ]
+}
+
+pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    // Thread A: the group's default actor.
+    let a = g
+        .thread("conv-journey-actor-a")
+        .script(gated_write_script(
+            "/workspace/journey-actor-a.txt",
+            "actor-a write approved",
+        ))
+        .build()
+        .await?;
+
+    // Thread B: a DISTINCT actor over the SAME shared coordinator.
+    let b = g
+        .thread("conv-journey-actor-b")
+        .with_actor_id("reborn-journey-actor-b")
+        .script(gated_write_script(
+            "/workspace/journey-actor-b.txt",
+            "actor-b write approved",
+        ))
+        .build()
+        .await?;
+
+    // Non-vacuity: the two threads must resolve genuinely DISTINCT owners, else
+    // this degrades to the single-actor case already covered elsewhere.
+    if a.binding.subject_user_id == b.binding.subject_user_id {
+        return Err("with_actor_id seam no-op: both threads resolved the same owner".into());
+    }
+
+    // Actor A: raise + approve + complete.
+    let (run_a, gate_a) = a
+        .submit_turn_until_blocked("ACTOR_A write the file")
+        .await
+        .map_err(|e| format!("[A block] {e}"))?;
+    a.approve_gate(run_a, &gate_a)
+        .await
+        .map_err(|e| format!("[A approve] {e}"))?;
+    a.wait_for_status(run_a, TurnStatus::Completed)
+        .await
+        .map_err(|e| format!("[A complete] {e}"))?;
+    a.assert_workspace_file_contains("journey-actor-a.txt", "ACTOR_PAYLOAD")
+        .await?;
+
+    // Actor B: its turn MUST still block on ITS OWN gate. If A's approval had
+    // leaked to B (a resolution-scope bug), B's write would auto-complete and
+    // `submit_turn_until_blocked` would fail fast on a terminal `Completed`
+    // instead of returning a gate ref — this is the load-bearing isolation pin.
+    let (run_b, gate_b) = b
+        .submit_turn_until_blocked("ACTOR_B write the file")
+        .await
+        .map_err(|e| format!("[B block — did B inherit A's approval?] {e}"))?;
+    if run_b == run_a {
+        return Err("actor B reused actor A's run id — resolution not actor-bound".into());
+    }
+    if gate_b.as_str() == gate_a.as_str() {
+        return Err("actor B raised actor A's gate ref — gate not actor-bound".into());
+    }
+    b.approve_gate(run_b, &gate_b)
+        .await
+        .map_err(|e| format!("[B approve] {e}"))?;
+    b.wait_for_status(run_b, TurnStatus::Completed)
+        .await
+        .map_err(|e| format!("[B complete] {e}"))?;
+    b.assert_workspace_file_contains("journey-actor-b.txt", "ACTOR_PAYLOAD")
+        .await?;
+
+    // Owner isolation: neither actor's owner scope may read the other's thread
+    // history (each owner's records live under a separate
+    // `/tenants/<tenant>/users/<user>/threads` subtree).
+    assert_history_isolated(&a, "A", &b, "B").await?;
+    assert_history_isolated(&b, "B", &a, "A").await?;
+    Ok(())
+}
+
+async fn assert_history_isolated(
+    reader: &RebornIntegrationHarness,
+    reader_name: &str,
+    other: &RebornIntegrationHarness,
+    other_name: &str,
+) -> HarnessResult<()> {
+    if reader
+        .thread_harness
+        .history(other.binding.thread_id.clone())
+        .await
+        .is_ok()
+    {
+        return Err(format!(
+            "isolation failure: actor {other_name}'s thread is readable under actor \
+             {reader_name}'s owner scope"
+        )
+        .into());
+    }
+    Ok(())
+}

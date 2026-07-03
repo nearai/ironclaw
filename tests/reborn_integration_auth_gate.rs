@@ -14,11 +14,15 @@
 //! failure for the parked capability instead of re-dispatching it → the run
 //! completes. Nothing is faked except the model at the vendor-SDK seam.
 //!
-//! DEFERRED: the happy "submit credentials → resume completes" arm. The
-//! `live_auth_gate` fixture wires a FIXED `AuthRequired` credential-account
-//! resolver with no toggle to flip it to resolved mid-test; exercising that
-//! arm needs a new settable-resolver seam, which is out of scope for this
-//! pure-coverage PR.
+//! DEFERRED here, COVERED elsewhere: the happy "submit credentials → resume
+//! completes" arm. The `live_auth_gate` fixture wires a FIXED `AuthRequired`
+//! credential-account resolver with no toggle to flip it to resolved mid-test
+//! (and no `run_state` store, so the capability host's auth-resume path cannot
+//! complete on this fixture at all). That arm is now covered by
+//! `tests/reborn_group_journeys/` (C-JOURNEY) on the
+//! `RebornIntegrationGroup::live_auth_and_approval()` group, whose auth gate
+//! resolves through the REAL `ProductAuthRuntimeCredentialResolver` +
+//! production manual-token flow — no settable-resolver fake needed.
 //!
 //! `assert_tool_error` IS used below, despite the general guidance to prefer
 //! `wait_for_status(Completed)` as the sole discriminator (as in

@@ -20,7 +20,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -35,7 +35,7 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
@@ -112,7 +112,8 @@ use ironclaw_reborn::{
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornLocalDevApprovalTestParts, build_reborn_services, visible_capability_request_for_run,
+    RebornLocalDevApprovalTestParts, RebornProductAuthServices, build_reborn_services,
+    visible_capability_request_for_run,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::{
@@ -1666,6 +1667,14 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// only the multiuser group constructors flip it on via
     /// [`with_run_owner_scoped_capability_dispatch`].
     scope_capability_by_run_owner: bool,
+    /// Local-dev product-auth services (C-JOURNEY convergence seam). `Some`
+    /// only for `new_with_options`-built harnesses (which flow through
+    /// `RebornServices`); `None` for the lower-level constructors and the Echo
+    /// backend. `seed_github_credential_account` reads this to create a real
+    /// credential account through `credential_account_service()`, letting a
+    /// parked `github.*` auth gate's `ProductAuthRuntimeCredentialResolver`
+    /// lookup resolve on re-dispatch.
+    product_auth: Option<Arc<RebornProductAuthServices>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1690,6 +1699,25 @@ struct HostRuntimeHarnessOptions {
         Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
         bool,
     )>,
+    /// C-JOURNEY: override the local-dev host network HTTP egress
+    /// (`RebornBuildInput::with_network_http_egress_for_test`). Without this,
+    /// `build_local_runtime` defaults to a REAL `ReqwestNetworkTransport`
+    /// (`factory.rs`), so any harness dispatching a bundled WASM capability
+    /// that crosses HTTP (e.g. `github.*`) on the `new_with_options` path MUST
+    /// set this to stay hermetic. `None` for every harness that surfaces no
+    /// such capability.
+    network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
+    /// C-JOURNEY: bundled first-party WASM packages (e.g. github) to publish
+    /// directly into the local-dev active-extension registry at construction
+    /// time, via `RebornServices::publish_bundled_extension_for_test`
+    /// (reaches the SAME `ActiveExtensionPublisher::publish` step
+    /// `builtin.extension_activate` calls). Without this, a bundled package's
+    /// capabilities are granted/trusted at the harness-authority layer
+    /// (`capability_ids`/`additional_provider_trust`) but NOT present in the
+    /// runtime's own dispatchable registry, so dispatch silently no-ops (the
+    /// tool call never reaches `invoke_capability`). Empty for every harness
+    /// that surfaces no bundled WASM capability.
+    activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1703,6 +1731,8 @@ impl HostRuntimeHarnessOptions {
             seed_extension_credentials: false,
             skill_activation_tenant: None,
             outbound_target_facade: None,
+            network_http_egress_for_test: None,
+            activate_bundled_extensions_for_test: Vec::new(),
         }
     }
 
@@ -1722,6 +1752,16 @@ impl HostRuntimeHarnessOptions {
         target_set_requires_approval: bool,
     ) -> Self {
         self.outbound_target_facade = Some((facade, target_set_requires_approval));
+        self
+    }
+
+    fn with_network_http_egress_for_test(mut self, egress: Arc<dyn NetworkHttpEgress>) -> Self {
+        self.network_http_egress_for_test = Some(egress);
+        self
+    }
+
+    fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
+        self.activate_bundled_extensions_for_test.push(package);
         self
     }
 }
@@ -1917,6 +1957,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support: None,
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
+            product_auth: None,
         })
     }
 
@@ -1945,6 +1986,189 @@ impl HostRuntimeCapabilityHarness {
             .enable_global_auto_approve_for_product_and_harness_users()
             .await?;
         Ok(harness)
+    }
+
+    /// C-JOURNEY convergence seam: surfaces the file-tool approval-gate
+    /// capabilities (`write_file`/`read_file`, `PermissionMode::Ask` — same
+    /// grant shape as `file_tools_requiring_approval`) AND a single GitHub
+    /// capability (`github.get_repo`) on the SAME `build_reborn_services`
+    /// local-dev runtime — the one wired with the
+    /// `run_state`/`approval_requests`/`capability_leases` stores BOTH gate
+    /// classes' resume paths need (`new_with_options` -> `build_reborn_services`).
+    ///
+    /// Distinct from `github_issue_tools_auth_required` (a separate,
+    /// lower-level `HostRuntimeServices` build with a hardcoded
+    /// `FixedRuntimeCredentialAccountResolver` and no run_state store — see
+    /// that constructor's doc comment): this harness's `github.*` credential
+    /// resolves through the REAL `ProductAuthRuntimeCredentialResolver`
+    /// (`factory.rs`, wired unconditionally by `build_reborn_services`). No
+    /// GitHub credential account is seeded at construction (unlike
+    /// `extension_lifecycle_tools`, which seeds all four bundled providers via
+    /// `.with_seed_extension_credentials()`).
+    ///
+    /// **Gate chaining (empirically verified, not assumed):** the global
+    /// auto-approve toggle this harness disables (for the file-tool arm) is
+    /// NOT capability-scoped, so `github.get_repo` first raises a real
+    /// `TurnStatus::BlockedApproval` too. Approving re-dispatches the
+    /// still-uncredentialed capability, which blocks AGAIN at a real
+    /// `TurnStatus::BlockedAuth` (`CredentialStageError::AuthRequired`).
+    /// `RebornIntegrationHarness::resolve_auth_gate` seeds the account
+    /// (`seed_github_credential_account`) and resumes, letting the SAME
+    /// parked capability re-dispatch and complete — the happy-path auth
+    /// resume the `github_issue_tools_auth_required` fixture cannot do. See
+    /// `scenario_auth_then_approval_journey`'s module doc for the full
+    /// approval->auth chain a caller must drive.
+    ///
+    /// **Making `github.*` genuinely dispatchable (not just granted) needed
+    /// two additive test-support seams, both required together:**
+    /// 1. `capability_ids`/`additional_provider_trust` alone are NOT enough —
+    ///    they only populate the harness-authority grant layer. The runtime's
+    ///    OWN dispatchable registry (`build_local_runtime`'s
+    ///    `local_dev_builtin_extension_registry()`) contains only first-party
+    ///    builtins + the four lifecycle capabilities; bundled packages
+    ///    (github, gmail, …) live in a SEPARATE `AvailableExtensionCatalog`
+    ///    used for search only. Without registry presence, a scripted
+    ///    `github.*` call silently never reaches `invoke_capability` (the run
+    ///    completes with zero recorded invocations). Fixed via
+    ///    `RebornServices::publish_bundled_extension_for_test`
+    ///    (`factory.rs`, new `#[cfg(feature = "test-support")]` accessor) —
+    ///    reaches the SAME `ActiveExtensionPublisher::publish` step
+    ///    `builtin.extension_activate` calls, called directly at harness
+    ///    construction instead of via a scripted install/activate handshake.
+    /// 2. Registry presence alone still isn't sufficient: `build_local_runtime`
+    ///    mounts `/system/extensions` at an EMPTY per-harness tempdir, so the
+    ///    runtime fails to compile `wasm/github_tool.wasm` at dispatch time
+    ///    (`Failed{host_creation_failed}`) even once the package metadata is
+    ///    registered. Fixed by copying the REAL asset directory
+    ///    (`github_support::asset_root()`, already used by the
+    ///    `github_issue_tools_*` harnesses) into this harness's own tempdir
+    ///    mount (`copy_dir_recursive`) — no new fixtures, reuses the existing
+    ///    on-disk asset tree.
+    ///
+    /// Runtime policy is left at `None` (like `file_tools_requiring_approval`,
+    /// NOT the `LocalDevYolo` policy `extension_lifecycle_tools` uses) so the
+    /// file tools' real `PermissionMode::Ask` gate is preserved; the two seams
+    /// above are independent of the runtime-policy profile.
+    pub(crate) async fn file_and_github_auth_tools() -> HarnessResult<Self> {
+        // Hermetic guard: `new_with_options`'s `build_local_runtime` defaults to
+        // a REAL `ReqwestNetworkTransport` when no test egress is supplied
+        // (`factory.rs`). This harness surfaces a `github.*` WASM capability
+        // that crosses HTTP, so it MUST override the network egress or the
+        // post-resume dispatch would attempt a live network call.
+        let github_fixture_response =
+            br#"{"id":1,"full_name":"octocat/hello-world","private":false}"#.to_vec();
+        let network_egress: Arc<dyn NetworkHttpEgress> = Arc::new(
+            RecordingNetworkHttpEgress::with_body(github_fixture_response),
+        );
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-file-github-auth-tools",
+            vec![
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new("github.get_repo")?,
+            ],
+            local_dev_all_effects(),
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-file-github-auth-user")?,
+            HostRuntimeHarnessOptions::new(
+                workspace_mounts(MountPermissions::read_write_list_delete())?,
+                None,
+            )
+            .with_network_http_egress_for_test(network_egress)
+            .with_activated_bundled_extension(github_support::extension_package()?),
+        )
+        .await?;
+        harness.network_policy = wildcard_test_policy();
+        harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        // `publish_bundled_extension_for_test` makes the github package's
+        // METADATA dispatchable (registry + trust), but `build_local_runtime`
+        // mounts `/system/extensions` at an EMPTY per-harness tempdir
+        // (`factory.rs`: `create_dir_all(root.join("system/extensions"))`) —
+        // NOT at the real asset directory `local_dev_root_filesystem` mounts
+        // on the OTHER (`github_issue_tools_*`) harness path. Without the
+        // actual WASM module bytes reachable at that mount, dispatch fails
+        // with `host_creation_failed` when the runtime tries to compile
+        // `wasm/github_tool.wasm`. Copy the real asset directory into the
+        // harness's own tempdir mount so the module is genuinely loadable —
+        // additive, test-only, no production wiring changes.
+        copy_dir_recursive(
+            &github_support::asset_root(),
+            &harness
+                .root
+                .path()
+                .join("local-dev/system/extensions/github"),
+        )?;
+        // Global auto-approve now defaults ON; disable it so write_file/read_file
+        // raise real `BlockedApproval` gates (mirrors `file_tools_requiring_approval`).
+        // The GitHub auth gate is a separate mechanism (credential resolution, not
+        // approval mode) and is unaffected by this toggle.
+        harness
+            .disable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    /// C-JOURNEY: seed a real GitHub credential account — WITH real secret
+    /// material — through the PRODUCTION manual-token flow
+    /// (`request_manual_token_setup` → `submit_manual_token`, the same
+    /// two-step path the real "user pastes a token in the UI" flow drives), so
+    /// a parked `github.*` auth gate's `ProductAuthRuntimeCredentialResolver`
+    /// lookup resolves on re-dispatch AND the re-dispatched WASM capability's
+    /// credential obligation can actually stage the token. A bare
+    /// `credential_account_service().create_account(..)` carrying a dangling
+    /// `SecretHandle` is NOT enough: it clears the auth gate, but the
+    /// re-dispatched execution then fails at `stage_credential_material`
+    /// (no material behind the handle) and the run still completes with a
+    /// model-visible failure — caught by `assert_tool_result_contains`.
+    ///
+    /// `scope` MUST be the run's actual dispatch-time `(tenant, user, agent,
+    /// project)` — `ProductAuthRuntimeCredentialResolver::resolve_access_secret`'s
+    /// `account_visible_from_runtime_scope` check matches on all four, so a
+    /// mismatched scope (e.g. a fixed literal that doesn't match the calling
+    /// group/harness's real run scope) silently seeds an account the
+    /// dispatch-time lookup never finds, leaving the run stuck at
+    /// `BlockedAuth`. Callers build this from their own resolved run scope
+    /// (see `RebornIntegrationHarness::resolve_auth_gate`, which uses
+    /// `self.turn_scope` + `self.binding.actor_user_id` — the SAME fields
+    /// `resume_run` uses).
+    ///
+    /// Continuation is `AuthContinuationRef::SetupOnly`: the harness's
+    /// `resolve_auth_gate` performs the run resume itself (mirroring the
+    /// approval-gate helpers), so the flow must not ALSO dispatch a
+    /// `TurnGateResume` continuation.
+    pub(crate) async fn seed_github_credential_account(
+        &self,
+        scope: &ResourceScope,
+    ) -> HarnessResult<()> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let challenge = product_auth
+            .request_manual_token_setup(
+                ironclaw_reborn_composition::RebornManualTokenSetupRequest::new(
+                    scope.clone(),
+                    AuthProviderId::new("github")?,
+                    CredentialAccountLabel::new("journey github")?,
+                    ironclaw_auth::AuthContinuationRef::SetupOnly,
+                    chrono::Utc::now() + chrono::Duration::minutes(10),
+                ),
+            )
+            .await
+            .map_err(|error| format!("manual token setup failed: {error:?}"))?;
+        product_auth
+            .submit_manual_token(
+                ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
+                    scope.clone(),
+                    challenge.interaction_id,
+                    secrecy::SecretString::from("journey-github-token"),
+                ),
+            )
+            .await
+            .map_err(|error| format!("manual token submit failed: {error:?}"))?;
+        Ok(())
     }
 
     /// E-PROJ: harness surfacing the local-dev synthetic `project_create`
@@ -2336,6 +2560,8 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_credentials,
             skill_activation_tenant,
             outbound_target_facade,
+            network_http_egress_for_test,
+            activate_bundled_extensions_for_test,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2361,9 +2587,23 @@ impl HostRuntimeCapabilityHarness {
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
         }
+        if let Some(egress) = network_http_egress_for_test {
+            input = input.with_network_http_egress_for_test(egress);
+        }
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {
             seed_extension_lifecycle_credentials(&services, &user_id).await?;
+        }
+        // C-JOURNEY: publish bundled WASM packages into the active-extension
+        // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
+        // doc) so their capabilities are genuinely dispatchable, not merely
+        // granted at the harness-authority layer.
+        for package in &activate_bundled_extensions_for_test {
+            services
+                .publish_bundled_extension_for_test(package)
+                .ok_or(
+                    "local-dev Reborn services missing extension management for test publish",
+                )??;
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
@@ -2372,6 +2612,10 @@ impl HostRuntimeCapabilityHarness {
         // C-ATTACH seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
         let project_service = services.local_dev_project_service_for_test();
+        // C-JOURNEY: capture product-auth before `services.host_runtime` is
+        // moved out below, so `seed_github_credential_account` can create a
+        // real credential account later (auth-gate happy-path resume).
+        let product_auth = services.product_auth.clone();
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
         // `skill_activation_tools`). Built with the caller-supplied tenant
@@ -2449,6 +2693,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support,
             outbound_target_tools,
             scope_capability_by_run_owner: false,
+            product_auth,
         })
     }
 
@@ -2599,6 +2844,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support: None,
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
+            product_auth: None,
         })
     }
 
@@ -2697,6 +2943,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support: None,
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
+            product_auth: None,
         })
     }
 
@@ -2774,6 +3021,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support: None,
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
+            product_auth: None,
         })
     }
 
@@ -2837,6 +3085,7 @@ impl HostRuntimeCapabilityHarness {
             attachment_test_support: None,
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
+            product_auth: None,
         })
     }
 
@@ -3523,6 +3772,31 @@ impl HostRuntime for RecordingHostRuntime {
         self.inner.resume_capability(request).await
     }
 
+    /// C-JOURNEY: forward auth-resume to the real runtime. `auth_resume_capability`
+    /// is a DEFAULTED trait method whose default fails loudly ("capability
+    /// auth-resume is unsupported by this host runtime", `ironclaw_host_runtime`
+    /// lib.rs) precisely so wrappers that forget to forward it fail visibly —
+    /// which is exactly what happened here: this wrapper predates any test
+    /// exercising a happy-path auth resume, so the missing forward was latent
+    /// until the first auth→resolve→re-dispatch journey drove it. Mirrors
+    /// `invoke_capability`'s ApprovalRequired scope recording because
+    /// `auth_resume_json` can itself raise an approval gate (the NoPriorLease
+    /// path re-runs authorization).
+    async fn auth_resume_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let scope = request.context.resource_scope.clone();
+        let outcome = self.inner.auth_resume_capability(request).await?;
+        if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
+            self.pending_approval_scopes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(gate.approval_request_id, scope);
+        }
+        Ok(outcome)
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
@@ -4082,6 +4356,27 @@ fn wildcard_test_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(1_000_000),
     }
+}
+
+/// C-JOURNEY: recursively copy `src` into `dst` (creating `dst` and any
+/// intermediate directories). Used to populate a harness's per-test
+/// `/system/extensions/<id>` mount with the real bundled-extension asset
+/// directory (manifest + wasm module + schemas) so a WASM capability
+/// published via `publish_bundled_extension_for_test` is genuinely loadable,
+/// not just registered as metadata.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> HarnessResult<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn capability_ids_from_strs(ids: &[&str]) -> HarnessResult<Vec<CapabilityId>> {

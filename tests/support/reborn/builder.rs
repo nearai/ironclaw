@@ -34,7 +34,8 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::NetworkHttpRequest;
@@ -1069,6 +1070,64 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Resolve a blocked AUTH gate the "user submitted credentials" way
+    /// (C-JOURNEY convergence seam): seed a real GitHub credential account
+    /// through product-auth (`HostRuntimeCapabilityHarness::seed_github_credential_account`)
+    /// so the parked capability's next `ProductAuthRuntimeCredentialResolver`
+    /// lookup resolves, then resume with `ResumeTurnPrecondition::BlockedAuthGate`
+    /// and NO deny disposition so the parked `github.*` capability re-dispatches
+    /// and the run completes.
+    ///
+    /// Only valid on a capability harness built via
+    /// `HostRuntimeCapabilityHarness::file_and_github_auth_tools` (reached
+    /// through `_shared.capability`) — the credential-seeding path needs the
+    /// `build_reborn_services` product-auth wiring that `deny_auth_gate`'s
+    /// sibling fixture (`RebornIntegrationGroup::live_auth_gate`, a lower-level
+    /// `HostRuntimeServices` build with a hardcoded credential resolver and no
+    /// run_state store) does not have.
+    pub async fn resolve_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to seed a github credential account".into(),
+                );
+            }
+        };
+        // Seed under THIS run's actual (tenant, user, agent, project) — the
+        // credential resolver's `account_visible_from_runtime_scope` check
+        // matches on all four, so a scope built from a differently-scoped
+        // group/harness (e.g. a fixed "*-e2e" literal) would silently seed an
+        // account the real dispatch-time lookup never finds, leaving the run
+        // stuck at `BlockedAuth` forever. `self.turn_scope` + `self.binding`
+        // are this harness's own resolved run scope (same fields
+        // `resume_run` uses for `TurnScope`/`TurnActor`).
+        let scope = ResourceScope {
+            tenant_id: self.turn_scope.tenant_id.clone(),
+            user_id: self.binding.actor_user_id.clone(),
+            agent_id: self.turn_scope.agent_id.clone(),
+            project_id: self.turn_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        harness.seed_github_credential_account(&scope).await?;
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
     /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
@@ -1110,6 +1169,18 @@ impl RebornIntegrationHarness {
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
+        // Key on `(run_id, gate_ref)`, NOT `run_id` alone: a C-JOURNEY chained
+        // turn can resume the SAME run twice in a row (e.g. an approval gate
+        // resolved, immediately followed by the auth gate the re-dispatched
+        // capability then raises) — a `run_id`-only key collides with the
+        // FIRST resume's idempotency key, so the coordinator treats the
+        // second resume as a replay and returns the cached `Queued` response
+        // without actually re-queuing any work. The gate_ref changes per gate
+        // resolution (a fresh gate raised after a prior resume gets a new
+        // ref), so including it keeps each DISTINCT gate resolution unique
+        // while still deduping a genuine retry of the SAME resume call.
+        let idempotency_key =
+            IdempotencyKey::new(format!("resume-{run_id}-{}", gate_ref.as_str()))?;
         let response = self
             .coordinator
             .resume_turn(ResumeTurnRequest {
@@ -1120,7 +1191,7 @@ impl RebornIntegrationHarness {
                 precondition,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
-                idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
+                idempotency_key,
                 resume_disposition,
             })
             .await?;

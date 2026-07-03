@@ -185,6 +185,20 @@ impl RebornLocalExtensionManagementPort {
         Arc::clone(&self.installation_store)
     }
 
+    /// C-JOURNEY: test-support access to the active-extension publisher
+    /// (registry + trust policy). `activate()` ultimately delegates the
+    /// model-visible-surface mutation to `self.active_extensions.publish(..)`
+    /// (see `active_publication.rs`) after its own install/credential-gate
+    /// bookkeeping; this accessor reaches that SAME publish step directly so a
+    /// test harness can make a bundled first-party WASM package (e.g. github)
+    /// genuinely dispatchable without driving the full multi-turn
+    /// install→activate capability handshake through the model. For tests
+    /// only — zero bytes shipped in production builds.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn active_extensions_for_test(&self) -> &ActiveExtensionPublisher {
+        &self.active_extensions
+    }
+
     pub(crate) async fn search(
         &self,
         query: &str,

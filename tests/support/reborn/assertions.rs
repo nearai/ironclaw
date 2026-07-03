@@ -238,6 +238,32 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that some SINGLE model request this thread sent to the scripted
+    /// provider contains EVERY needle in `needles` (all in one request, not
+    /// spread across several). This is the multi-turn "sees prior context"
+    /// proof: pass a needle unique to an earlier turn plus one unique to the
+    /// current turn — only the current turn's request carries BOTH, because the
+    /// earlier turn's own request predates the later text. Scanning with the
+    /// single-needle [`assert_model_request_contains`] cannot express this (each
+    /// needle would trivially match its own originating request), so a genuine
+    /// context-carryover regression (the loop rebuilding the request without
+    /// prior history) would slip through it but not through this.
+    pub async fn assert_model_request_contains_all(&self, needles: &[&str]) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        for messages in &requests {
+            let rendered = serde_json::to_string(messages)
+                .map_err(|e| format!("serialize captured model request: {e}"))?;
+            if needles.iter().all(|needle| rendered.contains(needle)) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "no single model request contained all of {needles:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — same caveat
     /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for

@@ -455,7 +455,27 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
+| `RebornIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Auth-gate resolution (C-JOURNEY)
+
+On a `live_auth_and_approval()` group thread:
+
+- `resolve_auth_gate(run_id, &gate_ref)` — the "user submitted credentials"
+  happy arm: seeds a real GitHub credential account WITH secret material
+  through the production manual-token flow
+  (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
+  `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
+  re-dispatches and completes. Only valid on this group (needs the
+  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  lower-level fixture cannot complete an auth resume).
+- `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
+
+Multi-turn journey chaining (gate -> resolve -> next turn on ONE
+conversation) is pinned by `tests/reborn_group_journeys/`; per-turn resume
+idempotency keys are `(run_id, gate_ref)`-scoped so one run can resume
+through an approval gate and a subsequent auth gate without replay collision.
 
 ### Distinct actors per thread (E-MULTIUSER)
 
