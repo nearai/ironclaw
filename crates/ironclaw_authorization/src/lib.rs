@@ -1,0 +1,1841 @@
+//! Capability authorization contracts for IronClaw Reborn.
+//!
+//! `ironclaw_authorization` evaluates authority-bearing host API contracts. It
+//! does not execute capabilities, reserve resources, prompt users, or reach into
+//! runtime internals. The first slices implement grant- and lease-backed gates
+//! for capability dispatch.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, RecordVersion, RootFilesystem, ScopedFilesystem,
+};
+
+/// Bounded retry budget for compare-and-swap loops on lease writes.
+///
+/// Each iteration re-reads the current row version and rewrites with
+/// `CasExpectation::Version(_)`; a multi-process race that loses the
+/// CAS retries until either it wins or this budget is exhausted.
+const CAS_RETRY_ATTEMPTS: usize = 3;
+use ironclaw_host_api::{
+    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
+    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
+    NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
+    ResourceEstimate, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota,
+    ScopedPath, TenantId, ThreadId, UserId,
+};
+use ironclaw_trust::{AuthorityCeiling, TrustDecision};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Authorizes a capability dispatch request against an execution context.
+#[async_trait]
+pub trait CapabilityDispatchAuthorizer: Send + Sync {
+    /// Returns `Allow` only when the context has matching authority for the capability and declared effects; otherwise fails closed.
+    async fn authorize_dispatch(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision;
+
+    /// Returns `Allow` only when dispatch authority and `SpawnProcess` authority are both present for the target capability.
+    async fn authorize_spawn(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+}
+
+/// Trust-aware capability dispatch authorizer.
+///
+/// This trait is the host-policy-aware counterpart to
+/// [`CapabilityDispatchAuthorizer`]. Callers pass the policy-validated
+/// [`TrustDecision`] alongside the serializable [`ExecutionContext`]. We keep
+/// this separate because `ironclaw_trust::EffectiveTrustClass` deliberately
+/// does not implement `Deserialize`; it should not be embedded directly in
+/// wire-shaped execution contexts.
+#[async_trait]
+pub trait TrustAwareCapabilityDispatchAuthorizer: Send + Sync {
+    /// Authorize a dispatch using both explicit grants/leases and the
+    /// policy-derived authority ceiling.
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision;
+
+    /// Authorize a background-process spawn using both explicit grants/leases
+    /// and the policy-derived authority ceiling.
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+}
+
+/// Grant-backed capability dispatch authorizer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrantAuthorizer;
+
+impl GrantAuthorizer {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl CapabilityDispatchAuthorizer for GrantAuthorizer {
+    async fn authorize_dispatch(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision {
+        authorize_from_grants(context, descriptor, estimate, context.grants.grants.iter())
+    }
+
+    async fn authorize_spawn(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision {
+        authorize_from_grants(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter(),
+        )
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for GrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        authorize_from_grants_with_trust(
+            context,
+            descriptor,
+            estimate,
+            context.grants.grants.iter(),
+            trust_decision,
+        )
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        authorize_from_grants_with_trust(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter(),
+            trust_decision,
+        )
+    }
+}
+
+/// Capability lease issued from an approved request or policy workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityLease {
+    pub scope: ResourceScope,
+    pub grant: CapabilityGrant,
+    pub invocation_fingerprint: Option<InvocationFingerprint>,
+    pub status: CapabilityLeaseStatus,
+}
+
+impl CapabilityLease {
+    pub fn new(scope: ResourceScope, grant: CapabilityGrant) -> Self {
+        Self {
+            scope,
+            grant,
+            invocation_fingerprint: None,
+            status: CapabilityLeaseStatus::Active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityLeaseStatus {
+    Active,
+    Claimed,
+    /// Transient state set by `begin_dispatch_claimed` to ensure exactly one
+    /// concurrent auth-resume reuses a fingerprinted claimed lease. A second
+    /// caller sees `Dispatching` and gets `InactiveLease` — matching the loser
+    /// path of a concurrent `Active` lease `claim()` race.
+    Dispatching,
+    Consumed,
+    Revoked,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CapabilityLeaseError {
+    #[error("unknown capability lease {lease_id}")]
+    UnknownLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} is expired")]
+    ExpiredLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} has no remaining invocations")]
+    ExhaustedLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} has not been claimed with its fingerprint")]
+    UnclaimedFingerprintLease { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} fingerprint does not match")]
+    FingerprintMismatch { lease_id: CapabilityGrantId },
+    #[error("capability lease {lease_id} is not active: {status:?}")]
+    InactiveLease {
+        lease_id: CapabilityGrantId,
+        status: CapabilityLeaseStatus,
+    },
+    #[error("capability lease persistence error: {reason}")]
+    Persistence { reason: String },
+    /// Internal CAS-loop signal: the lease record was updated between our
+    /// read and write. Surfaces only inside the retry loop and is converted
+    /// to [`CasExhausted`] if the budget is exhausted; callers will not see
+    /// this variant escape the public API.
+    #[doc(hidden)]
+    #[error("capability lease version mismatch (internal retry signal)")]
+    VersionMismatch,
+    /// CAS retry budget exhausted: too many concurrent writers contended on
+    /// the same lease row. Callers should treat this as transient and may
+    /// retry at a higher level.
+    #[error("capability lease compare-and-swap retry budget exhausted")]
+    CasExhausted,
+}
+
+/// Store of active/revoked capability leases.
+#[async_trait]
+pub trait CapabilityLeaseStore: Send + Sync {
+    /// Persists a scoped lease before any approval record is marked approved.
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Revokes a lease only within the exact resource-owner/invocation scope that owns it.
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Loads a lease by exact scope and ID; wrong-scope lookups must behave as unknown.
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease>;
+
+    /// Atomically marks an active fingerprinted lease as claimed after matching the replay fingerprint.
+    async fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Consumes or decrements an active/claimed lease after successful dispatch.
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Atomically transitions a Claimed, fingerprint-matched lease to
+    /// `Dispatching` so exactly one concurrent auth-resume reuses it. A second
+    /// caller sees a non-Claimed status and gets `InactiveLease` — the loser
+    /// bails exactly like a lost Active `claim()`.
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Reverts a `Dispatching` lease back to `Claimed` so a later auth-resume
+    /// can reuse it after a non-terminal auth re-bounce. No-op-safe if already Claimed.
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Lists leases visible to the exact resource-owner scope without exposing cross-scope records.
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease>;
+
+    /// Returns active, unexpired, unexhausted leases for the exact invocation context.
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease>;
+
+    /// Converts only non-fingerprinted active leases into ambient grants for authorization.
+    async fn active_grants_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityGrant> {
+        self.active_leases_for_context(context)
+            .await
+            .into_iter()
+            .filter(|lease| lease.invocation_fingerprint.is_none())
+            .map(|lease| lease.grant)
+            .collect()
+    }
+}
+
+/// In-memory lease store for early Reborn flows and tests.
+#[derive(Debug, Default)]
+pub struct InMemoryCapabilityLeaseStore {
+    leases: Mutex<HashMap<CapabilityLeaseKey, CapabilityLease>>,
+}
+
+impl InMemoryCapabilityLeaseStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn leases_guard(&self) -> MutexGuard<'_, HashMap<CapabilityLeaseKey, CapabilityLease>> {
+        self.leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[async_trait]
+impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.leases_guard().insert(
+            CapabilityLeaseKey::new(&lease.scope, lease.grant.id),
+            lease.clone(),
+        );
+        Ok(lease)
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        lease.status = CapabilityLeaseStatus::Revoked;
+        Ok(lease.clone())
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
+        self.leases_guard()
+            .get(&CapabilityLeaseKey::new(scope, lease_id))
+            .cloned()
+    }
+
+    async fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+
+        ensure_claimable(lease, invocation_fingerprint)?;
+        lease.status = CapabilityLeaseStatus::Claimed;
+        Ok(lease.clone())
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+
+        let was_claimed = matches!(
+            lease.status,
+            CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+        );
+        ensure_consumable(lease)?;
+        if lease.invocation_fingerprint.is_some() {
+            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining = 0;
+            }
+            lease.status = CapabilityLeaseStatus::Consumed;
+        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                lease.status = CapabilityLeaseStatus::Consumed;
+            } else if was_claimed {
+                lease.status = CapabilityLeaseStatus::Active;
+            }
+        } else if was_claimed {
+            lease.status = CapabilityLeaseStatus::Active;
+        }
+        Ok(lease.clone())
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        apply_begin_dispatch_claimed_transition(lease, invocation_fingerprint)?;
+        Ok(lease.clone())
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        apply_abort_dispatch_claimed_transition(lease)?;
+        Ok(lease.clone())
+    }
+
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+        let mut leases = self
+            .leases_guard()
+            .values()
+            .filter(|lease| same_scope_owner(&lease.scope, scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        leases.sort_by_key(|lease| lease.grant.id.as_uuid());
+        leases
+    }
+
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+        self.leases_for_scope(&context.resource_scope)
+            .await
+            .into_iter()
+            .filter(|lease| lease_is_authorizing(lease, context))
+            .collect()
+    }
+}
+
+/// Filesystem-backed capability lease store under the `/authorization` mount
+/// alias.
+///
+/// Construct with a [`ScopedFilesystem`] over any
+/// [`RootFilesystem`] (typically a
+/// [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
+/// or the in-memory backend for tests). The [`ScopedFilesystem`] resolves
+/// the `/authorization` alias to a tenant/user-scoped
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// before any backend dispatch — so tenant isolation is structural, not a
+/// convention this crate has to remember in its path builders.
+///
+/// Construct via [`FilesystemCapabilityLeaseStore::new`] with an
+/// `Arc<ScopedFilesystem<F>>`. The `Arc` shape matches the sibling
+/// filesystem-backed stores (`FilesystemSecretStore`,
+/// `FilesystemOutboundStateStore`, `FilesystemProcessStore`) and lets
+/// composition hold this store as `Arc<dyn CapabilityLeaseStore>` without
+/// erasing the lifetime parameter that an `&'a ScopedFilesystem<F>` would
+/// otherwise pin.
+pub struct FilesystemCapabilityLeaseStore<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+    mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl<F> FilesystemCapabilityLeaseStore<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self {
+            filesystem,
+            mutation_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn mutation_lock(&self, scope: &ResourceScope) -> Arc<tokio::sync::Mutex<()>> {
+        let key = CapabilityLeaseOwnerKey::new(scope);
+        self.mutation_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn read_lease(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
+        Ok(self
+            .read_lease_versioned(scope, lease_id)
+            .await?
+            .map(|(lease, _)| lease))
+    }
+
+    /// Read the lease together with its current backend record version.
+    ///
+    /// Used by the mutation paths (`revoke`, `claim`, `consume`) to drive a
+    /// `CasExpectation::Version` write, so a concurrent writer from another
+    /// process fails the CAS instead of clobbering this transition.
+    async fn read_lease_versioned(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<Option<(CapabilityLease, RecordVersion)>, CapabilityLeaseError> {
+        let path = lease_path(scope, lease_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, &path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
+        };
+        let lease: CapabilityLease = deserialize(&versioned.entry.body)?;
+        Ok(Some((lease, versioned.version)))
+    }
+
+    /// Write the lease with the given CAS expectation.
+    ///
+    /// `CasExpectation::Version(_)` is the canonical path used by the mutation
+    /// flows below — a `VersionMismatch` from the backend signals that a
+    /// concurrent writer modified the same row, and the caller's retry loop
+    /// re-reads and tries again. `CasExpectation::Any` remains in use only
+    /// from the issue path, which is paired with the per-owner
+    /// [`mutation_lock`] and writes a freshly-generated lease id that no
+    /// other writer can collide with.
+    /// Write the lease through the backend with the given CAS expectation.
+    ///
+    /// Backends that don't track per-row versions (e.g. `LocalFilesystem`)
+    /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
+    /// fall back to `CasExpectation::Any` and carry the safety invariant
+    /// via the per-owner `mutation_lock` — same trade-off documented on
+    /// `FilesystemCapabilityLeaseStore` and matched by sibling crates'
+    /// fallback shape (`ironclaw_processes::put_with_byte_fallback`).
+    async fn write_lease_raw(
+        &self,
+        lease: &CapabilityLease,
+        expectation: CasExpectation,
+    ) -> Result<(), CapabilityLeaseError> {
+        let path = lease_path(&lease.scope, lease.grant.id)?;
+        let body = serialize_pretty(lease)?;
+        // Defense-in-depth: tag the entry with the tenant id so admin-tier
+        // queries can filter by tenant and a path-rewriting bug surfaces as a
+        // query-time mismatch rather than silent cross-tenant leakage. See
+        // docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(lease.scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(
+            &self.filesystem,
+            &lease.scope,
+            &lease_owner_prefix(&lease.scope)?,
+        )
+        .await?;
+        // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
+        // AND entries with a populated `indexed` projection in a single
+        // `Unsupported` response. Strip the projection and downgrade CAS
+        // to `Any` so byte-only mounts stay writeable — the per-owner
+        // `mutation_lock` carries the ordering safety invariant on the
+        // fallback path, and the dropped tenant projection is best-effort
+        // (path-prefix scoping is the primary isolation boundary).
+        match self
+            .filesystem
+            .put(&lease.scope, &path, entry.clone(), expectation)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                match self
+                    .filesystem
+                    .put(&lease.scope, &path, opaque, CasExpectation::Any)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(lease_persistence_error(error)),
+                }
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
+    }
+
+    async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+        // Issue path only — see `update_lease_cas` for the mutation pattern.
+        // The per-owner mutation lock + fresh-id invariant in `issue` makes
+        // the CAS race unreachable for first-write of a brand-new lease id.
+        self.write_lease_raw(lease, CasExpectation::Any).await
+    }
+
+    /// Read-modify-write a lease under compare-and-swap.
+    ///
+    /// Reads the current row (and its [`RecordVersion`]), hands the
+    /// deserialized lease to `mutate`, writes the result back with
+    /// `CasExpectation::Version(_)`, and retries up to
+    /// [`CAS_RETRY_ATTEMPTS`] times on `FilesystemError::VersionMismatch`.
+    /// A missing lease maps to [`CapabilityLeaseError::UnknownLease`].
+    ///
+    /// This closes the multi-process race documented on
+    /// [`FilesystemCapabilityLeaseStore`]: even with a shared backend root,
+    /// a concurrent writer that updates the lease between our read and
+    /// write fails our CAS, we re-read, and re-apply the mutation against
+    /// the new state. Net effect is last-writer-wins among logically
+    /// concurrent transitions, with no silent clobber.
+    async fn update_lease_cas<M>(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        mut mutate: M,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>
+    where
+        M: FnMut(&mut CapabilityLease) -> Result<(), CapabilityLeaseError>,
+    {
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some((mut lease, version)) = self.read_lease_versioned(scope, lease_id).await?
+            else {
+                return Err(CapabilityLeaseError::UnknownLease { lease_id });
+            };
+            mutate(&mut lease)?;
+            match self
+                .write_lease_raw(&lease, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(lease),
+                Err(CapabilityLeaseError::VersionMismatch) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CapabilityLeaseError::CasExhausted)
+    }
+
+    async fn read_lease_index(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Option<Vec<ScopedPath>>, CapabilityLeaseError> {
+        let path = lease_index_path(scope)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, &path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
+        };
+        let index: CapabilityLeaseIndex = deserialize(&versioned.entry.body)?;
+        Ok(Some(index.paths))
+    }
+
+    async fn write_lease_index(
+        &self,
+        scope: &ResourceScope,
+        mut paths: Vec<ScopedPath>,
+    ) -> Result<(), CapabilityLeaseError> {
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        paths.dedup_by(|left, right| left.as_str() == right.as_str());
+        let path = lease_index_path(scope)?;
+        let body = serialize_pretty(&CapabilityLeaseIndex { paths })?;
+        // Defense-in-depth tenant projection on the per-owner lease index;
+        // see `write_lease_raw` for the rationale and design plan.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(&self.filesystem, scope, &lease_owner_prefix(scope)?).await?;
+        // Byte-only backends (LocalFilesystem) reject entries with a
+        // populated `indexed` projection. Fall back to the plain-bytes
+        // shape for those — the tenant projection is best-effort defense
+        // in depth, and dropping it on byte-only mounts is acceptable
+        // because the path-prefix scoping still routes tenant isolation
+        // structurally.
+        match self
+            .filesystem
+            .put(scope, &path, entry.clone(), CasExpectation::Any)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.filesystem
+                    .put(scope, &path, opaque, CasExpectation::Any)
+                    .await
+                    .map(|_| ())
+                    .map_err(lease_persistence_error)
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
+    }
+
+    async fn index_lease_path(
+        &self,
+        scope: &ResourceScope,
+        path: ScopedPath,
+    ) -> Result<(), CapabilityLeaseError> {
+        let mut paths = self.read_lease_index(scope).await?.unwrap_or_default();
+        if !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+        self.write_lease_index(scope, paths).await
+    }
+
+    async fn list_lease_paths_from_index_or_scan(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        if let Some(paths) = self.read_lease_index(scope).await? {
+            return Ok(paths);
+        }
+        self.scan_lease_paths(scope).await
+    }
+
+    async fn scan_lease_paths(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        let owner_prefix = lease_owner_prefix(scope)?;
+        let invocation_subdirs = self.list_subdir_names(scope, &owner_prefix).await?;
+        let mut paths = Vec::new();
+        for subdir in invocation_subdirs {
+            let invocation_root = join_scoped(&owner_prefix, &subdir)?;
+            paths.extend(self.list_lease_files(scope, &invocation_root).await?);
+        }
+        Ok(paths)
+    }
+
+    /// List the immediate child subdirectories of `prefix`, returning each
+    /// child's leaf name. `list_dir` returns
+    /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
+    /// resolution has already happened — we strip the leaf so callers can
+    /// rebuild a [`ScopedPath`] and let the per-op ACL fire again on the
+    /// follow-up read.
+    async fn list_subdir_names(
+        &self,
+        scope: &ResourceScope,
+        prefix: &ScopedPath,
+    ) -> Result<Vec<String>, CapabilityLeaseError> {
+        match self.filesystem.list_dir(scope, prefix).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|entry| entry.file_type == FileType::Directory)
+                .map(|entry| entry.name)
+                .collect()),
+            Err(error) if is_not_found(&error) => Ok(Vec::new()),
+            Err(error) => Err(lease_persistence_error(error)),
+        }
+    }
+
+    async fn list_lease_files(
+        &self,
+        scope: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        let entries = match self.filesystem.list_dir(scope, root).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(lease_persistence_error(error)),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            // `list_dir` returned a `VirtualPath`; rebuild the equivalent
+            // `ScopedPath` under our prefix so the follow-up `get` re-runs
+            // the per-op ACL check.
+            out.push(join_scoped(root, &entry.name)?);
+        }
+        Ok(out)
+    }
+
+    async fn read_lease_file(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let versioned = self
+            .filesystem
+            .get(scope, path)
+            .await
+            .map_err(lease_persistence_error)?
+            .ok_or_else(|| CapabilityLeaseError::Persistence {
+                reason: format!("filesystem capability lease store: lease file missing: {path}"),
+            })?;
+        deserialize(&versioned.entry.body)
+    }
+}
+
+#[async_trait]
+impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(&lease.scope);
+        let _guard = lock.lock().await;
+        self.index_lease_path(&lease.scope, lease_path(&lease.scope, lease.grant.id)?)
+            .await?;
+        self.write_lease(&lease).await?;
+        Ok(lease)
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        // CAS-Version retry: a concurrent claim/consume from another process
+        // must not be clobbered. Idempotent on already-Revoked leases.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            lease.status = CapabilityLeaseStatus::Revoked;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
+        self.read_lease(scope, lease_id).await.ok().flatten()
+    }
+
+    async fn claim(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        // CAS-Version retry: a concurrent claim/consume/revoke must not
+        // race past `ensure_claimable`. Re-validate inside the loop so a
+        // race that flips status (e.g. another claimant got there first)
+        // surfaces as the proper typed error rather than a clobber.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            ensure_claimable(lease, invocation_fingerprint)?;
+            lease.status = CapabilityLeaseStatus::Claimed;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        // CAS-Version retry: one-shot fingerprinted leases MUST NOT be
+        // consumable twice. Without CAS, two processes can both read
+        // Active/Claimed, both consume, and both succeed — granting double
+        // authority. The retry re-evaluates `ensure_consumable` against
+        // the latest version so the loser sees `InactiveLease`.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            let was_claimed = matches!(
+                lease.status,
+                CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+            );
+            ensure_consumable(lease)?;
+            if lease.invocation_fingerprint.is_some() {
+                if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                    *remaining = 0;
+                }
+                lease.status = CapabilityLeaseStatus::Consumed;
+            } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    lease.status = CapabilityLeaseStatus::Consumed;
+                } else if was_claimed {
+                    lease.status = CapabilityLeaseStatus::Active;
+                }
+            } else if was_claimed {
+                lease.status = CapabilityLeaseStatus::Active;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        let fingerprint = invocation_fingerprint.clone();
+        self.update_lease_cas(scope, lease_id, |lease| {
+            apply_begin_dispatch_claimed_transition(lease, &fingerprint)
+        })
+        .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        self.update_lease_cas(scope, lease_id, |lease| {
+            apply_abort_dispatch_claimed_transition(lease)
+        })
+        .await
+    }
+
+    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+        let Ok(paths) = self.list_lease_paths_from_index_or_scan(scope).await else {
+            return Vec::new();
+        };
+        let mut leases = Vec::new();
+        for path in paths {
+            if let Ok(lease) = self.read_lease_file(scope, &path).await {
+                leases.push(lease);
+            }
+        }
+        let mut leases = leases
+            .into_iter()
+            .filter(|lease| same_scope_owner(&lease.scope, scope))
+            .collect::<Vec<_>>();
+        leases.sort_by_key(|lease| lease.grant.id.as_uuid());
+        leases
+    }
+
+    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
+        self.leases_for_scope(&context.resource_scope)
+            .await
+            .into_iter()
+            .filter(|lease| lease_is_authorizing(lease, context))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CapabilityLeaseKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
+    invocation_id: InvocationId,
+    lease_id: CapabilityGrantId,
+}
+
+impl CapabilityLeaseKey {
+    fn new(scope: &ResourceScope, lease_id: CapabilityGrantId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            invocation_id: scope.invocation_id,
+            lease_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CapabilityLeaseOwnerKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
+}
+
+impl CapabilityLeaseOwnerKey {
+    fn new(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CapabilityLeaseIndex {
+    paths: Vec<ScopedPath>,
+}
+
+/// Authorizer that combines request-scoped grants with active capability leases.
+pub struct LeaseBackedAuthorizer<'a, S>
+where
+    S: CapabilityLeaseStore + ?Sized,
+{
+    leases: &'a S,
+}
+
+impl<'a, S> LeaseBackedAuthorizer<'a, S>
+where
+    S: CapabilityLeaseStore + ?Sized,
+{
+    pub fn new(leases: &'a S) -> Self {
+        Self { leases }
+    }
+}
+
+#[async_trait]
+impl<S> CapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
+where
+    S: CapabilityLeaseStore + ?Sized,
+{
+    async fn authorize_dispatch(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants(
+            context,
+            descriptor,
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+        )
+    }
+
+    async fn authorize_spawn(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+        )
+    }
+}
+
+#[async_trait]
+impl<S> TrustAwareCapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
+where
+    S: CapabilityLeaseStore + ?Sized,
+{
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants_with_trust(
+            context,
+            descriptor,
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+            trust_decision,
+        )
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.validate().is_err() {
+            return Decision::Deny {
+                reason: DenyReason::InternalInvariantViolation,
+            };
+        }
+
+        let lease_grants = self.leases.active_grants_for_context(context).await;
+        authorize_from_grants_with_trust(
+            context,
+            &spawn_descriptor(descriptor),
+            estimate,
+            context.grants.grants.iter().chain(lease_grants.iter()),
+            trust_decision,
+        )
+    }
+}
+
+fn spawn_descriptor(descriptor: &CapabilityDescriptor) -> CapabilityDescriptor {
+    let mut descriptor = descriptor.clone();
+    if !descriptor.effects.contains(&EffectKind::SpawnProcess) {
+        descriptor.effects.push(EffectKind::SpawnProcess);
+    }
+    descriptor
+}
+
+fn authorize_from_grants<'a>(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    grants: impl Iterator<Item = &'a CapabilityGrant>,
+) -> Decision {
+    authorize_from_grants_with_authority_ceiling(context, descriptor, estimate, grants, None)
+}
+
+fn authorize_from_grants_with_trust<'a>(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    grants: impl Iterator<Item = &'a CapabilityGrant>,
+    trust_decision: &TrustDecision,
+) -> Decision {
+    if context.validate().is_err() {
+        return Decision::Deny {
+            reason: DenyReason::InternalInvariantViolation,
+        };
+    }
+    if context.trust != trust_decision.effective_trust.class() {
+        return Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        };
+    }
+    authorize_from_grants_with_authority_ceiling(
+        context,
+        descriptor,
+        estimate,
+        grants,
+        Some(&trust_decision.authority_ceiling),
+    )
+}
+
+fn authorize_from_grants_with_authority_ceiling<'a>(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    grants: impl Iterator<Item = &'a CapabilityGrant>,
+    authority_ceiling: Option<&AuthorityCeiling>,
+) -> Decision {
+    if context.validate().is_err() {
+        return Decision::Deny {
+            reason: DenyReason::InternalInvariantViolation,
+        };
+    }
+
+    let mut saw_active_matching_grant = false;
+    for grant in grants
+        .filter(|grant| grant.capability == descriptor.id)
+        .filter(|grant| principal_matches_context(&grant.grantee, context))
+        .filter(|grant| grant_is_active(grant))
+    {
+        saw_active_matching_grant = true;
+        let effective_resource_ceiling = intersect_resource_ceilings(
+            grant.constraints.resource_ceiling.as_ref(),
+            authority_ceiling.and_then(|ceiling| ceiling.max_resource_ceiling.as_ref()),
+        );
+        let authority_effects_allow_descriptor = match authority_ceiling {
+            Some(ceiling) => effects_are_covered(&descriptor.effects, &ceiling.allowed_effects),
+            None => true,
+        };
+        if effects_are_covered(&descriptor.effects, &grant.constraints.allowed_effects)
+            && authority_effects_allow_descriptor
+            && resource_estimate_is_covered(estimate, effective_resource_ceiling.as_ref())
+            && let Some(obligations) =
+                obligations_for_grant(descriptor, grant, effective_resource_ceiling)
+        {
+            return Decision::Allow { obligations };
+        }
+    }
+
+    if saw_active_matching_grant {
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        }
+    } else {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+}
+
+fn obligations_for_grant(
+    descriptor: &CapabilityDescriptor,
+    grant: &CapabilityGrant,
+    effective_resource_ceiling: Option<ResourceCeiling>,
+) -> Option<Obligations> {
+    let mut obligations = Vec::new();
+
+    if descriptor_requires_mount_policy(descriptor) {
+        obligations.push(Obligation::UseScopedMounts {
+            mounts: grant.constraints.mounts.clone(),
+        });
+    }
+
+    if descriptor.effects.contains(&EffectKind::Network)
+        || network_policy_is_constrained(&grant.constraints.network)
+    {
+        obligations.push(Obligation::ApplyNetworkPolicy {
+            policy: grant.constraints.network.clone(),
+        });
+    }
+
+    if !descriptor.runtime_credentials.is_empty() {
+        if !descriptor.effects.contains(&EffectKind::UseSecret) {
+            return None;
+        }
+        for credential in &descriptor.runtime_credentials {
+            match &credential.source {
+                RuntimeCredentialRequirementSource::SecretHandle => {
+                    if grant.constraints.secrets.contains(&credential.handle) {
+                        obligations.push(Obligation::InjectSecretOnce {
+                            handle: credential.handle.clone(),
+                        });
+                    } else if credential.required {
+                        return None;
+                    }
+                }
+                RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } => {
+                    // Mirror SecretHandle: only mandate the obligation when the credential is
+                    // required. An optional product-auth credential is skipped rather than
+                    // injected so that a missing account does not hard-fail dispatch.
+                    if credential.required {
+                        obligations.push(Obligation::InjectCredentialAccountOnce {
+                            handle: credential.handle.clone(),
+                            provider: provider.clone(),
+                            setup: setup.clone(),
+                            provider_scopes: credential.provider_scopes.clone(),
+                            requester_extension: descriptor.provider.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    } else if descriptor.effects.contains(&EffectKind::UseSecret) {
+        // Some first-party handlers choose account-scoped credentials at
+        // dispatch time and stage the selected secret through their own
+        // host-runtime port, so there is no static grant handle to inject here.
+        if descriptor.runtime == RuntimeKind::FirstParty && grant.constraints.secrets.is_empty() {
+            obligations.push(Obligation::FirstPartyCredentialStagedViaHostPort {
+                capability_id: descriptor.id.clone(),
+            });
+        } else {
+            match grant.constraints.secrets.as_slice() {
+                [handle] => obligations.push(Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                }),
+                _ => return None,
+            }
+        }
+    }
+
+    if let Some(ceiling) = effective_resource_ceiling {
+        obligations.push(Obligation::EnforceResourceCeiling {
+            ceiling: ceiling.clone(),
+        });
+        if let Some(bytes) = ceiling.max_output_bytes {
+            obligations.push(Obligation::EnforceOutputLimit { bytes });
+        }
+    }
+
+    Obligations::new(obligations).ok()
+}
+
+fn descriptor_requires_mount_policy(descriptor: &CapabilityDescriptor) -> bool {
+    descriptor.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectKind::ReadFilesystem
+                | EffectKind::WriteFilesystem
+                | EffectKind::DeleteFilesystem
+                | EffectKind::ExecuteCode
+        )
+    })
+}
+
+fn network_policy_is_constrained(policy: &NetworkPolicy) -> bool {
+    !policy.allowed_targets.is_empty()
+        || policy.deny_private_ip_ranges
+        || policy.max_egress_bytes.is_some()
+}
+
+fn principal_matches_context(principal: &Principal, context: &ExecutionContext) -> bool {
+    match principal {
+        Principal::Tenant(id) => id == &context.tenant_id,
+        Principal::User(id) => id == &context.user_id,
+        Principal::Agent(id) => context.agent_id.as_ref() == Some(id),
+        Principal::Project(id) => context.project_id.as_ref() == Some(id),
+        Principal::Mission(id) => context.mission_id.as_ref() == Some(id),
+        Principal::Thread(id) => context.thread_id.as_ref() == Some(id),
+        Principal::Extension(id) => id == &context.extension_id,
+        Principal::HostRuntime | Principal::System(_) => false,
+    }
+}
+
+fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool {
+    required.iter().all(|effect| allowed.contains(effect))
+}
+
+fn grant_is_active(grant: &CapabilityGrant) -> bool {
+    let grant_not_expired = match grant.constraints.expires_at.as_ref() {
+        Some(expires_at) => expires_at > &Utc::now(),
+        None => true,
+    };
+    grant_not_expired && grant.constraints.max_invocations != Some(0)
+}
+
+/// Returns true when an existing grant exceeds the current policy-derived
+/// authority ceiling and should be reissued or revoked by a trust-change
+/// invalidation listener.
+///
+/// This helper is intentionally synchronous and store-agnostic: the
+/// `ironclaw_trust::InvalidationBus` runs listeners synchronously, while this
+/// crate's durable lease stores are async. Higher-level host wiring can use
+/// this predicate inside whatever transactional store/reconciliation path it
+/// owns, without introducing nested blocking executors or process/runtime dependencies here.
+pub fn grant_exceeds_authority_ceiling(
+    grant: &CapabilityGrant,
+    authority_ceiling: &AuthorityCeiling,
+) -> bool {
+    !effects_are_covered(
+        &grant.constraints.allowed_effects,
+        &authority_ceiling.allowed_effects,
+    ) || resource_ceiling_exceeds_authority(
+        grant.constraints.resource_ceiling.as_ref(),
+        authority_ceiling.max_resource_ceiling.as_ref(),
+    )
+}
+
+fn resource_ceiling_exceeds_authority(
+    grant_ceiling: Option<&ResourceCeiling>,
+    authority_ceiling: Option<&ResourceCeiling>,
+) -> bool {
+    match (grant_ceiling, authority_ceiling) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(grant), Some(authority)) => {
+            limit_exceeds(&grant.max_usd, &authority.max_usd)
+                || limit_exceeds(&grant.max_input_tokens, &authority.max_input_tokens)
+                || limit_exceeds(&grant.max_output_tokens, &authority.max_output_tokens)
+                || limit_exceeds(&grant.max_wall_clock_ms, &authority.max_wall_clock_ms)
+                || limit_exceeds(&grant.max_output_bytes, &authority.max_output_bytes)
+                || sandbox_quota_exceeds_authority(
+                    grant.sandbox.as_ref(),
+                    authority.sandbox.as_ref(),
+                )
+        }
+    }
+}
+
+fn sandbox_quota_exceeds_authority(
+    grant_quota: Option<&SandboxQuota>,
+    authority_quota: Option<&SandboxQuota>,
+) -> bool {
+    match (grant_quota, authority_quota) {
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+        (Some(grant), Some(authority)) => {
+            limit_exceeds(&grant.cpu_time_ms, &authority.cpu_time_ms)
+                || limit_exceeds(&grant.memory_bytes, &authority.memory_bytes)
+                || limit_exceeds(&grant.disk_bytes, &authority.disk_bytes)
+                || limit_exceeds(&grant.network_egress_bytes, &authority.network_egress_bytes)
+                || limit_exceeds(&grant.process_count, &authority.process_count)
+        }
+    }
+}
+
+fn limit_exceeds<T>(grant: &Option<T>, authority: &Option<T>) -> bool
+where
+    T: PartialOrd,
+{
+    match (grant, authority) {
+        (Some(grant), Some(authority)) => grant > authority,
+        (None, Some(_)) => true,
+        (None, None) | (Some(_), None) => false,
+    }
+}
+
+fn intersect_resource_ceilings(
+    grant_ceiling: Option<&ResourceCeiling>,
+    authority_ceiling: Option<&ResourceCeiling>,
+) -> Option<ResourceCeiling> {
+    match (grant_ceiling, authority_ceiling) {
+        (None, None) => None,
+        (Some(ceiling), None) | (None, Some(ceiling)) => Some(ceiling.clone()),
+        (Some(grant), Some(authority)) => Some(ResourceCeiling {
+            max_usd: stricter_limit(&grant.max_usd, &authority.max_usd),
+            max_input_tokens: stricter_limit(&grant.max_input_tokens, &authority.max_input_tokens),
+            max_output_tokens: stricter_limit(
+                &grant.max_output_tokens,
+                &authority.max_output_tokens,
+            ),
+            max_wall_clock_ms: stricter_limit(
+                &grant.max_wall_clock_ms,
+                &authority.max_wall_clock_ms,
+            ),
+            max_output_bytes: stricter_limit(&grant.max_output_bytes, &authority.max_output_bytes),
+            sandbox: intersect_sandbox_quotas(grant.sandbox.as_ref(), authority.sandbox.as_ref()),
+        }),
+    }
+}
+
+fn intersect_sandbox_quotas(
+    grant_quota: Option<&SandboxQuota>,
+    authority_quota: Option<&SandboxQuota>,
+) -> Option<SandboxQuota> {
+    match (grant_quota, authority_quota) {
+        (None, None) => None,
+        (Some(quota), None) | (None, Some(quota)) => Some(quota.clone()),
+        (Some(grant), Some(authority)) => Some(SandboxQuota {
+            cpu_time_ms: stricter_limit(&grant.cpu_time_ms, &authority.cpu_time_ms),
+            memory_bytes: stricter_limit(&grant.memory_bytes, &authority.memory_bytes),
+            disk_bytes: stricter_limit(&grant.disk_bytes, &authority.disk_bytes),
+            network_egress_bytes: stricter_limit(
+                &grant.network_egress_bytes,
+                &authority.network_egress_bytes,
+            ),
+            process_count: stricter_limit(&grant.process_count, &authority.process_count),
+        }),
+    }
+}
+
+fn stricter_limit<T>(left: &Option<T>, right: &Option<T>) -> Option<T>
+where
+    T: Clone + PartialOrd,
+{
+    match (left, right) {
+        (Some(left), Some(right)) if right < left => Some(right.clone()),
+        (Some(left), Some(_)) => Some(left.clone()),
+        (Some(left), None) => Some(left.clone()),
+        (None, Some(right)) => Some(right.clone()),
+        (None, None) => None,
+    }
+}
+
+fn resource_estimate_is_covered(
+    estimate: &ResourceEstimate,
+    ceiling: Option<&ResourceCeiling>,
+) -> bool {
+    let Some(ceiling) = ceiling else {
+        return true;
+    };
+    options_within_ceiling(estimate.usd.as_ref(), ceiling.max_usd.as_ref())
+        && options_within_ceiling(
+            estimate.input_tokens.as_ref(),
+            ceiling.max_input_tokens.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.output_tokens.as_ref(),
+            ceiling.max_output_tokens.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.wall_clock_ms.as_ref(),
+            ceiling.max_wall_clock_ms.as_ref(),
+        )
+        && options_within_ceiling(
+            estimate.output_bytes.as_ref(),
+            ceiling.max_output_bytes.as_ref(),
+        )
+        && match ceiling.sandbox.as_ref() {
+            Some(sandbox) => {
+                options_within_ceiling(
+                    estimate.network_egress_bytes.as_ref(),
+                    sandbox.network_egress_bytes.as_ref(),
+                ) && options_within_ceiling(
+                    estimate.process_count.as_ref(),
+                    sandbox.process_count.as_ref(),
+                )
+            }
+            None => true,
+        }
+}
+
+fn options_within_ceiling<T>(estimate: Option<&T>, maximum: Option<&T>) -> bool
+where
+    T: PartialOrd,
+{
+    match (estimate, maximum) {
+        (Some(estimate), Some(maximum)) => estimate <= maximum,
+        (None, Some(_)) => false,
+        _ => true,
+    }
+}
+
+pub(crate) fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> bool {
+    lease.status == CapabilityLeaseStatus::Active
+        && lease.scope.invocation_id == context.invocation_id
+        && !lease_is_expired(lease)
+        && lease.grant.constraints.max_invocations != Some(0)
+}
+
+pub(crate) fn ensure_claimable(
+    lease: &CapabilityLease,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    if lease.status != CapabilityLeaseStatus::Active {
+        return Err(CapabilityLeaseError::InactiveLease {
+            lease_id,
+            status: lease.status,
+        });
+    }
+    if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
+        return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+    }
+    ensure_not_expired_or_exhausted(lease)
+}
+
+pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    match lease.status {
+        CapabilityLeaseStatus::Active
+        | CapabilityLeaseStatus::Claimed
+        | CapabilityLeaseStatus::Dispatching => {}
+        CapabilityLeaseStatus::Consumed => {
+            return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
+        }
+        CapabilityLeaseStatus::Revoked => {
+            return Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            });
+        }
+    }
+
+    // Allow a fingerprinted lease to be consumed when Claimed OR Dispatching.
+    if lease.invocation_fingerprint.is_some()
+        && !matches!(
+            lease.status,
+            CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+        )
+    {
+        return Err(CapabilityLeaseError::UnclaimedFingerprintLease { lease_id });
+    }
+
+    ensure_not_expired_or_exhausted(lease)
+}
+
+/// Applies the `begin_dispatch_claimed` state-transition rule to a lease in
+/// place.
+///
+/// Requires `Claimed` status, a matching invocation fingerprint, and that the
+/// lease is neither expired nor exhausted; on success sets status to
+/// `Dispatching`.
+///
+/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
+/// delegate to this function so the transition predicate has a single source of
+/// truth. Each store handles its own persistence / compare-and-swap mechanics
+/// around the call.
+pub(crate) fn apply_begin_dispatch_claimed_transition(
+    lease: &mut CapabilityLease,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    if lease.status != CapabilityLeaseStatus::Claimed {
+        return Err(CapabilityLeaseError::InactiveLease {
+            lease_id,
+            status: lease.status,
+        });
+    }
+    if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
+        return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+    }
+    ensure_not_expired_or_exhausted(lease)?;
+    lease.status = CapabilityLeaseStatus::Dispatching;
+    Ok(())
+}
+
+/// Applies the `abort_dispatch_claimed` state-transition rule to a lease in
+/// place.
+///
+/// `Dispatching → Claimed`; no-op if already `Claimed`; returns
+/// `InactiveLease` for any other status.
+///
+/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
+/// delegate to this function so the transition predicate has a single source of
+/// truth. Each store handles its own persistence / compare-and-swap mechanics
+/// around the call.
+pub(crate) fn apply_abort_dispatch_claimed_transition(
+    lease: &mut CapabilityLease,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    match lease.status {
+        CapabilityLeaseStatus::Dispatching => {
+            lease.status = CapabilityLeaseStatus::Claimed;
+        }
+        CapabilityLeaseStatus::Claimed => {
+            // Already Claimed — no-op.
+        }
+        _ => {
+            return Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_not_expired_or_exhausted(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    if lease_is_expired(lease) {
+        return Err(CapabilityLeaseError::ExpiredLease { lease_id });
+    }
+
+    if lease.grant.constraints.max_invocations == Some(0) {
+        return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
+    }
+
+    Ok(())
+}
+
+fn lease_is_expired(lease: &CapabilityLease) -> bool {
+    lease
+        .grant
+        .constraints
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+}
+
+pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id
+        && left.user_id == right.user_id
+        && left.agent_id == right.agent_id
+        && left.project_id == right.project_id
+        && left.mission_id == right.mission_id
+        && left.thread_id == right.thread_id
+}
+
+// ── Lease path helpers ────────────────────────────────────────
+//
+// All helpers return [`ScopedPath`] strings under the `/authorization`
+// mount alias. The [`MountView`](ironclaw_host_api::MountView) granted by
+// composition resolves the alias to a tenant/user-scoped
+// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend op —
+// so the within-tenant scope (agent/project/mission/thread/invocation)
+// stays in the path while the leading `tenants/<tenant_id>/users/<user_id>`
+// prefix is the MountView's responsibility, not this crate's.
+//
+// Layout:
+//
+// ```text
+// /authorization/leases/<within-tenant-scope>/<invocation_id>/<lease_id>.json
+// /authorization/leases/<within-tenant-scope>/_lease_index.json
+// ```
+//
+// where `<within-tenant-scope>` is `[agents/<agent_id>/][projects/<project_id>/][missions/<mission_id>/][threads/<thread_id>]`.
+
+const LEASES_PREFIX: &str = "/authorization/leases";
+
+fn lease_path(
+    scope: &ResourceScope,
+    lease_id: CapabilityGrantId,
+) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/{}/{lease_id}.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
+        scope.invocation_id,
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn lease_index_path(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/_lease_index.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
+    ))
+    .map_err(lease_host_api_error)
+}
+
+fn lease_owner_prefix(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{}", LEASES_PREFIX, within_tenant_scope(scope),))
+        .map_err(lease_host_api_error)
+}
+
+/// Within-tenant path segment carrying the parts of the resource scope that
+/// are *not* the tenant/user identity (those move to the MountView). Always
+/// renders at least one segment (`scope`) so the lease prefix stays a
+/// non-empty directory the backend can `list_dir`.
+fn within_tenant_scope(scope: &ResourceScope) -> String {
+    let mut segments = Vec::new();
+    if let Some(agent_id) = &scope.agent_id {
+        segments.push(format!("agents/{agent_id}"));
+    }
+    if let Some(project_id) = &scope.project_id {
+        segments.push(format!("projects/{project_id}"));
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        segments.push(format!("missions/{mission_id}"));
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        segments.push(format!("threads/{thread_id}"));
+    }
+    if segments.is_empty() {
+        "scope".to_string()
+    } else {
+        segments.join("/")
+    }
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Used when reconstructing
+/// a child path after `list_dir` (which returns
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath)s) so the per-op ACL
+/// enforced by [`ScopedFilesystem`] still runs on the follow-up `get`.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{leaf}", prefix.as_str().trim_end_matches('/'),))
+        .map_err(lease_host_api_error)
+}
+
+fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec_pretty(value).map_err(|error| CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    })
+}
+
+fn deserialize<T>(bytes: &[u8]) -> Result<T, CapabilityLeaseError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_slice(bytes).map_err(|error| CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    })
+}
+
+fn lease_host_api_error(error: HostApiError) -> CapabilityLeaseError {
+    CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    }
+}
+
+fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
+    // Preserve the typed `VersionMismatch` signal so the CAS retry loop in
+    // `update_lease_cas` can detect and retry. Every other backend error
+    // collapses into the opaque `Persistence` variant — the redacted
+    // `FilesystemError::Display` is safe to surface across a tenant boundary.
+    if matches!(error, FilesystemError::VersionMismatch { .. }) {
+        return CapabilityLeaseError::VersionMismatch;
+    }
+    CapabilityLeaseError::Persistence {
+        reason: error.to_string(),
+    }
+}
+
+fn is_not_found(error: &FilesystemError) -> bool {
+    matches!(error, FilesystemError::NotFound { .. })
+}
+
+// ── Indexed projections (defense in depth) ─────────────────────
+//
+// Path-prefix scoping via the caller's [`MountView`] is the primary
+// tenant-isolation boundary; the indexed `tenant_id` projection added on
+// every lease/index write is belt-and-suspenders so an admin-tier query
+// can filter explicitly by tenant, and a path-rewriting bug surfaces as
+// a query-time mismatch rather than silent cross-tenant leakage. See
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+
+/// Index key projected on every lease and lease-index entry. Production
+/// reads never go through this key directly — path-prefix scoping
+/// handles routing — but it is available for admin-tier queries.
+fn index_key_tenant_id() -> IndexKey {
+    IndexKey::new("tenant_id").unwrap_or_else(|_| {
+        unreachable!("authorization index key `tenant_id` must be a simple identifier")
+    })
+}
+
+fn index_name_authorization_tenant() -> IndexName {
+    IndexName::new("authorization_by_tenant").unwrap_or_else(|_| {
+        unreachable!(
+            "authorization index name `authorization_by_tenant` must be a simple identifier"
+        )
+    })
+}
+
+/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
+/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// across the mount lifetime; mirrors the engine/processes stores'
+/// `ensure_*_index` shape so byte-only backends degrade gracefully
+/// instead of failing closed.
+async fn ensure_tenant_id_index<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    prefix: &ScopedPath,
+) -> Result<(), CapabilityLeaseError>
+where
+    F: RootFilesystem,
+{
+    let spec = IndexSpec::new(
+        index_name_authorization_tenant(),
+        vec![index_key_tenant_id()],
+        IndexKind::Exact,
+    );
+    match filesystem.ensure_index(scope, prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(lease_persistence_error(error)),
+    }
+}

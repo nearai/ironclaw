@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides batch_update",
+  "description": "Execute raw Slides API batchUpdate requests.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "requests"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "description": "Raw Slides API request object."
+      },
+      "description": "Slides API request objects."
+    }
+  },
+  "additionalProperties": false
+}

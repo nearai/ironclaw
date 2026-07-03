@@ -17,7 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{
+use ironclaw_llm::{
     ChatMessage, CompletionRequest, FinishReason, Role, ToolCall, ToolCompletionRequest,
     ToolDefinition,
 };
@@ -232,6 +232,8 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                                 arguments: serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(serde_json::Value::Object(Default::default())),
                                 reasoning: None,
+                                signature: None,
+                                arguments_parse_error: None,
                             })
                             .collect();
                         Ok(ChatMessage::assistant_with_tool_calls(
@@ -249,6 +251,8 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,
+                    reasoning: None,
+                    reasoning_details: None,
                 }),
             }
         })
@@ -595,7 +599,7 @@ pub async fn chat_completions_handler(
 /// proper HTTP errors instead of SSE error events. True token streaming can be
 /// added later by extending `LlmProvider` with a `complete_stream()` method.
 async fn handle_streaming(
-    llm: Arc<dyn crate::llm::LlmProvider>,
+    llm: Arc<dyn ironclaw_llm::LlmProvider>,
     req: OpenAiChatRequest,
     has_tools: bool,
 ) -> Result<Response, (StatusCode, Json<OpenAiErrorResponse>)> {
@@ -610,8 +614,8 @@ async fn handle_streaming(
     // Since streaming is simulated (LlmProvider returns complete responses),
     // this lets us return proper HTTP errors on failure.
     enum LlmResult {
-        Simple(crate::llm::CompletionResponse),
-        WithTools(crate::llm::ToolCompletionResponse),
+        Simple(ironclaw_llm::CompletionResponse),
+        WithTools(ironclaw_llm::ToolCompletionResponse),
     }
 
     let llm_result = if has_tools {
@@ -956,6 +960,8 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "rust"}),
             reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
         }];
 
         let converted = convert_tool_calls_to_openai(&calls);

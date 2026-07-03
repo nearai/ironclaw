@@ -118,6 +118,14 @@ while run is active:
     stop
 ```
 
+Capability-result transcript records carry a strict safe summary for portable
+metadata, logs, checkpoints, and fallback replay. When the host has richer
+model-facing recovery information, it may attach a bounded
+`ModelVisibleToolObservation` side channel to the tool-result reference. That
+observation is model-visible untrusted tool output, not a replacement for
+`LoopSafeSummary`, and must be validated/redacted before it can be replayed to
+the model.
+
 Equivalent pseudocode:
 
 ```rust
@@ -176,7 +184,7 @@ This facade composes lower-level services but does not move ownership into the l
 
 ## 6. Capability tool wrappers
 
-Visible capabilities become model-visible tool schemas for the current run.
+Visible capabilities become compact model-visible tool schemas for the current run.
 
 ```rust
 CapabilityDescriptor
@@ -186,6 +194,12 @@ CapabilityDescriptor
   -> concurrency policy
   -> result shaping hints
 ```
+
+The loop also exposes `capability_info` as a synthetic read-only provider tool.
+Use it for progressive disclosure when the model needs names, required fields,
+effect notes, or the full input schema for a currently visible capability. It
+does not dispatch through `HostRuntime` and cannot inspect capabilities outside
+the current visible surface.
 
 Tool execution is a wrapper around `CapabilityHost`:
 
@@ -334,7 +348,7 @@ The visible capability surface may change after extension activation, auth compl
 The loop should request a versioned capability surface before each model call:
 
 ```text
-visible_capabilities(run) -> { version, descriptors }
+visible_capabilities(run) -> { version, capabilities }
 ```
 
 If the version changes, the loop regenerates model-visible tool schemas. The loop does not discover extensions directly.
@@ -435,7 +449,7 @@ EnterpriseDedicated profile:
   shell.run             -> org-dedicated runner/container/VM
 ```
 
-The loop only sees visible capability descriptors. The profile resolver and runtime backends decide where/how they execute.
+The loop only sees visible capabilities with redacted descriptors, access status, and selected resource estimates. The profile resolver and runtime backends decide where/how they execute.
 
 ---
 
@@ -461,7 +475,7 @@ The first implementation should include:
 
 - provider-agnostic `Reply | CapabilityCalls` normalization
 - streaming assistant message events
-- capability wrapper generation from visible descriptors
+- capability wrapper generation from visible capabilities
 - sequential/parallel batch execution
 - structured approval/auth/resource suspension
 - checkpoints at assistant-finalized, batch-start, result-appended, and blocked states

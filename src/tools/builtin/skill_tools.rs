@@ -25,6 +25,7 @@ const MAX_CHAIN_DEPS: usize = 10;
 const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
+const SKILL_SCOPE_OWNER_METADATA_KEY: &str = "skill_scope_owner_id";
 
 /// Hard cap on the chain-installer BFS queue to prevent unbounded growth
 /// from nested `requires.skills` fan-out. Even though we stop enqueueing
@@ -32,6 +33,7 @@ const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
 /// case a future refactor (parallel fetching, retries) changes that
 /// invariant.
 const MAX_CHAIN_QUEUE: usize = MAX_CHAIN_DEPS * 10;
+const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
 
 #[derive(Debug, Clone, Error)]
 #[error("{message}")]
@@ -197,6 +199,27 @@ fn registry_write(
         );
         poison.into_inner()
     })
+}
+
+async fn registry_for_context(
+    registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+    ctx: &JobContext,
+) -> Result<Arc<std::sync::RwLock<SkillRegistry>>, ToolError> {
+    let Some(owner_id) = ctx
+        .metadata
+        .get(SKILL_SCOPE_OWNER_METADATA_KEY)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Arc::clone(registry));
+    };
+
+    let mut scoped = {
+        let guard = registry_read(registry);
+        guard.clone_config_for_tenant_user_scope(owner_id, &ctx.user_id)
+    };
+    scoped.discover_all().await;
+    Ok(Arc::new(std::sync::RwLock::new(scoped)))
 }
 
 async fn install_missing_skill_dependencies<F, Fut>(
@@ -464,6 +487,76 @@ fn append_chain_install_report_fields(output: &mut serde_json::Value, report: &C
     }
 }
 
+fn normalize_install_source_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn loaded_skill_name_for_source_url(
+    registry: &SkillRegistry,
+    requested_url: &str,
+) -> Option<String> {
+    let requested_url = normalize_install_source_url(requested_url);
+    if requested_url.is_empty() {
+        return None;
+    }
+
+    registry
+        .skills()
+        .iter()
+        .find_map(|skill| {
+            let skill_dir = match &skill.source {
+                ironclaw_skills::SkillSource::Installed(path) => path,
+                _ => return None,
+            };
+            installed_source_url_matches(skill_dir, &requested_url)
+                .then(|| skill.name().to_string())
+        })
+        .or_else(|| installed_skill_name_for_source_url_on_disk(registry, &requested_url))
+}
+
+fn installed_source_url_matches(skill_dir: &Path, requested_url: &str) -> bool {
+    let metadata_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
+    let Some(metadata) = std::fs::read(metadata_path).ok().and_then(|bytes| {
+        serde_json::from_slice::<ironclaw_skills::registry::InstalledSkillMetadata>(&bytes).ok()
+    }) else {
+        return false;
+    };
+    metadata
+        .source_url
+        .as_deref()
+        .is_some_and(|source_url| normalize_install_source_url(source_url) == requested_url)
+}
+
+fn installed_skill_name_for_source_url_on_disk(
+    registry: &SkillRegistry,
+    requested_url: &str,
+) -> Option<String> {
+    let entries = std::fs::read_dir(registry.install_target_dir()).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if installed_source_url_matches(&path, requested_url)
+            && let Some(name) = entry.file_name().to_str().filter(|name| !name.is_empty())
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn installed_skill_dir_by_name(registry: &SkillRegistry, name: &str) -> Option<PathBuf> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => {
+            let dir = registry.install_target_dir().join(name);
+            dir.join("SKILL.md").is_file().then_some(dir)
+        }
+        _ => None,
+    }
+}
+
 // ── skill_list ──────────────────────────────────────────────────────────
 
 pub struct SkillListTool {
@@ -502,16 +595,16 @@ impl Tool for SkillListTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let verbose = params
             .get("verbose")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
-        let guard = self
-            .registry
+        let guard = registry
             .read()
             .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
@@ -601,10 +694,11 @@ impl Tool for SkillSearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let query = require_str(&params, "query")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
         // Search the ClawHub catalog (async, best-effort)
         let catalog_outcome = self.catalog.search(query).await;
@@ -618,8 +712,7 @@ impl Tool for SkillSearchTool {
 
         // Search locally loaded skills
         let installed_names: Vec<String> = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -652,8 +745,7 @@ impl Tool for SkillSearchTool {
         // Find matching local skills (simple substring match)
         let query_lower = query.to_lowercase();
         let local_matches: Vec<serde_json::Value> = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -781,10 +873,11 @@ impl Tool for SkillInstallTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
         let install_dependencies = params
             .get("install_dependencies")
             .and_then(|v| v.as_bool())
@@ -795,16 +888,37 @@ impl Tool for SkillInstallTool {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        // Idempotent: if a skill with this name is already loaded (from any
+        // Idempotent: if the requested skill is already loaded (from any
         // source — local SKILL.md, bundled, previously installed), avoid
-        // reinstalling the top-level skill. Dependency installs are not a
-        // no-op: when explicitly requested, walk the loaded skill's companion
-        // list instead of returning early.
+        // reinstalling the top-level skill. URL installs can have a suggested
+        // `name` derived from the repository slug instead of the final parsed
+        // skill name, so also match against persisted install metadata.
+        // Dependency installs are not a no-op: when explicitly requested,
+        // walk the loaded skill's companion list instead of returning early.
         let loaded_required_skills = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+
+            if !install_dependencies {
+                if let Some(url) = params.get("url").and_then(|v| v.as_str())
+                    && let Some(installed_name) = loaded_skill_name_for_source_url(&guard, url)
+                {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(&installed_name, &report),
+                        start.elapsed(),
+                    ));
+                }
+                if installed_skill_dir_by_name(&guard, name).is_some() {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(name, &report),
+                        start.elapsed(),
+                    ));
+                }
+            }
+
             if let Some(loaded_skill) = guard.find_by_name(name) {
                 let required_skills = loaded_skill.manifest.requires.skills.clone();
                 if install_dependencies && !required_skills.is_empty() {
@@ -823,7 +937,7 @@ impl Tool for SkillInstallTool {
 
         if let Some(required_skills) = loaded_required_skills {
             let chain_report = install_missing_skill_dependencies(
-                &self.registry,
+                &registry,
                 self.catalog.registry_url(),
                 required_skills,
                 |url| async move { fetch_skill_payload(&url).await },
@@ -871,8 +985,7 @@ impl Tool for SkillInstallTool {
 
         // Check for duplicates and get install_dir under a brief read lock.
         let (user_dir, skill_name_from_parse, install_content) = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
@@ -883,11 +996,13 @@ impl Tool for SkillInstallTool {
                 )
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-            if guard.has(&skill_name) {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Skill '{}' already exists",
-                    skill_name
-                )));
+            if guard.has(&skill_name) || installed_skill_dir_by_name(&guard, &skill_name).is_some()
+            {
+                let report = ChainInstallReport::default();
+                return Ok(ToolOutput::success(
+                    build_already_installed_output(&skill_name, &report),
+                    start.elapsed(),
+                ));
             }
 
             (
@@ -920,7 +1035,7 @@ impl Tool for SkillInstallTool {
             AlreadyInstalled,
         }
         let commit_result: CommitResult = {
-            let mut guard = registry_write(&self.registry);
+            let mut guard = registry_write(&registry);
             if guard.has(&skill_name) {
                 CommitResult::AlreadyInstalled
             } else {
@@ -966,8 +1081,7 @@ impl Tool for SkillInstallTool {
             ChainInstallReport::default()
         } else if !install_dependencies {
             let missing_required_skills = {
-                let guard = self
-                    .registry
+                let guard = registry
                     .read()
                     .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
                 required_skills
@@ -982,7 +1096,7 @@ impl Tool for SkillInstallTool {
             }
         } else {
             install_missing_skill_dependencies(
-                &self.registry,
+                &registry,
                 self.catalog.registry_url(),
                 required_skills,
                 |url| async move { fetch_skill_payload(&url).await },
@@ -1001,19 +1115,29 @@ impl Tool for SkillInstallTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // No-op shortcut: if a skill with this name is already loaded (bundled,
-        // user, workspace, or previously installed), `execute` will return
+        // No-op shortcut: if a skill is already loaded (bundled, user,
+        // workspace, or previously installed), `execute` will return
         // `already_installed` without touching the catalog. Asking for approval
         // on a guaranteed no-op is pure friction, so we mirror the idempotent
-        // path here. Dependency-chain installs may still fetch companion
-        // skills, so they must go through the approval path below.
-        if !install_deps
-            && let Some(name) = params.get("name").and_then(|v| v.as_str())
-            && !name.is_empty()
-            && let Ok(guard) = self.registry.read()
-            && guard.has(name)
-        {
-            return ApprovalRequirement::Never;
+        // path here. URL installs may use a repository-derived `name`, so also
+        // match the request URL against persisted install metadata.
+        // Dependency-chain installs may still fetch companion skills, so they
+        // must go through the approval path below.
+        if !install_deps && let Ok(guard) = self.registry.read() {
+            let name_is_loaded = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .is_some_and(|name| {
+                    guard.has(name) || installed_skill_dir_by_name(&guard, name).is_some()
+                });
+            let source_url_is_loaded = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|url| loaded_skill_name_for_source_url(&guard, url).is_some());
+            if name_is_loaded || source_url_is_loaded {
+                return ApprovalRequirement::Never;
+            }
         }
 
         // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
@@ -1759,6 +1883,7 @@ async fn fetch_github_repo_payload(
         install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
             source_url: Some(source_url.to_string()),
             source_subdir: bundle.bundle_subdir.or(repo.subdir),
+            ..Default::default()
         }),
     })
 }
@@ -1778,6 +1903,7 @@ pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload
             install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
                 source_url: Some(url.to_string()),
                 source_subdir: None,
+                ..Default::default()
             }),
             ..SkillInstallPayload::default()
         });
@@ -1859,15 +1985,15 @@ impl Tool for SkillRemoveTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let registry = registry_for_context(&self.registry, ctx).await?;
 
         // Validate removal and get the filesystem path under a brief read lock.
         let skill_path = {
-            let guard = self
-                .registry
+            let guard = registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -1882,8 +2008,7 @@ impl Tool for SkillRemoveTool {
 
         // Remove from in-memory registry under a brief write lock.
         {
-            let mut guard = self
-                .registry
+            let mut guard = registry
                 .write()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
             guard
@@ -2033,6 +2158,139 @@ mod tests {
             })),
             ApprovalRequirement::Always,
             "install_dependencies=true must prompt even if the main skill is loaded",
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_url_duplicate_is_idempotent_without_approval() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        let source_url = "https://github.com/Pika-Labs/Pika-Skills";
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_bundle_to_disk(
+                &dir,
+                "pikastream-video-meeting",
+                &skill_content("pikastream-video-meeting", &[]),
+                &[],
+                Some(&ironclaw_skills::registry::InstalledSkillMetadata {
+                    source_url: Some(source_url.to_string()),
+                    source_subdir: None,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        let params = serde_json::json!({
+            "name": "pika-skills",
+            "url": source_url,
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+
+        let output = tool
+            .execute(params, &JobContext::default())
+            .await
+            .expect("duplicate URL install should be a no-op");
+        assert_eq!(output.result["status"], "already_installed");
+        assert_eq!(output.result["name"], "pikastream-video-meeting");
+        assert!(
+            output.result["message"]
+                .as_str()
+                .unwrap()
+                .contains("no install needed")
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_disk_duplicate_is_idempotent_without_loaded_registry() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        let source_url = "https://github.com/Pika-Labs/Pika-Skills";
+        {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_bundle_to_disk(
+                &dir,
+                "pikastream-video-meeting",
+                &skill_content("pikastream-video-meeting", &[]),
+                &[],
+                Some(&ironclaw_skills::registry::InstalledSkillMetadata {
+                    source_url: Some(source_url.to_string()),
+                    source_subdir: None,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("prepare should succeed");
+        }
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let params = serde_json::json!({
+            "name": "pikastream-video-meeting",
+            "url": source_url,
+        });
+
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+        let output = tool
+            .execute(params, &JobContext::default())
+            .await
+            .expect("disk duplicate install should be a no-op");
+        assert_eq!(output.result["status"], "already_installed");
+        assert_eq!(output.result["name"], "pikastream-video-meeting");
+    }
+
+    #[tokio::test]
+    async fn skill_install_uses_context_scoped_registry_when_present() {
+        let registry = test_registry();
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let mut ctx = JobContext::with_user("alice", "chat", "test session");
+        ctx.metadata = serde_json::json!({
+            SKILL_SCOPE_OWNER_METADATA_KEY: "owner",
+        });
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "scoped-chat-skill",
+                    "content": skill_content("scoped-chat-skill", &[]),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("scoped install should succeed");
+
+        assert_eq!(output.result["status"], "installed");
+        assert!(
+            !registry.read().unwrap().has("scoped-chat-skill"),
+            "chat installs for scoped users must not leak into the shared registry"
+        );
+
+        let mut scoped = registry
+            .read()
+            .unwrap()
+            .clone_config_for_tenant_user_scope("owner", "alice");
+        scoped.discover_all().await;
+        assert!(
+            scoped.has("scoped-chat-skill"),
+            "activation must find chat-installed skills in the same scoped registry"
+        );
+
+        let mut other_user = registry
+            .read()
+            .unwrap()
+            .clone_config_for_tenant_user_scope("owner", "bob");
+        other_user.discover_all().await;
+        assert!(
+            !other_user.has("scoped-chat-skill"),
+            "scoped installs must stay isolated from other users"
         );
     }
 

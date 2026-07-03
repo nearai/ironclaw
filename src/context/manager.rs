@@ -660,7 +660,7 @@ mod tests {
         // Update memory by adding a message
         manager
             .update_memory(job_id, |m| {
-                m.add_message(crate::llm::ChatMessage::user("hello from test"));
+                m.add_message(ironclaw_llm::ChatMessage::user("hello from test"));
             })
             .await
             .unwrap();

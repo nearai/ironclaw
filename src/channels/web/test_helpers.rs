@@ -45,8 +45,9 @@ use crate::tools::ToolRegistry;
 /// [`start`](Self::start) to also bind an Axum server on a random port.
 pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
-    llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    llm_provider: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     user_id: String,
+    tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
 }
 
 impl Default for TestGatewayBuilder {
@@ -55,6 +56,7 @@ impl Default for TestGatewayBuilder {
             msg_tx: None,
             llm_provider: None,
             user_id: "test-user".to_string(),
+            tool_registry: None,
         }
     }
 }
@@ -73,7 +75,7 @@ impl TestGatewayBuilder {
     }
 
     /// Set the LLM provider (needed for OpenAI-compatible API tests).
-    pub fn llm_provider(mut self, provider: Arc<dyn crate::llm::LlmProvider>) -> Self {
+    pub fn llm_provider(mut self, provider: Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
         self.llm_provider = Some(provider);
         self
     }
@@ -81,6 +83,14 @@ impl TestGatewayBuilder {
     /// Override the user ID (default: `"test-user"`).
     pub fn user_id(mut self, id: impl Into<String>) -> Self {
         self.user_id = id.into();
+        self
+    }
+
+    /// Attach a `ToolRegistry` to the gateway. Tests that need to
+    /// exercise registry-aware handler paths (collision rejection,
+    /// permission filtering, etc.) inject one here.
+    pub fn tool_registry(mut self, registry: Arc<crate::tools::ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
         self
     }
 
@@ -96,7 +106,7 @@ impl TestGatewayBuilder {
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
-            tool_registry: None,
+            tool_registry: self.tool_registry,
             store: None,
             settings_cache: None,
             job_manager: None,

@@ -1,0 +1,1453 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_authorization::*;
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, InMemoryBackend, LocalFilesystem, RootFilesystem,
+    ScopedFilesystem,
+};
+use ironclaw_host_api::*;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+#[tokio::test]
+async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    leases.issue(lease.clone()).await.unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(decision, Decision::Allow { .. }));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease.grant.id)
+            .await
+            .unwrap(),
+        lease
+    );
+}
+
+#[tokio::test]
+async fn lease_backed_authorizer_with_trust_denies_when_authority_ceiling_excludes_effect() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let mut descriptor = descriptor(capability.clone());
+    descriptor.effects = vec![EffectKind::DispatchCapability, EffectKind::Network];
+
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                capability,
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            ),
+        ))
+        .await
+        .unwrap();
+    let trust = trust_decision(vec![EffectKind::DispatchCapability], None);
+
+    let decision = LeaseBackedAuthorizer::new(&leases)
+        .authorize_dispatch_with_trust(&context, &descriptor, &ResourceEstimate::default(), &trust)
+        .await;
+
+    assert_eq!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::PolicyDenied
+        }
+    );
+}
+
+#[tokio::test]
+async fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    leases.issue(lease).await.unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let claimed = leases
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let other_fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "tampered"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let err = leases
+        .claim(&context.resource_scope, lease_id, &other_fingerprint)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::FingerprintMismatch { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn lease_authorizer_hides_leases_across_tenant_scope() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let other_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant2").unwrap(),
+        user_id: context.resource_scope.user_id.clone(),
+        agent_id: None,
+        project_id: context.resource_scope.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: context.invocation_id,
+    };
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+
+    leases
+        .issue(CapabilityLease::new(
+            other_scope,
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn lease_store_hides_leases_across_agent_scope() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.agent_id = Some(AgentId::new("agent-a").unwrap());
+    context.resource_scope.agent_id = context.agent_id.clone();
+    let mut other_scope = context.resource_scope.clone();
+    other_scope.agent_id = Some(AgentId::new("agent-b").unwrap());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    assert!(leases.get(&other_scope, lease_id).await.is_none());
+    assert_eq!(leases.leases_for_scope(&other_scope).await, Vec::new());
+    assert!(matches!(
+        leases.revoke(&other_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::UnknownLease { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lease_store_hides_leases_across_project_scope() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let mut other_scope = context.resource_scope.clone();
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    assert!(leases.get(&other_scope, lease_id).await.is_none());
+    assert_eq!(leases.leases_for_scope(&other_scope).await, Vec::new());
+    assert!(matches!(
+        leases.revoke(&other_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::UnknownLease { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lease_authorizer_denies_other_agent_context() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.agent_id = Some(AgentId::new("agent-a").unwrap());
+    context.resource_scope.agent_id = context.agent_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let mut other_context = context.clone();
+    other_context.agent_id = Some(AgentId::new("agent-b").unwrap());
+    other_context.resource_scope.agent_id = other_context.agent_id.clone();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&other_context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn revocation_is_scoped_to_tenant_and_user() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let other_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant2").unwrap(),
+        user_id: context.resource_scope.user_id.clone(),
+        agent_id: None,
+        project_id: context.resource_scope.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: context.invocation_id,
+    };
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease.clone()).await.unwrap();
+
+    let err = leases.revoke(&other_scope, lease_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn lease_authorizer_denies_invalid_context_before_grant_match() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let mut context = execution_context(CapabilitySet::default());
+    context.tenant_id = TenantId::new("tenant2").unwrap();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    leases
+        .issue(CapabilityLease::new(
+            context.resource_scope.clone(),
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::InternalInvariantViolation
+        }
+    ));
+}
+
+#[tokio::test]
+async fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let mut next_invocation_context = execution_context(CapabilitySet::default());
+    next_invocation_context.tenant_id = context.tenant_id.clone();
+    next_invocation_context.user_id = context.user_id.clone();
+    next_invocation_context.project_id = context.project_id.clone();
+    next_invocation_context.resource_scope.tenant_id = context.tenant_id.clone();
+    next_invocation_context.resource_scope.user_id = context.user_id.clone();
+    next_invocation_context.resource_scope.project_id = context.project_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    leases.issue(lease).await.unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(
+            &next_invocation_context,
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(2);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let after_first = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    assert_eq!(after_first.status, CapabilityLeaseStatus::Active);
+    assert_eq!(after_first.grant.constraints.max_invocations, Some(1));
+
+    let after_second = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    assert_eq!(after_second.status, CapabilityLeaseStatus::Consumed);
+    assert_eq!(after_second.grant.constraints.max_invocations, Some(0));
+    assert!(matches!(
+        leases.consume(&context.resource_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::ExhaustedLease { lease_id: id } if id == lease_id
+    ));
+}
+
+#[tokio::test]
+async fn consumed_lease_no_longer_authorizes_dispatch() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+    leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+#[tokio::test]
+async fn fingerprinted_lease_cannot_be_consumed_before_claim() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let err = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn fingerprinted_lease_without_invocation_limit_is_consumed_after_one_use() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    leases
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    let consumed = leases
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
+    assert!(matches!(
+        leases
+            .claim(&context.resource_scope, lease_id, &fingerprint)
+            .await
+            .unwrap_err(),
+        CapabilityLeaseError::InactiveLease { lease_id: id, status: CapabilityLeaseStatus::Consumed }
+            if id == lease_id
+    ));
+}
+
+#[tokio::test]
+async fn expired_lease_no_longer_authorizes_or_consumes() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.expires_at = Some(timestamp("2000-01-01T00:00:00Z"));
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+    assert!(matches!(
+        leases.consume(&context.resource_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::ExpiredLease { lease_id: id } if id == lease_id
+    ));
+}
+
+#[tokio::test]
+async fn consume_is_scoped_to_exact_invocation() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let mut next_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
+    next_invocation_scope.tenant_id = context.resource_scope.tenant_id.clone();
+    next_invocation_scope.user_id = context.resource_scope.user_id.clone();
+    next_invocation_scope.project_id = context.resource_scope.project_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+    leases.issue(lease.clone()).await.unwrap();
+
+    let err = leases
+        .consume(&next_invocation_scope, lease_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        leases
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(3);
+    let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    let lease_id = lease.grant.id;
+
+    FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        .issue(lease.clone())
+        .await
+        .unwrap();
+    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+
+    assert_eq!(
+        reloaded.get(&context.resource_scope, lease_id).await,
+        Some(lease)
+    );
+    assert_eq!(
+        reloaded.leases_for_scope(&context.resource_scope).await,
+        vec![
+            reloaded
+                .get(&context.resource_scope, lease_id)
+                .await
+                .unwrap()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocation_roots() {
+    // Wrap the underlying [`LocalFilesystem`] in a [`CountingFilesystem`]
+    // so we can assert that `leases_for_scope` reads the owner index
+    // rather than fanning out to `list_dir` per invocation. The
+    // [`ScopedFilesystem`] layer on top binds the `/authorization` alias
+    // to a tenant/user-scoped target — same as `engine_filesystem()`.
+    let counting = Arc::new(CountingFilesystem::new(local_filesystem_with_engine_mount()));
+    let fs = build_scoped_fs(
+        Arc::clone(&counting),
+        "/engine/tenants/test/users/test/authorization",
+    );
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let mut expected = Vec::new();
+
+    for _ in 0..3 {
+        let scope = execution_context(CapabilitySet::default()).resource_scope;
+        let lease = CapabilityLease::new(
+            scope,
+            grant_for(
+                descriptor.id.clone(),
+                Principal::Extension(context.extension_id.clone()),
+                vec![EffectKind::DispatchCapability],
+            ),
+        );
+        expected.push(lease.grant.id);
+        store.issue(lease).await.unwrap();
+    }
+
+    counting.reset_list_dir_calls();
+    let leases = store.leases_for_scope(&context.resource_scope).await;
+
+    let mut actual = leases
+        .into_iter()
+        .map(|lease| lease.grant.id)
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|lease_id| lease_id.as_uuid());
+    expected.sort_by_key(|lease_id| lease_id.as_uuid());
+    assert_eq!(actual, expected);
+    assert_eq!(
+        counting.list_dir_calls(),
+        0,
+        "indexed lease listing should not scan every invocation directory"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease).await.unwrap();
+
+    let claimed = store
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Claimed
+    );
+
+    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
+    assert_eq!(consumed.grant.constraints.max_invocations, Some(0));
+
+    let revoked = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        .revoke(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Revoked
+    );
+}
+
+#[tokio::test]
+async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint);
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease).await.unwrap();
+
+    let err = store
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn filesystem_fingerprinted_lease_without_invocation_limit_is_consumed_after_one_use() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "approved"}),
+    )
+    .unwrap();
+    let mut lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease).await.unwrap();
+
+    store
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
+    assert!(matches!(
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+            .claim(&context.resource_scope, lease_id, &fingerprint)
+            .await
+            .unwrap_err(),
+        CapabilityLeaseError::InactiveLease { lease_id: id, status: CapabilityLeaseStatus::Consumed }
+            if id == lease_id
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let mut other_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
+    other_invocation_scope.tenant_id = context.resource_scope.tenant_id.clone();
+    other_invocation_scope.user_id = context.resource_scope.user_id.clone();
+    other_invocation_scope.project_id = context.resource_scope.project_id.clone();
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease.clone()).await.unwrap();
+
+    assert_eq!(store.get(&other_invocation_scope, lease_id).await, None);
+    assert!(matches!(
+        store.revoke(&other_invocation_scope, lease_id).await.unwrap_err(),
+        CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
+    ));
+    assert_eq!(
+        store.get(&context.resource_scope, lease_id).await,
+        Some(lease)
+    );
+}
+
+/// Regression test for the systemic finding tracked in
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`:
+/// `FilesystemCapabilityLeaseStore` must enforce tenant isolation through
+/// the [`ScopedFilesystem`] mount permission boundary, not by hand-rolling
+/// `/engine/tenants/<tenant_id>/users/<user_id>/...` prefixes inside its
+/// path builders.
+///
+/// Two stores share one [`InMemoryBackend`] but are constructed with
+/// different [`MountView`]s — each resolves the `/authorization` alias to
+/// a distinct tenant-scoped [`VirtualPath`] subtree. Issuing a lease on
+/// tenant A under a `(user_id, project_id, invocation_id)` scope that
+/// tenant B *also* uses must NOT make that lease visible from tenant B.
+/// Before the migration to `&ScopedFilesystem<F>`, the store hand-coded
+/// the tenant + user prefix into every path string, so any composition
+/// layer that wrapped the backend without remembering to re-prefix would
+/// leak across tenants with the type system saying nothing — this test
+/// fails closed if that ever regresses.
+#[tokio::test]
+async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_a = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/a/users/alice/authorization",
+    );
+    let scoped_b = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/b/users/alice/authorization",
+    );
+    let store_a = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_a));
+    let store_b = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_b));
+
+    // Build a context whose `(user_id, project_id, invocation_id)` triple
+    // is reused verbatim across tenants. After the mount-view migration
+    // these identifiers no longer appear in the in-store path string
+    // (modulo project_id for the within-tenant subtree); cross-tenant
+    // routing is the MountView's responsibility.
+    let context_a = execution_context(CapabilitySet::default());
+    let mut context_b = context_a.clone();
+    // Same user/project/invocation; the only thing that should distinguish
+    // the two stores is the mount-time tenant prefix wired by composition.
+    context_b.tenant_id = TenantId::new("tenant-b-unused").unwrap();
+    context_b.resource_scope.tenant_id = context_b.tenant_id.clone();
+
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context_a.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context_a.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    store_a.issue(lease.clone()).await.unwrap();
+
+    // Tenant A sees its own lease.
+    assert_eq!(
+        store_a.get(&context_a.resource_scope, lease_id).await,
+        Some(lease),
+        "tenant A must see the lease it just issued",
+    );
+
+    // Tenant B must NOT see tenant A's lease, even when looking up the
+    // identical `(user_id, project_id, invocation_id)` scope from
+    // tenant A's request.
+    assert_eq!(
+        store_b.get(&context_a.resource_scope, lease_id).await,
+        None,
+        "tenant B must NOT see tenant A's lease (cross-tenant leak)",
+    );
+    assert!(
+        store_b
+            .leases_for_scope(&context_a.resource_scope)
+            .await
+            .is_empty(),
+        "tenant B leases_for_scope under (user, project, invocation) shared with tenant A must be empty",
+    );
+}
+
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// every `FilesystemCapabilityLeaseStore` lease write decorates its
+/// `Entry` with a `tenant_id` projection so an admin-tier query can
+/// filter explicitly by tenant and a path-rewriting bug surfaces as a
+/// query-time mismatch.
+///
+/// Issues a lease under tenant A's scope, then runs a raw
+/// `RootFilesystem::query` against the lease owner prefix with
+/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts a
+/// non-empty result; a query for a different tenant must return zero
+/// rows.
+#[tokio::test]
+async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection() {
+    use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-a/users/alice/authorization",
+    );
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped));
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    store.issue(lease).await.unwrap();
+
+    // Resolve the alias-relative owner prefix through the same MountView
+    // the store uses so the raw `query` targets the bytes the backend
+    // stored. The lease owner prefix is `/authorization/leases/projects/<id>`
+    // for our fixture scope.
+    let owner_alias = ironclaw_host_api::ScopedPath::new(format!(
+        "/authorization/leases/projects/{}",
+        context.resource_scope.project_id.as_ref().unwrap().as_str()
+    ))
+    .unwrap();
+    let virtual_prefix = scoped
+        .resolve(&context.resource_scope, &owner_alias)
+        .unwrap();
+    let tenant_key = IndexKey::new("tenant_id").unwrap();
+    let tenant_id_str = context.resource_scope.tenant_id.as_str().to_string();
+
+    let hit = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: IndexValue::Text(tenant_id_str),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !hit.is_empty(),
+        "tenant_id projection must surface the lease via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: IndexValue::Text("tenant-z".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant1's lease under tenant-z query; got {} rows",
+        miss.len(),
+    );
+}
+
+#[tokio::test]
+async fn revoked_lease_no_longer_authorizes_dispatch() {
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    leases.issue(lease).await.unwrap();
+    leases
+        .revoke(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+
+    let authorizer = LeaseBackedAuthorizer::new(&leases);
+    let decision = authorizer
+        .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+        .await;
+
+    assert!(matches!(
+        decision,
+        Decision::Deny {
+            reason: DenyReason::MissingGrant
+        }
+    ));
+}
+
+struct CountingFilesystem {
+    inner: LocalFilesystem,
+    list_dir_calls: Arc<AtomicUsize>,
+}
+
+impl CountingFilesystem {
+    fn new(inner: LocalFilesystem) -> Self {
+        Self {
+            inner,
+            list_dir_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn reset_list_dir_calls(&self) {
+        self.list_dir_calls.store(0, Ordering::SeqCst);
+    }
+
+    fn list_dir_calls(&self) -> usize {
+        self.list_dir_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for CountingFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
+
+    // After PR #3659 the trait default `get`/`put` are `Unsupported`.
+    // Forward to the inner LocalFilesystem (which implements them
+    // natively) so this counting wrapper keeps participating in the
+    // unified surface used by FilesystemCapabilityLeaseStore's read_lease
+    // / write_lease / read_lease_index / write_lease_index ops.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+}
+
+fn trust_decision(
+    allowed_effects: Vec<EffectKind>,
+    max_resource_ceiling: Option<ResourceCeiling>,
+) -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::sandbox(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects,
+            max_resource_ceiling,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
+    }
+}
+
+fn descriptor(id: CapabilityId) -> CapabilityDescriptor {
+    CapabilityDescriptor {
+        provider: ExtensionId::new(id.as_str().split('.').next().unwrap()).unwrap(),
+        id,
+        runtime: RuntimeKind::Wasm,
+        trust_ceiling: TrustClass::Sandbox,
+        description: "test".to_string(),
+        parameters_schema: serde_json::json!({"type": "object"}),
+        effects: vec![EffectKind::DispatchCapability],
+        default_permission: PermissionMode::Deny,
+        runtime_credentials: Vec::new(),
+        resource_profile: None,
+    }
+}
+
+fn grant_for(
+    capability: CapabilityId,
+    grantee: Principal,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilityGrant {
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee,
+        issued_by: Principal::HostRuntime,
+        constraints: GrantConstraints {
+            allowed_effects,
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    }
+}
+
+fn timestamp(value: &str) -> Timestamp {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap()
+}
+
+fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+    build_scoped_fs(
+        Arc::new(local_filesystem_with_engine_mount()),
+        "/engine/tenants/test/users/test/authorization",
+    )
+}
+
+/// Build a [`LocalFilesystem`] with a temp directory mounted at `/engine`
+/// so tests can target paths beneath it via `ScopedFilesystem`.
+fn local_filesystem_with_engine_mount() -> LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let engine_root = storage.join("engine");
+    std::fs::create_dir_all(&engine_root).unwrap();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(engine_root),
+    )
+    .unwrap();
+    fs
+}
+
+/// Build a [`ScopedFilesystem`] that mounts the `/authorization` alias onto
+/// `target_root` (a tenant/user-scoped subtree of the underlying backend)
+/// with full read/write/list/delete permissions. Multiple stores can share
+/// one backend by passing different `target_root` values — that's how the
+/// tenant-isolation regression test below constructs two disjoint
+/// `FilesystemCapabilityLeaseStore`s over a single `InMemoryBackend`.
+fn build_scoped_fs<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/authorization").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+fn execution_context(grants: CapabilitySet) -> ExecutionContext {
+    let invocation_id = InvocationId::new();
+    let resource_scope = ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        agent_id: resource_scope.agent_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust: TrustClass::Sandbox,
+        grants,
+        mounts: MountView::default(),
+        resource_scope,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TEST 3: FilesystemCapabilityLeaseStore persists Dispatching across
+// begin_dispatch_claimed / abort_dispatch_claimed / consume lifecycle.
+//
+// Covers the `begin_dispatch_claimed` → `Dispatching` transition (and its
+// persistence across store reload), `abort_dispatch_claimed` → back to
+// `Claimed` (and its persistence), and finally `begin_dispatch_claimed`
+// again followed by `consume` from the `Dispatching` state → `Consumed`
+// (and its persistence).  Prior test coverage stopped at issue/revoke/claim
+// /consume and never exercised the `Dispatching` status or its reload.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "dispatching lifecycle"}),
+    )
+    .unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+
+    // Issue + claim the lease (Claimed state).
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease).await.unwrap();
+    let claimed = store
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+
+    // ── begin_dispatch_claimed → Dispatching ──────────────────────────────
+    let dispatching = store
+        .begin_dispatch_claimed(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(
+        dispatching.status,
+        CapabilityLeaseStatus::Dispatching,
+        "begin_dispatch_claimed must return a Dispatching lease"
+    );
+
+    // Reload from the same shared filesystem backend and assert Dispatching is persisted.
+    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Dispatching,
+        "Dispatching status must survive store reload after begin_dispatch_claimed"
+    );
+
+    // ── abort_dispatch_claimed → back to Claimed ──────────────────────────
+    let aborted = store
+        .abort_dispatch_claimed(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        aborted.status,
+        CapabilityLeaseStatus::Claimed,
+        "abort_dispatch_claimed must revert Dispatching → Claimed"
+    );
+
+    // Reload and assert Claimed is persisted.
+    let reloaded2 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded2
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Claimed,
+        "Claimed status must survive store reload after abort_dispatch_claimed"
+    );
+
+    // ── begin_dispatch again + consume from Dispatching → Consumed ─────────
+    store
+        .begin_dispatch_claimed(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+
+    let consumed = store
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        consumed.status,
+        CapabilityLeaseStatus::Consumed,
+        "consume from Dispatching must yield Consumed"
+    );
+
+    // Reload and assert Consumed is persisted.
+    let reloaded3 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded3
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Consumed,
+        "Consumed status must survive store reload after consume-from-Dispatching"
+    );
+}

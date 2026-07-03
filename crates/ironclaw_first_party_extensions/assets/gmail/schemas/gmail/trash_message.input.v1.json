@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["message_id"],"properties":{"message_id":{"type":"string","minLength":1,"maxLength":1024}}}

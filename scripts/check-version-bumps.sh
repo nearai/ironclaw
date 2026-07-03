@@ -5,33 +5,39 @@ set -euo pipefail
 # Exit 0 if all checks pass, exit 1 if any version wasn't bumped.
 
 ERRORS=0
+ALLOW_SKIP_VERSION_CHECK="${ALLOW_SKIP_VERSION_CHECK:-true}"
+RAW_BASE_BRANCH="${GITHUB_BASE_REF:-main}"
+BASE_BRANCH="${RAW_BASE_BRANCH#refs/heads/}"
 
-# --- Skip mechanism -----------------------------------------------------------
-
-if [[ "${PR_LABELS:-}" == *"skip-version-check"* ]]; then
-    echo "skip-version-check label detected — skipping all version checks."
-    exit 0
-fi
-
-# Check commit messages for [skip-version-check]
-if git log "origin/${GITHUB_BASE_REF:-main}...HEAD" --pretty=format:"%s %b" 2>/dev/null \
-    | grep -qF '[skip-version-check]'; then
-    echo "[skip-version-check] found in commit message — skipping all version checks."
-    exit 0
-fi
-
-# --- Determine base branch and changed files ----------------------------------
-
-BASE_BRANCH="${GITHUB_BASE_REF:-main}"
-echo "Base branch: $BASE_BRANCH"
-
-# Ensure the base branch ref is available
+# Ensure the base branch ref is available for skip checks and diffs.
 if ! git rev-parse "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
     echo "Fetching origin/${BASE_BRANCH}..."
     git fetch origin "$BASE_BRANCH" --depth=1
 fi
 
-CHANGED_FILES=$(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+MERGE_BASE=$(git merge-base "origin/${BASE_BRANCH}" HEAD)
+
+# --- Skip mechanism -----------------------------------------------------------
+
+if [[ "${ALLOW_SKIP_VERSION_CHECK}" == "true" ]]; then
+    if [[ "${PR_LABELS:-}" == *"skip-version-check"* ]]; then
+        echo "skip-version-check label detected — skipping all version checks."
+        exit 0
+    fi
+
+    # Check commit messages for [skip-version-check]
+    if git log "${MERGE_BASE}..HEAD" --pretty=format:"%s %b" 2>/dev/null \
+        | grep -qF '[skip-version-check]'; then
+        echo "[skip-version-check] found in commit message — skipping all version checks."
+        exit 0
+    fi
+fi
+
+# --- Determine base branch and changed files ----------------------------------
+
+echo "Base branch: $BASE_BRANCH"
+
+CHANGED_FILES=$(git diff --name-only "$MERGE_BASE" HEAD)
 
 if [[ -z "$CHANGED_FILES" ]]; then
     echo "No changed files detected. Nothing to check."

@@ -1,0 +1,45 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Act as you in Slack via a personal user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you.",
+  "http": {
+    "allowlist": [
+      {
+        "host": "slack.com",
+        "path_prefix": "/api/",
+        "methods": ["GET", "POST"]
+      }
+    ],
+    "credentials": {
+      "slack_user_token": {
+        "secret_name": "slack_user_token",
+        "location": { "type": "bearer" },
+        "host_patterns": ["slack.com"]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 50,
+      "requests_per_hour": 1000
+    },
+    "timeout_secs": 30
+  },
+  "secrets": {
+    "allowed_names": ["slack_user_token"]
+  },
+  "auth": {
+    "secret_name": "slack_user_token",
+    "display_name": "Slack (personal)",
+    "instructions": "1. Create a private Slack app at https://api.slack.com/apps (From scratch, your workspace).\n2. Under OAuth & Permissions, add USER Token Scopes (not Bot Token Scopes):\n   search:read, channels:history, groups:history, im:history, mpim:history,\n   channels:read, groups:read, im:read, mpim:read, users:read, and chat:write\n   (chat:write only if you want it to post as you).\n3. Install the app to your workspace and authorize.\n4. Copy the User OAuth Token (starts with xoxp-) and paste it here.",
+    "setup_url": "https://api.slack.com/apps",
+    "token_hint": "Starts with 'xoxp-'",
+    "env_var": "SLACK_USER_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "slack_user_token",
+        "prompt": "Slack User OAuth Token (starts with xoxp-, from api.slack.com/apps > OAuth & Permissions)"
+      }
+    ]
+  }
+}

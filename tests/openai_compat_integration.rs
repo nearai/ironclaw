@@ -15,7 +15,7 @@ use ironclaw::channels::web::platform::state::GatewayState;
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use ironclaw_llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
@@ -64,7 +64,7 @@ impl LlmProvider for MockLlmProvider {
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == ironclaw::llm::Role::User)
+            .find(|m| m.role == ironclaw_llm::Role::User)
             .map(|m| m.content.clone())
             .unwrap_or_else(|| "no user message".to_string());
 
@@ -73,6 +73,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -92,17 +93,21 @@ impl LlmProvider for MockLlmProvider {
         if let Some(tool) = req.tools.first() {
             Ok(ToolCompletionResponse {
                 content: None,
-                tool_calls: vec![ironclaw::llm::ToolCall {
+                tool_calls: vec![ironclaw_llm::ToolCall {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
                     reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -113,6 +118,8 @@ impl LlmProvider for MockLlmProvider {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -151,6 +158,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -168,6 +176,8 @@ impl LlmProvider for FixedModelProvider {
             finish_reason: FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
         })
     }
 

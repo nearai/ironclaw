@@ -249,6 +249,9 @@ document.getElementById('restart-close-btn').addEventListener('click', () => can
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
+// Bug #3082 recovery affordances on the progress modal.
+document.getElementById('restart-refresh-btn').addEventListener('click', () => window.location.reload());
+document.getElementById('restart-dismiss-btn').addEventListener('click', () => dismissRestartLoader());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
@@ -257,6 +260,7 @@ document.getElementById('memory-save-btn').addEventListener('click', () => saveM
 document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
 document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
 document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
+document.getElementById('logs-download-btn').addEventListener('click', () => downloadLogsJsonl());
 document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
 document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
 document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());

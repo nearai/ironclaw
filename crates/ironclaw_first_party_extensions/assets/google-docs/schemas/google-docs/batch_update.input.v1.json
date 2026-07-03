@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs batch_update",
+  "description": "Execute raw Docs API batchUpdate requests.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "requests"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "description": "Raw Docs API request object."
+      },
+      "description": "Docs API request objects."
+    }
+  },
+  "additionalProperties": false
+}

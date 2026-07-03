@@ -42,11 +42,23 @@ function normalizeHistoryToolCall(toolCall) {
   };
 }
 
-function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) {
+function getToolActivityGroupStatus(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return 'success';
+  const lastEntry = entries[entries.length - 1];
+  return lastEntry && lastEntry.status === 'fail' ? 'fail' : 'success';
+}
+
+function isSubtleToolFailure(entries, index) {
+  const entry = entries[index];
+  return !!(entry && entry.status === 'fail' && index !== entries.length - 1);
+}
+
+function createToolActivitySummary(toolCount, totalDurationMs, includeDuration, status) {
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
   const summary = document.createElement('button');
   summary.type = 'button';
   summary.className = 'activity-summary';
+  summary.setAttribute('data-status', status === 'fail' ? 'fail' : 'success');
   summary.setAttribute('aria-expanded', 'false');
   summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
@@ -78,6 +90,7 @@ function applyToolActivityCardState(rendered, options) {
     rendered.card.removeAttribute('data-call-id');
   }
   rendered.card.setAttribute('data-status', status);
+  rendered.card.setAttribute('data-emphasis', options.subtleFailure && status === 'fail' ? 'subtle' : 'normal');
   rendered.toolName.textContent = entry.name;
 
   if (options.showDuration && entry.duration_ms !== null) {
@@ -95,7 +108,12 @@ function applyToolActivityCardState(rendered, options) {
   }
 
   rendered.output.textContent = getToolActivityBodyText(entry);
-  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
+  const shouldAutoExpand = !!(
+    options.expandErrors
+    && !options.subtleFailure
+    && status === 'fail'
+    && rendered.output.textContent
+  );
   setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
@@ -186,9 +204,10 @@ function createToolActivityCard(entry, options) {
 }
 
 function createActivityGroupFromEntries(entries, options) {
-  const hasError = entries.some(entry => entry.status === 'fail');
+  const groupStatus = getToolActivityGroupStatus(entries);
+  const hasTerminalError = groupStatus === 'fail';
   const group = document.createElement('div');
-  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
+  group.className = 'activity-group' + (hasTerminalError ? '' : ' collapsed');
 
   let totalDurationMs = 0;
   let hasDuration = false;
@@ -199,23 +218,29 @@ function createActivityGroupFromEntries(entries, options) {
     }
   }
 
-  const summary = createToolActivitySummary(entries.length, totalDurationMs, options.includeSummaryDuration && hasDuration);
-  if (hasError) {
+  const summary = createToolActivitySummary(
+    entries.length,
+    totalDurationMs,
+    options.includeSummaryDuration && hasDuration,
+    groupStatus
+  );
+  if (hasTerminalError) {
     summary.querySelector('.activity-summary-chevron').classList.add('expanded');
     summary.setAttribute('aria-expanded', 'true');
   }
 
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = hasError ? 'flex' : 'none';
+  cardsContainer.style.display = hasTerminalError ? 'flex' : 'none';
 
-  for (const entry of entries) {
+  entries.forEach((entry, index) => {
     const rendered = createToolActivityCard(entry, {
       showDuration: !!options.showCardDurations,
       expandErrors: options.expandErrors !== false,
+      subtleFailure: isSubtleToolFailure(entries, index),
     });
     cardsContainer.appendChild(rendered.card);
-  }
+  });
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
@@ -414,26 +439,32 @@ function createToolActivityController(options) {
     removeThinking();
     if (!activeGroup) return;
 
-    for (const rendered of activeEntries) {
-      clearTimer(rendered);
-      if (rendered.entry.duration_ms === null) {
-        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
-      }
-      applyToolActivityCardState(rendered, {
-        showDuration: true,
-        expandErrors: true,
-      });
-    }
-
     if (activeEntries.length === 0) {
       activeGroup.remove();
       reset(false);
       return;
     }
 
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+    }
+
     const totalDurationMs = activeEntries.reduce((sum, rendered) => {
       return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
     }, 0);
+
+    const finalizedEntries = activeEntries.map((rendered) => rendered.entry);
+    const groupStatus = getToolActivityGroupStatus(finalizedEntries);
+    activeEntries.forEach((rendered, index) => {
+      applyToolActivityCardState(rendered, {
+        showDuration: true,
+        expandErrors: true,
+        subtleFailure: isSubtleToolFailure(finalizedEntries, index),
+      });
+    });
 
     const cardsContainer = document.createElement('div');
     cardsContainer.className = 'activity-cards-container';
@@ -442,7 +473,7 @@ function createToolActivityController(options) {
       cardsContainer.appendChild(rendered.card);
     }
 
-    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true);
+    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true, groupStatus);
     summary.addEventListener('click', () => {
       const isOpen = cardsContainer.style.display !== 'none';
       cardsContainer.style.display = isOpen ? 'none' : 'flex';
@@ -514,4 +545,3 @@ function humanizeToolName(rawName) {
 function shouldShowChannelConnectedMessage(extensionName, success) {
   return false;
 }
-

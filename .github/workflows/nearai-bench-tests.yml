@@ -1,0 +1,154 @@
+# Regression coverage for the /benchmark slash-command dispatcher.
+#
+# The dispatcher in nearai-bench.yml parses comment bodies with a sed
+# regex and gates work on a whole-word `startsWith` guard. Both surfaces
+# gate paid LLM CI — silent breakage in either would let unintended
+# bodies through (or block valid ones). This workflow runs the same
+# regex + guard logic against fixture inputs so a change to the
+# dispatcher's parsing logic can't ship without surfacing the diff.
+#
+# Filed in response to serrrfirat's Medium/tests finding on #3808.
+
+name: nearai-bench dispatcher tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/nearai-bench.yml'
+      - '.github/workflows/nearai-bench-tests.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/nearai-bench.yml'
+      - '.github/workflows/nearai-bench-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  parser:
+    name: parser regex + guard fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Run dispatcher parser fixtures
+        run: |
+          set -euo pipefail
+
+          # ─── Parser under test ───────────────────────────────────────
+          # Keep in sync with nearai-bench.yml's `parse` step. Both
+          # surfaces (this test + the dispatcher) live in the same path
+          # filter so a change to one without the other fails CI.
+          parse_suite() {
+            printf '%s' "$1" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+)([[:space:]]+--model[[:space:]]+[A-Za-z0-9_./:-]+)?[[:space:]]*$@\1@p'
+          }
+          parse_model() {
+            printf '%s' "$1" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p'
+          }
+
+          # Whole-word guard from the workflow-level `if:` clause.
+          # GitHub Actions: startsWith(body, '/benchmark ') || body == '/benchmark'
+          guard_match() {
+            [[ "$1" == "/benchmark "* ]] || [[ "$1" == "/benchmark" ]]
+          }
+
+          fail=0
+
+          assert_parse() {
+            local label="$1" body="$2" want_suite="$3" want_model="$4"
+            local got_suite got_model
+            got_suite=$(parse_suite "$body")
+            got_model=$(parse_model "$body")
+            if [ "$got_suite" = "$want_suite" ] && [ "$got_model" = "$want_model" ]; then
+              printf '  PASS  %s\n' "$label"
+            else
+              printf '  FAIL  %s\n' "$label"
+              printf '        body:  %q\n' "$body"
+              printf '        want:  suite=%q model=%q\n' "$want_suite" "$want_model"
+              printf '        got:   suite=%q model=%q\n' "$got_suite" "$got_model"
+              fail=1
+            fi
+          }
+
+          assert_guard() {
+            local label="$1" body="$2" want="$3"   # "match" | "skip"
+            local got="skip"
+            if guard_match "$body"; then got="match"; fi
+            if [ "$got" = "$want" ]; then
+              printf '  PASS  %s\n' "$label"
+            else
+              printf '  FAIL  %s\n' "$label"
+              printf '        body:  %q\n' "$body"
+              printf '        want %s, got %s\n' "$want" "$got"
+              fail=1
+            fi
+          }
+
+          # ─── Parser fixtures ─────────────────────────────────────────
+          echo "=== parser regex ==="
+          # Valid: authorized + parseable
+          assert_parse 'smoke suite, no model' \
+            '/benchmark ironclaw-smoke' \
+            'ironclaw-smoke' ''
+          assert_parse 'full suite, no model' \
+            '/benchmark ironclaw' \
+            'ironclaw' ''
+          assert_parse 'smoke + lowercase OpenRouter model' \
+            '/benchmark ironclaw-smoke --model qwen/qwen3.5-35b-a3b' \
+            'ironclaw-smoke' 'qwen/qwen3.5-35b-a3b'
+          assert_parse 'smoke + mixed-case HF-style model' \
+            '/benchmark ironclaw-smoke --model Qwen/Qwen3.5-122B-A10B' \
+            'ironclaw-smoke' 'Qwen/Qwen3.5-122B-A10B'
+          assert_parse 'three-segment model id' \
+            '/benchmark ironclaw --model openrouter/anthropic/claude-sonnet-4' \
+            'ironclaw' 'openrouter/anthropic/claude-sonnet-4'
+          assert_parse 'trailing whitespace ok' \
+            '/benchmark ironclaw-smoke   ' \
+            'ironclaw-smoke' ''
+
+          # Invalid: parser must reject (both outputs empty)
+          assert_parse 'empty command' \
+            '/benchmark' '' ''
+          assert_parse 'extra positional token' \
+            '/benchmark ironclaw-smoke garbage' '' ''
+          assert_parse 'two positional tokens' \
+            '/benchmark foo bar' '' ''
+          assert_parse '--model flag without value' \
+            '/benchmark ironclaw-smoke --model' '' ''
+          assert_parse 'unrelated comment' \
+            'looks good to me' '' ''
+          assert_parse 'starts with /benchmark but in a quote' \
+            '> /benchmark ironclaw-smoke' '' ''
+
+          # ─── Guard fixtures ──────────────────────────────────────────
+          echo
+          echo "=== whole-word startsWith guard ==="
+          assert_guard 'bare command' \
+            '/benchmark' 'match'
+          assert_guard 'command with suite' \
+            '/benchmark ironclaw-smoke' 'match'
+          assert_guard 'command with suite + model' \
+            '/benchmark ironclaw-smoke --model qwen/qwen3.5-35b-a3b' 'match'
+
+          assert_guard 'prefix collision: /benchmarking-something' \
+            '/benchmarking-something' 'skip'
+          assert_guard 'prefix collision: /benchmark-foo' \
+            '/benchmark-foo' 'skip'
+          assert_guard 'prefix collision: /benchmarkfoo' \
+            '/benchmarkfoo' 'skip'
+          assert_guard 'unrelated comment' \
+            'looks good to me' 'skip'
+          assert_guard 'markdown-quoted command' \
+            '> /benchmark ironclaw-smoke' 'skip'
+
+          echo
+          if [ "$fail" = "1" ]; then
+            echo "::error::dispatcher parser regression — see failures above"
+            exit 1
+          fi
+          echo "all dispatcher parser fixtures passed"

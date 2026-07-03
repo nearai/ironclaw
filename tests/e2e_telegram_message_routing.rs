@@ -19,7 +19,7 @@ mod tests {
     use ironclaw::config::Config;
     use ironclaw::db::{Database, libsql::LibSqlBackend};
     use ironclaw::error::ChannelError;
-    use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
+    use ironclaw_llm::{LlmProvider, SessionConfig, SessionManager};
     use tokio::sync::{Mutex, mpsc};
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -204,6 +204,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let gateway = Arc::new(TestChannel::new());

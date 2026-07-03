@@ -321,6 +321,18 @@ def build_gateway_env(
         "WASM_CHANNELS_DIR": str(channels_dir),
         "ONBOARD_COMPLETED": "true",
     }
+    # Propagate select agent-time env vars from the parent process.
+    # The live-canary workflow YAML sets ALLOW_LOCAL_TOOLS=true and
+    # AGENT_AUTO_APPROVE_TOOLS=true at the job level expecting them to
+    # reach the gateway, but Popen(env=env) replaces the env wholesale
+    # so without this propagation they were silently dropped. First
+    # probe to notice was tool_install_chat in PR #3682 — chat-driven
+    # tool dispatches parked on an approval gate instead of
+    # auto-approving and never reached `installed=true`.
+    for var in ("ALLOW_LOCAL_TOOLS", "AGENT_AUTO_APPROVE_TOOLS"):
+        value = os.environ.get(var)
+        if value:
+            env[var] = value
     if extra_env:
         env.update({key: value for key, value in extra_env.items() if value})
     return env
@@ -485,7 +497,7 @@ async def start_gateway_stack(
         # defaults llm_backend to `nearai`, so the env config is ignored
         # and the agent attempts an interactive NearAI auth flow that
         # never completes in CI. Mirrors the pattern documented in
-        # tests/e2e/CLAUDE.md and used by test_v2_tool_activate_surface.py.
+        # tests/e2e/CLAUDE.md.
         await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
         return GatewayStack(
             base_url=base_url,

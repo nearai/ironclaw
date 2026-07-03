@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use ironclaw::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
+use ironclaw::workspace::{SearchConfig, Workspace, paths};
+use ironclaw_embeddings::MockEmbeddings;
 
 fn get_pool() -> deadpool_postgres::Pool {
     let database_url = std::env::var("DATABASE_URL")

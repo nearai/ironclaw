@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs delete_content",
+  "description": "Delete document content in a range.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "start_index",
+    "end_index"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "start_index": {
+      "type": "integer",
+      "description": "Start index inclusive."
+    },
+    "end_index": {
+      "type": "integer",
+      "description": "End index exclusive."
+    },
+    "segment_id": {
+      "type": "string",
+      "description": "Segment ID. Defaults to body."
+    }
+  },
+  "additionalProperties": false
+}

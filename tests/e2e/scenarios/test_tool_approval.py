@@ -113,7 +113,7 @@ async def test_approval_card_appears(page):
 
     # Check card contents
     header = card.locator(SEL["approval_header"].replace(".approval-card ", ""))
-    assert await header.text_content() == "Tool requires approval"
+    assert await header.text_content() == "Approve tool call"
 
     tool_name = card.locator(".approval-tool-name")
     assert await tool_name.text_content() == "shell"

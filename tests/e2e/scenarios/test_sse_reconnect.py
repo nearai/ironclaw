@@ -292,33 +292,38 @@ async def test_refresh_skips_readonly_external_active_thread(page):
 
     await page.route("**/api/chat/threads", patch_threads_response)
 
-    # 4. Reload — loadThreads() should skip the "http" active thread
-    await page.reload()
-    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
-    await _wait_for_connected(page, timeout=15000)
+    try:
+        # 4. Reload — loadThreads() should skip the "http" active thread
+        await page.reload()
+        await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+        await _wait_for_connected(page, timeout=15000)
 
-    # 5. Assert we landed on the writable gateway conversation, not the
-    # patched read-only external thread, and that the legacy pinned assistant
-    # chrome is gone from the DOM.
-    assert fallback_gateway_thread_id, "expected a gateway fallback thread id"
-    await page.wait_for_function(
-        "(expected) => currentThreadId === expected",
-        arg=fallback_gateway_thread_id,
-        timeout=15000,
-    )
-    assert await page.locator("#assistant-thread").count() == 0
+        # 5. Assert we landed on a writable gateway conversation, not the
+        # patched read-only external thread. In a full-suite run there may be
+        # an existing gateway conversation newer than the assistant fallback,
+        # so the invariant is "not the read-only active thread" rather than a
+        # specific fallback id.
+        assert fallback_gateway_thread_id, "expected a gateway fallback thread id"
+        await page.wait_for_function(
+            "(external) => !!currentThreadId && currentThreadId !== external",
+            arg=ext_thread_id,
+            timeout=15000,
+        )
+        current_thread = await page.evaluate("() => currentThreadId")
+        assert current_thread != ext_thread_id
+        assert await page.locator("#assistant-thread").count() == 0
 
-    # 6. Chat input should be enabled (not disabled by read-only state)
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-    is_disabled = await chat_input.is_disabled()
-    assert not is_disabled, "Chat input should be enabled on the fallback gateway thread"
-
-    # Drain in-flight route callbacks before the `page` fixture closes the
-    # context (see the setup comment at step 3 for the root cause). The
-    # `ignoreErrors` behavior swallows the cancellation of any mid-flight
-    # `route.fetch()` so it cannot surface on an unrelated later test.
-    await page.unroute_all(behavior="ignoreErrors")
+        # 6. Chat input should be enabled (not disabled by read-only state)
+        chat_input = page.locator(SEL["chat_input"])
+        await chat_input.wait_for(state="visible", timeout=5000)
+        is_disabled = await chat_input.is_disabled()
+        assert not is_disabled, "Chat input should be enabled on the fallback gateway thread"
+    finally:
+        # Drain in-flight route callbacks before the `page` fixture closes the
+        # context (see the setup comment at step 3 for the root cause). The
+        # `ignoreErrors` behavior swallows the cancellation of any mid-flight
+        # `route.fetch()` so it cannot surface on an unrelated later test.
+        await page.unroute_all(behavior="ignoreErrors")
 
 
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):

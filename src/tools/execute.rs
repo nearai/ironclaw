@@ -8,8 +8,8 @@ use std::borrow::Cow;
 
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::ChatMessage;
 use crate::tools::{ToolRegistry, prepare_tool_params, redact_params};
+use ironclaw_llm::ChatMessage;
 use ironclaw_safety::SafetyLayer;
 
 /// Execute a tool with safety checks: lookup → validate → timeout → execute → serialize.
@@ -451,7 +451,7 @@ mod tests {
             "Content should contain the output: {}",
             content
         );
-        assert_eq!(message.role, crate::llm::Role::Tool);
+        assert_eq!(message.role, ironclaw_llm::Role::Tool);
         assert_eq!(message.name.as_deref(), Some("echo"));
     }
 
@@ -477,7 +477,7 @@ mod tests {
             "Error content should contain the message: {}",
             content
         );
-        assert_eq!(message.role, crate::llm::Role::Tool);
+        assert_eq!(message.role, ironclaw_llm::Role::Tool);
         assert_eq!(message.name.as_deref(), Some("echo"));
     }
 

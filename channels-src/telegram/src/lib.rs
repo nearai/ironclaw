@@ -283,6 +283,11 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Workspace path for comma-separated keyword filter applied to group messages.
+/// When set, the bot only processes group messages containing at least one keyword.
+/// Leave unset (or empty) to process all messages.
+const GROUP_FILTER_KEYWORDS_PATH: &str = "state/group_filter_keywords";
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -1826,11 +1831,25 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
 
 /// Send a pairing code message to a chat. Used when an unknown user DMs the bot.
 fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
+    // The reply must name the IronClaw surface explicitly. An earlier wording
+    // ("Enter this code in IronClaw…") was ambiguous: users naturally pasted
+    // the code into their TUI/CLI chat, where there was no handler for it.
+    // The agent now also accepts `approve telegram <code>` typed in any chat
+    // surface, so we surface that path alongside the web/CLI options.
+    //
+    // Telegram itself is *not* listed as a chat surface here: the recipient
+    // is by definition unpaired, so their DMs are intercepted by the
+    // allowlist gate in `handle_message` *before* the agent parser ever
+    // sees `approve telegram <code>`. They'd just get another pairing
+    // reply. Pairing approval requires an already-authenticated IronClaw
+    // surface (web / TUI / CLI). Reference: PR review on #3381.
     send_message(
         chat_id,
         &format!(
-            "Enter this code in IronClaw to pair your telegram account: `{}`. CLI fallback: `ironclaw pairing approve telegram {}`",
-            code, code
+            "Pair this Telegram account with IronClaw using one of:\n\
+             • Web: Settings → Channels → Telegram → paste `{code}`\n\
+             • Any signed-in IronClaw chat (TUI / web): type `approve telegram {code}`\n\
+             • Terminal: `ironclaw pairing approve telegram {code}`",
         ),
         None,
         Some("Markdown"),
@@ -2129,6 +2148,16 @@ fn download_and_store_documents(attachments: &mut [InboundAttachment]) {
     }
 }
 
+/// Returns true if `content` contains at least one of the given keywords (case-insensitive).
+/// An empty keyword list means no filtering — every message passes.
+fn message_passes_group_filter(content: &str, keywords: &[&str]) -> bool {
+    if keywords.is_empty() {
+        return true;
+    }
+    let lower = content.to_lowercase();
+    keywords.iter().any(|kw| lower.contains(*kw))
+}
+
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
     // Extract attachments from media fields (pure data mapping, no host calls)
@@ -2271,6 +2300,25 @@ fn handle_message(message: TelegramMessage) {
                 );
                 return;
             }
+        }
+    }
+
+    // Keyword filter for group messages: skip messages that don't match any configured keyword.
+    // Only applied in group chats; DMs are never filtered.
+    if !is_private {
+        let raw_keywords =
+            channel_host::workspace_read(GROUP_FILTER_KEYWORDS_PATH).unwrap_or_default();
+        let keywords: Vec<&str> = raw_keywords
+            .split(',')
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !message_passes_group_filter(&content, &keywords) {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Ignoring group message (no keyword match): {}", content),
+            );
+            return;
         }
     }
 
@@ -3382,5 +3430,33 @@ mod tests {
                 half_limit,
             );
         }
+    }
+
+    #[test]
+    fn test_message_passes_group_filter_no_keywords() {
+        assert!(message_passes_group_filter("hello world", &[]));
+        assert!(message_passes_group_filter("random chat", &[]));
+    }
+
+    #[test]
+    fn test_message_passes_group_filter_match() {
+        let keywords = vec!["bug", "error", "crash"];
+        assert!(message_passes_group_filter("I found a bug in ironclaw", &keywords));
+        assert!(message_passes_group_filter("getting an ERROR when I run it", &keywords));
+        assert!(message_passes_group_filter("the app CRASH es on startup", &keywords));
+    }
+
+    #[test]
+    fn test_message_passes_group_filter_no_match() {
+        let keywords = vec!["bug", "error", "crash"];
+        assert!(!message_passes_group_filter("hey everyone, how are you?", &keywords));
+        assert!(!message_passes_group_filter("random message", &keywords));
+    }
+
+    #[test]
+    fn test_message_passes_group_filter_case_insensitive() {
+        let keywords = vec!["bug"];
+        assert!(message_passes_group_filter("Found a BUG!", &keywords));
+        assert!(message_passes_group_filter("Bug report here", &keywords));
     }
 }

@@ -1,0 +1,30 @@
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running `target/release/ironclaw_stress --backend libsql --scenario mixed-user-session --sweep-concurrency 1,2,4,8,12,16,24 --operations 50 --users 1000 --progress-interval-seconds 0 --human-read --bottleneck-report --output-jsonl tools/ironclaw_stress/results/2026-06-30-usable-boundary/mixed-user-concurrency-sweep.jsonl`
+[ironclaw-stress] starting sweep suite_run_id=3af11f4ebba54ccd95c989c728a50088 points=7 repetitions=1
+[ironclaw-stress] sweep point label="r1 c1 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c1-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=1 operations_per_task=50 total_operations=50 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=50 succeeded=50 failed=0 duration_ms=638 throughput_ops_sec=78.3
+[ironclaw-stress] sweep point label="r1 c2 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c2-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=2 operations_per_task=50 total_operations=100 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=100 succeeded=100 failed=0 duration_ms=1959 throughput_ops_sec=51.0
+[ironclaw-stress] sweep point label="r1 c4 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c4-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=4 operations_per_task=50 total_operations=200 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=200 succeeded=200 failed=0 duration_ms=7180 throughput_ops_sec=27.9
+[ironclaw-stress] sweep point label="r1 c8 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c8-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=8 operations_per_task=50 total_operations=400 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=400 succeeded=400 failed=0 duration_ms=29402 throughput_ops_sec=13.6
+[ironclaw-stress] sweep point label="r1 c12 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c12-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=12 operations_per_task=50 total_operations=600 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=600 succeeded=600 failed=0 duration_ms=74109 throughput_ops_sec=8.1
+[ironclaw-stress] sweep point label="r1 c16 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c16-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=16 operations_per_task=50 total_operations=800 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0
+[ironclaw-stress] finished attempted=800 succeeded=800 failed=0 duration_ms=130191 throughput_ops_sec=6.1
+[ironclaw-stress] sweep point label="r1 c24 u1000 at0 m0 ub0 ab0 ctx20 cg4 tc2 tb1024" backend=libsql scenario=mixed-user-session
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=3af11f4ebba54ccd95c989c728a50088-r1-c24-u1000-at0-m0-ub0-ab0-ctx20-cg4-tc2-tb1024
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=24 operations_per_task=50 total_operations=1200 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=0

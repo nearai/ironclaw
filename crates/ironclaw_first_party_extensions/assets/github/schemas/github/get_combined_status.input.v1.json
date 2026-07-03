@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub get_combined_status input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Branch, tag, commit SHA, or ref."
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "ref"
+  ]
+}

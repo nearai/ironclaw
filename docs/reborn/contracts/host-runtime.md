@@ -1,223 +1,97 @@
-# IronClaw Reborn host runtime composition contract
+# Reborn Host Runtime Contract
 
-**Date:** 2026-04-25
-**Status:** V1 composition slice
-**Crate:** `crates/ironclaw_host_runtime`
-**Depends on:** `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/dispatcher.md`, `docs/reborn/contracts/processes.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/approvals.md`, `docs/reborn/contracts/capability-access.md`
+`ironclaw_host_runtime` is the composition-facing host boundary above Reborn capability, process, network, secret, audit, and resource substrates. Upper turn/loop services depend on the `HostRuntime` trait and receive structured outcomes instead of concrete substrate handles.
 
----
+## Obligation composition
 
-## 1. Purpose
+`DefaultHostRuntime` may be configured with a `CapabilityObligationHandler` through `with_obligation_handler(...)`. It forwards the handler into `CapabilityHost` for capability invocations.
 
-`ironclaw_host_runtime` is a composition-only crate for the current Reborn host/runtime vertical slice.
+Production/service-graph construction should prefer `BuiltinObligationServices` plus `DefaultHostRuntime::with_builtin_obligation_services(...)`. `BuiltinObligationServices` requires an audit sink, secret store, and resource governor at construction time, creates the network-policy and runtime-secret handoff stores, and keeps those mutable stores owned by host-runtime composition. Runtime adapters/HTTP egress that need the exact state staged by the handler must be built through host-runtime helper methods such as `BuiltinObligationServices::host_http_egress(...)` or `HostRuntimeServices::try_with_host_http_egress(...)`, rather than by receiving raw store handles. The remaining raw handoff-store constructors and `with_*_store` seams are low-level host-runtime/test harness escape hatches for contract coverage and bespoke host-owned composition; upper Reborn crates must not use them. `HostRuntimeServices` can also adapt durable event/audit logs with `with_durable_event_log(...)` and `with_durable_audit_log(...)`; the latter is the production path for built-in obligation audit records that must be replayable through the Reborn event substrate. Standalone Reborn composition should obtain those durable logs from `ironclaw_reborn_event_store::build_reborn_event_stores(...)`, which rejects in-memory stores in production and keeps storage drivers outside `ironclaw_events`.
 
-Terminology note: **kernel** is the architectural security perimeter described in [`kernel-boundary.md`](kernel-boundary.md). In the current implementation, `ironclaw_host_runtime` is the concrete composition crate for kernel-facing services/adapters; it is not permission to grow product workflow inside the kernel. There is no active `ironclaw_kernel` crate in the Reborn stack unless a deliberate rename happens later.
+`BuiltinObligationHandler` is the default host-owned implementation for current V1 obligations. It is deliberately fail-closed: obligations that require backing services fail unless the corresponding store/sink/governor is configured. The convenience `with_builtin_obligation_handler()` installs an explicit empty/dev handler and keeps those obligations fail-closed until a fully configured services value is supplied.
 
-It wires already-owned service crates together so application setup code does not repeatedly hand-connect the same shared handles:
+Supported built-in behavior:
 
-```text
-ExtensionRegistry
-RootFilesystem
-ResourceGovernor
-CapabilityDispatchAuthorizer
-RunStateStore / ApprovalRequestStore / CapabilityLeaseStore
-ProcessServices
-WASM / Script / MCP runtime backends
-EventSink / AuditSink
-CapabilityObligationHandler
-  -> HostRuntimeServices
-      -> WASM / Script / MCP RuntimeAdapter wrappers
-      -> RuntimeDispatcher
-      -> CapabilityHost
-      -> ApprovalResolver
-      -> ProcessHost
-```
+- `AuditBefore`: emits metadata-only `AuditStage::Before` records.
+- `AuditAfter`: emits metadata-only `AuditStage::After` records after dispatch output is available.
+- `ApplyNetworkPolicy`: validates policy metadata and stages a scoped policy in `NetworkObligationPolicyStore` for runtime handoff.
+- `InjectSecretOnce`: verifies the secret exists, leases and consumes it exactly once, then stages material in `RuntimeSecretInjectionStore` for one runtime take.
+- `UseScopedMounts`: accepts only mount views that are subsets of the execution context mount view and returns the narrowed view to the capability host.
+- `ReserveResources`: reserves the exact requested reservation id through a configured `ResourceGovernor` and returns the reservation for dispatch/process handoff.
+- `EnforceResourceCeiling`: for immediate invoke/resume, decomposes supported ceiling dimensions into host-owned estimate and result checks. `max_usd` and input/output token ceilings require matching host estimates before dispatch and are re-checked against measured `ResourceUsage` after dispatch. `max_output_bytes` is enforced after redaction before publication and reports the same output-limit failure category as `EnforceOutputLimit`. Wall-clock ceilings and sandbox CPU-time, memory, disk, network-egress, and process-count ceilings fail closed until a concrete runtime/sandbox adapter handoff exists.
+- `RedactOutput`: sanitizes dispatch output string values and object keys before publication, failing closed if redacted keys collide.
+- `EnforceOutputLimit`: fails before publication if serialized output exceeds the limit.
 
-This crate does not define new authority semantics and does not own lifecycle state. It is a narrow composition root over existing contracts.
+## Isolation rules
 
----
+- `NetworkObligationPolicyStore` keys policies by full `ResourceScope` plus capability id and consumes entries with `take(...)`.
+- `RuntimeSecretInjectionStore` keys material by full `ResourceScope`, capability id, and secret handle and consumes entries with `take(...)`.
+- Staged secret entries have a default five-minute TTL; insertion, `take(...)`, and `prune_expired(...)` drop expired material so abandoned handoffs stop being usable even if runtime setup never reaches egress.
+- Direct `satisfy(...)` releases any prepared resource reservation without discarding successfully staged network/secret handoffs that the caller still needs to pass to runtime adapters.
+- Inline dispatch completion discards any unconsumed staged network/secret handoffs so successful calls do not leave reusable ambient state behind.
+- Background process lifecycle cleanup currently enforces a single active process handoff per scoped capability (`ResourceScope` plus capability id). Starting a second process handoff for the same scoped capability before the first reaches terminal cleanup fails closed; process-owned handoff ids are a follow-up design.
+- Terminal process cleanup failures are surfaced through the process-store transition or background failure handler and logged with process id/stage context; they must not be silently swallowed.
+- Staged secrets must never be logged or exposed through debug output.
+- Handler errors must use stable categories and avoid raw provider/backend details.
 
-## 2. Boundary
+## Visible capability surface
 
-`HostRuntimeServices` may build:
+`HostRuntime::visible_capabilities(...)` is a visibility producer only. `DefaultHostRuntime` computes a deterministic, versioned surface from the extension registry, the caller `ExecutionContext`, caller/host-supplied `provider_trust`, the trust-aware authorizer, and the caller/profile supplied `CapabilitySurfacePolicy`. It does not evaluate the runtime host trust policy while computing visibility. Missing grants, missing provider trust, denied trust ceilings, authorizer denials, disallowed runtimes, and disallowed effects omit capabilities from the surface. Authorizer `RequireApproval` decisions may be represented as `VisibleCapabilityAccess::RequiresApproval`, but that status does not issue a grant or bypass approval storage.
 
-```rust
-RuntimeDispatcher<'static, F, G>
-Arc<RuntimeDispatcher<'static, F, G>>
-CapabilityHost<'_, D>
-ProcessHost<'_>
-ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>
-```
+Surface versioning returns `sha256:<lower-hex>` over canonical JSON that includes the configured base version, `SurfaceKind`, visibility policy, visibility-affecting context fields, grants, relevant provider trust ceilings, visible capability ids/providers/runtimes/effects/schemas, selected resource estimates, and visible access status. Policy allow-lists and visible capability payloads are canonicalized before hashing, so semantically equivalent allow-list ordering or registry insertion ordering does not churn the version; returned capabilities still preserve filtered registry order for deterministic rendering. The hash is stable across process runs so upper loop services can checkpoint the visible tool surface. Direct invocation remains authoritative: a capability omitted from the visible surface must still fail closed through `CapabilityHost` authorization if a caller tries to invoke it directly.
 
-It may hold shared `Arc` handles to configured services, runtime backends, observability sinks, an optional WASM host HTTP client or hardened network egress client, optional already-resolved runtime HTTP credentials, an optional scoped `SecretStore`, a one-shot runtime secret injection store, and an optional capability-obligation handler. It adapts concrete runtime crates into `ironclaw_dispatcher::RuntimeAdapter` implementations when building `RuntimeDispatcher`, and it provides a small `BuiltinObligationHandler` for metadata-only audit, scoped network-policy handoff, and direct-handle secret lease consumption.
+The hot capability catalog resolves cold manifest refs through the package's virtual root before model/tool publication. `input_schema_ref` replaces the descriptor's `$ref`-style `parameters_schema`, while `output_schema_ref` is retained adjacent to the descriptor. `prompt_doc_ref` is optional lazy help metadata: when declared, it is resolved with the same bounded fail-closed file handling, but model-visible capabilities are valid without it. Resolution remains publication metadata only: it does not grant authority, execute runtime code, or construct host-port implementations.
 
-It must not:
+## FirstParty runtime adapter
 
-- implement grant matching or spawn policy
-- execute runtime lanes directly outside adapter wrappers
-- own process state transitions or cancellation semantics
-- own approval resolution or lease semantics; `approval_resolver()` only wires `ironclaw_approvals::ApprovalResolver`
-- own broad runtime/input/output obligation semantics; `with_obligation_handler(...)` passes a shared `CapabilityObligationHandler` through to `CapabilityHost`, and `BuiltinObligationHandler` is limited to metadata-only audit, scoped mount/resource handoff, `ApplyNetworkPolicy` preflight/hand-off to WASM host HTTP imports and `ironclaw_network` egress, direct `InjectSecretOnce { handle }` lease/consume into a one-shot runtime injection store, and immediate dispatch/resume output redaction/limits. Already-resolved runtime HTTP credentials may be injected only in the hardened WASM egress adapter after pre-injection leak scanning.
-- expose process lifecycle APIs through `CapabilityHost`
-- turn process subscriptions into a message bus
-- weaken tenant/user/agent/project scoped persistence boundaries
-
-Ownership remains:
+`HostRuntimeServices` can register host-owned first-party capability handlers through `FirstPartyCapabilityRegistry`. When a declared capability uses `RuntimeKind::FirstParty`, dispatch still follows the normal path:
 
 ```text
-authorization -> grant, lease, and spawn decisions
-capabilities  -> caller-facing invoke/resume/spawn workflow
-processes     -> lifecycle, result, output, cancellation, and process services
-dispatcher    -> already-authorized runtime routing through registered adapters
-host_runtime  -> composition of concrete WASM / Script / MCP adapters
-runtimes      -> WASM / Script / MCP execution
-```
-
----
-
-## 3. API shape
-
-The helper is intentionally small:
-
-```rust
-let services = HostRuntimeServices::new(
-    registry,
-    filesystem,
-    governor,
-    authorizer,
-    process_services,
-)
-.with_run_state(run_state)
-.with_approval_requests(approval_requests)
-.with_capability_leases(capability_leases)
-.with_script_runtime(script_runtime)
-.with_wasm_http_client(wasm_http_client)
-// or install the built-in hardened Reborn network egress client:
-.with_hardened_network_egress()
-// optional already-resolved credentials for host-mediated WASM HTTP egress:
-.with_runtime_http_credentials(runtime_http_credentials)
-// optional direct-handle InjectSecretOnce support:
-.with_secret_store(secret_store)
-.with_event_sink(event_sink)
-.with_audit_sink(audit_sink)
-.with_builtin_obligation_handler();
-
-// Or provide a custom handler:
-let services = services.with_obligation_handler(obligation_handler);
-
-let dispatcher = services.runtime_dispatcher_arc();
-let capability_host = services.capability_host_for_runtime_dispatcher(&dispatcher);
-let approval_resolver = services.approval_resolver();
-let process_host = services.process_host();
-```
-
-For tests or custom process executors, callers can also provide an arbitrary dispatcher and executor:
-
-```rust
-let capability_host = services.capability_host(&dispatcher, executor);
-```
-
-`capability_host_for_runtime_dispatcher(...)` derives a `DispatchProcessExecutor` from the same runtime dispatcher used for immediate dispatch. Spawned capability-backed process work therefore routes through the authorized dispatch interface after `CapabilityHost::spawn_json(...)` has authorized, satisfied configured obligations, and recorded the process start. The concrete WASM, Script, and MCP runtimes are wrapped by `WasmRuntimeAdapter`, `ScriptRuntimeAdapter`, and `McpRuntimeAdapter` here instead of being hardcoded into `ironclaw_dispatcher`.
-
----
-
-## 4. Tenant and lifecycle invariants
-
-The helper preserves the same service handles for `CapabilityHost`, `ApprovalResolver`, and `ProcessHost`:
-
-```text
-CapabilityHost::spawn_json(...)
-  -> ProcessServices::background_manager(...)
-      -> shared ProcessStore
-      -> shared ProcessResultStore
-      -> shared ProcessCancellationRegistry
-
-ProcessHost status/kill/result/output
-  -> ProcessServices::host()
-      -> same shared ProcessStore
-      -> same shared ProcessResultStore
-      -> same shared ProcessCancellationRegistry
-```
-
-`approval_resolver()` uses the same `ApprovalRequestStore`, `CapabilityLeaseStore`, and optional `AuditSink` handles configured for `CapabilityHost::resume_json(...)`. This prevents accidental split wiring where one component approves a request into one lease store while resume checks another, or where approval audit disappears because the resolver was not wired to the shared audit sink.
-
-If configured, the shared `CapabilityObligationHandler` is passed into each `CapabilityHost` built by this helper. `HostRuntimeServices::with_builtin_obligation_handler()` installs the built-in handler with the shared `NetworkObligationPolicyStore`, `RuntimeSecretInjectionStore`, and `ResourceGovernor`.
-
-Supported built-in obligations in this slice:
-
-- `AuditBefore`: emits a redacted `AuditStage::Before` audit envelope through the configured `AuditSink`; without an audit sink, it fails closed.
-- `ApplyNetworkPolicy`: validates policy metadata and stores the scoped policy in `NetworkObligationPolicyStore`; without a policy store, it fails closed. The policy key includes tenant/user/agent/project/mission/thread/invocation/capability scope.
-- `InjectSecretOnce { handle }`: requires `with_secret_store(...)`, verifies the scoped secret exists, calls `SecretStore::lease_once(...)`, calls `SecretStore::consume(...)` exactly once, and stages the returned material in `RuntimeSecretInjectionStore`. Runtime consumers must call `take(...)`, which removes the material so it cannot be reused. Missing secret stores, missing scoped secrets, lease failures, consume failures, and injection-store failures all map to sanitized `CapabilityObligationFailureKind::Secret`.
-- `UseScopedMounts { mounts }`: validates the requested mount view and requires it to be a subset of `ExecutionContext.mounts`; the prepared mount view is handed back to `CapabilityHost` for dispatch/process-start attenuation. Broader/duplicate/invalid mount obligations fail closed as `CapabilityObligationFailureKind::Mount`.
-- `ReserveResources { reservation_id }`: for immediate dispatch/resume, reserves `CapabilityObligationRequest.estimate` in `ExecutionContext.resource_scope` using the exact requested `ResourceReservationId`. The prepared reservation is handed to `CapabilityHost` and then to `RuntimeDispatcher`/runtime adapters so WASM, Script, and MCP lanes reconcile/release the same reservation instead of double-reserving. If preparation is aborted before ownership transfers, the handler releases the reservation. Missing/denied/mismatched resource handling maps to sanitized `CapabilityObligationFailureKind::Resource`. Spawn keeps resource ownership in `ironclaw_processes::ResourceManagedProcessStore` and rejects prepared resource reservations to avoid leaks or double ownership.
-- `AuditAfter`: runs after successful immediate dispatch/resume and emits a redacted `AuditStage::After` audit envelope with metadata-only output byte count.
-- `RedactOutput`: runs after successful immediate dispatch/resume and applies `ironclaw_safety::LeakDetector` string redaction recursively to JSON output before callers receive it. Blocking leak detections fail closed as `CapabilityObligationFailureKind::Output`.
-- `EnforceOutputLimit { bytes }`: runs after redaction and before returning immediate dispatch/resume output; oversized output fails closed as `CapabilityObligationFailureKind::Output`.
-
-The WASM runtime adapter consumes accepted network policy during dispatch. If `with_hardened_network_egress()` or `with_http_egress_client(...)` is configured, WASM `host.http_request_utf8` calls go through `ironclaw_network::HardenedHttpEgressClient`/`HttpEgressClient`, which policy-checks, DNS-resolves, private-address-checks, redirect-revalidates, pins validated resolution, and bounds response size before returning bytes. The hardened WASM egress adapter also runs `ironclaw_safety::LeakDetector` on the guest-provided URL/body before any credential injection, injects only already-resolved `RuntimeHttpCredential` values configured by the composition layer, and scans/redacts-or-blocks response bodies before returning them to guest memory. If only a custom `WasmHostHttp` is configured, the adapter still wraps it with `WasmPolicyHttpClient` as a lower-level test/custom-client policy guard. If a network policy is present for Script or MCP lanes, those adapters fail closed with `NetworkDenied` until they have enforceable network plumbing. This handoff still does not perform OAuth refresh, account selection, credential-account resolution, or reserve egress resources by itself. Resource-reservation handoff is supported for immediate WASM, Script, and MCP dispatch/resume; dispatcher validation failures release prepared reservations before returning, and runtime adapters reconcile/release prepared reservations instead of double-reserving. Post-output obligations are only supported for immediate dispatch/resume; spawn rejects `AuditAfter`, `RedactOutput`, and `EnforceOutputLimit` because process output completion belongs to process/result services. Unsupported or failed handler outcomes remain fail-closed inside `CapabilityHost` before dispatch, process start, approval lease claim, or final result return as appropriate.
-
-This also prevents accidental split wiring where one component starts a process and another reads results or signals cancellation from a different store/registry.
-
-Tenant/user/agent/project scope still comes from `ExecutionContext.resource_scope`, and all persistence remains under the lower-level store contracts.
-
----
-
-## 5. Live example
-
-A non-Docker in-memory live example is available at:
-
-```text
-crates/ironclaw_host_runtime/examples/reborn_host_runtime.rs
-```
-
-Run it with:
-
-```bash
-cargo run -p ironclaw_host_runtime --example reborn_host_runtime
-```
-
-A non-Docker filesystem-backed live example is available at:
-
-```text
-crates/ironclaw_host_runtime/examples/reborn_host_runtime_filesystem.rs
-```
-
-Run it with:
-
-```bash
-cargo run -p ironclaw_host_runtime --example reborn_host_runtime_filesystem
-```
-
-The filesystem example uses `ProcessServices::filesystem(...)` and verifies that result metadata and JSON output are written under scoped artifact refs:
-
-```text
-/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-results/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-outputs/{process_id}/output.json
-```
-
-Both examples use an in-process `ScriptBackend` with a manifest-declared `runner = "sandboxed_process"` script capability so they can demonstrate the full composition path without requiring Docker:
-
-```text
-HostRuntimeServices
+HostRuntime::invoke_capability
+  -> CapabilityHost authorization / approvals / obligations
   -> RuntimeDispatcher
-  -> CapabilityHost::spawn_json(...)
-  -> ProcessServices background manager
-  -> ScriptRuntime + in-process backend
-  -> ProcessHost::await_result/output(...)
+  -> FirstPartyRuntimeAdapter
+  -> registered host-owned handler
 ```
 
----
+First-party handlers are composition-owned and keyed by `CapabilityId`; user-installed manifests must not self-assign first-party/system authority. A missing handler fails closed as `UndeclaredCapability` before handler side effects. The adapter owns resource reservation/reconciliation, emits the same dispatcher runtime events as other runtime lanes, and surfaces only stable redacted dispatch categories. `RuntimeKind::System` remains deferred for a stricter host-only adapter.
 
-## 6. Current non-goals
+First-party `builtin.read_file` reads plain text through scoped mounts and, for supported document extensions such as PDF, runs the shared document extractor before applying the same line-numbered offset/limit output shape. Unsupported or extraction-empty binaries still fail closed instead of exposing raw bytes.
 
-This slice does not implement:
+First-party handlers that need process effects must receive execution through the selected `RuntimeProcessPort`. `ProcessBackendKind::TenantSandbox` is wired through a typed `RebornRuntimeProcessBinding` or production runtime-policy value that pairs the policy with the accepted `TenantSandboxProcessPort`; composition must not manufacture a legacy project-scoped container identity from `ResourceScope`. The host-runtime-owned Reborn Docker command transport derives workspace/container identity from a collision-resistant digest of the full resource scope: tenant id, user id, agent id, and project id when present, falling back to thread id and then invocation id for project-less work. Production tenant sandboxes must key backend lifecycle by this scoped tenant boundary instead of deriving container identity from a bare project id. Container user identity and workspace sharing mode are explicit sandbox configuration, not implicit composition-layer UID or raw permission-bit assumptions.
 
-- a full production `AppBuilder` replacement
-- DB-backed host service factories
-- channel adapters or turn service wiring
-- thread/step stores
-- message bus, durable subscription cursors, or event fanout
-- runtime backend lifecycle management beyond holding shared handles
-- policy configuration loading
+Docker tenant sandbox command mounts are derived from the request `MountView`, never from caller-supplied host paths. The transport only resolves a `MountGrant.target` when trusted composition configured a matching virtual-root-to-host-root mount source. Mount aliases become container mount targets, with `/workspace` replacing the default scoped workspace bind when explicitly granted. Read-only binds require read + list + execute and no write/delete; writable binds require read + list + execute + write + delete because Docker directory binds cannot enforce delete separately from write. Unsupported permission shapes, unconfigured virtual roots, container system-path aliases, non-directory targets, and source escapes fail closed before container creation.
 
-Those should layer on this composition root rather than expanding dispatcher or capability-host responsibilities.
+## Runtime HTTP egress
+
+Runtime HTTP remains host-mediated through `RuntimeHttpEgress` and `HostHttpEgressService`. Runtime requests carry the full `ResourceScope` and `CapabilityId` so `HostHttpEgressService` can borrow the matching staged policy from `NetworkObligationPolicyStore` immediately before outbound transport, while obligation completion/abort or process lifecycle cleanup owns final discard. The production constructor is fail-closed until a policy store is attached; request-embedded policy fallback is only available through an explicitly named test/legacy constructor. A missing scoped/capability policy fails before transport, and staged credential material is consumed before credential, request, network, or response failure can make it reusable. Runtime code must not perform ad-hoc DNS/private-IP checks or direct HTTP clients; `ironclaw_network` owns network policy enforcement and `ironclaw_secrets` owns secret lease/consume semantics.
+
+First-party `builtin.http` keeps inline responses within a model-visible budget through the host-runtime-local tool-call HTTP egress port, while shared `RuntimeHttpEgress` callers keep strict response-limit errors. The default inline response-body limit is 48 KiB, smaller model-supplied positive limits are honored, and oversized inline bodies return a sanitized partial response with compatibility truncation fields plus a `truncation` envelope that points the model to `builtin.http.save`. Large binary bodies must not be exposed as inline `body_base64`; they return omission metadata and the same save hint instead, while tiny binary bodies may remain base64 for compatibility. `builtin.http.save` keeps the website-scale 10 MiB default response-body limit for saved bodies, requires `WriteFilesystem`, requires `save_to`, and carries only a host-derived narrowed mount grant for the resolved destination. Network-only `builtin.http` must reject `save_to` before egress. Zero limits/timeouts remain invalid input, and positive timeouts are clamped to the 30s runtime wall-clock ceiling.
+
+Raw HTTP diagnostic logging is intentionally double-gated: the unsafe `IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS=1` environment switch is honored only for local single-user `LocalDev`/`LocalYolo` runtime policy. Hosted, enterprise, and safer local profiles must keep logging sanitized stable reason codes even if that environment variable is present.
+
+MCP HTTP/SSE follows the same rule through `ironclaw_mcp::McpHostHttpClient`: the host supplies an `McpRuntimeHttpAdapter<RuntimeHttpEgress>` and an egress planner for scoped network policy, credential injection handles, response body limits, and timeouts. Generic or direct-network MCP clients keep `uses_host_mediated_http_egress() == false`, so `McpRuntime` rejects HTTP/SSE manifests before any outbound attempt.
+
+For MCP HTTP/SSE credentials, the host planner is called once for the real
+`tools/call` JSON-RPC body before the handshake. The client validates that plan
+up front, then reuses it when sending `tools/call`; the handshake requests are
+planned separately and strip credential injections. Planner-visible headers are
+stable policy headers only; the protocol-owned `Mcp-Session-Id` header is added
+after planning. This keeps the planner idempotent and prevents staged secret
+handles from being recomputed from runtime-visible MCP input.
+
+Credential injection plans identify their material source. Production runtime tool egress for first-party/native, MCP, script, and WASM lanes must use `RuntimeCredentialSource::StagedObligation { capability_id }`, the one-shot handoff path prepared by `InjectSecretOnce` or `InjectCredentialAccountOnce` obligations. `HostHttpEgressService` must be configured with the same `RuntimeSecretInjectionStore` as the obligation handler and must call `take(scope, capability_id, handle)` before runtime/network use. Missing required staged material fails before outbound transport, and successful or failed transport attempts cannot reuse the staged value because `take(...)` removes it first. `RuntimeCredentialSource::SecretStoreLease` is retained only for explicitly named legacy/test compatibility paths that are not backed by an already-satisfied authorization obligation; production egress rejects direct secret-store leases before transport. If one approved request plan injects the same source+handle into multiple targets, the egress service consumes the staged or leased material once and reuses it only within that request. Header, query-param, and path-placeholder credential targets are supported; request-body targets remain out of scope.
+
+GSuite first-party handlers use the same staged-obligation path even though
+their credential handle is selected dynamically from product-auth account state
+instead of a static manifest `runtime_credentials` entry. Composition stages the
+selected Google access-secret handle through the host obligation handler before
+the first-party HTTP request is sent.
+
+Path-placeholder credential targets are higher risk than headers or query parameters because upstream access logs, CDN edge logs, reverse proxies, crash dumps, and `Referer` propagation routinely capture URL paths and rarely apply credential redaction to path segments. `HostHttpEgressService` therefore allows path-placeholder injection only for HTTPS URLs, requires the placeholder to appear exactly once as a full path segment, and accepts only non-empty unreserved path-segment credential values other than `.` or `..`. Capability owners should prefer header or query-param targets unless a documented upstream contract specifically requires path placement.
+
+Built-in host HTTP returns redirect responses without following them. This preserves the #3088 redirect invariant for the current V1 surface by never forwarding credentials to a redirected target. The invariant is pinned by the host-runtime runtime egress contract and the `ironclaw_network` reqwest transport redirect contract. A future redirect-following transport must re-run network policy and credential target policy for every hop before reinjecting credentials.
+
+For WASM host-mediated HTTP imports, `WasmRuntimeHttpAdapter` carries the invoking capability id into `WasmRuntimeCredentialProvider`. Host composition derives the default provider from validated manifest v2 `runtime_credentials` declarations on WASM capability descriptors. The provider matches the request URL against the declared HTTPS audience through the `ironclaw_network` target parser/matcher, then emits `StagedObligation` injection plans for matching capability+audience pairs. When a declaration uses `source = { type = "product_auth_account", provider = "..." }`, authorization emits an account-backed obligation and the host-runtime resolver stages the selected account's access secret under the declared runtime credential slot handle before egress. Explicit `WasmStagedRuntimeCredentials` rules remain available for named legacy/test composition, but production manifest-backed tools should use the manifest-derived provider. The WASM guest still supplies only method/url/headers/body and never chooses credential handles, account providers, or targets.
+
+Script and shell process execution keep Docker containers ambient-network-disabled by default (`docker run --network none`). Tenant sandbox composition can now attach explicit broker affordances for commands. The preferred network shape bind-mounts a host-owned Unix socket and exposes `IRONCLAW_REBORN_NETWORK_MODE=brokered`, `IRONCLAW_REBORN_HTTP_BROKER_SOCKET`, and `IRONCLAW_REBORN_HTTP_BROKER_URL` while preserving Docker `--network none`; Unix-socket broker paths are Unix-host affordances, and Windows hosts must use the HTTP-proxy broker shape. The HTTP-proxy shape is available for compositions that accept Docker network attachment and exposes standard `http_proxy`/`https_proxy` values. Secret broker handoff is metadata-only through `IRONCLAW_REBORN_SECRET_MODE=brokered` plus either `IRONCLAW_REBORN_SECRET_BROKER_SOCKET` or `IRONCLAW_REBORN_SECRET_BROKER_URL`; raw secret material is not injected into command environments. Composition must provision broker sockets or endpoints per `ResourceScope`/`CapabilityId` handoff so tenants cannot share a reusable broker authority by accident. Caller-supplied overrides for reserved broker environment variables fail closed, and containers without a configured network broker still run with Docker networking disabled. If scripts later gain a brokered HTTP SDK, sidecar, helper process, or host API, every request must flow through `ironclaw_scripts::ScriptRuntimeHttpAdapter<RuntimeHttpEgress>`. The host supplies the `ResourceScope`, `CapabilityId`, `NetworkPolicy`, credential injection plan, response body limit, and timeout; script/runtime input must not invent secret handles, raw credential headers/query parameters, DNS checks, private-IP checks, or direct HTTP clients inside `ironclaw_scripts`.

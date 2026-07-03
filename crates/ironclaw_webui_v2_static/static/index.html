@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>IronClaw</title>
+    <link
+      rel="icon"
+      type="image/png"
+      href="/v2/assets/favicon-96x96.png"
+      sizes="96x96"
+    />
+    <link rel="icon" type="image/svg+xml" href="/v2/assets/favicon.svg" />
+    <link rel="shortcut icon" href="/v2/assets/favicon.ico" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="/v2/assets/apple-touch-icon.png"
+    />
+    <meta name="apple-mobile-web-app-title" content="IronClaw" />
+    <link rel="manifest" href="/v2/assets/site.webmanifest" />
+    <!-- Fonts vendored locally (Geist / Geist Mono / Newsreader). The
+         woff2 files and this CSS are downloaded by frontend/vendor.sh;
+         no fonts.googleapis.com / fonts.gstatic.com round-trip. -->
+    <link rel="stylesheet" href="/v2/vendor/fonts/fonts.css" />
+    <script nonce="__IRONCLAW_CSP_NONCE__">
+      (() => {
+        try {
+          const stored = localStorage.getItem("ironclaw:v2-theme");
+          const theme =
+            stored === "light" || stored === "dark"
+              ? stored
+              : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          document.documentElement.dataset.theme = theme;
+          window.__IRONCLAW_INITIAL_THEME__ = theme;
+        } catch (_) {
+          document.documentElement.dataset.theme = "light";
+          window.__IRONCLAW_INITIAL_THEME__ = "light";
+        }
+      })();
+    </script>
+    <!-- The React ecosystem (react, react-dom, react-router, react-query,
+         react-hook-form, htm) is bundled into /v2/dist/app.js by esbuild
+         (frontend/build.mjs) — no esm.sh importmap, no runtime CDN. -->
+    <script src="/v2/vendor/tailwindcss-browser.js"></script>
+    <style type="text/tailwindcss">
+      @theme {
+        /* ── Fonts ─────────────────────────────────────────────────── */
+        --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
+          ui-sans-serif, system-ui, sans-serif;
+        --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", Georgia,
+          serif;
+        --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+          monospace;
+
+        /* ── Colour palette (iron-* / signal / copper utilities) ─── */
+        /* Backed by CSS vars in app.css — switches automatically on theme. */
+        --color-iron-950: var(--v2-canvas-strong);
+        --color-iron-900: var(--v2-surface);
+        --color-iron-800: var(--v2-surface-soft);
+        --color-iron-700: var(--v2-panel-border);
+        --color-iron-400: var(--v2-text-faint);
+        --color-iron-300: var(--v2-text-muted);
+        --color-iron-200: var(--v2-text);
+        --color-iron-100: var(--v2-text-strong);
+        --color-signal: var(--v2-accent-text);
+        --color-copper: var(--v2-warning-text);
+        --color-mint: var(--v2-accent-text);
+      }
+    </style>
+    <link rel="stylesheet" href="/v2/styles/app.css" />
+    <!-- Vendored UMD globals (window.DOMPurify / window.marked / window.hljs),
+         consumed by lib/markdown.js + chat markdown-renderer. Loaded
+         synchronously so they exist before the deferred module bundle runs. -->
+    <script src="/v2/vendor/purify.min.js"></script>
+    <script src="/v2/vendor/marked.umd.min.js"></script>
+    <script src="/v2/vendor/highlight.min.js"></script>
+  </head>
+  <body class="min-h-[100dvh] bg-iron-950 text-iron-100 antialiased">
+    <div id="v2-root"></div>
+    <script type="module" src="/v2/dist/app.js"></script>
+  </body>
+</html>

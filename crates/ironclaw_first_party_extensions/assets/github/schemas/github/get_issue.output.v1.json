@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub get issue output",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "number": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string" },
+    "state": { "type": "string" },
+    "html_url": { "type": "string" },
+    "body": { "type": ["string", "null"] },
+    "user": { "type": "object" },
+    "labels": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "assignees": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "milestone": { "type": ["object", "null"] },
+    "pull_request": { "type": "object" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "closed_at": { "type": ["string", "null"] }
+  },
+  "required": ["number", "title", "state", "html_url"]
+}

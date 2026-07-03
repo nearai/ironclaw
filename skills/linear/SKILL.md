@@ -1,29 +1,39 @@
 ---
 name: linear
-version: "1.0.0"
-description: Linear issue tracker API integration
+version: "1.2.0"
+description: Linear issue tracker API integration. Covers first-use identity bootstrap (viewer + teams cached), raw GraphQL for list/search/create/update, and the rules for handling "my issues" / "assigned to me" requests.
 activation:
   keywords:
     - "linear"
-    - "ticket"
-    - "sprint"
-    - "backlog"
-    - "roadmap"
+    - "my linear"
+    - "linear issue"
+    - "linear issues"
+    - "linear ticket"
+    - "linear tickets"
+    - "linear backlog"
+    - "linear assignments"
+    - "my linear issues"
+    - "my linear tickets"
+    - "assigned in linear"
+    - "linear.app"
   exclude_keywords:
     - "jira"
     - "asana"
+    - "github issue"
   patterns:
-    - "(?i)(create|list|show|assign|close|update)\\s.*(issue|ticket|task|bug)"
-    - "(?i)linear\\.app"
+    - "(?i)linear\\.(?:app|com)"
+    - "(?i)\\blinear\\b.+(issue|ticket|task|backlog|board)"
+    - "(?i)(create|show|list|close|update).+linear\\s+(issue|ticket)"
   tags:
     - "project-management"
     - "issue-tracking"
-  max_context_tokens: 2000
+  max_context_tokens: 1600
 credentials:
   - name: linear_api_key
     provider: linear
     location:
-      type: bearer
+      type: header
+      name: Authorization
     hosts:
       - "api.linear.app"
     setup_instructions: "Create an API key at https://linear.app/settings/api"
@@ -31,7 +41,57 @@ credentials:
 
 # Linear API Skill
 
-You have access to the Linear GraphQL API via the `http` tool. Credentials are automatically injected — **never construct Authorization headers manually**. When the URL host is `api.linear.app`, the system injects `Authorization: Bearer {linear_api_key}` transparently.
+You have access to the Linear GraphQL API via the `http` tool. Credentials are automatically injected — **never construct Authorization headers manually**. When the URL host is `api.linear.app`, the system injects `Authorization: {linear_api_key}` transparently (no Bearer prefix — Linear API keys are sent raw).
+
+## Identity bootstrap (first use)
+
+Linear's API key does not tell you who the user IS inside Linear. Before running any "my issues" / "assigned to me" / "my tickets" request, make sure the user's Linear identity is cached. This avoids re-fetching `viewer` on every request and makes filter-by-assignee queries deterministic.
+
+### Cache file
+
+Path: `context/intel/linear-identity.md`
+
+Shape:
+
+```yaml
+---
+type: linear-identity
+bootstrapped_at: 2026-04-21
+refreshed_at: 2026-04-21
+stale_after: 2026-05-21
+---
+# Linear identity
+user_id: 8a7f...-uuid
+display_name: Tobias Holenstein
+email: tobias@...
+timezone: Europe/Zurich
+
+## Teams
+- id: team-uuid-a, key: ENG, name: Engineering
+- id: team-uuid-b, key: PROD, name: Product
+
+## Default team
+ENG
+```
+
+### Bootstrap flow
+
+1. `memory_read("context/intel/linear-identity.md")`. If the file exists and `stale_after` is in the future, use it and stop.
+2. If missing or stale, run one GraphQL call:
+   ```
+   query { viewer { id name displayName email } teams(first: 50) { nodes { id key name } } }
+   ```
+3. Write the cache via `memory_write` with `stale_after` = today + 30 days.
+4. If the returned team list has exactly one team, record it as `Default team`. If more than one, ask the user once: *"I see teams ENG, PROD, OPS. Which one do you default to for new issues?"* and store the answer.
+5. On HTTP 401 or an `AuthenticationError` GraphQL error, invalidate the cache and re-prompt the user to check their API key — do not silently retry.
+
+### Using the cached identity
+
+- "list my issues" / "what's assigned to me" → filter by `assignee: { id: { eq: "<cached user_id>" } }`, **not** by `assignee: { isMe: true }` (the `isMe` filter is not universally available and `viewer` round-trips are wasteful).
+- "create an issue in my team" → use cached `Default team` id without asking.
+- "create an issue in <team name>" → match against cached team names; ask only if no match.
+- Skills that import external work into Linear must consume this cache rather than re-resolving identity per run.
+
 
 ## API Patterns
 
@@ -44,6 +104,14 @@ All requests are `POST` with a JSON body containing `query` and optional `variab
 ```
 http(method="POST", url="https://api.linear.app/graphql", body={"query": "{ issues(first: 20, orderBy: updatedAt) { nodes { id identifier title state { name } assignee { name } priority priorityLabel createdAt } } }"})
 ```
+
+### List Issues Assigned to the User (uses identity cache)
+
+```
+http(method="POST", url="https://api.linear.app/graphql", body={"query": "query($uid: ID!) { issues(filter: { assignee: { id: { eq: $uid } }, state: { type: { nin: [completed, canceled] } } }, first: 50, orderBy: updatedAt) { nodes { id identifier title state { name type } priority priorityLabel url updatedAt } } }", "variables": {"uid": "<cached user_id>"}})
+```
+
+Never pass `viewer.id` inline from a fresh round-trip when the cache is valid — consult `context/intel/linear-identity.md`.
 
 ### Get Issue by Identifier
 

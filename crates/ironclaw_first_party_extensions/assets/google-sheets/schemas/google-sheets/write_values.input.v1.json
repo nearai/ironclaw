@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets write_values",
+  "description": "Write values to a range.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "range",
+    "values"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "range": {
+      "type": "string",
+      "description": "A1 notation range."
+    },
+    "values": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "description": "Cell value."
+        },
+        "description": "Row values."
+      },
+      "description": "Rows of values."
+    },
+    "value_input_option": {
+      "type": "string",
+      "description": "RAW or USER_ENTERED. Defaults to USER_ENTERED."
+    }
+  },
+  "additionalProperties": false
+}

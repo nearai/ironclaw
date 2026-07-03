@@ -580,7 +580,9 @@ function showConfigureModal(name, options) {
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
-      if (secrets.length === 0 && setupFields.length === 0) {
+      const interactiveLogin = setup.interactive_login || null;
+      const onboarding = setup.onboarding || null;
+      if (secrets.length === 0 && setupFields.length === 0 && !interactiveLogin) {
         if (options && options.authData) {
           showAuthCard(options.authData);
         } else {
@@ -588,7 +590,7 @@ function showConfigureModal(name, options) {
         }
         return;
       }
-      renderConfigureModal(name, secrets, setupFields, setup.onboarding || null, options);
+      renderConfigureModal(name, secrets, setupFields, interactiveLogin, onboarding, options);
     })
     .catch((err) => {
       showToast(I18n.t('extensions.setupLoadFailed', { message: err.message }), 'error');
@@ -598,7 +600,151 @@ function showConfigureModal(name, options) {
     });
 }
 
-function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
+function translateOrFallback(key, fallback) {
+  const value = I18n.t(key);
+  return value === key ? fallback : value;
+}
+
+function compactSetupPrompt(prompt) {
+  return String(prompt || '')
+    .replace(/^enter\s+(your\s+)?/i, '')
+    .replace(/\s*\((optional|for example|numeric|[0-9]+\s*chars?|leave empty).*?\)\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function setupFieldLabel(item) {
+  const fallback = compactSetupPrompt(item.prompt || item.name);
+  return translateOrFallback('setup.secret.' + item.name, fallback || item.name);
+}
+
+function updateConfigureModalI18n(root) {
+  const scope = root || document;
+  scope.querySelectorAll('[data-configure-label-name]').forEach(function(label) {
+    const name = label.getAttribute('data-configure-label-name');
+    const prompt = label.getAttribute('data-configure-label-prompt') || name;
+    label.textContent = setupFieldLabel({ name: name, prompt: prompt });
+  });
+  scope.querySelectorAll('[data-configure-placeholder]').forEach(function(input) {
+    const key = input.getAttribute('data-configure-placeholder');
+    input.placeholder = I18n.t(key);
+  });
+  scope.querySelectorAll('[data-configure-title-name]').forEach(function(title) {
+    title.textContent = I18n.t('config.title', {
+      name: title.getAttribute('data-configure-title-name') || ''
+    });
+  });
+  scope.querySelectorAll('[data-configure-optional-summary]').forEach(function(summary) {
+    summary.textContent = I18n.t('config.optionalSectionSummary', {
+      count: summary.getAttribute('data-configure-optional-summary') || '0'
+    });
+  });
+}
+
+function basicConfigureValidationError(field, value) {
+  const label = setupFieldLabel(field);
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    return I18n.t('config.controlCharsNotAllowed', { name: label });
+  }
+
+  const validators = {
+    wecom_bot_id: /^[A-Za-z0-9_-]{3,128}$/,
+    wecom_bot_secret: /^[A-Za-z0-9_-]{16,128}$/
+  };
+  const validator = validators[field.name];
+  if (validator && !validator.test(value)) {
+    return I18n.t('config.invalidField', { name: label });
+  }
+  return null;
+}
+
+function createConfigureField(item, kind, optionalGroup) {
+  const field = document.createElement('div');
+  field.className = 'configure-field';
+  if (kind === 'secret') field.dataset.secretName = item.name;
+
+  const label = document.createElement('label');
+  const labelText = document.createElement('span');
+  labelText.setAttribute('data-configure-label-name', item.name);
+  labelText.setAttribute('data-configure-label-prompt', item.prompt || item.name);
+  labelText.textContent = setupFieldLabel(item);
+  label.appendChild(labelText);
+  if (item.optional && !optionalGroup) {
+    const opt = document.createElement('span');
+    opt.className = 'field-optional';
+    opt.textContent = I18n.t('config.optional');
+    label.appendChild(opt);
+  }
+  field.appendChild(label);
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'configure-input-row';
+
+  const input = document.createElement('input');
+  input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+  input.name = item.name;
+  const placeholderKey = item.provided
+    ? 'config.alreadySet'
+    : item.optional
+      ? 'config.optionalPlaceholder'
+      : 'config.requiredPlaceholder';
+  input.setAttribute('data-configure-placeholder', placeholderKey);
+  input.placeholder = I18n.t(placeholderKey);
+  // Do not copy extension-provided regexes into HTML pattern. Browser regex
+  // engines can backtrack catastrophically; server-side validation is the
+  // security boundary for manifest-provided secret.validation patterns.
+  inputRow.appendChild(input);
+
+  if (item.provided) {
+    const badge = document.createElement('span');
+    badge.className = 'field-provided';
+    badge.textContent = '\u2713';
+    badge.title = I18n.t('config.alreadyConfigured');
+    badge.setAttribute('data-i18n-title', 'config.alreadyConfigured');
+    inputRow.appendChild(badge);
+  }
+  if (item.auto_generate && !item.provided) {
+    const hint = document.createElement('span');
+    hint.className = 'field-autogen';
+    hint.textContent = I18n.t('config.autoGenerate');
+    hint.setAttribute('data-i18n', 'config.autoGenerate');
+    inputRow.appendChild(hint);
+  }
+
+  field.appendChild(inputRow);
+  return {
+    node: field,
+    field: {
+      kind: kind,
+      name: item.name,
+      input: input,
+      optional: !!item.optional,
+      provided: !!item.provided,
+      autoGenerate: !!item.auto_generate,
+      prompt: item.prompt || item.name
+    }
+  };
+}
+
+function appendConfigureFieldGroup(form, fields, items, kind, optionalGroup) {
+  for (const item of items) {
+    const built = createConfigureField(item, kind, optionalGroup);
+    built.field.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(
+        form.closest('.configure-overlay')?.getAttribute('data-extension-name') || '',
+        fields
+      );
+    });
+    form.appendChild(built.node);
+    fields.push(built.field);
+  }
+}
+
+window.addEventListener('ironclaw:language-changed', function() {
+  updateConfigureModalI18n(document);
+});
+
+function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onboarding, options) {
   // Cancel any existing auth-flow overlay before replacing it.
   // Remove directly (don't clear authFlowPending) since a new overlay is about to be appended.
   var existingOverlay = document.querySelector('.configure-overlay');
@@ -630,6 +776,7 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
 
   const header = document.createElement('h3');
   header.textContent = I18n.t('config.title', { name: name });
+  header.setAttribute('data-configure-title-name', name);
   modal.appendChild(header);
 
   if (onboarding && onboarding.credential_instructions) {
@@ -639,96 +786,50 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
     modal.appendChild(hint);
   }
 
+  if (interactiveLogin) {
+    const hint = document.createElement('div');
+    hint.className = 'configure-hint';
+    hint.textContent = interactiveLoginHintText(name, interactiveLogin);
+    modal.appendChild(hint);
+  }
+
   const form = document.createElement('div');
   form.className = 'configure-form';
 
   const fields = [];
-  for (const secret of secrets) {
-    const field = document.createElement('div');
-    field.className = 'configure-field';
-    field.dataset.secretName = secret.name;
+  const requiredSecrets = secrets.filter((secret) => !secret.optional);
+  const optionalSecrets = secrets.filter((secret) => secret.optional);
+  const requiredSetupFields = setupFields.filter((field) => !field.optional);
+  const optionalSetupFields = setupFields.filter((field) => field.optional);
 
-    const label = document.createElement('label');
-    label.textContent = secret.prompt;
-    if (secret.optional) {
-      const opt = document.createElement('span');
-      opt.className = 'field-optional';
-      opt.textContent = I18n.t('config.optional');
-      label.appendChild(opt);
-    }
-    field.appendChild(label);
+  appendConfigureFieldGroup(form, fields, requiredSecrets, 'secret', false);
+  appendConfigureFieldGroup(form, fields, requiredSetupFields, 'field', false);
 
-    const inputRow = document.createElement('div');
-    inputRow.className = 'configure-input-row';
+  const optionalCount = optionalSecrets.length + optionalSetupFields.length;
+  if (optionalCount > 0) {
+    const optionalDetails = document.createElement('details');
+    optionalDetails.className = 'configure-optional-group';
 
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.name = secret.name;
-    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
+    const summary = document.createElement('summary');
+    summary.setAttribute('data-configure-optional-summary', String(optionalCount));
+    summary.textContent = I18n.t('config.optionalSectionSummary', { count: String(optionalCount) });
+    optionalDetails.appendChild(summary);
 
-    if (secret.provided) {
-      const badge = document.createElement('span');
-      badge.className = 'field-provided';
-      badge.textContent = '\u2713';
-      badge.title = I18n.t('config.alreadyConfigured');
-      inputRow.appendChild(badge);
-    }
-    if (secret.auto_generate && !secret.provided) {
-      const hint = document.createElement('span');
-      hint.className = 'field-autogen';
-      hint.textContent = I18n.t('config.autoGenerate');
-      inputRow.appendChild(hint);
-    }
-
-    field.appendChild(inputRow);
-    form.appendChild(field);
-    fields.push({ kind: 'secret', name: secret.name, input: input });
+    const optionalBody = document.createElement('div');
+    optionalBody.className = 'configure-optional-fields';
+    appendConfigureFieldGroup(optionalBody, fields, optionalSecrets, 'secret', true);
+    appendConfigureFieldGroup(optionalBody, fields, optionalSetupFields, 'field', true);
+    optionalDetails.appendChild(optionalBody);
+    form.appendChild(optionalDetails);
   }
 
-  for (const setupField of setupFields) {
-    const field = document.createElement('div');
-    field.className = 'configure-field';
-
-    const label = document.createElement('label');
-    label.textContent = setupField.prompt;
-    if (setupField.optional) {
-      const opt = document.createElement('span');
-      opt.className = 'field-optional';
-      opt.textContent = I18n.t('config.optional');
-      label.appendChild(opt);
-    }
-    field.appendChild(label);
-
-    const inputRow = document.createElement('div');
-    inputRow.className = 'configure-input-row';
-
-    const input = document.createElement('input');
-    input.type = setupField.input_type === 'password' ? 'password' : 'text';
-    input.name = setupField.name;
-    input.placeholder = setupField.provided ? I18n.t('config.alreadySet') : '';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
-
-    if (setupField.provided) {
-      const badge = document.createElement('span');
-      badge.className = 'field-provided';
-      badge.textContent = '\u2713';
-      badge.title = I18n.t('config.alreadyConfigured');
-      inputRow.appendChild(badge);
-    }
-
-    field.appendChild(inputRow);
-    form.appendChild(field);
-    fields.push({ kind: 'field', name: setupField.name, input: input });
+  if (fields.length > 0) {
+    modal.appendChild(form);
   }
 
-  modal.appendChild(form);
+  if (interactiveLogin) {
+    modal.appendChild(renderInteractiveLoginPanel(name));
+  }
 
   const error = document.createElement('div');
   error.className = 'configure-inline-error';
@@ -738,11 +839,23 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = I18n.t('config.save');
-  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
-  actions.appendChild(submitBtn);
+  if (fields.length > 0) {
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'btn-ext activate';
+    submitBtn.textContent = I18n.t('config.save');
+    submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
+    actions.appendChild(submitBtn);
+  }
+
+  if (interactiveLogin) {
+    const loginBtn = document.createElement('button');
+    loginBtn.className = 'btn-ext activate';
+    loginBtn.dataset.defaultLabel = interactiveLoginDefaultLabel(name, interactiveLogin);
+    loginBtn.textContent = loginBtn.dataset.defaultLabel;
+    loginBtn.dataset.interactiveLogin = 'true';
+    loginBtn.addEventListener('click', () => startInteractiveLogin(name, overlay));
+    actions.appendChild(loginBtn);
+  }
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
@@ -760,7 +873,222 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
-  if (fields.length > 0) fields[0].input.focus();
+  if (fields.length > 0) {
+    fields[0].input.focus();
+  } else {
+    const loginBtn = overlay.querySelector('.configure-actions button[data-interactive-login="true"]');
+    if (loginBtn) loginBtn.focus();
+  }
+}
+
+function renderInteractiveLoginPanel(name) {
+  const panel = document.createElement('div');
+  panel.className = 'configure-qr-login';
+  panel.style.display = 'none';
+
+  const title = document.createElement('div');
+  title.className = 'configure-verification-title';
+  title.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrTitle') : I18n.t('auth.connect');
+  panel.appendChild(title);
+
+  const status = document.createElement('div');
+  status.className = 'configure-verification-instructions';
+  status.textContent = interactiveLoginStatusText(name, null);
+  status.dataset.qrStatus = 'true';
+  panel.appendChild(status);
+
+  const link = document.createElement('a');
+  link.className = 'configure-verification-link';
+  link.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrOpen') : I18n.t('auth.connect');
+  link.target = '_blank';
+  link.rel = 'noreferrer noopener';
+  link.style.display = 'none';
+  link.dataset.qrLink = 'true';
+  panel.appendChild(link);
+
+  return panel;
+}
+
+function interactiveLoginHintText(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatHint');
+  return (interactiveLogin && interactiveLogin.instructions) || '';
+}
+
+function interactiveLoginDefaultLabel(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatConnect');
+  return (interactiveLogin && interactiveLogin.button_label) || I18n.t('auth.connect');
+}
+
+function interactiveLoginWaitingLabel(name) {
+  if (name === 'wechat') return I18n.t('config.wechatWaiting');
+  return I18n.t('status.connecting');
+}
+
+function interactiveLoginStatusText(name, res) {
+  if (name !== 'wechat') return (res && res.message) || '';
+  if (!res) return I18n.t('config.wechatQrIntro');
+
+  switch (res.status) {
+    case 'pending':
+      return res.qr_code_url ? I18n.t('config.wechatQrReady') : I18n.t('config.wechatQrWaiting');
+    case 'scanned':
+      return I18n.t('config.wechatQrScanned');
+    case 'refreshed':
+      return I18n.t('config.wechatQrRefreshed');
+    case 'succeeded':
+      return I18n.t('config.wechatConnected');
+    case 'failed':
+      return res.message || I18n.t('config.wechatQrFailed');
+    default:
+      return res.message || I18n.t('config.wechatQrIntro');
+  }
+}
+
+function getInteractiveLoginButton(overlay) {
+  return overlay && overlay.querySelector('.configure-actions button[data-interactive-login="true"]');
+}
+
+function getInteractiveLoginPanel(overlay) {
+  return overlay && overlay.querySelector('.configure-qr-login');
+}
+
+function updateInteractiveLoginPanel(overlay, res) {
+  const panel = getInteractiveLoginPanel(overlay);
+  if (!panel) return;
+  const name = overlay && overlay.dataset ? overlay.dataset.extensionName : '';
+  const status = panel.querySelector('[data-qr-status="true"]');
+  const link = panel.querySelector('[data-qr-link="true"]');
+
+  panel.style.display = '';
+  if (status) {
+    if (name === 'wechat' && res.status === 'refreshed') {
+      status.textContent = I18n.t('config.wechatQrRefreshedHint');
+    } else {
+      status.textContent = interactiveLoginStatusText(name, res);
+    }
+  }
+
+  if (link && res.qr_code_url) {
+    link.href = res.qr_code_url;
+    link.style.display = '';
+  }
+}
+
+function maybeOpenInteractiveLoginUrl(name, overlay, res) {
+  if (name !== 'wechat' || !overlay || !res || !res.qr_code_url) return;
+  const qrUrl = res.qr_code_url;
+  if (overlay.dataset.interactiveLoginLastOpenedUrl === qrUrl) return;
+  overlay.dataset.interactiveLoginLastOpenedUrl = qrUrl;
+  window.open(qrUrl, '_blank', 'noopener,noreferrer');
+}
+
+function setInteractiveLoginBusy(overlay, busy, label) {
+  const loginBtn = getInteractiveLoginButton(overlay);
+  if (!loginBtn) return;
+  loginBtn.disabled = !!busy;
+  loginBtn.textContent = label || loginBtn.dataset.defaultLabel || I18n.t('auth.connect');
+}
+
+function interactiveLoginPollDelayMs(status) {
+  switch (status) {
+    case 'refreshed':
+      return 2000;
+    case 'pending':
+    case 'scanned':
+      return 3000;
+    default:
+      return 3000;
+  }
+}
+
+function startInteractiveLogin(name, overlay) {
+  if (!overlay || !document.body.contains(overlay)) return;
+  clearConfigureInlineError(overlay);
+  setConfigureInlineStatus(
+    overlay,
+    name === 'wechat' ? I18n.t('config.wechatPreparingQr') : I18n.t('status.connecting'),
+  );
+  setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/start', {
+    method: 'POST',
+    body: { force: true },
+  })
+    .then((res) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (!res.success || !res.session_id) {
+        setInteractiveLoginBusy(overlay, false);
+        setConfigureInlineError(
+          overlay,
+          res.message || I18n.t('config.interactiveLoginStartFailed'),
+        );
+        setConfigureInlineStatus(overlay, '');
+        return;
+      }
+
+      overlay.dataset.interactiveLoginSessionId = res.session_id;
+      updateInteractiveLoginPanel(overlay, res);
+      maybeOpenInteractiveLoginUrl(name, overlay, res);
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
+      pollInteractiveLogin(name, overlay, res.session_id);
+    })
+    .catch((err) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(
+        overlay,
+        err.message || I18n.t('config.interactiveLoginStartFailed'),
+      );
+      setConfigureInlineStatus(overlay, '');
+    });
+}
+
+function pollInteractiveLogin(name, overlay, sessionId) {
+  if (!overlay || !document.body.contains(overlay)) return;
+  if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/poll', {
+    method: 'POST',
+    body: { session_id: sessionId },
+  })
+    .then((res) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+
+      updateInteractiveLoginPanel(overlay, res);
+      maybeOpenInteractiveLoginUrl(name, overlay, res);
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
+
+      if (res.status === 'pending' || res.status === 'scanned' || res.status === 'refreshed') {
+        if (res.status === 'refreshed') {
+          setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
+        }
+        window.setTimeout(function() {
+          pollInteractiveLogin(name, overlay, sessionId);
+        }, interactiveLoginPollDelayMs(res.status));
+        return;
+      }
+
+      if (res.success && res.activated) {
+        closeConfigureModal(name);
+        showToast(res.message || I18n.t('config.connectedSuccess', { name: name }), 'success');
+        refreshCurrentSettingsTab();
+        return;
+      }
+
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, res.message || I18n.t('config.interactiveLoginFailed'));
+      setConfigureInlineStatus(overlay, '');
+    })
+    .catch((err) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, err.message || I18n.t('config.interactiveLoginFailed'));
+      setConfigureInlineStatus(overlay, '');
+    });
 }
 
 function setConfigureInlineError(overlay, message) {
@@ -768,6 +1096,15 @@ function setConfigureInlineError(overlay, message) {
   if (!error) return;
   error.textContent = message || '';
   error.style.display = message ? 'block' : 'none';
+}
+
+function setConfigureInlineStatus(overlay, message) {
+  const panel = getInteractiveLoginPanel(overlay);
+  if (!panel) return;
+  const status = panel.querySelector('[data-qr-status="true"]');
+  if (!status) return;
+  panel.style.display = message ? '' : 'none';
+  status.textContent = message || '';
 }
 
 function clearConfigureInlineError(overlay) {
@@ -778,6 +1115,33 @@ function submitConfigureModal(name, fields, options) {
   options = options || {};
   const secrets = {};
   const setupFields = {};
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  clearConfigureInlineError(overlay);
+
+  for (const f of fields) {
+    f.input.classList.remove('configure-input-invalid');
+    const value = f.input.value.trim();
+    const missingRequired = !f.optional && !f.provided && !f.autoGenerate && !value;
+    if (missingRequired) {
+      const message = I18n.t('config.requiredFieldMissing', { name: setupFieldLabel(f) });
+      f.input.classList.add('configure-input-invalid');
+      setConfigureInlineError(overlay, message);
+      showToast(message, 'error');
+      f.input.focus();
+      return;
+    }
+    if (value) {
+      const validationError = basicConfigureValidationError(f, value);
+      if (validationError) {
+        f.input.classList.add('configure-input-invalid');
+        setConfigureInlineError(overlay, validationError);
+        showToast(validationError, 'error');
+        f.input.focus();
+        return;
+      }
+    }
+  }
+
   for (const f of fields) {
     const value = f.input.value.trim();
     if (!value) {
@@ -790,10 +1154,8 @@ function submitConfigureModal(name, fields, options) {
     }
   }
 
-  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
   const requestId = overlay ? overlay.getAttribute('data-request-id') : null;
   const threadId = overlay ? overlay.getAttribute('data-thread-id') : null;
-  clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];

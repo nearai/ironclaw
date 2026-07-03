@@ -384,6 +384,15 @@
   color: var(--danger);
 }
 
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] {
+  border-color: var(--border);
+}
+
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] .activity-tool-name,
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] .activity-icon-fail {
+  color: var(--text-secondary);
+}
+
 .activity-tool-header {
   display: flex;
   align-items: center;
@@ -530,6 +539,10 @@
   background: var(--bg-tertiary);
 }
 
+.activity-summary[data-status="fail"] {
+  color: var(--danger);
+}
+
 .activity-summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -607,6 +620,17 @@
   font-weight: 600;
   color: var(--text);
   font-family: var(--font-mono);
+}
+
+.approval-summary {
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  background: var(--code-bg);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 
 .approval-description {
@@ -1552,4 +1576,3 @@
   font-size: 13px;
   line-height: 1.4;
 }
-

@@ -1,3 +1,42 @@
+// Issue #2991: extract the most-load-bearing parameter as a one-line summary
+// so the user can decide without opening the parameter blob. Returns null
+// when no useful summary can be derived. Output is bounded to one line and
+// ~120 chars so a long URL or multi-line shell script can't push the
+// approval buttons off-screen.
+const APPROVAL_SUMMARY_MAX_LEN = 120;
+function truncateApprovalSummary(s) {
+  if (s.length <= APPROVAL_SUMMARY_MAX_LEN) return s;
+  return s.slice(0, APPROVAL_SUMMARY_MAX_LEN - 1) + '…';
+}
+function summarizeApprovalParams(toolName, params) {
+  if (!params || typeof params !== 'object') return null;
+  const name = String(toolName || '').toLowerCase().replace(/-/g, '_');
+  if (name === 'http' || name === 'http_request' || name === 'web_fetch') {
+    const method = String(params.method || 'GET').toUpperCase();
+    const url = typeof params.url === 'string' ? params.url.trim()
+      : typeof params.endpoint === 'string' ? params.endpoint.trim() : '';
+    if (url.length > 0) return truncateApprovalSummary(method + ' ' + url);
+  }
+  if (name === 'shell' || name === 'bash' || name === 'exec') {
+    const raw = params.command || params.cmd || params.script;
+    if (typeof raw === 'string') {
+      // Collapse newlines + runs of whitespace so multi-line scripts
+      // render on a single line.
+      const cmd = raw.replace(/\s+/g, ' ').trim();
+      if (cmd.length > 0) return truncateApprovalSummary(cmd);
+    }
+  }
+  if (name === 'file_write' || name === 'write_file' || name === 'apply_patch'
+      || name === 'file_read' || name === 'read_file' || name === 'list_dir') {
+    const raw = params.path || params.target;
+    if (typeof raw === 'string') {
+      const path = raw.trim();
+      if (path.length > 0) return truncateApprovalSummary(path);
+    }
+  }
+  return null;
+}
+
 function showApproval(data) {
   // Avoid duplicate cards on reconnect/history refresh.
   const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
@@ -21,6 +60,25 @@ function showApproval(data) {
   toolName.className = 'approval-tool-name';
   toolName.textContent = humanizeToolName(data.tool_name);
   card.appendChild(toolName);
+
+  // Try to render an actionable one-line summary from the parameters
+  // (e.g. "GET https://api.example.com/foo") so the approval prompt is
+  // self-explanatory instead of "A tool is requesting permission" (#2991).
+  let parsedParams = null;
+  if (data.parameters) {
+    try {
+      parsedParams = JSON.parse(data.parameters);
+    } catch (_e) {
+      parsedParams = null;
+    }
+  }
+  const summary = summarizeApprovalParams(data.tool_name, parsedParams);
+  if (summary) {
+    const summaryEl = document.createElement('div');
+    summaryEl.className = 'approval-summary';
+    summaryEl.textContent = summary;
+    card.appendChild(summaryEl);
+  }
 
   if (data.description) {
     const desc = document.createElement('div');

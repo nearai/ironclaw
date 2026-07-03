@@ -53,6 +53,12 @@ pub enum GateStoreError {
     #[error("a gate is already pending for this thread")]
     AlreadyExists,
 
+    /// A gate matches the supplied request id but belongs to a different
+    /// user. Distinct from `NotFound` so callers (HTTP handlers) can
+    /// return 403 without leaking whether the gate exists at all.
+    #[error("not authorized to resolve this gate")]
+    Unauthorized,
+
     #[error("persistence error: {reason}")]
     Persistence { reason: String },
 }
@@ -193,6 +199,32 @@ impl PendingGateStore {
             .map(PendingGateView::from)
     }
 
+    /// Read-only peek at a pending gate keyed by `request_id`, scoped to
+    /// the requesting user. Returns `None` if no gate matches, the gate
+    /// is owned by another user, or it has expired.
+    ///
+    /// Used by the foreground cancel path to recover the owning thread
+    /// when the client omits `thread_id` in the resolution payload —
+    /// without this, a foreground inline-await gate would be stranded
+    /// (gate marked cancelled, parked VM never unwound). See PR #3366
+    /// review.
+    pub async fn peek_by_request_id(
+        &self,
+        request_id: Uuid,
+        expected_user_id: &str,
+    ) -> Option<PendingGateView> {
+        let inner = self.inner.lock().await;
+        let key = inner.by_request_id.get(&request_id)?;
+        if key.user_id != expected_user_id {
+            return None;
+        }
+        inner
+            .by_key
+            .get(key)
+            .filter(|g| !g.is_expired())
+            .map(PendingGateView::from)
+    }
+
     /// List all non-expired gates for a user.
     pub async fn list_for_user(&self, user_id: &str) -> Vec<PendingGate> {
         let inner = self.inner.lock().await;
@@ -202,6 +234,85 @@ impl PendingGateStore {
             .filter(|gate| gate.user_id == user_id && !gate.is_expired())
             .cloned()
             .collect()
+    }
+
+    /// Atomically take a pending gate by `request_id`, verifying user
+    /// ownership, channel authorization, and expiry under a single lock.
+    ///
+    /// Mirrors [`take_verified`], but resolves the composite key from
+    /// the wire `request_id` first. Used by HTTP surfaces (the
+    /// inline-await fast path) where the caller has only the
+    /// channel-visible thread identifier — which for the web gateway is
+    /// recorded on the gate as `scope_thread_id`, not as the internal
+    /// engine `ThreadId`. Looking up by `request_id` (unique
+    /// system-wide) avoids the wire-vs.-engine identifier confusion
+    /// that would otherwise miss the gate entirely.
+    ///
+    /// Returns:
+    /// - `Ok(gate)` on success — the gate is removed from both indices.
+    /// - `Err(NotFound)` when no gate matches `request_id` (already
+    ///   resolved, never existed, or unrecoverable after a restart).
+    /// - `Err(Unauthorized)` when a gate exists but `expected_user_id`
+    ///   does not own it. This is intentionally distinct from
+    ///   `NotFound` so callers can surface a 403 without leaking gate
+    ///   existence across tenants.
+    /// - `Err(ChannelMismatch | Expired)` — same semantics as
+    ///   [`take_verified`].
+    ///
+    /// [`take_verified`]: PendingGateStore::take_verified
+    pub async fn take_verified_by_request_id(
+        &self,
+        request_id: Uuid,
+        expected_user_id: &str,
+        responding_channel: &str,
+    ) -> Result<PendingGate, GateStoreError> {
+        let (key, gate) = {
+            let mut inner = self.inner.lock().await;
+
+            let key = inner
+                .by_request_id
+                .get(&request_id)
+                .cloned()
+                .ok_or(GateStoreError::NotFound)?;
+
+            if key.user_id != expected_user_id {
+                return Err(GateStoreError::Unauthorized);
+            }
+
+            let gate = inner.by_key.get(&key).ok_or(GateStoreError::NotFound)?;
+
+            // Verify channel authorization
+            let channel_authorized = gate.source_channel == responding_channel
+                || TRUSTED_GATE_CHANNELS.contains(&responding_channel);
+            if !channel_authorized {
+                return Err(GateStoreError::ChannelMismatch {
+                    expected: gate.source_channel.clone(),
+                    actual: responding_channel.to_string(),
+                });
+            }
+
+            // Check expiry — clean up expired gate while we hold the lock.
+            if gate.is_expired() {
+                let removed = inner.by_key.remove(&key);
+                if let Some(ref g) = removed {
+                    inner.by_request_id.remove(&g.request_id);
+                }
+                return Err(GateStoreError::Expired);
+            }
+
+            // Atomically remove — no TOCTOU gap.
+            let gate = inner.by_key.remove(&key).ok_or(GateStoreError::NotFound)?;
+            inner.by_request_id.remove(&gate.request_id);
+            (key, gate)
+        };
+
+        // Persist removal after lock is released.
+        if let Some(ref persistence) = self.persistence
+            && let Err(e) = persistence.remove(&key).await
+        {
+            tracing::debug!(error = %e, "gate persistence removal failed (gate already taken from memory)");
+        }
+        Ok(gate)
     }
 
     /// List all non-expired gates.
@@ -469,6 +580,61 @@ mod tests {
         assert_eq!(store.list_all().await.len(), 1);
     }
 
+    // ── peek_by_request_id (foreground cancel fallback) ──────
+
+    #[tokio::test]
+    async fn test_peek_by_request_id_returns_view_for_owning_user() {
+        // Regression: PR #3366 review — chat_gate_resolve_handler's
+        // Cancelled arm uses this path to recover the owning thread when
+        // the client omits `thread_id`, otherwise the parked VM is
+        // stranded. Also asserts ownership scoping so a cross-user lookup
+        // doesn't leak the gate.
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate_with("alice", ThreadId::new(), "web", 300);
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        let view = store
+            .peek_by_request_id(request_id, "alice")
+            .await
+            .expect("owning user sees the gate");
+        assert_eq!(view.request_id, request_id.to_string());
+
+        // Cross-user lookup yields None (do not leak gate existence).
+        assert!(store.peek_by_request_id(request_id, "bob").await.is_none());
+
+        // Unknown request_id yields None.
+        assert!(
+            store
+                .peek_by_request_id(Uuid::new_v4(), "alice")
+                .await
+                .is_none()
+        );
+
+        // Peek does not consume — second peek still works.
+        assert!(
+            store
+                .peek_by_request_id(request_id, "alice")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peek_by_request_id_skips_expired() {
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate_with("alice", ThreadId::new(), "web", -1);
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        assert!(
+            store
+                .peek_by_request_id(request_id, "alice")
+                .await
+                .is_none()
+        );
+    }
+
     // ── Channel verification ─────────────────────────────────
 
     #[tokio::test]
@@ -595,6 +761,78 @@ mod tests {
 
         assert_eq!(successes, 1, "Exactly one concurrent take must succeed");
         assert_eq!(failures, 1, "Exactly one concurrent take must fail");
+    }
+
+    // ── take_verified_by_request_id ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_take_verified_by_request_id_resolves_via_request_id() {
+        // The HTTP fast path looks gates up by request_id when the
+        // wire-supplied thread identifier (channel scope id) does not
+        // equal the engine `ThreadId`. Verify the lookup still reaches
+        // the gate and removes both indices on success.
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate("web");
+        let key = gate.key();
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        let taken = store
+            .take_verified_by_request_id(request_id, "user1", "web")
+            .await
+            .expect("take by request_id must succeed");
+        assert_eq!(taken.action_name, "shell");
+
+        // Both indices must be cleared.
+        assert!(store.peek(&key).await.is_none());
+        assert!(matches!(
+            store
+                .take_verified_by_request_id(request_id, "user1", "web")
+                .await,
+            Err(GateStoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_take_verified_by_request_id_rejects_other_user() {
+        // Tenant isolation: a gate matching `request_id` but owned by
+        // a different user must surface `Unauthorized`, distinct from
+        // `NotFound`, so HTTP callers can return 403 without leaking
+        // gate existence across tenants.
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate_with("alice", ThreadId::new(), "web", 300);
+        let key = gate.key();
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        assert!(matches!(
+            store
+                .take_verified_by_request_id(request_id, "mallory", "web")
+                .await,
+            Err(GateStoreError::Unauthorized)
+        ));
+        // Gate is left intact — the legitimate owner must still be able
+        // to resolve it.
+        assert!(store.peek(&key).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_take_verified_by_request_id_channel_mismatch() {
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate("telegram");
+        let key = gate.key();
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        // Slack is not the source channel and not in the trusted set.
+        assert!(matches!(
+            store
+                .take_verified_by_request_id(request_id, "user1", "slack")
+                .await,
+            Err(GateStoreError::ChannelMismatch { .. })
+        ));
+        // Channel-mismatch must NOT consume the gate.
+        assert!(store.peek(&key).await.is_some());
     }
 
     // ── Peek ─────────────────────────────────────────────────

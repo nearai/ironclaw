@@ -1,12 +1,12 @@
 //! Agent-callable tools for managing extensions (MCP servers and WASM tools).
 //!
 //! These built-ins manage extension discovery and lifecycle from conversation.
-//! In engine v2, the normal model-facing enablement path is
-//! `tool_activate(name=...)`: blocked integrations surface in capability
-//! background, and `tool_activate` internally handles install/auth/activation
-//! as needed. `tool_search`, `tool_list`, and `tool_info` support discovery;
-//! `tool_install` / `tool_auth` remain available as narrower runtime/compat
-//! surfaces rather than the primary v2 prompt contract.
+//! In engine v2, installed-but-unauthed tools are callable directly: the
+//! engine's auth preflight raises an `Authentication` gate at execute time,
+//! the inline-await machinery parks the VM, and the OAuth callback delivers
+//! the resolved credential to retry the action. `tool_search`, `tool_list`,
+//! and `tool_info` support discovery; `tool_install` / `tool_auth` cover the
+//! narrower install + manual-auth flows.
 
 use std::sync::Arc;
 
@@ -113,11 +113,11 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. Use `tool_install` for explicit \
-         installation, then call `tool_activate(name=\"...\")` to make a discovered \
-         integration usable. Use the `message` tool for \
-         proactive outbound sends. Use discover:true to search online if the built-in registry \
-         has no results."
+         receive and reply there), tools, and MCP servers. Use `tool_install` to install \
+         a discovered integration; once installed, its tools become directly callable \
+         (the engine's auth preflight raises an authentication gate at execute time when \
+         credentials are missing). Use the `message` tool for proactive outbound sends. \
+         Use discover:true to search online if the built-in registry has no results."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -326,64 +326,6 @@ impl Tool for ToolAuthTool {
 
     fn engine_compatibility(&self) -> EngineCompatibility {
         EngineCompatibility::V1Only
-    }
-}
-
-// ── tool_activate ────────────────────────────────────────────────────────
-
-pub struct ToolActivateTool {
-    manager: Arc<ExtensionManager>,
-}
-
-impl ToolActivateTool {
-    pub fn new(manager: Arc<ExtensionManager>) -> Self {
-        Self { manager }
-    }
-}
-
-#[async_trait]
-impl Tool for ToolActivateTool {
-    fn name(&self) -> &str {
-        "tool_activate"
-    }
-
-    fn description(&self) -> &str {
-        "Make an integration usable. This may install, authenticate, and activate it as needed \
-         before loading tools, starting channels, or connecting to MCP servers."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Extension name to activate"
-                }
-            },
-            "required": ["name"]
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        ctx: &JobContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let start = std::time::Instant::now();
-
-        let name = require_str(&params, "name")?;
-
-        let result = self
-            .manager
-            .ensure_extension_ready(name, &ctx.user_id, EnsureReadyIntent::ExplicitActivate)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-        Ok(ToolOutput::success(
-            output_from_ensure_ready(result),
-            start.elapsed(),
-        ))
     }
 }
 
@@ -905,7 +847,7 @@ mod tests {
         };
 
         let description = tool.description();
-        assert!(description.contains("call `tool_activate(name=\"...\")`"));
+        assert!(description.contains("Use `tool_install` to install"));
         assert!(description.contains("Use the `message` tool for proactive outbound sends"));
     }
 
@@ -942,23 +884,6 @@ mod tests {
         assert!(
             schema["properties"].get("token").is_none(),
             "tool_auth must not have a token parameter"
-        );
-    }
-
-    #[test]
-    fn test_tool_activate_schema() {
-        use crate::tools::tool::ApprovalRequirement;
-        let tool = ToolActivateTool {
-            manager: test_manager_stub(),
-        };
-        assert_eq!(tool.name(), "tool_activate");
-        assert!(
-            tool.description()
-                .contains("install, authenticate, and activate")
-        );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Never
         );
     }
 

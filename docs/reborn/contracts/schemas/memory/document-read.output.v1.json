@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/document-read.output.v1.json",
+  "title": "Memory Document Read Output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["content"],
+  "properties": {
+    "content": { "type": "string" },
+    "version": { "type": "string", "maxLength": 128 },
+    "metadata": { "type": "object", "additionalProperties": true }
+  }
+}

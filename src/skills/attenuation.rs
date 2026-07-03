@@ -17,7 +17,7 @@
 //! | Trusted only       | All tools (user placed these, full trust)         |
 //! | Installed present  | Read-only tools ONLY                              |
 
-use crate::llm::ToolDefinition;
+use ironclaw_llm::ToolDefinition;
 use ironclaw_skills::{LoadedSkill, SkillTrust};
 
 /// Tools that are always safe -- read-only, no side effects.
@@ -138,6 +138,7 @@ mod tests {
             manifest: SkillManifest {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],

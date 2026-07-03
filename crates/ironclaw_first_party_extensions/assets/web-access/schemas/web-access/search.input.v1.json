@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Search query"
+    },
+    "queries": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "description": "Batch of search queries"
+    },
+    "num_results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Results per query. Defaults to 5."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Alias for num_results"
+    },
+    "recency_filter": {
+      "type": "string",
+      "enum": ["day", "week", "month", "year"],
+      "description": "Prefer recent results"
+    },
+    "domain_filter": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      },
+      "description": "Domains to include, or prefix with '-' to exclude"
+    },
+    "include_content": {
+      "type": "boolean",
+      "description": "Ask the search backend for larger source context"
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["auto", "exa_mcp"],
+      "description": "Search provider. auto uses zero-config Exa MCP."
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["query"]
+    },
+    {
+      "required": ["queries"]
+    }
+  ],
+  "additionalProperties": false
+}

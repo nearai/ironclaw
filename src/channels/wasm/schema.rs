@@ -147,6 +147,13 @@ impl ChannelCapabilitiesFile {
         serde_json::to_string(&self.config).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Whether this channel declares owner/pairing gating in its config.
+    pub fn requires_binding(&self) -> bool {
+        ["owner_id", "dm_policy", "allow_from"]
+            .iter()
+            .any(|key| self.config.contains_key(*key))
+    }
+
     /// Get the webhook secret header name for this channel.
     ///
     /// Returns the configured header name from capabilities, or a sensible default.
@@ -205,6 +212,22 @@ impl ChannelCapabilitiesFile {
             .and_then(|c| c.webhook.as_ref())
             .and_then(|w| w.managed_by_host)
             .unwrap_or(true)
+    }
+
+    /// Get the HTTP methods exposed by the host webhook router.
+    ///
+    /// Defaults to POST and only keeps methods implemented by the generic
+    /// WASM webhook router. This prevents a capabilities file from widening
+    /// the effective method surface through typos or unsupported methods.
+    pub fn webhook_methods(&self) -> Vec<String> {
+        let methods = self
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .map(|w| w.methods.as_slice())
+            .unwrap_or_default();
+        normalize_webhook_methods(methods)
     }
 
     /// Return setup.secret_config_mappings after applying security constraints.
@@ -290,6 +313,23 @@ impl ChannelCapabilitiesFile {
             })
             .collect()
     }
+}
+
+fn normalize_webhook_methods(methods: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for method in methods {
+        let upper = method.trim().to_ascii_uppercase();
+        if !matches!(upper.as_str(), "GET" | "POST") || normalized.contains(&upper) {
+            continue;
+        }
+        normalized.push(upper);
+    }
+
+    if normalized.is_empty() {
+        normalized.push("POST".to_string());
+    }
+
+    normalized
 }
 
 /// Schema for channel capabilities.
@@ -427,6 +467,13 @@ pub struct WebhookSchema {
     /// in a provider-specific request field rather than the configured header.
     #[serde(default)]
     pub managed_by_host: Option<bool>,
+
+    /// HTTP methods the generic webhook router should expose for this path.
+    ///
+    /// Defaults to POST. Callback-style providers that perform URL
+    /// verification can opt into GET explicitly.
+    #[serde(default)]
+    pub methods: Vec<String>,
 }
 
 /// Setup configuration schema.
@@ -712,6 +759,34 @@ mod tests {
     }
 
     #[test]
+    fn test_requires_binding_detects_dm_owner_fields() {
+        let telegram = ChannelCapabilitiesFile::from_json(
+            r#"{
+                "name": "telegram",
+                "config": {
+                    "owner_id": null,
+                    "dm_policy": "pairing",
+                    "allow_from": []
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(telegram.requires_binding());
+
+        let wechat = ChannelCapabilitiesFile::from_json(
+            r#"{
+                "name": "wechat",
+                "config": {
+                    "base_url": "https://ilinkai.weixin.qq.com",
+                    "bot_type": "3"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(!wechat.requires_binding());
+    }
+
+    #[test]
     fn test_durable_workspace_paths_are_prefixed() {
         let json = r#"{
             "name": "slack",
@@ -762,7 +837,8 @@ mod tests {
                     "allowed_paths": ["/webhook/telegram"],
                     "webhook": {
                         "secret_header": "X-Telegram-Bot-Api-Secret-Token",
-                        "secret_name": "telegram_webhook_secret"
+                        "secret_name": "telegram_webhook_secret",
+                        "methods": ["post", "GET", "TRACE", "POST"]
                     }
                 }
             }
@@ -775,6 +851,25 @@ mod tests {
         );
         assert_eq!(file.webhook_secret_name(), "telegram_webhook_secret");
         assert!(file.webhook_secret_managed_by_host());
+        assert_eq!(
+            file.webhook_methods(),
+            vec!["POST".to_string(), "GET".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_webhook_methods_default_to_post() {
+        let json = r#"{
+            "name": "telegram",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/telegram"]
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(file.webhook_methods(), vec!["POST".to_string()]);
     }
 
     #[test]

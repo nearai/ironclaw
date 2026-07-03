@@ -1,0 +1,558 @@
+{
+  "model": "mock-model",
+  "schema_version": 1,
+  "entries": [
+    {
+      "request_hash": "8b0594268d8163bcd1adf3f5268990be03bbde10e953aff35a6f58a709737b43",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 2,
+        "last_user_content": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name = 'gmail-draft-3133'\n  goal = 'Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.'\n  cadence = cron expression '*/3 * * * *'\nThen immediately use mission_fire to trigger it once. Do not call tool_list, tool_info, tool_activate, or any other tool before mission_create. Just create the mission and fire it."
+              }
+            ]
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"name\": \"gmail-draft-3133\", \"goal\": \"Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \\\"Test mission #3133\\\" and body \\\"Mock draft from the IronClaw e2e test.\\\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\", \"cadence\": \"*/3 * * * *\"}",
+                    "name": "mission_create"
+                  },
+                  "id": "call_529804722287442abf4af8c4",
+                  "type": "function"
+                },
+                {
+                  "function": {
+                    "arguments": "{\"name\": \"gmail-draft-3133\"}",
+                    "name": "mission_fire"
+                  },
+                  "id": "call_0c3ac26a8b324127a2cee4a5",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778219609,
+        "id": "chatcmpl-9d694b797f3acd72",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 332,
+          "prompt_tokens": 15249,
+          "total_tokens": 15581
+        }
+      }
+    },
+    {
+      "request_hash": "17d5a286b3e7533ecdd4209841290909381960a576304ad294d6bc8a596a4bd2",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 5,
+        "last_user_content": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name = 'gmail-draft-3133'\n  goal = 'Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.'\n  cadence = cron expression '*/3 * * * *'\nThen immediately use mission_fire to trigger it once. Do not call tool_list, tool_info, tool_activate, or any other tool before mission_create. Just create the mission and fire it."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "mission_create",
+                  "arguments": "{\"cadence\":\"*/3 * * * *\",\"goal\":\"Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \\\"Test mission #3133\\\" and body \\\"Mock draft from the IronClaw e2e test.\\\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\",\"name\":\"gmail-draft-3133\"}"
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "mission_fire",
+                  "arguments": "{\"name\":\"gmail-draft-3133\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'mission_id': '<uuid>', 'name': 'gmail-draft-3133', 'status': 'created'}"
+          },
+          {
+            "role": "tool",
+            "content": "[ACTION FAILED] mission_fire: {'error': 'effect execution error: mission not found by name: tried [\"gmail-draft-3133\"]. Use mission_list to see available missions.'}"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\nThe mission was created successfully with ID `f19887ba-34a6-4e93-98da-6d8d3394112f`, but the `mission_fire` call failed because it couldn't find the mission by name immediately after creation. Let me try firing it using the mission ID instead:\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"id\": \"f19887ba-34a6-4e93-98da-6d8d3394112f\"}",
+                    "name": "mission_fire"
+                  },
+                  "id": "call_fb552114d76c407581db9baf",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778219616,
+        "id": "chatcmpl-ac1de833db95dc10",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 137,
+          "prompt_tokens": 15536,
+          "prompt_tokens_details": {
+            "cached_tokens": 14672
+          },
+          "total_tokens": 15673
+        }
+      }
+    },
+    {
+      "request_hash": "dc61373fb9af3b80914e85077785cd49e9de6c5dd150721ec4d00401e1e672e1",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 7,
+        "last_user_content": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the mission_create tool to create a mission with these exact parameters and DO NOT run any other tools first:\n  name = 'gmail-draft-3133'\n  goal = 'Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.'\n  cadence = cron expression '*/3 * * * *'\nThen immediately use mission_fire to trigger it once. Do not call tool_list, tool_info, tool_activate, or any other tool before mission_create. Just create the mission and fire it."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "mission_create",
+                  "arguments": "{\"cadence\":\"*/3 * * * *\",\"goal\":\"Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \\\"Test mission #3133\\\" and body \\\"Mock draft from the IronClaw e2e test.\\\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\",\"name\":\"gmail-draft-3133\"}"
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "mission_fire",
+                  "arguments": "{\"name\":\"gmail-draft-3133\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'mission_id': '<uuid>', 'name': 'gmail-draft-3133', 'status': 'created'}"
+          },
+          {
+            "role": "tool",
+            "content": "[ACTION FAILED] mission_fire: {'error': 'effect execution error: mission not found by name: tried [\"gmail-draft-3133\"]. Use mission_list to see available missions.'}"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\nThe mission was created successfully with ID `<uuid>`, but the `mission_fire` call failed because it couldn't find the mission by name immediately after creation. Let me try firing it using the mission ID instead:\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "mission_fire",
+                  "arguments": "{\"id\":\"<uuid>\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'status': 'fired', 'thread_id': '<uuid>'}"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\nThe mission has been successfully created and fired:\n\n- **Mission created**: `gmail-draft-3133` with ID `f19887ba-34a6-4e93-98da-6d8d3394112f`\n- **Cadence**: `*/3 * * * *` (runs every 3 minutes)\n- **Mission fired**: Triggered a one-time execution with thread ID `9c67e951-a968-4b50-9d64-30f6062f279f`\n\nThe mission will now execute the Gmail draft creation as specified in its goal. The initial `mission_fire` by name failed because the mission wasn't immediately indexed by name, but firing by ID worked successfully.",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1778219618,
+        "id": "chatcmpl-b0f987f5b7c39231",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 181,
+          "prompt_tokens": 15736,
+          "total_tokens": 15917
+        }
+      }
+    },
+    {
+      "request_hash": "9bd54aee4f8ff02b0e33fe5a818197126723960e05667ff742506ddd676a81a4",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 2,
+        "last_user_content": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\n\n## Current Focus\nThis is the first run. Start by understanding the goal and determining the first step.\n\n## Knowledge from Prior Threads\n[SKILLS]\n\nThis is thread #1 for this mission.\n\n## Instructions\nBased on the above context, take the next step toward the goal. Use tools to gather information, analyze data, or take actions. When done, call FINAL() with your response. Include:\n1. What you accomplished in this step\n2. What the next focus should be (for the next thread)\n3. Whether the goal has been achieved (yes/no)"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"detail\": \"schema\", \"include_schema\": true, \"name\": \"gmail\"}",
+                    "name": "tool_info"
+                  },
+                  "id": "call_1b59317beb8a4f6c948d48eb",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778219620,
+        "id": "chatcmpl-87b2f730c41a85dd",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 91,
+          "prompt_tokens": 17722,
+          "prompt_tokens_details": {
+            "cached_tokens": 6288
+          },
+          "total_tokens": 17813
+        }
+      }
+    },
+    {
+      "request_hash": "c60635dffe9950e95fdc7b7e7d9f446954a0a804b0a2a65d0edda2d41235b27f",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 4,
+        "last_user_content": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\n\n## Current Focus\nThis is the first run. Start by understanding the goal and determining the first step.\n\n## Knowledge from Prior Threads\n[SKILLS]\n\nThis is thread #1 for this mission.\n\n## Instructions\nBased on the above context, take the next step toward the goal. Use tools to gather information, analyze data, or take actions. When done, call FINAL() with your response. Include:\n1. What you accomplished in this step\n2. What the next focus should be (for the next thread)\n3. Whether the goal has been achieved (yes/no)"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "tool_info",
+                  "arguments": "{\"detail\":\"schema\",\"include_schema\":true,\"name\":\"gmail\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'description': 'Read, search, send, draft, and reply to emails via Gmail. Supports Gmail search query syntax (is:unread, from:, subject:, after:, etc.).', 'name': 'gmail', 'parameters': ['action', 'bcc', 'body', 'cc', 'label_ids', 'max_results', 'message_id', 'query', 'reply_all', 'subject', 'to'], 'schema': {'properties': {'action': {'description': 'The Gmail operation to perform', 'enum': ['list_messages', 'get_message', 'send_message', 'create_draft', 'reply_to_message', 'trash_message'], 'type': 'string'}, 'bcc': {'description': 'BCC recipients, comma-separated. Used by: send_message, create_draft', 'type': 'string'}, 'body': {'description': 'Email body (plain text). Required for: send_message, create_draft, reply_to_message', 'type': 'string'}, 'cc': {'description': 'CC recipients, comma-separated. Used by: send_message, create_draft', 'type': 'string'}, 'label_ids': {'description': \"Label IDs to filter by (e.g., 'INBOX', 'SENT', 'DRAFT'). Used by: list_messages\", 'items': {'type': 'string'}, 'type': 'array'}, 'max_results': {'default': 20, 'description': 'Maximum number of messages to return (default: 20). Used by: list_messages', 'type': 'integer'}, 'message_id': {'description': 'Message ID. Required for: get_message, reply_to_message, trash_message', 'type': 'string'}, 'query': {'description': \"Gmail search query (same syntax as Gmail search box, e.g., 'is:unread', 'from:alice@example.com'). Used by: list_messages\", 'type': 'string'}, 'reply_all': {'default': False, 'description': 'If true, reply to all recipients (default: false). Used by: reply_to_message', 'type': 'boolean'}, 'subject': {'description': 'Email subject. Required for: send_message, create_draft', 'type': 'string'}, 'to': {'description': 'Recipient email address(es), comma-separated. Required for: send_message, create_draft', 'type': 'string'}}, 'required': ['action'], 'type': 'object'}}"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"action\": \"create_draft\", \"body\": \"Mock draft from the IronClaw e2e test.\", \"subject\": \"Test mission #3133\", \"to\": \"owner@example.com\"}",
+                    "name": "gmail"
+                  },
+                  "id": "call_0c6030b6b0cb41ea8e25174b",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778219624,
+        "id": "chatcmpl-91b03ec249e4389d",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 86,
+          "prompt_tokens": 18287,
+          "prompt_tokens_details": {
+            "cached_tokens": 16768
+          },
+          "total_tokens": 18373
+        }
+      }
+    },
+    {
+      "request_hash": "96f7b9aeb1e15f3d3d61f58782be9030c7470b2c727bd76f2e16b3f7250c0d8d",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 2,
+        "last_user_content": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with",
+        "tool_count": 16
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "# Mission: gmail-draft-3133\n\nGoal: Use the gmail tool with action=create_draft to send a draft to owner@example.com with subject \"Test mission #3133\" and body \"Mock draft from the IronClaw e2e test.\". Just call the gmail tool directly — the runtime handles authentication. Do NOT call tool_activate, tool_install, or any other setup tool first.\n\n## Previous Approaches\n1. PAUSED: gate 'authentication' on action 'gmail' awaiting authentication\n\n## Knowledge from Prior Threads\n[SKILLS]\n\nThis is thread #2 for this mission.\n\n## Instructions\nBased on the above context, take the next step toward the goal. Use tools to gather information, analyze data, or take actions. When done, call FINAL() with your response. Include:\n1. What you accomplished in this step\n2. What the next focus should be (for the next thread)\n3. Whether the goal has been achieved (yes/no)"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"action\": \"create_draft\", \"to\": \"owner@example.com\", \"subject\": \"Test mission #3133\", \"body\": \"Mock draft from the IronClaw e2e test.\"}",
+                    "name": "gmail"
+                  },
+                  "id": "call_66394a8fadd141c59b23016f",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778219626,
+        "id": "chatcmpl-8e9d08c27ca19920",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 114,
+          "prompt_tokens": 17722,
+          "prompt_tokens_details": {
+            "cached_tokens": 6288
+          },
+          "total_tokens": 17836
+        }
+      }
+    }
+  ]
+}

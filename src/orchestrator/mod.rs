@@ -47,9 +47,9 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::llm::LlmProvider;
 use crate::secrets::SecretsStore;
 use ironclaw_common::AppEvent;
+use ironclaw_llm::LlmProvider;
 
 /// Resolve the orchestrator port from the `ORCHESTRATOR_PORT` environment
 /// variable, falling back to 50051.

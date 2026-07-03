@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides replace_all_text",
+  "description": "Find and replace text.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "find",
+    "replace"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "find": {
+      "type": "string",
+      "description": "Text to find."
+    },
+    "replace": {
+      "type": "string",
+      "description": "Replacement text."
+    },
+    "match_case": {
+      "type": "boolean",
+      "description": "Case-sensitive match. Defaults to true."
+    }
+  },
+  "additionalProperties": false
+}

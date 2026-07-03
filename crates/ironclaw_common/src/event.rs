@@ -312,6 +312,27 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// Caller-provided external tool was emitted by the LLM and the
+    /// thread is paused until the caller POSTs back a
+    /// `function_call_output`. Used by the Responses API
+    /// (`/v1/responses`) to surface a `function_call`
+    /// `ResponseOutputItem` in lieu of the approval-card UX that
+    /// `GateRequired` carries.
+    ///
+    /// `request_id` is the engine pending-gate id (used by the resume
+    /// path to find the gate). `call_id` is the LLM-emitted tool call
+    /// identifier echoed back in `function_call_output.call_id`.
+    /// `arguments` is the JSON-stringified tool parameters per the
+    /// OpenAI Responses wire shape.
+    #[serde(rename = "external_tool_call")]
+    ExternalToolCall {
+        request_id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "error")]
     Error {
         /// Sanitized, channel-agnostic message shown to users. Never
@@ -708,6 +729,7 @@ impl AppEvent {
             Self::OnboardingState { .. } => "onboarding_state",
             Self::GateRequired { .. } => "gate_required",
             Self::GateResolved { .. } => "gate_resolved",
+            Self::ExternalToolCall { .. } => "external_tool_call",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
             Self::JobMessage { .. } => "job_message",
@@ -831,6 +853,13 @@ mod tests {
                 parameters: String::new(),
                 extension_name: None,
                 resume_kind: serde_json::Value::Null,
+                thread_id: None,
+            },
+            AppEvent::ExternalToolCall {
+                request_id: String::new(),
+                call_id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
                 thread_id: None,
             },
             AppEvent::Error {

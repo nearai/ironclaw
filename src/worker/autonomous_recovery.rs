@@ -1,4 +1,4 @@
-use crate::llm::{ResponseAnomaly, ResponseMetadata};
+use ironclaw_llm::{ResponseAnomaly, ResponseMetadata};
 
 pub(crate) const EMPTY_TOOL_COMPLETION_NUDGE: &str = "\
 Your previous tool-enabled response was empty or malformed.\n\

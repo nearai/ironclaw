@@ -13,6 +13,7 @@
 //! The engine defines traits for external dependencies ([`LlmBackend`],
 //! [`Store`], [`EffectExecutor`]) that the host crate implements via bridge
 //! adapters over existing infrastructure.
+#![warn(unreachable_pub)]
 
 // Security: `__regex_match__` (in `executor/orchestrator.rs`) accepts
 // arbitrary patterns from the Python orchestrator and runs them on
@@ -52,7 +53,7 @@ pub use types::step::{
     StepStatus, TokenUsage,
 };
 pub use types::thread::{
-    ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
+    ActiveSkillProvenance, LlmCallPurpose, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
 };
 
 // ── Re-exports: traits ──────────────────────────────────────
@@ -75,19 +76,25 @@ pub use gate::lease::LeaseGate;
 pub use gate::pipeline::GatePipeline;
 pub use gate::tool_tier::{ToolTier, classify_tool_tier};
 pub use gate::{
-    ExecutionGate, ExecutionMode, GateContext, GateDecision, GateResolution, ResumeKind,
+    CancellingGateController, ExecutionGate, ExecutionMode, GateContext, GateController,
+    GateDecision, GatePauseRequest, GateResolution, ResumeKind,
 };
 
 // ── Re-exports: runtime ───────────────────────────────────────
 
 pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
-pub use runtime::manager::ThreadManager;
+pub use runtime::manager::{
+    ENGINE_RESTART_RECOVERY_METADATA_KEY, PENDING_APPROVAL_METADATA_KEY,
+    RUNTIME_CHECKPOINT_METADATA_KEY, ThreadManager,
+};
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
-    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+    BudgetGate, FireRateLimit, GateResolutionOutcome, MissionManager, MissionNotification,
+    MissionUpdate,
 };
 pub use runtime::tree::ThreadTree;
+pub use types::mission::MissionGateInfo;
 
 pub use types::conversation::{
     ConversationEntry, ConversationId, ConversationSurface, EntrySender,
@@ -133,7 +140,7 @@ pub(crate) mod tests {
     ///
     /// Stores all entity types with proper CRUD semantics and filtering by
     /// project_id / user_id. Use this instead of defining per-module mocks.
-    pub struct InMemoryStore {
+    pub(crate) struct InMemoryStore {
         threads: RwLock<Vec<Thread>>,
         steps: RwLock<Vec<Step>>,
         events: RwLock<Vec<ThreadEvent>>,
@@ -145,7 +152,7 @@ pub(crate) mod tests {
     }
 
     impl InMemoryStore {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 threads: RwLock::new(Vec::new()),
                 steps: RwLock::new(Vec::new()),
@@ -158,7 +165,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub fn with_docs(docs: Vec<MemoryDoc>) -> Self {
+        pub(crate) fn with_docs(docs: Vec<MemoryDoc>) -> Self {
             Self {
                 docs: RwLock::new(docs),
                 ..Self::new()

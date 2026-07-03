@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.1...ironclaw_common-v0.4.2) - 2026-05-11
+
+### Added
+
+- *(common)* describe paths and platform helpers in crate description ([#3498](https://github.com/nearai/ironclaw/pull/3498))
+
+### Other
+
+- *(llm)* extract multi-provider integration into ironclaw_llm crate ([#3387](https://github.com/nearai/ironclaw/pull/3387))
+
+## [0.4.1](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.0...ironclaw_common-v0.4.1) - 2026-05-07
+
+### Added
+
+- *(common)* align crate description with lib.rs doc wording ([#3372](https://github.com/nearai/ironclaw/pull/3372))
+
+### Fixed
+
+- *(common)* clarify crate-level doc wording ([#3370](https://github.com/nearai/ironclaw/pull/3370))
+
+## [0.4.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.3.0...ironclaw_common-v0.4.0) - 2026-04-29
+
+### Added
+
+- *(debug-panel)* expand Activity tab coverage with CodeAct + warnings ([#2850](https://github.com/nearai/ironclaw/pull/2850))
+- *(bridge)* project 7 more engine events to AppEvents ([#2844](https://github.com/nearai/ironclaw/pull/2844))
+- *(bridge)* project 3 dropped engine events to AppEvents ([#2797](https://github.com/nearai/ironclaw/pull/2797))
+
+### Fixed
+
+- bug bash 4/16 triage — error boundary, TEE secrets, pairing, rehydration ([#2753](https://github.com/nearai/ironclaw/pull/2753))
+
+### Other
+
+- Merge pull request #3002 from nearai/main
+
 ## [0.3.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.2.0...ironclaw_common-v0.3.0) - 2026-04-21
 
 ### Added

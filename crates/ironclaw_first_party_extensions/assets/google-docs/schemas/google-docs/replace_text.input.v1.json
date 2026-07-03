@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs replace_text",
+  "description": "Find and replace text.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "find",
+    "replace"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "find": {
+      "type": "string",
+      "description": "Text to search for."
+    },
+    "replace": {
+      "type": "string",
+      "description": "Replacement text."
+    },
+    "match_case": {
+      "type": "boolean",
+      "description": "Case-sensitive match. Defaults to true."
+    }
+  },
+  "additionalProperties": false
+}

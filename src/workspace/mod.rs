@@ -42,12 +42,11 @@
 
 mod chunker;
 mod document;
-mod embedding_cache;
-mod embeddings;
 pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
+mod reborn_identity_context;
 #[cfg(feature = "postgres")]
 mod repository;
 pub mod schema;
@@ -63,12 +62,7 @@ pub use document::{
     content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
     paths,
 };
-pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
-#[cfg(feature = "bedrock")]
-pub use embeddings::BedrockEmbeddings;
-pub use embeddings::{
-    EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
-};
+pub use reborn_identity_context::WorkspaceIdentityContextSource;
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{
@@ -94,6 +88,9 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
+use ironclaw_embeddings::{
+    CachedEmbeddingProvider, EmbeddingCacheConfig, EmbeddingError, EmbeddingProvider,
+};
 use ironclaw_safety::{Sanitizer, Severity};
 
 /// Files injected into the system prompt. Writes to these are scanned for
@@ -751,18 +748,39 @@ impl Workspace {
     pub fn scoped_to_user(&self, user_id: impl Into<String>) -> Self {
         let user_id = user_id.into();
 
+        let private_source_scopes: Vec<String> = self
+            .memory_layers
+            .iter()
+            .filter(|layer| layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private)
+            .map(|layer| layer.scope.clone())
+            .collect();
+        let non_private_source_scopes: Vec<String> = self
+            .memory_layers
+            .iter()
+            .filter(|layer| layer.sensitivity != crate::workspace::layer::LayerSensitivity::Private)
+            .map(|layer| layer.scope.clone())
+            .collect();
+
         let mut memory_layers = self.memory_layers.clone();
         for layer in &mut memory_layers {
-            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private
-                && layer.scope == self.user_id
-            {
+            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private {
                 layer.scope = user_id.clone();
             }
         }
 
         let mut read_user_ids = vec![user_id.clone()];
         for scope in &self.read_user_ids {
-            if scope != &self.user_id && !read_user_ids.contains(scope) {
+            let used_by_non_private_layer = non_private_source_scopes.contains(scope);
+            let old_primary_private_scope = scope == &self.user_id && !used_by_non_private_layer;
+            let private_layer_source_scope =
+                private_source_scopes.contains(scope) && !used_by_non_private_layer;
+
+            // Drop scopes that came only from the source private identity, but preserve
+            // any scope string that a non-private layer intentionally shares.
+            if !old_primary_private_scope
+                && !private_layer_source_scope
+                && !read_user_ids.contains(scope)
+            {
                 read_user_ids.push(scope.clone());
             }
         }
@@ -2467,7 +2485,7 @@ impl Workspace {
                         "Failed to embed chunk {}: {}{}",
                         chunk.id,
                         e,
-                        if matches!(e, embeddings::EmbeddingError::AuthFailed) {
+                        if matches!(e, EmbeddingError::AuthFailed) {
                             ". Check OPENAI_API_KEY or set EMBEDDING_PROVIDER=ollama for local embeddings"
                         } else {
                             ""

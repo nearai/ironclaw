@@ -10,13 +10,20 @@ use ironclaw_engine::{
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use uuid::Uuid;
 
-use crate::llm::{
+use crate::agent::cost_guard::CostGuard;
+use crate::db::Database;
+use crate::history::LlmCallRecord;
+use ironclaw_llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
+const LLM_CALL_PURPOSE_CHAT: &str = "chat";
+const LLM_CALL_PURPOSE_MAX_LEN: usize = 32;
+const LLM_METADATA_USER_ID_MAX_LEN: usize = 255;
 
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
@@ -68,22 +75,201 @@ fn cost_usd_from(
     cost.to_f64().unwrap_or(0.0)
 }
 
+#[derive(Clone, Copy)]
+struct LlmTokenBuckets {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+}
+
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
 pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
+    usage_recorder: Arc<LlmUsageRecorder>,
+}
+
+pub struct LlmUsageRecorder {
+    db: Option<Arc<dyn Database>>,
+    cost_guard: Arc<CostGuard>,
+    provider_name: String,
+}
+
+impl LlmUsageRecorder {
+    pub fn new(
+        db: Option<Arc<dyn Database>>,
+        cost_guard: Arc<CostGuard>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        let provider_name = provider_name.into();
+        if db.is_none() && provider_name != "test-disabled" {
+            tracing::warn!(
+                provider = %provider_name,
+                "engine v2 LLM usage recorder initialized without database; durable usage persistence disabled"
+            );
+        }
+        Self {
+            db,
+            cost_guard,
+            provider_name,
+        }
+    }
+
+    async fn record(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        config: &LlmCallConfig,
+        tokens: LlmTokenBuckets,
+    ) -> Result<(), EngineError> {
+        let model = provider.effective_model_name(config.model.as_deref());
+        let purpose = validate_llm_call_purpose(config.metadata.get("purpose"))?;
+        let user_id = validate_llm_metadata_user_id(config.metadata.get("user_id"))?;
+        let db = self.db.as_ref();
+        let cost_per_token = if config.model.is_some() {
+            None
+        } else {
+            Some(provider.cost_per_token())
+        };
+        let cost = match user_id {
+            Some(user_id) => {
+                self.cost_guard
+                    .record_llm_call_for_user(
+                        user_id,
+                        &model,
+                        tokens.input_tokens,
+                        tokens.output_tokens,
+                        tokens.cache_read_input_tokens,
+                        tokens.cache_creation_input_tokens,
+                        provider.cache_read_discount(),
+                        provider.cache_write_multiplier(),
+                        cost_per_token,
+                    )
+                    .await
+            }
+            None => {
+                self.cost_guard
+                    .record_llm_call(
+                        &model,
+                        tokens.input_tokens,
+                        tokens.output_tokens,
+                        tokens.cache_read_input_tokens,
+                        tokens.cache_creation_input_tokens,
+                        provider.cache_read_discount(),
+                        provider.cache_write_multiplier(),
+                        cost_per_token,
+                    )
+                    .await
+            }
+        };
+
+        let Some(db) = db else {
+            return Ok(());
+        };
+
+        let conversation_id = config
+            .metadata
+            .get("v1_conversation_id")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .or_else(|| {
+                config
+                    .metadata
+                    .get("conversation_scope")
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            });
+        let record = LlmCallRecord {
+            job_id: None,
+            conversation_id,
+            provider: &self.provider_name,
+            model: &model,
+            input_tokens: tokens.input_tokens,
+            output_tokens: tokens.output_tokens,
+            cost,
+            purpose,
+        };
+
+        // Keep usage accounting fail-loud and per-call. Batching this path
+        // would need a durable queue plus backpressure so accepted LLM calls
+        // cannot disappear before admin usage aggregation sees them.
+        db.record_llm_call(&record)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("failed to persist engine v2 LLM usage: {e}"),
+            })?;
+        Ok(())
+    }
+}
+
+fn validate_llm_call_purpose(value: Option<&String>) -> Result<Option<&str>, EngineError> {
+    let Some(purpose) = value.map(String::as_str) else {
+        return Ok(None);
+    };
+    if purpose.len() > LLM_CALL_PURPOSE_MAX_LEN {
+        return Err(EngineError::Store {
+            reason: format!(
+                "invalid engine v2 LLM usage purpose: length {} exceeds {LLM_CALL_PURPOSE_MAX_LEN}",
+                purpose.len()
+            ),
+        });
+    }
+    if purpose != LLM_CALL_PURPOSE_CHAT {
+        return Err(EngineError::Store {
+            reason: format!("invalid engine v2 LLM usage purpose: {purpose}"),
+        });
+    }
+    Ok(Some(purpose))
+}
+
+fn validate_llm_metadata_user_id(value: Option<&String>) -> Result<Option<&str>, EngineError> {
+    let Some(user_id) = value.map(String::as_str) else {
+        return Ok(None);
+    };
+    if user_id.is_empty() {
+        return Err(EngineError::Store {
+            reason: "invalid engine v2 LLM usage user_id: empty".to_string(),
+        });
+    }
+    if user_id.len() > LLM_METADATA_USER_ID_MAX_LEN {
+        return Err(EngineError::Store {
+            reason: format!(
+                "invalid engine v2 LLM usage user_id: length {} exceeds {LLM_METADATA_USER_ID_MAX_LEN}",
+                user_id.len()
+            ),
+        });
+    }
+    Ok(Some(user_id))
 }
 
 impl LlmBridgeAdapter {
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         cheap_provider: Option<Arc<dyn LlmProvider>>,
+        usage_recorder: Arc<LlmUsageRecorder>,
     ) -> Self {
         Self {
             provider,
             cheap_provider,
+            usage_recorder,
         }
+    }
+
+    #[cfg(test)]
+    fn new_without_usage_recorder_for_testing(
+        provider: Arc<dyn LlmProvider>,
+        cheap_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
+        Self::new(
+            provider,
+            cheap_provider,
+            Arc::new(LlmUsageRecorder::new(
+                None,
+                Arc::new(crate::agent::cost_guard::CostGuard::new(
+                    crate::agent::cost_guard::CostGuardConfig::default(),
+                )),
+                "test-disabled",
+            )),
+        )
     }
 
     fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
@@ -92,6 +278,15 @@ impl LlmBridgeAdapter {
         } else {
             &self.provider
         }
+    }
+
+    async fn record_usage(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        config: &LlmCallConfig,
+        tokens: LlmTokenBuckets,
+    ) -> Result<(), EngineError> {
+        self.usage_recorder.record(provider, config, tokens).await
     }
 }
 
@@ -110,8 +305,20 @@ impl LlmBackend for LlmBridgeAdapter {
         sanitize_tool_messages(&mut chat_messages);
 
         // Convert actions to tool definitions
+        //
+        // In disabled-CodeAct mode the model has no Python escape hatch, so
+        // every callable action MUST be reachable via the provider's
+        // structured `tool_calls` interface. Filtering down to
+        // `emits_full_schema_tool()` in that mode would leave compact-info
+        // actions (e.g. `mission_create`, `gmail_send`, `notion_search`)
+        // visible in the prompt as "available" but absent from the provider
+        // tool list — i.e. unreachable. The prompt builder mirrors this by
+        // omitting the "Enabled Tools" section when CodeAct is disabled
+        // (see `prompt::build_codeact_system_prompt_inner`). PR #3665 review.
         let tools: Vec<ToolDefinition> = if config.force_text {
             vec![] // No tools when forcing text
+        } else if ironclaw_engine::executor::prompt::codeact_disabled() {
+            actions.iter().map(action_def_to_tool_def).collect()
         } else {
             actions
                 .iter()
@@ -126,7 +333,7 @@ impl LlmBackend for LlmBridgeAdapter {
 
         if tools.is_empty() {
             // No tools: use plain completion (matches existing no-tools path)
-            let mut request = crate::llm::CompletionRequest::new(chat_messages)
+            let mut request = ironclaw_llm::CompletionRequest::new(chat_messages)
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
@@ -140,6 +347,17 @@ impl LlmBackend for LlmBridgeAdapter {
                 .map_err(|e| EngineError::Llm {
                     reason: e.to_string(),
                 })?;
+            self.record_usage(
+                provider,
+                config,
+                LlmTokenBuckets {
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                    cache_read_input_tokens: response.cache_read_input_tokens,
+                    cache_creation_input_tokens: response.cache_creation_input_tokens,
+                },
+            )
+            .await?;
 
             let cleaned_text = clean_response(&response.content);
 
@@ -183,6 +401,17 @@ impl LlmBackend for LlmBridgeAdapter {
                 .map_err(|e| EngineError::Llm {
                     reason: e.to_string(),
                 })?;
+        self.record_usage(
+            provider,
+            config,
+            LlmTokenBuckets {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
+            },
+        )
+        .await?;
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
@@ -403,6 +632,8 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
+        reasoning: None,
+        reasoning_details: None,
     };
 
     // Convert action calls if present (assistant message with tool calls)
@@ -415,6 +646,8 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
                     reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
                 })
                 .collect(),
         );
@@ -513,6 +746,12 @@ fn extract_code_block(text: &str) -> Option<String> {
 }
 
 fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    if ironclaw_engine::executor::prompt::codeact_disabled() {
+        if cleaned_text.trim().is_empty() {
+            return LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string());
+        }
+        return LlmResponse::Text(cleaned_text);
+    }
     match extract_code_block(&cleaned_text) {
         Some(code) => LlmResponse::Code {
             code,
@@ -620,7 +859,7 @@ mod tests {
     use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
 
     use crate::error::LlmError;
-    use crate::llm::ToolCompletionResponse;
+    use ironclaw_llm::ToolCompletionResponse;
 
     #[derive(Default)]
     struct CapturingProviderState {
@@ -646,8 +885,8 @@ mod tests {
 
         async fn complete(
             &self,
-            req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
@@ -655,11 +894,12 @@ mod tests {
                 .await
                 .push(req.messages);
 
-            Ok(crate::llm::CompletionResponse {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "ok".to_string(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -682,9 +922,11 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -710,7 +952,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant("I checked a tool earlier."),
@@ -747,7 +989,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant("I checked a tool earlier."),
@@ -774,13 +1016,250 @@ mod tests {
         assert!(sent[2].name.is_none());
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_records_engine_v2_usage_for_admin_aggregates() {
+        use chrono::Utc;
+
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::{Database, UserRecord};
+
+        struct PricedUsageProvider;
+
+        #[async_trait]
+        impl LlmProvider for PricedUsageProvider {
+            fn model_name(&self) -> &str {
+                "priced-usage-model"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::new(1, 2), Decimal::new(2, 2))
+            }
+
+            async fn complete(
+                &self,
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
+                    content: "ok".to_string(),
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("usage.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        db.create_user(&UserRecord {
+            id: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            display_name: "alice".to_string(),
+            status: "active".to_string(),
+            role: "member".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("create user");
+        let conversation_id = db
+            .create_conversation("web", "alice", Some("thread-1"))
+            .await
+            .expect("create conversation");
+
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedUsageProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(
+                Some(Arc::clone(&db)),
+                Arc::clone(&cost_guard),
+                "test-backend",
+            )),
+        );
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("user_id".to_string(), "alice".to_string());
+        config
+            .metadata
+            .insert("v1_conversation_id".to_string(), "not-a-uuid".to_string());
+        config.metadata.insert(
+            "conversation_scope".to_string(),
+            conversation_id.to_string(),
+        );
+        config
+            .metadata
+            .insert("purpose".to_string(), "chat".to_string());
+
+        adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect("complete");
+
+        let usage = db
+            .user_usage_stats(Some("alice"), Utc::now() - chrono::Duration::hours(1))
+            .await
+            .expect("usage stats");
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].user_id, "alice");
+        assert_eq!(usage[0].model, "priced-usage-model");
+        assert_eq!(usage[0].call_count, 1);
+        assert_eq!(usage[0].input_tokens, 3);
+        assert_eq!(usage[0].output_tokens, 2);
+        assert!(usage[0].total_cost > Decimal::ZERO);
+
+        let summaries = db
+            .user_summary_stats(Some("alice"))
+            .await
+            .expect("summary stats");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].user_id, "alice");
+        assert!(summaries[0].last_active_at.is_some());
+        assert_eq!(cost_guard.actions_this_hour().await, 1);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_fails_when_engine_v2_usage_persistence_fails() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::Database;
+
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(Some(db), cost_guard, "test-backend")),
+        );
+
+        let err = adapter
+            .complete(
+                &[ThreadMessage::user("hello")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .expect_err("unmigrated DB must fail durable usage recording");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("failed to persist engine v2 LLM usage"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_rejects_invalid_engine_v2_usage_purpose() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::Database;
+
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(Some(db), cost_guard, "test-backend")),
+        );
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("purpose".to_string(), "billing".to_string());
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("invalid durable usage purpose must fail");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage purpose"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_invalid_engine_v2_usage_purpose_without_db() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("purpose".to_string(), "billing".to_string());
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("invalid usage purpose must fail before DB availability checks");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage purpose"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_overlong_engine_v2_usage_user_id() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
+        let mut config = LlmCallConfig::default();
+        config.metadata.insert(
+            "user_id".to_string(),
+            "u".repeat(LLM_METADATA_USER_ID_MAX_LEN + 1),
+        );
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("overlong usage user_id must fail");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage user_id"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn complete_with_tools_preserves_matched_action_results() {
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant_with_actions(
@@ -834,8 +1313,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("test only uses complete_with_tools")
         }
 
@@ -848,9 +1327,11 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -901,7 +1382,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "Now let me list your installed extensions and start Pi:\n\n[Called tool `shell` with arguments: {\"command\":\"pi list 2>&1\",\"timeout\":10,\"workdir\":\".\"}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -931,7 +1412,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "Let me check.\n[Called tool `unknown_tool` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -966,13 +1447,14 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: self.content.clone(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -991,7 +1473,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
             content: "Let me check.\n[Called tool `shell` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1015,7 +1497,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "[Called tool `unknown_tool` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1039,7 +1521,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
             content: "[Called tool `shell` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1064,7 +1546,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let config = ironclaw_engine::LlmCallConfig {
             model: Some("gpt-4o".into()),
@@ -1107,7 +1589,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         adapter
             .complete(
@@ -1123,15 +1605,27 @@ mod tests {
         assert_eq!(models[0], None);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn complete_with_tools_only_emits_full_schema_provider_tools() {
+        // Both this test and `complete_emits_compact_actions_when_codeact_disabled`
+        // read the process-global `IRONCLAW_DISABLE_CODEACT` env var. Serialize
+        // via lock_env() and pin the value here so the other test setting
+        // `=true` can't leak across when `cargo test` runs them in parallel.
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+        }
+
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
-        adapter
+        let result = adapter
             .complete(
                 &[ThreadMessage::user("hi")],
                 &[
@@ -1156,8 +1650,18 @@ mod tests {
                 ],
                 &LlmCallConfig::default(),
             )
-            .await
-            .unwrap();
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.unwrap();
 
         let tool_definitions = state.tool_definitions.lock().await;
         let emitted = tool_definitions.last().expect("tool completion request");
@@ -1167,6 +1671,78 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["http"]);
+    }
+
+    /// PR #3665 review (serrrfirat). Disabled-CodeAct mode strips the Python
+    /// escape hatch, so any callable action MUST be reachable via the
+    /// provider's structured `tool_calls`. Filtering down to FullSchema in
+    /// that mode left compact actions (`mission_create`, `gmail_send`, ...)
+    /// visible in the prompt but absent from the provider tool list — i.e.
+    /// unreachable. This test pins the relaxed filter.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn complete_emits_compact_actions_when_codeact_disabled() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_DISABLE_CODEACT", "true");
+        }
+
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
+
+        let result = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[
+                    ActionDef {
+                        name: "http".into(),
+                        description: "fetch".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::ReadExternal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::FullSchema,
+                        discovery: None,
+                    },
+                    ActionDef {
+                        name: "mission_create".into(),
+                        description: "create mission".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::WriteLocal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::CompactToolInfo,
+                        discovery: None,
+                    },
+                ],
+                &LlmCallConfig::default(),
+            )
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.expect("adapter.complete should succeed");
+
+        let tool_definitions = state.tool_definitions.lock().await;
+        let emitted = tool_definitions.last().expect("tool completion request");
+        let mut names: Vec<&str> = emitted.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["http", "mission_create"],
+            "disabled-CodeAct must emit BOTH FullSchema and CompactToolInfo actions \
+             — otherwise compact actions are unreachable"
+        );
     }
 
     // ── extract_code_block tests ────────────────────────────
@@ -1555,8 +2131,8 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("should use complete_with_tools")
         }
         async fn complete_with_tools(
@@ -1567,7 +2143,7 @@ And also check the token price:\n\
             // a prior tool result's project_id via template ref.
             Ok(ToolCompletionResponse {
                 content: Some("Creating mission in the new project".to_string()),
-                tool_calls: vec![crate::llm::ToolCall {
+                tool_calls: vec![ironclaw_llm::ToolCall {
                     id: "call-2".to_string(),
                     name: "mission_create".to_string(),
                     arguments: serde_json::json!({
@@ -1576,12 +2152,16 @@ And also check the token price:\n\
                         "project_id": "{{call-1.project_id}}"
                     }),
                     reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,
-                finish_reason: crate::llm::FinishReason::ToolUse,
+                finish_reason: ironclaw_llm::FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -1589,7 +2169,7 @@ And also check the token price:\n\
     #[tokio::test]
     async fn complete_resolves_template_refs_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(TemplateRefProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         // Conversation history: user asked to create a project, tool returned
         // a result with project_id, now the LLM wants to create a mission
@@ -1663,13 +2243,14 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "hello".to_string(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1683,9 +2264,11 @@ And also check the token price:\n\
                 tool_calls: Vec::new(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -1696,7 +2279,7 @@ And also check the token price:\n\
     #[tokio::test]
     async fn complete_no_tools_populates_cost_usd_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1715,9 +2298,44 @@ And also check the token price:\n\
     }
 
     #[tokio::test]
+    async fn complete_model_override_uses_static_pricing_in_cost_guard() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(
+                None,
+                Arc::clone(&cost_guard),
+                "test-disabled",
+            )),
+        );
+        let mut config = LlmCallConfig {
+            model: Some("gpt-4o-mini".to_string()),
+            ..LlmCallConfig::default()
+        };
+        config
+            .metadata
+            .insert("purpose".to_string(), "chat".to_string());
+
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &config)
+            .await
+            .expect("complete");
+
+        let usage = cost_guard.model_usage().await;
+        let tokens = usage.get("gpt-4o-mini").expect("model override usage");
+        assert_eq!(tokens.input_tokens, 1000);
+        assert_eq!(tokens.output_tokens, 500);
+        assert_eq!(tokens.cost, rust_decimal_macros::dec!(0.00045));
+    }
+
+    #[tokio::test]
     async fn complete_with_tools_populates_cost_usd_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1752,13 +2370,14 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 1000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1773,7 +2392,8 @@ And also check the token price:\n\
 
         let primary: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
         let cheap: Arc<dyn LlmProvider> = Arc::new(ZeroProvider);
-        let adapter = LlmBridgeAdapter::new(primary, Some(cheap));
+        let adapter =
+            LlmBridgeAdapter::new_without_usage_recorder_for_testing(primary, Some(cheap));
 
         let output = adapter
             .complete(
@@ -1811,13 +2431,14 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 5_000,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1831,7 +2452,7 @@ And also check the token price:\n\
         }
 
         let provider: Arc<dyn LlmProvider> = Arc::new(SubscriptionProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
@@ -1879,15 +2500,16 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
                 // Total input = 10_000; 2_000 cache-read, 1_000 cache-write,
                 // 7_000 uncached. Output = 500.
-                Ok(crate::llm::CompletionResponse {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 2_000,
                     cache_creation_input_tokens: 1_000,
                 })
@@ -1901,7 +2523,7 @@ And also check the token price:\n\
         }
 
         let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicCachingProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())

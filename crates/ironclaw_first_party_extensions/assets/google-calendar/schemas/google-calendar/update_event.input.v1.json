@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["event_id","event"],"properties":{"calendar_id":{"type":"string","minLength":1,"maxLength":1024},"event_id":{"type":"string","minLength":1,"maxLength":1024},"event":{"type":"object","minProperties":1,"maxProperties":100,"additionalProperties":true}}}

@@ -121,6 +121,8 @@ impl ChannelPairingStore for LibSqlBackend {
         meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
 
         // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
@@ -218,6 +220,8 @@ impl ChannelPairingStore for LibSqlBackend {
         owner_id: &str,
     ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
 
         // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent approvals
@@ -330,6 +334,8 @@ impl ChannelPairingStore for LibSqlBackend {
         &self,
         approval: &crate::db::PairingApprovalRecord,
     ) -> Result<(), DatabaseError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
@@ -457,6 +463,27 @@ impl ChannelPairingStore for LibSqlBackend {
         conn.execute(
             "DELETE FROM channel_identities WHERE channel = ?1 AND external_id = ?2",
             params![channel, external_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn create_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let id = uuid::Uuid::new_v4().to_string();
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (channel, external_id)
+             DO UPDATE SET owner_id = ?2",
+            params![id, owner_id, channel, external_id],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;

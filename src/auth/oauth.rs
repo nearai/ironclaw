@@ -11,7 +11,6 @@ use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resol
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_common::ExtensionName;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -25,9 +24,11 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Shared callback server ──────────────────────────────────────────────
 
-// Core OAuth callback infrastructure is defined in `crate::llm::oauth_helpers`
-// and re-exported here for backward compatibility.
-pub use crate::llm::oauth_helpers::{
+// Core OAuth callback infrastructure lives in the standalone `ironclaw_oauth`
+// crate so non-LLM OAuth flows (WASM tools, MCP, NEAR AI session login) don't
+// have to depend on `ironclaw_llm` for transport. Re-exported here so existing
+// `crate::auth::oauth::...` call sites continue to compile.
+pub use ironclaw_oauth::{
     OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
     is_loopback_host, landing_html, wait_for_callback,
 };
@@ -41,7 +42,7 @@ pub use crate::llm::oauth_helpers::{
 ///
 /// Both the v1 dispatcher (`src/agent/dispatcher.rs`) and the v2 effect adapter
 /// (`src/bridge/effect_adapter.rs`) call this on every `auth_url` extracted
-/// from `tool_activate`/`tool_auth` output before surfacing it to the client.
+/// from `tool_install`/`tool_auth` output before surfacing it to the client.
 /// Keeping the helper in one place ensures the v1/v2 invariants stay symmetric.
 pub(crate) fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
     url.map(str::trim).and_then(|u| {
@@ -208,7 +209,7 @@ pub fn build_oauth_url(
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
+        fill_secure_random(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -222,7 +223,7 @@ pub fn build_oauth_url(
 
     // Generate random state for CSRF protection
     let mut state_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+    fill_secure_random(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
     // Build the authorization URL via the `url` crate so query-string encoding
@@ -249,6 +250,14 @@ pub fn build_oauth_url(
         code_verifier,
         state,
     })
+}
+
+fn fill_secure_random(bytes: &mut [u8]) {
+    use rand::{RngExt as _, TryRng as _};
+
+    if rand::rngs::SysRng.try_fill_bytes(bytes).is_err() {
+        rand::rng().fill(bytes);
+    }
 }
 
 /// Append OAuth authorization-request query parameters to `authorization_url`.

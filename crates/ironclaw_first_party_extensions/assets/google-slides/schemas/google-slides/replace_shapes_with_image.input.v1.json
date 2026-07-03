@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides replace_shapes_with_image",
+  "description": "Replace matching shapes with an image.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "find",
+    "image_url"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "find": {
+      "type": "string",
+      "description": "Text to match in shapes."
+    },
+    "image_url": {
+      "type": "string",
+      "description": "Replacement image URL."
+    },
+    "match_case": {
+      "type": "boolean",
+      "description": "Case-sensitive match. Defaults to true."
+    }
+  },
+  "additionalProperties": false
+}

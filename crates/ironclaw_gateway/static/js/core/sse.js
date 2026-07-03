@@ -5,6 +5,26 @@ function rememberSseEventId(event) {
   window.__e2e.lastSseEventId = event.lastEventId;
 }
 
+function countVisibleRunReplyMessages() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return 0;
+  return container.querySelectorAll('.message.assistant, .message.system').length;
+}
+
+function appendMissingRunReplyFallback(expectedThreadId, previousReplyCount) {
+  if (!currentThreadId || currentThreadId !== expectedThreadId) return;
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  const replyCount = countVisibleRunReplyMessages();
+  if (replyCount > previousReplyCount) return;
+  const messages = container.querySelectorAll('.message');
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  if (!lastMessage || !lastMessage.classList.contains('user')) return;
+  finalizeActivityGroup();
+  addMessage('system', I18n.t('chat.runFinishedWithoutReply'));
+  enableChatInput();
+}
+
 function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
   cleanupConnectionState();
@@ -61,15 +81,10 @@ function connectSSE(lastEventIdOverride) {
       setTimeout(() => { lostBanner.remove(); }, 2000);
     }
 
-    // If we were restarting, close the modal and reset button now that server is back
+    // If we were restarting, close the modal and reset button now that server is back.
+    // dismissRestartLoader() also clears the watchdog timer (#3082).
     if (isRestarting) {
-      const loaderEl = document.getElementById('restart-loader');
-      if (loaderEl) loaderEl.style.display = 'none';
-      const restartBtn = document.getElementById('restart-btn');
-      const restartIcon = document.getElementById('restart-icon');
-      if (restartBtn) restartBtn.disabled = false;
-      if (restartIcon) restartIcon.classList.remove('spinning');
-      isRestarting = false;
+      dismissRestartLoader();
     }
 
     if (sseHasConnectedBefore && currentThreadId) {
@@ -88,6 +103,12 @@ function connectSSE(lastEventIdOverride) {
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
     debouncedLoadThreads();
+    // Retry any first-load loader (chat history, threads, missions) that
+    // raced engine init and failed silently. SSE-accept implies the
+    // backend has stabilized — see init-auth.js for the rationale (#3274).
+    if (typeof runInitialHydrationRetry === 'function') {
+      runInitialHydrationRetry();
+    }
     sseHasConnectedBefore = true;
   };
 
@@ -177,7 +198,25 @@ function connectSSE(lastEventIdOverride) {
       _doneWithoutResponseTimer = null;
     }
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+
+    const messages = document.querySelectorAll('#chat-messages .message');
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastAssistantAlreadyHasResponse = Boolean(
+      lastMessage
+        && lastMessage.classList.contains('assistant')
+        && (lastMessage.getAttribute('data-raw') || '') === data.content
+    );
+
+    // Streamed responses already accumulated `data.content` into the
+    // bubble we just finalized. Separately, a thread switch or history
+    // refresh can render the completed response from /history before the
+    // matching SSE response arrives. In both cases, adding another bubble
+    // would render the same final assistant message twice. Only create a
+    // new bubble when the final response is not already the latest chat
+    // message (the normal non-streaming path).
+    if (!streamingMsg && !lastAssistantAlreadyHasResponse) {
+      addMessage('assistant', data.content);
+    }
     pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
@@ -365,12 +404,19 @@ function connectSSE(lastEventIdOverride) {
       // Safety net (#2079): if "Done" arrives but we never received a
       // `response` event for this turn, the message may have been lost
       // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
-      // history after a short delay so the user sees the answer.
+      // history after a short delay so the user sees the answer. If
+      // history still has no assistant/system reply for the completed turn,
+      // append a visible fallback instead of leaving the turn silent.
       if (!_turnResponseReceived && data.message === 'Done') {
         if (!_doneWithoutResponseTimer) {
+          const threadIdAtDone = currentThreadId;
+          const previousReplyCount = countVisibleRunReplyMessages();
           _doneWithoutResponseTimer = setTimeout(() => {
             _doneWithoutResponseTimer = null;
-            if (currentThreadId) loadHistory();
+            if (!threadIdAtDone || currentThreadId !== threadIdAtDone) return;
+            Promise.resolve(loadHistory()).then(() => {
+              appendMissingRunReplyFallback(threadIdAtDone, previousReplyCount);
+            });
           }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
         }
       }

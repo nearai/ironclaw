@@ -81,7 +81,10 @@ pub(crate) async fn dispatch_engine_external_callback(
             "Invalid request_id (expected UUID)".to_string(),
         )
     })?;
-    let callback = crate::agent::submission::Submission::ExternalCallback { request_id };
+    let callback = crate::agent::submission::Submission::ExternalCallback {
+        request_id,
+        payload: None,
+    };
     dispatch_engine_submission(state, user_id, thread_id, callback).await
 }
 

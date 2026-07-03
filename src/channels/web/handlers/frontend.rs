@@ -260,15 +260,17 @@ pub async fn project_widgets_handler(
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<ResolvedWidget>>, (StatusCode, String)> {
     // Resolve project name to derive the workspace slug.
-    let project = crate::bridge::get_engine_project(&project_id, &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Project not found".to_string()))?;
+    let slug = {
+        let project = crate::bridge::get_engine_project(&project_id, &user.user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Project not found".to_string()))?;
 
-    let slug = project
-        .name
-        .to_lowercase()
-        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
+        project
+            .name
+            .to_lowercase()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+    };
     let widgets_dir = format!("projects/{slug}/.system/widgets/");
 
     let workspace = resolve_workspace(&state, &user).await?;
@@ -287,8 +289,8 @@ pub async fn project_widgets_handler(
         if !entry.is_directory {
             continue;
         }
-        let name = entry.name();
-        if !is_safe_widget_id(name) {
+        let name = entry.name().to_string();
+        if !is_safe_widget_id(&name) {
             continue;
         }
         let manifest_path = format!("{widgets_dir}{name}/manifest.json");

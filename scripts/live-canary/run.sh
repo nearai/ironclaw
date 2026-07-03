@@ -40,6 +40,7 @@ passthrough_args=("$@")
 
 PROVIDER="${PROVIDER:-default}"
 PLAYWRIGHT_INSTALL="${PLAYWRIGHT_INSTALL:-auto}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-90m}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-artifacts/live-canary}"
 TIMESTAMP="${TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -51,6 +52,7 @@ LOG_FILE="${RUN_DIR}/test-output.log"
 SUMMARY_FILE="${RUN_DIR}/summary.md"
 ENV_FILE="${RUN_DIR}/env-summary.txt"
 TRACE_STATUS_FILE="${RUN_DIR}/trace-fixture-status.txt"
+RESULTS_FILE="${RUN_DIR}/results.json"
 
 : > "${LOG_FILE}"
 
@@ -65,9 +67,22 @@ finish() {
   status=$?
   record_trace_status || true
   write_summary || true
+  emit_results_json || true
   log "[live-canary] summary=${SUMMARY_FILE}"
   log "[live-canary] log=${LOG_FILE}"
   exit "${status}"
+}
+
+emit_results_json() {
+  # No-op for non-cargo lanes (auth-* uses JUnit XML, workflow-canary
+  # writes its own results.json from python). The helper bails silently
+  # when it can't find a `test result:` line or when the output file
+  # already exists.
+  python3 "$(dirname "$0")/emit_results_json.py" \
+    --log "${LOG_FILE}" \
+    --out "${RESULTS_FILE}" \
+    --lane "${LANE}" \
+    --provider "${PROVIDER}" 2>&1 | tee -a "${LOG_FILE}" >/dev/null
 }
 
 write_env_summary() {
@@ -89,7 +104,9 @@ write_env_summary() {
     echo "DATABASE_BACKEND=${DATABASE_BACKEND:-<unset>}"
     echo "LIBSQL_PATH=${LIBSQL_PATH:-<unset>}"
     echo "playwright_install=${PLAYWRIGHT_INSTALL}"
+    echo "python_bin=${PYTHON_BIN}"
     echo "cases=${CASES:-<default>}"
+    echo "reborn_webui_v2_live_qa_harness_ref=${REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF:-<checkout>}"
     echo "skip_build=${SKIP_BUILD:-0}"
     echo "skip_python_bootstrap=${SKIP_PYTHON_BOOTSTRAP:-0}"
   } > "${ENV_FILE}"
@@ -163,6 +180,15 @@ write_summary() {
     echo "- \`${LOG_FILE}\`"
     echo "- \`${ENV_FILE}\`"
     echo "- \`${TRACE_STATUS_FILE}\`"
+    if [[ -f "${RESULTS_FILE}" ]]; then
+      echo "- \`${RESULTS_FILE}\`"
+    fi
+    if [[ -f "${RUN_DIR}/case-manifest.json" ]]; then
+      echo "- \`${RUN_DIR}/case-manifest.json\`"
+    fi
+    if [[ -f "${RUN_DIR}/preflight.json" ]]; then
+      echo "- \`${RUN_DIR}/preflight.json\`"
+    fi
   } > "${SUMMARY_FILE}"
 }
 
@@ -183,7 +209,15 @@ build_case_args() {
     for case_name in "${raw_cases[@]}"; do
       trimmed="$(echo "$case_name" | xargs)"
       if [[ -n "${trimmed}" ]]; then
-        case_args+=(--case "${trimmed}")
+        if [[ "${trimmed}" == "all" || "${trimmed}" == "ALL" || "${trimmed}" == "*" ]]; then
+          if [[ "${LANE}" == "reborn-webui-v2-live-qa" ]]; then
+            case_args+=(--non-telegram-qa-cases)
+          else
+            case_args+=(--all-cases)
+          fi
+        else
+          case_args+=(--case "${trimmed}")
+        fi
       fi
     done
   fi
@@ -194,16 +228,14 @@ run_python_lane() {
   shift
   build_common_args
   build_case_args
-  local -a safe_case_args=()
-  local -a safe_passthrough_args=()
-  if [[ ${case_args+x} ]]; then
-    safe_case_args=("${case_args[@]}")
+  local -a python_cmd=("${PYTHON_BIN}" "${script}" "${common_args[@]}" "$@")
+  if [[ ${#case_args[@]} -gt 0 ]]; then
+    python_cmd+=("${case_args[@]}")
   fi
-  if [[ ${passthrough_args+x} ]]; then
-    safe_passthrough_args=("${passthrough_args[@]}")
+  if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+    python_cmd+=("${passthrough_args[@]}")
   fi
-  run_with_timeout python3 "${script}" "${common_args[@]}" "$@" \
-    "${safe_case_args[@]}" "${safe_passthrough_args[@]}"
+  run_with_timeout "${python_cmd[@]}"
 }
 
 main() {
@@ -297,9 +329,13 @@ main() {
           --playwright-install "${PLAYWRIGHT_INSTALL}"
       fi
       ;;
+    reborn-webui-v2-live-qa)
+      run_python_lane scripts/reborn_webui_v2_live_qa/run_live_qa.py \
+        --playwright-install "${PLAYWRIGHT_INSTALL}"
+      ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
       return 2
       ;;
   esac

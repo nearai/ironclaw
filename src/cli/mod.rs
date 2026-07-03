@@ -113,6 +113,34 @@ pub struct Cli {
     /// active: rate limits, hooks, authentication gates.
     #[arg(long, global = true)]
     pub auto_approve: bool,
+
+    /// Deployment mode: where IronClaw is running and who owns the machine
+    /// boundary.
+    ///
+    /// Wire names: `local_single_user`, `hosted_multi_tenant`,
+    /// `enterprise_dedicated`. Falls back to `IRONCLAW_DEPLOYMENT_MODE`,
+    /// then to `local_single_user`.
+    #[arg(long = "deployment-mode", global = true, value_name = "MODE")]
+    pub deployment_mode: Option<ironclaw_host_api::runtime_policy::DeploymentMode>,
+
+    /// Requested runtime profile (#3045).
+    ///
+    /// Wire names: `secure_default`, `local_safe`, `local_dev`, `local_yolo`,
+    /// `hosted_safe`, `hosted_dev`, `hosted_yolo_tenant_scoped`,
+    /// `enterprise_safe`, `enterprise_dev`, `enterprise_yolo_dedicated`,
+    /// `sandboxed`, `experiment`. Falls back to `IRONCLAW_RUNTIME_PROFILE`,
+    /// then to `secure_default`.
+    #[arg(long = "runtime-profile", global = true, value_name = "PROFILE")]
+    pub runtime_profile: Option<ironclaw_host_api::runtime_policy::RuntimeProfile>,
+
+    /// Acknowledge the disclosure required by `*_yolo*` profiles.
+    ///
+    /// Yolo profiles intentionally reduce approvals inside their authority
+    /// boundary. The CLI must capture explicit operator confirmation —
+    /// without this flag (or `IRONCLAW_YOLO_DISCLOSURE=true`), any yolo
+    /// profile selection fails closed.
+    #[arg(long = "yolo-disclosure", global = true)]
+    pub yolo_disclosure: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -442,22 +470,31 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let session = crate::llm::create_session_manager(config.llm.session.clone()).await;
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
 
-    let embeddings = config
-        .embeddings
-        .create_provider(
-            &config.llm.nearai.base_url,
+    let bedrock_setup =
+        config
+            .llm
+            .bedrock
+            .as_ref()
+            .map(|b| ironclaw_embeddings::BedrockEmbeddingSetup {
+                region: b.region.clone(),
+                profile: b.profile.clone(),
+            });
+    let embeddings = ironclaw_embeddings::create_provider(
+        &config.embeddings,
+        ironclaw_embeddings::ProviderDeps {
             session,
-            config.llm.bedrock.as_ref(),
-        )
-        .await;
+            bedrock_setup,
+        },
+    )
+    .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let cache_config = crate::workspace::EmbeddingCacheConfig {
+    let cache_config = ironclaw_embeddings::EmbeddingCacheConfig {
         max_entries: config.embeddings.cache_size,
     };
     run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await
@@ -468,6 +505,39 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use insta::assert_snapshot;
+
+    const CLI_HELP_RENDER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    fn normalize_help_snapshot(help: String) -> String {
+        let mut normalized = help
+            .lines()
+            .map(|line| if line.trim().is_empty() { "" } else { line })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if help.ends_with('\n') {
+            normalized.push('\n');
+        }
+        normalized
+    }
+
+    fn render_cli_help(long: bool) -> String {
+        // The generated Clap tree includes the Trace Commons subcommands and can
+        // overflow Rust's default test-thread stack while rendering snapshots.
+        let help = std::thread::Builder::new()
+            .stack_size(CLI_HELP_RENDER_STACK_SIZE)
+            .spawn(move || {
+                let mut cmd = Cli::command();
+                if long {
+                    cmd.render_long_help().to_string()
+                } else {
+                    cmd.render_help().to_string()
+                }
+            })
+            .expect("CLI help render thread should spawn")
+            .join()
+            .expect("CLI help render thread should not panic");
+        normalize_help_snapshot(help)
+    }
 
     #[test]
     fn test_version() {
@@ -481,32 +551,28 @@ mod tests {
     #[test]
     #[cfg(feature = "import")]
     fn test_help_output() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_help().to_string();
+        let help = render_cli_help(false);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(not(feature = "import"))]
     fn test_help_output_without_import() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_help().to_string();
+        let help = render_cli_help(false);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(feature = "import")]
     fn test_long_help_output() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_long_help().to_string();
+        let help = render_cli_help(true);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(not(feature = "import"))]
     fn test_long_help_output_without_import() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_long_help().to_string();
+        let help = render_cli_help(true);
         assert_snapshot!(help);
     }
 }

@@ -34,6 +34,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
+  else if (subtab === 'trace-commons') loadTraceCommonsCredits();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
@@ -725,6 +726,118 @@ function loadNetworkingSettings() {
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
+  });
+}
+
+// --- Trace Commons Credits ---
+
+// Shared read-only display-group builder: a titled settings-group of
+// label/description/value rows. Editable settings go through
+// renderStructuredSettingsInto; this is the display-only counterpart.
+function appendDisplayGroup(container, titleText, rows) {
+  var group = document.createElement('div');
+  group.className = 'settings-group';
+  var title = document.createElement('div');
+  title.className = 'settings-group-title';
+  title.textContent = titleText;
+  group.appendChild(title);
+  rows.forEach(function(rowDef) {
+    var row = document.createElement('div');
+    row.className = 'settings-row';
+    var labelWrap = document.createElement('div');
+    labelWrap.className = 'settings-label-wrap';
+    var label = document.createElement('div');
+    label.className = 'settings-label';
+    label.textContent = rowDef.label;
+    labelWrap.appendChild(label);
+    if (rowDef.description) {
+      var desc = document.createElement('div');
+      desc.className = 'settings-description';
+      desc.textContent = rowDef.description;
+      labelWrap.appendChild(desc);
+    }
+    row.appendChild(labelWrap);
+    var val = document.createElement('div');
+    val.className = 'settings-display-value';
+    val.textContent = rowDef.value;
+    row.appendChild(val);
+    group.appendChild(row);
+  });
+  container.appendChild(group);
+  return group;
+}
+
+function traceCommonsCreditRows(report) {
+  var delta = report.delayed_credit_delta || 0;
+  var submittedStr = I18n.t('traceCommons.submissionsSummary', {
+    submitted: String(report.submissions_submitted || 0),
+    total: String(report.submissions_total || 0),
+  });
+  if (report.submissions_accepted !== undefined && report.submissions_accepted !== null) {
+    submittedStr += I18n.t('traceCommons.submissionsAcceptedSuffix', {
+      accepted: String(report.submissions_accepted),
+    });
+  }
+  var syncAt = report.last_credit_sync_at || null;
+  return [
+    { label: I18n.t('traceCommons.pendingCredit'), value: (report.pending_credit || 0).toFixed(2),
+      description: I18n.t('traceCommons.pendingCreditDesc') },
+    { label: I18n.t('traceCommons.finalCredit'), value: (report.final_credit || 0).toFixed(2),
+      description: I18n.t('traceCommons.finalCreditDesc') },
+    { label: I18n.t('traceCommons.delayedLedger'), value: (delta >= 0 ? '+' : '') + delta.toFixed(2),
+      description: I18n.t('traceCommons.delayedLedgerDesc') },
+    { label: I18n.t('traceCommons.submissions'), value: submittedStr },
+    { label: I18n.t('traceCommons.lastSynced'),
+      value: syncAt ? new Date(syncAt).toLocaleString() : I18n.t('traceCommons.never'),
+      description: I18n.t('traceCommons.lastSyncedDesc') },
+  ];
+}
+
+function loadTraceCommonsCredits() {
+  var container = document.getElementById('settings-trace-commons-content');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+
+  apiFetch('/api/traces/credit').then(function(data) {
+    var report = data.report || {};
+    var summary = data.summary || {};
+
+    container.innerHTML = '';
+
+    // Show the opt-in empty state ONLY when the user is genuinely not enrolled.
+    // An enrolled user with zero submissions still gets their (zero-credit)
+    // view — keying on `submissions_total` alone misreports them as not enrolled.
+    if (!data.enrolled) {
+      container.innerHTML = '<div class="empty-state">' + escapeHtml(I18n.t('traceCommons.empty')) + '</div>';
+      return;
+    }
+
+    appendDisplayGroup(container, I18n.t('traceCommons.creditsTitle'), traceCommonsCreditRows(report));
+
+    var explanations = (report.explanation_lines && report.explanation_lines.length)
+      ? report.explanation_lines
+      : (summary.recent_explanations || []);
+    if (explanations.length) {
+      var exGroup = appendDisplayGroup(container, I18n.t('traceCommons.recentExplanations'), []);
+      var exList = document.createElement('ul');
+      exList.style.margin = '4px 0 0 16px';
+      exList.style.padding = '0';
+      explanations.forEach(function(line) {
+        var li = document.createElement('li');
+        li.className = 'settings-description';
+        li.textContent = line;
+        exList.appendChild(li);
+      });
+      exGroup.appendChild(exList);
+    }
+
+    var caveat = document.createElement('div');
+    caveat.className = 'settings-description';
+    caveat.style.marginTop = '12px';
+    caveat.textContent = I18n.t('traceCommons.caveat');
+    container.appendChild(caveat);
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': ' + escapeHtml(err.message) + '</div>';
   });
 }
 

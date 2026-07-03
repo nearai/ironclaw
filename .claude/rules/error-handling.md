@@ -13,6 +13,7 @@ Existing rules forbid `.unwrap()` / `.expect()` in production. The footguns belo
 - `.ok()?` on `Result` — drops the error entirely.
 - `let Ok(x) = ... else { return None }` / `else { return }` — same shape, structured.
 - `if let Err(e) = ... { warn!(...) }` followed by caching / inserting / continuing — poisons downstream state with a half-initialized value and hides the failure forever. (#2633 `seed_if_empty` cache.)
+- `.map_err(|_| OtherError)` — a closure that ignores its error binding and substitutes a generic error **drops the underlying cause**. A sanitized boundary error built this way (e.g. `RebornServicesError` → HTTP 500) reaches the user as a bare "Internal" with no server-side trail. (#4644: a read-only attachment mount surfaced as an undiagnosable 500 because the landing error was mapped with `map_err(|_| …Internal…)`.) Carry the cause instead: `.map_err(RebornServicesError::internal_from)` (logs the source, returns the sanitized 500), or log the bound error before mapping. The HTTP boundary additionally logs every 5xx as a safety net, but the *cause* only survives if the mapping doesn't discard it.
 
 **Required pattern — fail loud by default:**
 
@@ -26,7 +27,9 @@ let projects = store.list_projects(&owner_id).await?;
 let rows = store.list_agent_jobs().await.unwrap_or_default(); // silent-ok: dashboard refresh, next poll retries
 ```
 
-Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, or `else { return` / `else { return None }` on a DB/IO/workspace call must carry a `// silent-ok: <reason>` comment or be rejected.
+Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, or `else { return` / `else { return None }` on a DB/IO/workspace/boundary call must carry a `// silent-ok: <reason>` comment or be rejected.
+
+A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `RebornServicesError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
 
 ## Persist-Then-Reload Atomicity
 

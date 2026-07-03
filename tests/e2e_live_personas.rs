@@ -70,14 +70,82 @@ mod persona_tests {
     /// calls. Loads the real `./skills/` directory so persona skills
     /// (ceo-setup, content-creator-setup, etc.) are available.
     async fn build_persona_harness(test_name: &str) -> LiveTestHarness {
-        LiveTestHarnessBuilder::new(test_name)
+        // Persona scenarios activate skills (developer-setup, ceo-setup,
+        // creator-setup, trader-setup) whose tool sets include
+        // credentialed integrations: github_tool, gmail_tool,
+        // google_calendar_tool, slack_tool, telegram_tool, composio_tool,
+        // google_docs/sheets/slides_tool. Engine v2's auth pre-flight
+        // raises AuthRequired the moment any of those tools is dispatched
+        // without a matching credential in the secrets store, which parks
+        // the thread and starves the LLM of a response — the
+        // `developer_full_workflow` first turn was failing on this in
+        // canary runs because no `github_token` was seeded.
+        //
+        // Each credential is read from a `LIVE_CANARY_<NAME>` env var
+        // when present, falling back to a dummy value otherwise. Two
+        // execution modes:
+        //
+        //   - Local / canary CI with the secret wired through (preferred):
+        //     real credential reaches the WASM tool, which hits the real
+        //     external API end-to-end. This is what we actually want the
+        //     persona-rotating lane to verify.
+        //
+        //   - Local without env, or canary without the secret set: dummy
+        //     value satisfies the auth pre-flight, the tool's API call
+        //     fails with 401, the agent recovers via workspace tools, and
+        //     the workspace-content assertions still pass (every needle
+        //     in DEV_*_CHECKS comes from the user's own message, not from
+        //     API data).
+        let mut builder = LiveTestHarnessBuilder::new(test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
-            .with_skills_dir(repo_skills_dir())
-            .build()
-            .await
+            .with_skills_dir(repo_skills_dir());
+        for (name, env_var, fallback) in PERSONA_CREDENTIALS {
+            let value = std::env::var(env_var).unwrap_or_else(|_| (*fallback).to_string());
+            builder = builder.with_secret(*name, value);
+        }
+        builder.build().await
     }
+
+    /// Credentials referenced by the persona-rotating skill set.
+    ///
+    /// Each tuple is `(secrets_store_name, env_var, dummy_fallback)`:
+    ///
+    ///   - `secrets_store_name`: the name the WASM tool's
+    ///     `capabilities.json` looks up in the secrets store.
+    ///   - `env_var`: the env var the test harness reads first; set in
+    ///     `.github/workflows/live-canary.yml` from a GH Actions secret
+    ///     for the canary lane, or exported locally for repro runs.
+    ///   - `dummy_fallback`: used when the env var is unset. Satisfies
+    ///     the auth pre-flight; tools will 401 against the real API.
+    const PERSONA_CREDENTIALS: &[(&str, &str, &str)] = &[
+        (
+            "github_token",
+            "LIVE_CANARY_GITHUB_TOKEN",
+            "ghp_mock_persona_canary_token",
+        ),
+        (
+            "google_oauth_token",
+            "LIVE_CANARY_GOOGLE_OAUTH_TOKEN",
+            "ya29.mock_persona_canary",
+        ),
+        (
+            "slack_bot_token",
+            "LIVE_CANARY_SLACK_BOT_TOKEN",
+            "xoxb-mock-persona-canary",
+        ),
+        (
+            "telegram_bot_token",
+            "LIVE_CANARY_TELEGRAM_BOT_TOKEN",
+            "111222333:MOCK_PERSONA_CANARY",
+        ),
+        (
+            "composio_api_key",
+            "LIVE_CANARY_COMPOSIO_API_KEY",
+            "mock-composio-persona-canary",
+        ),
+    ];
 
     struct PersonaCheck {
         needles: &'static [&'static str],

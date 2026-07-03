@@ -115,6 +115,40 @@ When in doubt: **do not commit**. A live test that has to be
 re-recorded by each developer is annoying; a leaked credential is a
 revocation incident.
 
+## Reborn QA Recorded Fixtures
+
+`tests/reborn_qa_recorded_behavior.rs` has a newer recorded-fixture tier for
+Reborn QA workflows under `tests/fixtures/llm_traces/reborn_qa/`.
+
+Run the hermetic gate locally with:
+
+```bash
+scripts/ci/check-reborn-qa-fixtures.sh
+cargo test --test reborn_qa_recorded_behavior --features libsql -- --nocapture
+```
+
+Re-record all Reborn QA fixtures with one attended command:
+
+```bash
+ANTHROPIC_API_KEY=... \
+IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/reborn/local-dev \
+  cargo test --test reborn_qa_recorded_behavior record_ \
+    -- --ignored --test-threads=1 --nocapture
+```
+
+Notes:
+
+- `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT` should point at a local Reborn
+  `local-dev` root that has the Google account configured for the CRM and
+  meeting-prep recordings.
+- The recorder tier is intentionally ignored and manual; it spends model tokens
+  and may import live credentials into a temp runtime.
+- The committed contract and replay tiers are not ignored. CI runs them without
+  keys or network access, alongside `scripts/ci/check-reborn-qa-fixtures.sh`.
+- Treat adding a new QA workflow as a fixture requirement: add the recorder
+  case, add a contract assertion over the selected tool/request/end state, and
+  commit the scrubbed fixture.
+
 ## Adding a New Live Test
 
 1. Add a `#[tokio::test]` + `#[ignore]` (live tier — never runs in the

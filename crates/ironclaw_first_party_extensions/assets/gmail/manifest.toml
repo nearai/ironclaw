@@ -1,0 +1,88 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "First-party Gmail capabilities for Reborn."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "gmail"
+
+[[capabilities]]
+id = "gmail.list_messages"
+description = "List Gmail messages."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/list_messages.input.v1.json"
+output_schema_ref = "schemas/gmail/list_messages.output.v1.json"
+prompt_doc_ref = "prompts/gmail/list_messages.md"
+
+[[capabilities]]
+id = "gmail.get_message"
+description = "Get a Gmail message."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/get_message.input.v1.json"
+output_schema_ref = "schemas/gmail/get_message.output.v1.json"
+prompt_doc_ref = "prompts/gmail/get_message.md"
+
+[[capabilities]]
+id = "gmail.send_message"
+description = "Send a Gmail message."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/send_message.input.v1.json"
+output_schema_ref = "schemas/gmail/send_message.output.v1.json"
+prompt_doc_ref = "prompts/gmail/send_message.md"
+
+[[capabilities]]
+id = "gmail.create_draft"
+description = "Create a Gmail draft."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/create_draft.input.v1.json"
+output_schema_ref = "schemas/gmail/create_draft.output.v1.json"
+prompt_doc_ref = "prompts/gmail/create_draft.md"
+
+[[capabilities]]
+id = "gmail.reply_to_message"
+description = "Reply to a Gmail message."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/reply_to_message.input.v1.json"
+output_schema_ref = "schemas/gmail/reply_to_message.output.v1.json"
+prompt_doc_ref = "prompts/gmail/reply_to_message.md"
+
+[[capabilities]]
+id = "gmail.trash_message"
+description = "Move a Gmail message to trash."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+runtime_credentials = [
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+input_schema_ref = "schemas/gmail/trash_message.input.v1.json"
+output_schema_ref = "schemas/gmail/trash_message.output.v1.json"
+prompt_doc_ref = "prompts/gmail/trash_message.md"

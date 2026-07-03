@@ -85,7 +85,7 @@ Use for:
 
 ## 4. Namespace roots
 
-V1 canonical virtual areas/roots mirror the storage placement map:
+Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 
 ```text
 /engine
@@ -99,38 +99,57 @@ V1 canonical virtual areas/roots mirror the storage placement map:
 /tmp
 /secrets
 /events
+/processes
+/authorization
+/outbound
+/run-state
+/approvals
+/threads
+/conversations
+/turns
+/resources
+/tenant-shared
+/tenants
 ```
 
 Recommended meaning:
 
 | Root | Purpose |
 |---|---|
-| `/engine` | host-owned engine config, schemas, migrations, runtime metadata, and not-indexed engine blobs |
-| `/system/settings` | settings repository projections/import-export surfaces |
+| `/engine` | host-owned runtime state, schemas, migrations, and service metadata |
+| `/system/settings` | typed settings repository and optional settings projections |
 | `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
-| `/system/skills` | skill package/registry projections/import-export surfaces |
+| `/system/skills` | skill manifests, registries, and installed skill state |
 | `/users` | user-owned durable profile/config areas |
 | `/projects` | project workspaces, missions, thread state, and project-local config |
 | `/memory` | durable memory namespace, initially file-like even if backed by another store |
-| `/artifacts` | artifact/object/local backend for process and export outputs |
-| `/tmp` | ephemeral runtime temp backend |
-| `/secrets` | typed encrypted secret repository projection/reference surface only; not generic secret material listing |
-| `/events` | durable event/audit append-log export/projection area |
+| `/artifacts` | artifact/object storage for process output refs and durable generated files |
+| `/tmp` | process/invocation-local temporary data |
+| `/secrets` | encrypted secret records and redacted secret projections only |
+| `/events` | durable event/audit append log and projections |
+| `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
+| `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
+| `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
+| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
+| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
+| `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
+| `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
+| `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
-Extension-visible aliases should be scoped aliases such as:
+Extension-visible workspace-style names should be scoped aliases such as:
 
 ```text
 /workspace
 /project
-/memory
 /extension/config
 /extension/state
 /extension/cache
-/tmp
-/artifacts
 ```
 
-Aliases are resolved by `MountView`; a same-named canonical root such as `/tmp` or `/artifacts` does not make that alias visible without an explicit mount grant.
+Aliases are resolved by `MountView`; they are not global virtual roots by themselves.
 
 ---
 
@@ -182,7 +201,7 @@ Rules:
 
 1. Use longest alias match for `ScopedPath -> VirtualPath`.
 2. Alias match must be exact or segment-boundary prefixed.
-3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution.
+3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution, except trusted local single-user `MountView`s may accept an already-authorized raw host prefix that is explicitly present as a mount alias. Hosted and extension-declared mounts must continue to use stable scoped aliases such as `/workspace` or `/host`.
 4. `VirtualPath` must begin with a known root.
 5. Backend mount selection must use longest virtual mount prefix.
 6. If two backend mounts match with the same prefix length, fail closed.
@@ -213,7 +232,6 @@ Operation requirements:
 |---|---|
 | `read_file` | `read` |
 | `write_file` | `write` |
-| `append_file` | `write` |
 | `list_dir` | `list` |
 | `stat` | `read` or `list` |
 | `delete` | `delete` |
@@ -387,16 +405,20 @@ Backend errors may keep raw errors for logs, but public/display errors should us
 
 ## 14. Initial Rust API sketch
 
+`read_file_bounded` returns `Ok(None)` when the file exceeds the caller's limit; streaming backends should enforce that without allocating the full file first.
+
 ```rust
 #[async_trait]
 pub trait RootFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError>;
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
-    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError>;
 }
 
 pub trait FilesystemCatalog {
@@ -417,11 +439,8 @@ pub struct ScopedFilesystem<F> {
 impl<F: RootFilesystem> ScopedFilesystem<F> {
     async fn read_file(&self, path: &ScopedPath) -> Result<Vec<u8>, FilesystemError>;
     async fn write_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
-    async fn append_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError>;
-    async fn delete(&self, path: &ScopedPath) -> Result<(), FilesystemError>;
-    async fn create_dir_all(&self, path: &ScopedPath) -> Result<(), FilesystemError>;
 }
 ```
 
@@ -436,7 +455,6 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - scoped read resolves through mount view and reads expected bytes
 - read denied when mount lacks `read`
 - write denied on read-only mount
-- append denied on read-only mount
 - list denied when mount lacks `list`
 - longest backend virtual mount wins
 - unknown alias fails closed
@@ -470,46 +488,3 @@ Do not add in `ironclaw_filesystem`:
 - secret material storage
 
 Those are separate services using filesystem contracts.
-
-
----
-
-## Contract freeze addendum — V1 filesystem API and placement (2026-04-25)
-
-The V1 `RootFilesystem` contract includes exactly these operations:
-
-```rust
-read_file
-write_file
-append_file
-list_dir
-stat
-delete
-create_dir_all
-```
-
-`ScopedFilesystem` must expose the same operation set and enforce `MountPermissions` for each operation:
-
-| Operation | Permission |
-| --- | --- |
-| `read_file` | `read` |
-| `write_file` | `write` |
-| `append_file` | `write` |
-| `list_dir` | `list` |
-| `stat` | `read` or `list` |
-| `delete` | `delete` |
-| `create_dir_all` | `write` |
-
-Deferred from V1:
-
-```text
-compare-and-swap writes
-rename/copy
-streaming/range reads
-checksums/content-addressed storage
-persistent mount registry
-```
-
-`append_file` is included in V1 because event/audit JSONL sinks need append-style writes without read-modify-write truncation risk. It appends bytes at a path; it is not a compare-and-swap, lock, streaming, or multi-record transaction primitive.
-
-The source-of-truth namespace map is frozen in [`storage-placement.md`](storage-placement.md). This filesystem crate remains generic: it may route `/memory`, `/system`, `/engine`, `/artifacts`, `/tmp`, `/secrets`, `/events`, `/users`, and `/projects` mounts, but it must not encode memory metadata/search semantics, secret repository semantics, approval/process schemas, or event projection logic.

@@ -7,10 +7,12 @@ pub mod engine;
 pub mod llm;
 pub mod memory;
 pub mod secrets;
+mod skill_registry_scope;
 pub mod skills;
 pub mod system_prompt;
 pub mod tokens;
 pub mod tool_policy;
+pub mod traces;
 pub mod users;
 
 pub mod frontend;

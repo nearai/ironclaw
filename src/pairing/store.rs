@@ -197,4 +197,22 @@ impl PairingStore {
         self.cache.evict(&channel, external_id);
         Ok(())
     }
+
+    /// Create a channel identity directly (trusted path, e.g. OAuth completion).
+    /// Inserts into channel_identities and populates the cache without requiring
+    /// a pairing code flow.
+    pub async fn create_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &UserId,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        if let Some(ref db) = self.db {
+            db.create_channel_identity(&channel, external_id, owner_id.as_str())
+                .await?;
+        }
+        self.cache.insert(&channel, external_id, owner_id.clone());
+        Ok(())
+    }
 }

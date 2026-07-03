@@ -1,0 +1,10 @@
+# ironclaw_trust guardrails
+
+- Own host-controlled trust evaluation only: `EffectiveTrustClass`, `TrustPolicy`, layered `PolicySource`s, and the trust-change invalidation contract.
+- Privileged variants of `EffectiveTrustClass` (FirstParty, System) MUST only be constructible from inside this crate. Public constructors expose Sandbox and UserTrusted only.
+- Do not import any other `ironclaw_*` crate besides `ironclaw_host_api`. No dispatcher, capability host, runtimes, host runtime, approvals, run-state, processes, events, resources, or product workflow.
+- Manifest input always flows through `RequestedTrustClass` and `PackageIdentity` from `host_api`. Manifest deserialization paths must never construct an `EffectiveTrustClass` directly.
+- Trust downgrade or revocation must publish on `InvalidationBus` synchronously, before any subsequent `evaluate()` returns the new lower decision — fail-closed. Runtime mutation must go through `HostTrustPolicy::mutate_with`; the per-source `upsert` / `remove` methods are `pub(crate)` precisely so this contract cannot be bypassed.
+- `TrustClass` ceiling alone grants no capability authority. Authorization must consume both an `EffectiveTrustClass` *and* an explicit `CapabilityGrant`.
+- Identity drift (`package_id`, `source`, `digest`, `signer`) or requested-authority growth invalidates retained grants; PR3 will use the helpers exposed here.
+- The cross-crate contract — evaluation matrix, requested-vs-effective split, `PackageIdentity` scope, mutation/invalidation orchestration, and built-in tool migration intent — lives in `crates/ironclaw_trust/CONTRACT.md` (co-located with the crate so doc + code review stays unified). Update it whenever `TrustPolicy::evaluate`, `default_decision`, source match keys, `mutate_with`, or `EffectiveTrustClass` semantics change. The Reborn-track docs at `docs/reborn/contracts/host-api.md` / `extensions.md` live on the staging branch and describe the broader vocabulary; reference them from CONTRACT.md, do not duplicate them here.

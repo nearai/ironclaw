@@ -54,6 +54,16 @@ pub struct ExtensionManifest {
     /// Only present for `McpServer` manifests.
     #[serde(default)]
     pub auth: Option<String>,
+
+    /// When true, this entry is omitted from the default "available but not
+    /// installed" surfaces (the agent's `Activatable Integrations` prompt
+    /// section and the settings catalog). It remains buildable and
+    /// installable by explicit name. Used for alternate/legacy variants of
+    /// a canonical integration (e.g. `telegram_mtproto` vs the canonical
+    /// `telegram` channel) so the agent doesn't enumerate them as options.
+    /// Issue #3533.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Extension kind as declared in manifests.
@@ -217,6 +227,7 @@ impl ExtensionManifest {
             fallback_source: None,
             auth_hint,
             version: self.version.clone(),
+            hidden: self.hidden,
         })
     }
 
@@ -285,6 +296,7 @@ impl ExtensionManifest {
             fallback_source,
             auth_hint,
             version: self.version.clone(),
+            hidden: self.hidden,
         }
     }
 }
@@ -325,9 +337,41 @@ mod tests {
         assert_eq!(manifest.kind, ManifestKind::Tool);
         assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
         assert!(manifest.tags.contains(&"default".to_string()));
+        // Default: not hidden.
+        assert!(!manifest.hidden);
 
         let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::WasmTool);
+        assert!(!entry.hidden);
+    }
+
+    /// Issue #3533 regression: a manifest can declare itself hidden, in which
+    /// case the `RegistryEntry` it produces carries that flag forward to
+    /// `ExtensionManager::list`.
+    #[test]
+    fn test_parse_hidden_manifest_propagates_to_registry_entry() {
+        let json = r#"{
+            "name": "telegram_mtproto",
+            "display_name": "Telegram Tool",
+            "kind": "tool",
+            "version": "0.2.1",
+            "hidden": true,
+            "description": "Direct MTProto integration (alternate)",
+            "source": {
+                "dir": "tools-src/telegram",
+                "capabilities": "telegram-tool.capabilities.json",
+                "crate_name": "telegram-tool"
+            }
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        assert!(manifest.hidden);
+
+        let entry = manifest.to_registry_entry().expect("entry");
+        assert!(
+            entry.hidden,
+            "hidden flag must propagate from manifest to registry entry"
+        );
     }
 
     #[test]

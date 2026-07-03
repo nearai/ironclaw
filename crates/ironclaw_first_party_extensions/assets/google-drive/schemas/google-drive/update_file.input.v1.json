@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive update_file",
+  "description": "Update file metadata or move/star a file.",
+  "type": "object",
+  "required": [
+    "file_id"
+  ],
+  "properties": {
+    "file_id": {
+      "type": "string",
+      "description": "The file ID."
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "New file name."
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "New description."
+    },
+    "move_to_parent": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Parent folder ID to move into."
+    },
+    "starred": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Whether to star the file."
+    }
+  },
+  "additionalProperties": false
+}

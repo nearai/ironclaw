@@ -65,6 +65,21 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     await _drain_pipes()
 
 
+async def _set_tool_permission(base_url: str, tool_name: str, state: str):
+    """Persist an explicit tool permission override for deterministic approval tests."""
+    async with httpx.AsyncClient() as client:
+        response = await client.put(
+            f"{base_url}/api/settings/tools/{tool_name}",
+            json={"state": state},
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            timeout=15,
+        )
+    assert response.status_code == 200, (
+        f"Failed to set {tool_name} permission to {state}: "
+        f"{response.status_code} {response.text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -109,6 +124,8 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        # Dummy key: mock LLM ignores it, but openai_compatible config requires auth.
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_V2_APPROVAL_DB_TMPDIR.name, "v2-approval-e2e.db"),
@@ -133,6 +150,11 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
     base_url = f"http://127.0.0.1:{gateway_port}"
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        # The production seeded default for the read-only `http` tool is
+        # `always_allow`. These approval tests intentionally exercise the
+        # explicit ask-each-time path, so pin the fixture user to that policy
+        # after startup seeding completes.
+        await _set_tool_permission(base_url, "http", "ask_each_time")
         yield base_url
     except TimeoutError:
         if proc.returncode is None:
@@ -278,25 +300,44 @@ async def _approve(
 
 class TestV2EngineApprovalFlow:
     async def test_same_user_approvals_are_thread_scoped(self, v2_approval_server):
+        """Two threads for the same user can each park at their own
+        approval gate concurrently; resolving one does not affect the
+        other.
+
+        Regression for the inline-gate-park dispatch interaction (#3157
+        follow-up). Without the gate-park handoff, thread A's parked
+        engine call holds the per-user agent loop's `handle_message`
+        for up to 5 minutes, and thread B's send sits in `msg_tx`
+        behind it — pending_b never surfaces in this window. The
+        bridge now spawns a post-park continuation when it detects a
+        pending gate row for the (user, thread), which lets the agent
+        loop unblock immediately and dispatch thread B.
+        """
         base_url = v2_approval_server
 
         thread_a = (await api_post(base_url, "/api/chat/thread/new", timeout=15)).json()["id"]
         thread_b = (await api_post(base_url, "/api/chat/thread/new", timeout=15)).json()["id"]
 
+        # Sequence the two sends so the second one is dispatched only after
+        # the first thread's gate has surfaced. With the inline-gate-await
+        # path (PR #3157) the engine parks the live execution at the gate;
+        # firing both sends back-to-back races the per-user dispatch with
+        # the first thread's parked state and previously left both gates
+        # un-surfaced (see history of this test for the racy variant).
         await api_post(
             base_url,
             "/api/chat/send",
             json={"content": "make approval post alpha", "thread_id": thread_a},
             timeout=30,
         )
+        pending_a = await _wait_for_approval(base_url, thread_a, timeout=60)
+
         await api_post(
             base_url,
             "/api/chat/send",
             json={"content": "make approval post beta", "thread_id": thread_b},
             timeout=30,
         )
-
-        pending_a = await _wait_for_approval(base_url, thread_a, timeout=60)
         pending_b = await _wait_for_approval(base_url, thread_b, timeout=60)
         assert pending_a["request_id"] != pending_b["request_id"]
 
@@ -316,14 +357,18 @@ class TestV2EngineApprovalFlow:
 
     """Test the v2 engine tool approval lifecycle.
 
-    Uses text-based approval ("yes"/"no"/"always" as chat messages) rather
-    than the /api/chat/approval endpoint, since the v2 engine's pending_approval
-    metadata uses engine thread IDs that differ from the v1 session thread IDs
-    shown in the history API.
+    Resolves gates via ``POST /api/chat/approval`` because PR #3157 made
+    Approval gates pause inline inside the running CodeAct script via
+    ``BridgeGateController::pause``. The legacy "reply with text
+    'yes'/'no'/'always' through /api/chat/send" path no longer unsticks
+    the parked engine — only ``/api/chat/approval`` (which routes
+    through the controller's in-memory delivery channel) does. The
+    request_id needed for approval is taken straight from the
+    ``pending_gate`` payload returned by ``/api/chat/history``.
     """
 
     async def test_approval_yes(self, v2_approval_server):
-        """Approve a pending http POST tool call by replying 'yes'."""
+        """Approve a pending http POST tool call via /api/chat/approval."""
         base = v2_approval_server
 
         thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
@@ -337,39 +382,15 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt (delivered via pending_gate, not response text)
-        await _wait_for_approval(base, thread_id, timeout=60)
+        pending = await _wait_for_approval(base, thread_id, timeout=60)
+        approve = await _approve(base, thread_id, pending["request_id"], "approve")
+        assert approve.status_code == 202, approve.text
 
-        # Reply "yes" to approve — goes through SubmissionParser as ApprovalResponse
-        await api_post(
-            base, "/api/chat/send",
-            json={"content": "yes", "thread_id": thread_id},
-            timeout=30,
-        )
-
-        # Wait for the approval to be processed — poll until the response
-        # changes from the approval prompt (tool executes after approval)
-        for _ in range(120):
-            await asyncio.sleep(0.5)
-            r = await api_get(base, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-            history = r.json()
-            turns = history.get("turns", [])
-            if turns:
-                last = (turns[-1].get("response") or "").lower()
-                if last and "requires approval" not in last:
-                    break
-            # Also check if pending_gate is cleared (approval processed)
-            if not history.get("pending_gate"):
-                break
-
-        # After approval, pending_gate should be cleared
-        assert history.get("pending_gate") is None, (
-            f"After approval, pending_gate should be cleared. "
-            f"Got: {history.get('pending_gate')}"
-        )
+        history = await _wait_for_no_pending_gate(base, thread_id, timeout=60)
+        assert history.get("pending_gate") is None, history
 
     async def test_approval_no(self, v2_approval_server):
-        """Deny a pending tool call by replying 'no'."""
+        """Deny a pending tool call via /api/chat/approval action='deny'."""
         base = v2_approval_server
 
         thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
@@ -382,47 +403,17 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt (delivered via pending_gate)
-        await _wait_for_approval(base, thread_id, timeout=60)
+        pending = await _wait_for_approval(base, thread_id, timeout=60)
+        deny = await _approve(base, thread_id, pending["request_id"], "deny")
+        assert deny.status_code == 202, deny.text
 
-        # Deny
-        await api_post(
-            base, "/api/chat/send",
-            json={"content": "no", "thread_id": thread_id},
-            timeout=30,
-        )
-
-        # Wait for the denial response — poll until the approval prompt is
-        # no longer the latest response (meaning the denial was processed)
-        for _ in range(120):
-            await asyncio.sleep(0.5)
-            r = await api_get(base, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-            history = r.json()
-            turns = history.get("turns", [])
-            if turns:
-                last = (turns[-1].get("response") or "").lower()
-                # The denial is processed when the last response changes from
-                # the approval prompt or mentions denial
-                if last and "requires approval" not in last:
-                    break
-                if "denied" in last or "rejected" in last:
-                    break
-
-        all_responses = " ".join(
-            (t.get("response") or "") for t in history.get("turns", [])
-        ).lower()
-
-        # After denial, approval prompt should no longer be pending
-        assert history.get("pending_gate") is None, (
-            f"After denial, pending_gate should be cleared. "
-            f"Got: {history.get('pending_gate')}"
-        )
+        history = await _wait_for_no_pending_gate(base, thread_id, timeout=60)
+        assert history.get("pending_gate") is None, history
 
     async def test_approval_always(self, v2_approval_server):
-        """Approve with 'always' — second request auto-approves."""
+        """'always' approval clears the gate and auto-approves the next call."""
         base = v2_approval_server
 
-        # First thread: trigger approval and reply "always"
         thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
         thread_id_1 = thread_r.json()["id"]
 
@@ -432,17 +423,12 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        await _wait_for_approval(base, thread_id_1, timeout=60)
+        pending = await _wait_for_approval(base, thread_id_1, timeout=60)
+        always = await _approve(base, thread_id_1, pending["request_id"], "always")
+        assert always.status_code == 202, always.text
+        await _wait_for_no_pending_gate(base, thread_id_1, timeout=60)
 
-        await api_post(
-            base, "/api/chat/send",
-            json={"content": "always", "thread_id": thread_id_1},
-            timeout=30,
-        )
-
-        await _wait_for_response(base, thread_id_1, timeout=60)
-
-        # Second thread: same tool should auto-approve (no pause)
+        # Second thread: same tool must auto-approve (no pause).
         thread_r2 = await api_post(base, "/api/chat/thread/new", timeout=15)
         thread_id_2 = thread_r2.json()["id"]
 
@@ -452,7 +438,6 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Should complete directly without approval prompt
         history = await _wait_for_response(base, thread_id_2, timeout=60)
         all_responses = " ".join(
             (t.get("response") or "") for t in history.get("turns", [])
@@ -461,7 +446,6 @@ class TestV2EngineApprovalFlow:
         assert "requires approval" not in all_responses, (
             f"Second thread should auto-approve. Got: {all_responses[:500]}"
         )
-        # Verify the tool actually ran (not just that approval was skipped)
         turns = history.get("turns", [])
         assert len(turns) >= 1, (
             f"Expected at least 1 turn with tool execution after auto-approve. "
@@ -571,6 +555,8 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        # Dummy key: mock LLM ignores it, but openai_compatible config requires auth.
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_RESTART_DB_TMPDIR.name, "v2-restart-e2e.db"),
@@ -655,17 +641,27 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
 
     await start()
     try:
+        # First boot must require approval so the test can persist an
+        # `always_allow` decision, then verify a later restart honors it.
+        # Do not reset inside start(), or the restart would erase the state
+        # this test is specifically validating.
+        await _set_tool_permission(base_url, "http", "ask_each_time")
         yield {"base_url": base_url, "start": start, "stop": stop}
     finally:
         await stop()
 
 
 async def test_always_approve_survives_restart(restartable_v2_server):
-    """After 'always' approval and process restart, the tool auto-approves without a gate."""
+    """After 'always' approval and process restart, the tool auto-approves without a gate.
+
+    Resolves the gate via ``POST /api/chat/approval`` (action='always') so
+    the inline-await ``BridgeGateController`` is unparked; the legacy
+    text-replay path was removed by PR #3157.
+    """
     server = restartable_v2_server
     base = server["base_url"]
 
-    # 1. Trigger approval and reply "always"
+    # 1. Trigger approval and resolve with action='always'
     thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
     thread_id = thread_r.json()["id"]
 
@@ -675,13 +671,9 @@ async def test_always_approve_survives_restart(restartable_v2_server):
         timeout=30,
     )
 
-    await _wait_for_approval(base, thread_id, timeout=60)
-
-    await api_post(
-        base, "/api/chat/send",
-        json={"content": "always", "thread_id": thread_id},
-        timeout=30,
-    )
+    pending = await _wait_for_approval(base, thread_id, timeout=60)
+    always = await _approve(base, thread_id, pending["request_id"], "always")
+    assert always.status_code == 202, always.text
 
     await _wait_for_no_pending_gate(base, thread_id, timeout=60)
 

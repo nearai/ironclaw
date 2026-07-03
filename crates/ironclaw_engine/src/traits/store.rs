@@ -215,6 +215,11 @@ pub trait Store: Send + Sync {
         }
         let mut missions = self.list_missions(project_id, user_id).await?;
         missions.extend(self.list_shared_missions(project_id).await?);
+        // Sort deterministically so callers (LLM tool dispatch, replay
+        // tests, UI lists) see a stable order independent of HashMap
+        // iteration. Sort key: name (stable, human-readable), then id
+        // (tiebreaker for any duplicate names).
+        missions.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
         Ok(missions)
     }
 

@@ -27,7 +27,7 @@ on:
         required: false
         type: string
         default: ""
-  # Staging build from the staging branch every hour
+  # Rolling :staging image tags from main branch (hourly)
   schedule:
     - cron: '0 * * * *'
 
@@ -47,7 +47,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
+          ref: ${{ github.event_name == 'schedule' && 'main' || '' }}
           persist-credentials: false
 
       - name: Resolve source git commit
@@ -94,7 +94,7 @@ jobs:
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           elif [[ "${EVENT_NAME}" == "schedule" ]]; then
-            # Daily staging: :staging + :sha-xxx
+            # Hourly staging: :staging + :sha-xxx
             TAGS="${IMAGE_NAME}:staging"
             TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
             WORKER_TAGS="${WORKER_IMAGE_NAME}:staging"
@@ -126,7 +126,7 @@ jobs:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
-      - name: Check if current staging commit is already built
+      - name: Check if current git commit is already built
         id: check
         if: steps.tags.outputs.target == 'runtime-staging'
         env:

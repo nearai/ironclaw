@@ -86,60 +86,61 @@ pub(crate) fn mission_capability_actions() -> Vec<ActionDef> {
         ),
         mission_action(
             "mission_get",
-            "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.",
+            "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress. Provide either `name` (preferred — the same name used at create time) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
-                },
-                "required": ["id"]
+                    "name": {"type": "string", "description": "Mission/routine name to retrieve (preferred — the same name used at create time)"},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative; only needed if you already hold a UUID)"}
+                }
             }),
             None,
         ),
         mission_action(
             "mission_fire",
-            "Manually trigger a mission or routine to run immediately.",
+            "Manually trigger a mission or routine to run immediately. Provide either `name` (preferred — the same name used at create time) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to trigger"}
-                },
-                "required": ["id"]
+                    "name": {"type": "string", "description": "Mission/routine name to trigger (preferred — the same name used at create time)"},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative; only needed if you already hold a UUID)"}
+                }
             }),
             None,
         ),
         mission_action(
             "mission_pause",
-            "Pause a running mission or routine.",
+            "Pause a running mission or routine. Provide either `name` (preferred) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to pause"}
-                },
-                "required": ["id"]
+                    "name": {"type": "string", "description": "Mission/routine name to pause (preferred)"},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative)"}
+                }
             }),
             None,
         ),
         mission_action(
             "mission_resume",
-            "Resume a paused mission or routine.",
+            "Resume a paused mission or routine. Provide either `name` (preferred) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to resume"}
-                },
-                "required": ["id"]
+                    "name": {"type": "string", "description": "Mission/routine name to resume (preferred)"},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative)"}
+                }
             }),
             None,
         ),
         mission_action(
             "mission_update",
-            "Update an existing mission or routine. Only include fields you want to change; omitted fields remain unchanged.",
+            "Update an existing mission or routine. Only include fields you want to change; omitted fields remain unchanged. Identify the target by `name` (preferred) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to update"},
-                    "name": {"type": "string", "description": "New display name"},
+                    "name": {"type": "string", "description": "Mission/routine name to update (preferred). When also setting `new_name`, this is the lookup key."},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative)"},
+                    "new_name": {"type": "string", "description": "New display name (use this when renaming; the existing `name` field is the lookup key)"},
                     "goal": {"type": "string", "description": "New mission goal"},
                     "cadence": {"type": "string", "description": "New cadence: manual, cron, event:<channel>:<pattern>, or webhook:<path>"},
                     "timezone": {"type": "string", "description": "IANA timezone for cron scheduling"},
@@ -149,13 +150,18 @@ pub(crate) fn mission_capability_actions() -> Vec<ActionDef> {
                     "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Duplicate event suppression window"},
                     "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget"},
                     "success_criteria": {"type": "string", "description": "Completion criteria"}
-                },
-                "required": ["id"]
+                }
             }),
             Some(action_discovery_summary(
-                &["id"],
+                &[],
                 &[
+                    "Identify the mission with `name` (preferred) or `id` (UUID). \
+                     If both are provided they must identify the same mission, or use \
+                     the legacy `{id, name}` rename shape (where `name` is the new \
+                     name) — otherwise the resolver errors with \
+                     'identify different missions'.",
                     "Only include the fields you want to change; omitted fields keep their existing values.",
+                    "When renaming, set `new_name` (not `name`); `name` remains the lookup key.",
                     "When updating cadence, keep timezone aligned with cron-based schedules.",
                 ],
                 &[
@@ -165,13 +171,13 @@ pub(crate) fn mission_capability_actions() -> Vec<ActionDef> {
         ),
         mission_action(
             "mission_complete",
-            "Mark a mission or routine complete.",
+            "Mark a mission or routine complete. Provide either `name` (preferred) or `id` (UUID).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Mission/routine ID to complete"}
-                },
-                "required": ["id"]
+                    "name": {"type": "string", "description": "Mission/routine name to complete (preferred)"},
+                    "id": {"type": "string", "description": "Mission/routine UUID (legacy alternative)"}
+                }
             }),
             None,
         ),

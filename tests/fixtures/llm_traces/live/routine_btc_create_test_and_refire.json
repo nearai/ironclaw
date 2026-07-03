@@ -1,0 +1,941 @@
+{
+  "model_name": "live-routine_btc_create_test_and_refire",
+  "http_exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "content-type",
+            "application/json; charset=utf-8"
+          ],
+          [
+            "access-control-request-method",
+            "*"
+          ],
+          [
+            "x-xss-protection",
+            "0"
+          ],
+          [
+            "access-control-allow-origin",
+            "*"
+          ],
+          [
+            "x-permitted-cross-domain-policies",
+            "none"
+          ],
+          [
+            "x-frame-options",
+            "SAMEORIGIN"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "date",
+            "Fri, 01 May 2026 10:08:42 GMT"
+          ],
+          [
+            "cache-control",
+            "max-age=30, public, must-revalidate, s-maxage=60"
+          ],
+          [
+            "access-control-allow-methods",
+            "POST, PUT, DELETE, GET, OPTIONS"
+          ],
+          [
+            "referrer-policy",
+            "strict-origin-when-cross-origin"
+          ],
+          [
+            "access-control-expose-headers",
+            "link, per-page, total"
+          ],
+          [
+            "x-content-type-options",
+            "nosniff"
+          ],
+          [
+            "vary",
+            "Accept-Encoding, Origin"
+          ],
+          [
+            "x-request-id",
+            "ca203e91-e2e6-4942-a4a5-4abcf5fc70da"
+          ],
+          [
+            "alternate-protocol",
+            "443:npn-spdy/2"
+          ],
+          [
+            "strict-transport-security",
+            "max-age=15724800; includeSubdomains"
+          ],
+          [
+            "etag",
+            "W/\"ea3f8b2ec1d662f71d842ecfa132afb0\""
+          ],
+          [
+            "x-runtime",
+            "0.005202"
+          ],
+          [
+            "content-security-policy-report-only",
+            "script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;"
+          ],
+          [
+            "cf-cache-status",
+            "HIT"
+          ],
+          [
+            "cf-ray",
+            "9f4dfc895926fcce-FUK"
+          ],
+          [
+            "alt-svc",
+            "h3=\":443\"; ma=86400"
+          ],
+          [
+            "access-control-allow-headers",
+            "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+          ]
+        ],
+        "body": "{\"bitcoin\":{\"usd\":77213}}"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "vary",
+            "Accept-Encoding, Origin"
+          ],
+          [
+            "x-xss-protection",
+            "0"
+          ],
+          [
+            "date",
+            "Fri, 01 May 2026 10:08:54 GMT"
+          ],
+          [
+            "cache-control",
+            "max-age=30, public, must-revalidate, s-maxage=60"
+          ],
+          [
+            "x-runtime",
+            "0.005202"
+          ],
+          [
+            "x-content-type-options",
+            "nosniff"
+          ],
+          [
+            "cf-cache-status",
+            "HIT"
+          ],
+          [
+            "strict-transport-security",
+            "max-age=15724800; includeSubdomains"
+          ],
+          [
+            "cf-ray",
+            "9f4dfcd49cb3fcd2-FUK"
+          ],
+          [
+            "access-control-allow-headers",
+            "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+          ],
+          [
+            "alternate-protocol",
+            "443:npn-spdy/2"
+          ],
+          [
+            "etag",
+            "W/\"ea3f8b2ec1d662f71d842ecfa132afb0\""
+          ],
+          [
+            "x-request-id",
+            "ca203e91-e2e6-4942-a4a5-4abcf5fc70da"
+          ],
+          [
+            "x-permitted-cross-domain-policies",
+            "none"
+          ],
+          [
+            "referrer-policy",
+            "strict-origin-when-cross-origin"
+          ],
+          [
+            "access-control-request-method",
+            "*"
+          ],
+          [
+            "access-control-allow-origin",
+            "*"
+          ],
+          [
+            "content-security-policy-report-only",
+            "script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;"
+          ],
+          [
+            "age",
+            "16"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "alt-svc",
+            "h3=\":443\"; ma=86400"
+          ],
+          [
+            "access-control-allow-methods",
+            "POST, PUT, DELETE, GET, OPTIONS"
+          ],
+          [
+            "access-control-expose-headers",
+            "link, per-page, total"
+          ],
+          [
+            "content-type",
+            "application/json; charset=utf-8"
+          ],
+          [
+            "x-frame-options",
+            "SAMEORIGIN"
+          ]
+        ],
+        "body": "{\"bitcoin\":{\"usd\":77213}}"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          [
+            "x-xss-protection",
+            "0"
+          ],
+          [
+            "content-security-policy-report-only",
+            "script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;"
+          ],
+          [
+            "cf-ray",
+            "9f4dfd134a65fccf-FUK"
+          ],
+          [
+            "access-control-allow-headers",
+            "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+          ],
+          [
+            "x-request-id",
+            "ca203e91-e2e6-4942-a4a5-4abcf5fc70da"
+          ],
+          [
+            "etag",
+            "W/\"ea3f8b2ec1d662f71d842ecfa132afb0\""
+          ],
+          [
+            "x-runtime",
+            "0.005202"
+          ],
+          [
+            "server",
+            "cloudflare"
+          ],
+          [
+            "alternate-protocol",
+            "443:npn-spdy/2"
+          ],
+          [
+            "vary",
+            "Accept-Encoding, Origin"
+          ],
+          [
+            "access-control-request-method",
+            "*"
+          ],
+          [
+            "date",
+            "Fri, 01 May 2026 10:09:04 GMT"
+          ],
+          [
+            "strict-transport-security",
+            "max-age=15724800; includeSubdomains"
+          ],
+          [
+            "cache-control",
+            "max-age=30, public, must-revalidate, s-maxage=60"
+          ],
+          [
+            "access-control-allow-methods",
+            "POST, PUT, DELETE, GET, OPTIONS"
+          ],
+          [
+            "alt-svc",
+            "h3=\":443\"; ma=86400"
+          ],
+          [
+            "content-type",
+            "application/json; charset=utf-8"
+          ],
+          [
+            "age",
+            "26"
+          ],
+          [
+            "x-content-type-options",
+            "nosniff"
+          ],
+          [
+            "x-permitted-cross-domain-policies",
+            "none"
+          ],
+          [
+            "cf-cache-status",
+            "HIT"
+          ],
+          [
+            "x-frame-options",
+            "SAMEORIGIN"
+          ],
+          [
+            "access-control-expose-headers",
+            "link, per-page, total"
+          ],
+          [
+            "referrer-policy",
+            "strict-origin-when-cross-origin"
+          ],
+          [
+            "access-control-allow-origin",
+            "*"
+          ]
+        ],
+        "body": "{\"bitcoin\":{\"usd\":77213}}"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Create basic routine for checking price of Bitcoin every five minutes and send me test request right now."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_657a9167a2d74cdd88556b34",
+            "name": "routine_create",
+            "arguments": {
+              "cron": "*/5 * * * *",
+              "description": "Check Bitcoin price every 5 minutes",
+              "enabled": "True",
+              "name": "bitcoin-price-check",
+              "prompt": "Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.",
+              "timezone": "UTC",
+              "trigger_type": "cron"
+            }
+          }
+        ],
+        "input_tokens": 9383,
+        "output_tokens": 222
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b4d5b1ea6b4b4d3184b1d227",
+            "name": "routine_fire",
+            "arguments": {
+              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+            }
+          }
+        ],
+        "input_tokens": 9571,
+        "output_tokens": 48
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_657a9167a2d74cdd88556b34",
+          "name": "mission_create",
+          "content": "{'mission_id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'name': 'bitcoin-price-check', 'status': 'created'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_7febebee51a647b38f1187a2",
+            "name": "routine_history",
+            "arguments": {
+              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+            }
+          }
+        ],
+        "input_tokens": 9651,
+        "output_tokens": 71
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_b4d5b1ea6b4b4d3184b1d227",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_23968adef6b64abb9ccd2090",
+            "name": "job_status",
+            "arguments": {
+              "job_id": "{{call_b4d5b1ea6b4b4d3184b1d227.thread_id}}"
+            }
+          }
+        ],
+        "input_tokens": 9993,
+        "output_tokens": 91
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_657a9167a2d74cdd88556b34",
+          "name": "mission_create",
+          "content": "{'mission_id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'name': 'bitcoin-price-check', 'status': 'created'}"
+        },
+        {
+          "tool_call_id": "call_b4d5b1ea6b4b4d3184b1d227",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71'}"
+        },
+        {
+          "tool_call_id": "call_7febebee51a647b38f1187a2",
+          "name": "mission_get",
+          "content": "{'approach_history': [], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': None, 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': None, 'state': 'Running', 'steps': 0, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 0}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4d907b74c6b04b5bbd759005",
+            "name": "tool_activate",
+            "arguments": {
+              "name": "web_search"
+            }
+          }
+        ],
+        "input_tokens": 10101,
+        "output_tokens": 80
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_23968adef6b64abb9ccd2090",
+          "name": "job_status",
+          "content": "{'error': 'Job not found: Job 6d4fae13-fb42-4845-b4ec-a785b136aa71 not found'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "# Mission: bitcoin-price-check\n\nGoal: Fetch the current Bitcoin price from a pub",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "text",
+        "content": "\n\n```repl\n# Fetch Bitcoin price from CoinGecko API\nimport json\n\ntry:\n    # Try CoinGecko API first\n    result = await http(\n        method=\"GET\",\n        url=\"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd\",\n        timeout_secs=10\n    )\n    \n    if result and \"bitcoin\" in result:\n        btc_price = result[\"bitcoin\"][\"usd\"]\n        FINAL(f\"## Bitcoin Price Report\\n\\n**Current BTC/USD Price: ${btc_price:,}**\\n\\n*Fetched from CoinGecko API*\\n\\n---\\n\\n**Mission Status:** Complete for this run. The price check was successful.\")\n    else:\n        raise Exception(\"Invalid API response\")\n        \nexcept Exception as e:\n    # Fallback to web_search if API fails\n    try:\n        search_result = await web_search(query=\"Bitcoin price USD today current\", count=3)\n        \n        # Parse price from search results\n        import re\n        price_match = None\n        for item in search_result.get(\"results\", []):\n            content = item.get(\"title\", \"\") + \" \" + item.get(\"snippet\", \"\")\n            # Look for patterns like $45,000 or $45,000.00\n            matches = re.findall(r'\\$(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)', content)\n            if matches:\n                price_match = matches[0].replace(\",\", \"\")\n                break\n        \n        if price_match:\n            FINAL(f\"## Bitcoin Price Report\\n\\n**Current BTC/USD Price: ${price_match}**\\n\\n*Price found via web search (CoinGecko API unavailable)*\\n\\n---\\n\\n**Mission Status:** Complete for this run.\")\n        else:\n            FINAL(f\"## Bitcoin Price Report\\n\\n**Status:** Unable to fetch current Bitcoin price.\\n\\n**Attempted Methods:**\\n1. CoinGecko API - Failed\\n2. Web Search - No clear price found\\n\\n**Error:** {str(e)}\\n\\n**Next Steps:** Please try again in a few minutes or check the price manually at coingecko.com or coinmarketcap.com\")\n            \n    except Exception as search_error:\n        FINAL(f\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: {str(e)}\\n- Search: {str(search_error)}\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\")\n```",
+        "input_tokens": 9704,
+        "output_tokens": 654
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 13
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4e9e7350c1f84d73b3b2baee",
+            "name": "routine_history",
+            "arguments": {
+              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+            }
+          }
+        ],
+        "input_tokens": 10248,
+        "output_tokens": 66
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "[no output]"
+        },
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "{\n  \"kind\": \"wasm_tool\",\n  \"message\": \"Extension 'web_search' is ready.\",\n  \"name\": \"web_search\",\n  \"phase\": \"ready\",\n  \"status\": \"ready\"\n}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 15
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_69b042732bfe447c8d0e44b2",
+            "name": "tool_activate",
+            "arguments": {
+              "name": "http"
+            }
+          }
+        ],
+        "input_tokens": 10753,
+        "output_tokens": 82
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_4e9e7350c1f84d73b3b2baee",
+          "name": "mission_get",
+          "content": "{'approach_history': [\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\"], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': '2026-05-01T10:08:42.565898+00:00', 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': \"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\", 'state': 'Done', 'steps': 1, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 10358}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 17
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b3ac6430a5154168b5e1fde7",
+            "name": "tool_list",
+            "arguments": {
+              "kind": "builtin"
+            }
+          }
+        ],
+        "input_tokens": 10824,
+        "output_tokens": 59
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_69b042732bfe447c8d0e44b2",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 19
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_81b424003cef45e9be61c621",
+            "name": "tool_activate",
+            "arguments": {
+              "name": "http"
+            }
+          }
+        ],
+        "input_tokens": 14823,
+        "output_tokens": 78
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_b3ac6430a5154168b5e1fde7",
+          "name": "tool_list",
+          "content": "{'builtin_count': 47, 'builtins': [{'default_state': 'always_allow', 'description': 'Search for available extensions to add new capabilities. Extensions include channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can receive and reply there), tools, and MCP servers. Use `tool_install` for explicit installation, then call `tool_activate(name=\"...\")` to make a discovered integration usable. Use the `message` tool for proactive outbound sends. Use discover:true to search online if the built-in registry has no results.', 'locked': False, 'locked_reason': None, 'name': 'tool_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently remove an installed extension (channel, tool, or MCP server) from disk. This action cannot be undone — the WASM binary and configuration files will be deleted.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_remove', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Write content to a file on the LOCAL FILESYSTEM. **Only use for creating new files or complete rewrites.** For targeted edits, use apply_patch instead — it's safer and more efficient. NOT for workspace memory (use memory_write for that). Creates parent directories automatically.\", 'locked': False, 'locked_reason': None, 'name': 'write_file', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Search past memories, decisions, and context. MUST be called before answering questions about prior work, decisions, dates, people, preferences, or todos. Returns relevant snippets with relevance scores.', 'locked': False, 'locked_reason': None, 'name': 'memory_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'List contents of a directory on the LOCAL FILESYSTEM. NOT for workspace memory (use memory_tree for that). Shows files and subdirectories with their sizes.', 'locked': False, 'locked_reason': None, 'name': 'list_dir', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Show detailed information about an installed extension, including version and WIT version compatibility.', 'locked': False, 'locked_reason': None, 'name': 'extension_info', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Check the status and details of a specific job by its ID.', 'locked': False, 'locked_reason': None, 'name': 'job_status', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Update the plan progress checklist displayed to the user. Call this when creating a plan, starting execution, completing a step, or when the plan fails. The UI renders this as a live checklist. Always send the FULL list of steps (not incremental diffs).', 'locked': False, 'locked_reason': None, 'name': 'plan_update', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all routines with their status, trigger info, and next fire time.', 'locked': False, 'locked_reason': None, 'name': 'routine_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Manually trigger a routine to run immediately, bypassing schedule, trigger type, and cooldown.', 'locked': False, 'locked_reason': None, 'name': 'routine_fire', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all registered tools with names and descriptions', 'locked': False, 'locked_reason': None, 'name': 'system_tools_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Get or set the permission state for a tool. Use to view current permissions or propose a change (requires user approval). States: always_allow (no prompt), ask_each_time (approval required), disabled (tool hidden from LLM).', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_permission_set', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Install an extension (channel, tool, or MCP server). Use the name from tool_search results, or provide an explicit URL. Also discovers tool source code in the working directory (tools-src/, tool-src/, or direct subdirectories with Cargo.toml).', 'locked': False, 'locked_reason': None, 'name': 'tool_install', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Echoes back the input message. Useful for testing tool execution.', 'locked': False, 'locked_reason': None, 'name': 'echo', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Read the event log for a sandbox job. Shows messages, tool calls, results, and status changes from the container. Use this to check what Claude Code or a worker sub-agent has been doing.', 'locked': False, 'locked_reason': None, 'name': 'job_events', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'View the execution history of a routine. Shows recent runs with status, duration, and results.', 'locked': False, 'locked_reason': None, 'name': 'routine_history', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Emit a structured system event to routines with a system_event trigger. Use this to trigger routines from tool workflows without waiting for cron.', 'locked': False, 'locked_reason': None, 'name': 'event_emit', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'View the workspace memory structure as a tree (database-backed storage). Use this to discover valid workspace paths before calling memory_read or memory_write. The workspace is separate from the local filesystem; use memory_read for files shown here, NOT read_file.', 'locked': False, 'locked_reason': None, 'name': 'memory_tree', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Read a file from the workspace memory (database-backed storage). Use this to read files shown by memory_tree or to inspect a document before patching it with memory_write. NOT for local filesystem files (use read_file for those). If a workspace file does not exist yet, expect a not-found error and then create it with memory_write. Do not pass absolute paths like '/Users/...' or 'C:\\\\...'. Works with identity files, heartbeat checklist, memory, daily logs, or any custom workspace path.\", 'locked': False, 'locked_reason': None, 'name': 'memory_read', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Analyze an image using a vision-capable AI model. Provide a workspace path to the image and an optional analysis question.', 'locked': False, 'locked_reason': None, 'name': 'image_analyze', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Write to persistent memory (database-backed, NOT the local filesystem). Use for important facts, decisions, preferences, workflow docs, or other workspace files that should live in memory rather than on disk. Targets: 'memory' for curated long-term facts, 'daily_log' for timestamped session notes, 'heartbeat' for the periodic checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, or a custom workspace path like 'projects/alpha/notes.md'. Prefer normal writes with 'content' unless you have just read the file and know the exact text to patch with 'old_string'/'new_string'. Never pass absolute filesystem paths like '/Users/...' or 'C:\\\\...'.\", 'locked': False, 'locked_reason': None, 'name': 'memory_write', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Generate an image from a text prompt using an AI image generation model (e.g., FLUX). Returns the generated image data.', 'locked': False, 'locked_reason': None, 'name': 'image_generate', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Create a new job or task for the agent to work on. Use this when the user wants you to do something substantial that should be tracked as a separate job.', 'locked': False, 'locked_reason': None, 'name': 'create_job', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Read a file from the LOCAL FILESYSTEM. **Always read a file before editing it.** NOT for workspace memory paths (use memory_read for those). Returns content with line numbers. Default limit is 2000 lines. For large files, use offset and limit for partial reads.', 'locked': False, 'locked_reason': None, 'name': 'read_file', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Search file contents using regex patterns. Powered by ripgrep. Three output modes: content (matching lines with context), files_with_matches (file paths only, default), count (match counts per file). Use this instead of shell with 'grep' or 'rg'.\", 'locked': False, 'locked_reason': None, 'name': 'grep', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods. Use save_to to download binary files (images, PDFs, etc.) to a local path, e.g. {\"method\":\"GET\",\"url\":\"https://picsum.photos/800/600\",\"save_to\":\"/tmp/photo.jpg\"}.', 'locked': False, 'locked_reason': None, 'name': 'http', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'List extensions and built-in tools with their authentication, activation, and permission status. Set include_available:true to also show registry entries not yet installed. Use kind=\"builtin\" to list only built-in Rust tools.', 'locked': False, 'locked_reason': None, 'name': 'tool_list', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Get info about any tool: description, parameter names, curated summary guidance, or full discovery schema.', 'locked': False, 'locked_reason': None, 'name': 'tool_info', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Get the agent version and build information', 'locked': False, 'locked_reason': None, 'name': 'system_version', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Execute shell commands. Use for running builds, tests, git operations, and other CLI tasks. Commands run in a subprocess with captured output. Long-running commands have a timeout. When Docker sandbox is enabled, commands run in isolated containers for security.', 'locked': False, 'locked_reason': None, 'name': 'shell', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Undo the most recent modification to a file by restoring its previous content. Only works for changes made by apply_patch or write_file in the current session.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'file_undo', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Apply targeted edits to a file using search/replace. **Prefer this over write_file** for modifying existing files — it sends only the changed portion. The old_string must match exactly (including whitespace and indentation). The edit will FAIL if old_string is not unique — provide more context to make it unique, or set replace_all=true. **You must read_file before editing.** When editing text from read_file output, preserve the exact indentation (tabs/spaces) as it appears after the line number prefix.', 'locked': False, 'locked_reason': None, 'name': 'apply_patch', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Upgrade installed WASM extensions (channels and tools) to match the current host WIT version. If name is omitted, checks and upgrades all installed WASM extensions. Authentication and secrets are preserved.', 'locked': False, 'locked_reason': None, 'name': 'tool_upgrade', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'List all jobs or filter by status. Shows job IDs, titles, and current status.', 'locked': False, 'locked_reason': None, 'name': 'list_jobs', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently delete a stored secret by name. This cannot be undone.', 'locked': False, 'locked_reason': None, 'name': 'secret_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Edit an existing image using an AI model. Provide the workspace path to the source image and a text prompt describing the desired edits.', 'locked': False, 'locked_reason': None, 'name': 'image_edit', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Update an existing routine. Can change prompt, description, enabled state, cron schedule/timezone, Pass the routine name and only the fields you want to change. This does not convert trigger types. Behavior-changing edits should leave the routine marked unverified until it is tested again.', 'locked': False, 'locked_reason': None, 'name': 'routine_update', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Get current time, parse or format timestamps, convert timezones, or calculate time differences.', 'locked': False, 'locked_reason': None, 'name': 'time', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Fast file pattern matching. Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`). Results sorted by modification time (newest first). Use this instead of shell with `find` or `ls -R`.', 'locked': False, 'locked_reason': None, 'name': 'glob', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all stored secrets by name. Never returns values — only names and optional provider metadata. Use this to check what credentials are available before attempting a task that requires them.', 'locked': False, 'locked_reason': None, 'name': 'secret_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Create a new routine (scheduled or event-driven task). Supports cron schedules, event pattern matching, system events, and manual triggers. Use this when the user wants something to happen periodically or reactively. Do not use this for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Creation saves the routine, but does not verify that it will execute successfully.\", 'locked': False, 'locked_reason': None, 'name': 'routine_create', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': \"Send a proactive message to a channel. Use normal assistant output to reply in the active conversation; use this tool for proactive notifications, routine/background follow-ups, attachments, or sending to a different channel/recipient. If channel/target are omitted, reuses the current conversation's channel and sender/group when available. If you provide `target` without `channel` and no scoped channel can be resolved, the message may be broadcast across connected channels instead of sent to just one. Supports file attachments: first download the file with the http tool using save_to (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass the file path in the attachments array. Images are sent as photos on Telegram. - Signal: target accepts E.164 (+1234567890) or group ID - Telegram: target accepts username or chat ID - Slack: target accepts channel ID (C0...) or user ID (U0...)\", 'locked': False, 'locked_reason': None, 'name': 'message', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Delete a routine permanently. This also removes all run history.', 'locked': False, 'locked_reason': None, 'name': 'routine_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Cancel a running or pending job. The job will be marked as cancelled and stopped.', 'locked': False, 'locked_reason': None, 'name': 'cancel_job', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Parse, query, and transform JSON data. Supports JSONPath-like queries. Use `source_tool_call_id` to reference the full output of a previous tool call (avoids truncation issues with large responses).', 'locked': False, 'locked_reason': None, 'name': 'json', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Initiate authentication for an extension. For OAuth, returns a URL. For manual auth, returns instructions. The user provides their token through a secure channel, never through this tool.', 'locked': False, 'locked_reason': None, 'name': 'tool_auth', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make an integration usable. This may install, authenticate, and activate it as needed before loading tools, starting channels, or connecting to MCP servers.', 'locked': False, 'locked_reason': None, 'name': 'tool_activate', 'permission_state': 'always_allow'}]}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 21
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_08b42248eedb43e7b02e5518",
+            "name": "http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+            }
+          }
+        ],
+        "input_tokens": 14894,
+        "output_tokens": 113
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_81b424003cef45e9be61c621",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 23
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a3f00734525c4707a0edbfdc",
+            "name": "routine_update",
+            "arguments": {
+              "name": "{{call_4e9e7350c1f84d73b3b2baee.name}}",
+              "prompt": "Fetch the current Bitcoin price using the http tool. Call: http(method=\"GET\", url=\"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd\"). Parse the response to extract the bitcoin.usd price and report it clearly in a formatted message like \"Bitcoin Price: $XXX,XXX USD\"."
+            }
+          }
+        ],
+        "input_tokens": 15409,
+        "output_tokens": 302
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_08b42248eedb43e7b02e5518",
+          "name": "http",
+          "content": "{'body': {'bitcoin': {'usd': 77213}}, 'headers': {'access-control-allow-headers': 'Origin, X-Requested-With, Content-Type, Accept, Authorization', 'access-control-allow-methods': 'POST, PUT, DELETE, GET, OPTIONS', 'access-control-allow-origin': '*', 'access-control-expose-headers': 'link, per-page, total', 'access-control-request-method': '*', 'age': '16', 'alt-svc': 'h3=\":443\"; ma=86400', 'alternate-protocol': '443:npn-spdy/2', 'cache-control': 'max-age=30, public, must-revalidate, s-maxage=60', 'cf-cache-status': 'HIT', 'cf-ray': '9f4dfcd49cb3fcd2-FUK', 'content-security-policy-report-only': 'script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;', 'content-type': 'application/json; charset=utf-8', 'date': 'Fri, 01 May 2026 10:08:54 GMT', 'etag': 'W/\"ea3f8b2ec1d662f71d842ecfa132afb0\"', 'referrer-policy': 'strict-origin-when-cross-origin', 'server': 'cloudflare', 'strict-transport-security': 'max-age=15724800; includeSubdomains', 'vary': 'Accept-Encoding, Origin', 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN', 'x-permitted-cross-domain-policies': 'none', 'x-request-id': 'ca203e91-e2e6-4942-a4a5-4abcf5fc70da', 'x-runtime': '0.005202', 'x-xss-protection': '0'}, 'status': 200}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 25
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_05c529ff62ea4620aeca7165",
+            "name": "routine_fire",
+            "arguments": {
+              "name": "{{call_4e9e7350c1f84d73b3b2baee.name}}"
+            }
+          }
+        ],
+        "input_tokens": 15592,
+        "output_tokens": 55
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_a3f00734525c4707a0edbfdc",
+          "name": "mission_update",
+          "content": "{'status': 'updated'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 27
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_17e42824f0994356914beb8f",
+            "name": "routine_history",
+            "arguments": {
+              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+            }
+          }
+        ],
+        "input_tokens": 15675,
+        "output_tokens": 50
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_05c529ff62ea4620aeca7165",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "# Mission: bitcoin-price-check\n\nGoal: Fetch the current Bitcoin price using the ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ddabbb02263745438709ddf1",
+            "name": "http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+            }
+          }
+        ],
+        "input_tokens": 9798,
+        "output_tokens": 88
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 29
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ac9051b4a2ed4d6ba6e0c5eb",
+            "name": "job_status",
+            "arguments": {
+              "job_id": "{{call_05c529ff62ea4620aeca7165.thread_id}}"
+            }
+          }
+        ],
+        "input_tokens": 16294,
+        "output_tokens": 85
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_657a9167a2d74cdd88556b34",
+          "name": "mission_create",
+          "content": "{'mission_id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'name': 'bitcoin-price-check', 'status': 'created'}"
+        },
+        {
+          "tool_call_id": "call_b4d5b1ea6b4b4d3184b1d227",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71'}"
+        },
+        {
+          "tool_call_id": "call_7febebee51a647b38f1187a2",
+          "name": "mission_get",
+          "content": "{'approach_history': [], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': None, 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': None, 'state': 'Running', 'steps': 0, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 0}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        },
+        {
+          "tool_call_id": "call_23968adef6b64abb9ccd2090",
+          "name": "job_status",
+          "content": "{'error': 'Job not found: Job 6d4fae13-fb42-4845-b4ec-a785b136aa71 not found'}"
+        },
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "[no output]"
+        },
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "{\n  \"kind\": \"wasm_tool\",\n  \"message\": \"Extension 'web_search' is ready.\",\n  \"name\": \"web_search\",\n  \"phase\": \"ready\",\n  \"status\": \"ready\"\n}"
+        },
+        {
+          "tool_call_id": "call_4e9e7350c1f84d73b3b2baee",
+          "name": "mission_get",
+          "content": "{'approach_history': [\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\"], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': '2026-05-01T10:08:42.565898+00:00', 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': \"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\", 'state': 'Done', 'steps': 1, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 10358}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        },
+        {
+          "tool_call_id": "call_69b042732bfe447c8d0e44b2",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        },
+        {
+          "tool_call_id": "call_b3ac6430a5154168b5e1fde7",
+          "name": "tool_list",
+          "content": "{'builtin_count': 47, 'builtins': [{'default_state': 'always_allow', 'description': 'Search for available extensions to add new capabilities. Extensions include channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can receive and reply there), tools, and MCP servers. Use `tool_install` for explicit installation, then call `tool_activate(name=\"...\")` to make a discovered integration usable. Use the `message` tool for proactive outbound sends. Use discover:true to search online if the built-in registry has no results.', 'locked': False, 'locked_reason': None, 'name': 'tool_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently remove an installed extension (channel, tool, or MCP server) from disk. This action cannot be undone — the WASM binary and configuration files will be deleted.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_remove', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Write content to a file on the LOCAL FILESYSTEM. **Only use for creating new files or complete rewrites.** For targeted edits, use apply_patch instead — it's safer and more efficient. NOT for workspace memory (use memory_write for that). Creates parent directories automatically.\", 'locked': False, 'locked_reason': None, 'name': 'write_file', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Search past memories, decisions, and context. MUST be called before answering questions about prior work, decisions, dates, people, preferences, or todos. Returns relevant snippets with relevance scores.', 'locked': False, 'locked_reason': None, 'name': 'memory_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'List contents of a directory on the LOCAL FILESYSTEM. NOT for workspace memory (use memory_tree for that). Shows files and subdirectories with their sizes.', 'locked': False, 'locked_reason': None, 'name': 'list_dir', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Show detailed information about an installed extension, including version and WIT version compatibility.', 'locked': False, 'locked_reason': None, 'name': 'extension_info', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Check the status and details of a specific job by its ID.', 'locked': False, 'locked_reason': None, 'name': 'job_status', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Update the plan progress checklist displayed to the user. Call this when creating a plan, starting execution, completing a step, or when the plan fails. The UI renders this as a live checklist. Always send the FULL list of steps (not incremental diffs).', 'locked': False, 'locked_reason': None, 'name': 'plan_update', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all routines with their status, trigger info, and next fire time.', 'locked': False, 'locked_reason': None, 'name': 'routine_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Manually trigger a routine to run immediately, bypassing schedule, trigger type, and cooldown.', 'locked': False, 'locked_reason': None, 'name': 'routine_fire', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all registered tools with names and descriptions', 'locked': False, 'locked_reason': None, 'name': 'system_tools_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Get or set the permission state for a tool. Use to view current permissions or propose a change (requires user approval). States: always_allow (no prompt), ask_each_time (approval required), disabled (tool hidden from LLM).', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_permission_set', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Install an extension (channel, tool, or MCP server). Use the name from tool_search results, or provide an explicit URL. Also discovers tool source code in the working directory (tools-src/, tool-src/, or direct subdirectories with Cargo.toml).', 'locked': False, 'locked_reason': None, 'name': 'tool_install', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Echoes back the input message. Useful for testing tool execution.', 'locked': False, 'locked_reason': None, 'name': 'echo', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Read the event log for a sandbox job. Shows messages, tool calls, results, and status changes from the container. Use this to check what Claude Code or a worker sub-agent has been doing.', 'locked': False, 'locked_reason': None, 'name': 'job_events', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'View the execution history of a routine. Shows recent runs with status, duration, and results.', 'locked': False, 'locked_reason': None, 'name': 'routine_history', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Emit a structured system event to routines with a system_event trigger. Use this to trigger routines from tool workflows without waiting for cron.', 'locked': False, 'locked_reason': None, 'name': 'event_emit', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'View the workspace memory structure as a tree (database-backed storage). Use this to discover valid workspace paths before calling memory_read or memory_write. The workspace is separate from the local filesystem; use memory_read for files shown here, NOT read_file.', 'locked': False, 'locked_reason': None, 'name': 'memory_tree', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Read a file from the workspace memory (database-backed storage). Use this to read files shown by memory_tree or to inspect a document before patching it with memory_write. NOT for local filesystem files (use read_file for those). If a workspace file does not exist yet, expect a not-found error and then create it with memory_write. Do not pass absolute paths like '/Users/...' or 'C:\\\\...'. Works with identity files, heartbeat checklist, memory, daily logs, or any custom workspace path.\", 'locked': False, 'locked_reason': None, 'name': 'memory_read', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Analyze an image using a vision-capable AI model. Provide a workspace path to the image and an optional analysis question.', 'locked': False, 'locked_reason': None, 'name': 'image_analyze', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Write to persistent memory (database-backed, NOT the local filesystem). Use for important facts, decisions, preferences, workflow docs, or other workspace files that should live in memory rather than on disk. Targets: 'memory' for curated long-term facts, 'daily_log' for timestamped session notes, 'heartbeat' for the periodic checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, or a custom workspace path like 'projects/alpha/notes.md'. Prefer normal writes with 'content' unless you have just read the file and know the exact text to patch with 'old_string'/'new_string'. Never pass absolute filesystem paths like '/Users/...' or 'C:\\\\...'.\", 'locked': False, 'locked_reason': None, 'name': 'memory_write', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Generate an image from a text prompt using an AI image generation model (e.g., FLUX). Returns the generated image data.', 'locked': False, 'locked_reason': None, 'name': 'image_generate', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Create a new job or task for the agent to work on. Use this when the user wants you to do something substantial that should be tracked as a separate job.', 'locked': False, 'locked_reason': None, 'name': 'create_job', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Read a file from the LOCAL FILESYSTEM. **Always read a file before editing it.** NOT for workspace memory paths (use memory_read for those). Returns content with line numbers. Default limit is 2000 lines. For large files, use offset and limit for partial reads.', 'locked': False, 'locked_reason': None, 'name': 'read_file', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Search file contents using regex patterns. Powered by ripgrep. Three output modes: content (matching lines with context), files_with_matches (file paths only, default), count (match counts per file). Use this instead of shell with 'grep' or 'rg'.\", 'locked': False, 'locked_reason': None, 'name': 'grep', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods. Use save_to to download binary files (images, PDFs, etc.) to a local path, e.g. {\"method\":\"GET\",\"url\":\"https://picsum.photos/800/600\",\"save_to\":\"/tmp/photo.jpg\"}.', 'locked': False, 'locked_reason': None, 'name': 'http', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'List extensions and built-in tools with their authentication, activation, and permission status. Set include_available:true to also show registry entries not yet installed. Use kind=\"builtin\" to list only built-in Rust tools.', 'locked': False, 'locked_reason': None, 'name': 'tool_list', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Get info about any tool: description, parameter names, curated summary guidance, or full discovery schema.', 'locked': False, 'locked_reason': None, 'name': 'tool_info', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Get the agent version and build information', 'locked': False, 'locked_reason': None, 'name': 'system_version', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Execute shell commands. Use for running builds, tests, git operations, and other CLI tasks. Commands run in a subprocess with captured output. Long-running commands have a timeout. When Docker sandbox is enabled, commands run in isolated containers for security.', 'locked': False, 'locked_reason': None, 'name': 'shell', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Undo the most recent modification to a file by restoring its previous content. Only works for changes made by apply_patch or write_file in the current session.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'file_undo', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Apply targeted edits to a file using search/replace. **Prefer this over write_file** for modifying existing files — it sends only the changed portion. The old_string must match exactly (including whitespace and indentation). The edit will FAIL if old_string is not unique — provide more context to make it unique, or set replace_all=true. **You must read_file before editing.** When editing text from read_file output, preserve the exact indentation (tabs/spaces) as it appears after the line number prefix.', 'locked': False, 'locked_reason': None, 'name': 'apply_patch', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Upgrade installed WASM extensions (channels and tools) to match the current host WIT version. If name is omitted, checks and upgrades all installed WASM extensions. Authentication and secrets are preserved.', 'locked': False, 'locked_reason': None, 'name': 'tool_upgrade', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'List all jobs or filter by status. Shows job IDs, titles, and current status.', 'locked': False, 'locked_reason': None, 'name': 'list_jobs', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently delete a stored secret by name. This cannot be undone.', 'locked': False, 'locked_reason': None, 'name': 'secret_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Edit an existing image using an AI model. Provide the workspace path to the source image and a text prompt describing the desired edits.', 'locked': False, 'locked_reason': None, 'name': 'image_edit', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Update an existing routine. Can change prompt, description, enabled state, cron schedule/timezone, Pass the routine name and only the fields you want to change. This does not convert trigger types. Behavior-changing edits should leave the routine marked unverified until it is tested again.', 'locked': False, 'locked_reason': None, 'name': 'routine_update', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Get current time, parse or format timestamps, convert timezones, or calculate time differences.', 'locked': False, 'locked_reason': None, 'name': 'time', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Fast file pattern matching. Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`). Results sorted by modification time (newest first). Use this instead of shell with `find` or `ls -R`.', 'locked': False, 'locked_reason': None, 'name': 'glob', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all stored secrets by name. Never returns values — only names and optional provider metadata. Use this to check what credentials are available before attempting a task that requires them.', 'locked': False, 'locked_reason': None, 'name': 'secret_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Create a new routine (scheduled or event-driven task). Supports cron schedules, event pattern matching, system events, and manual triggers. Use this when the user wants something to happen periodically or reactively. Do not use this for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Creation saves the routine, but does not verify that it will execute successfully.\", 'locked': False, 'locked_reason': None, 'name': 'routine_create', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': \"Send a proactive message to a channel. Use normal assistant output to reply in the active conversation; use this tool for proactive notifications, routine/background follow-ups, attachments, or sending to a different channel/recipient. If channel/target are omitted, reuses the current conversation's channel and sender/group when available. If you provide `target` without `channel` and no scoped channel can be resolved, the message may be broadcast across connected channels instead of sent to just one. Supports file attachments: first download the file with the http tool using save_to (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass the file path in the attachments array. Images are sent as photos on Telegram. - Signal: target accepts E.164 (+1234567890) or group ID - Telegram: target accepts username or chat ID - Slack: target accepts channel ID (C0...) or user ID (U0...)\", 'locked': False, 'locked_reason': None, 'name': 'message', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Delete a routine permanently. This also removes all run history.', 'locked': False, 'locked_reason': None, 'name': 'routine_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Cancel a running or pending job. The job will be marked as cancelled and stopped.', 'locked': False, 'locked_reason': None, 'name': 'cancel_job', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Parse, query, and transform JSON data. Supports JSONPath-like queries. Use `source_tool_call_id` to reference the full output of a previous tool call (avoids truncation issues with large responses).', 'locked': False, 'locked_reason': None, 'name': 'json', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Initiate authentication for an extension. For OAuth, returns a URL. For manual auth, returns instructions. The user provides their token through a secure channel, never through this tool.', 'locked': False, 'locked_reason': None, 'name': 'tool_auth', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make an integration usable. This may install, authenticate, and activate it as needed before loading tools, starting channels, or connecting to MCP servers.', 'locked': False, 'locked_reason': None, 'name': 'tool_activate', 'permission_state': 'always_allow'}]}"
+        },
+        {
+          "tool_call_id": "call_81b424003cef45e9be61c621",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        },
+        {
+          "tool_call_id": "call_08b42248eedb43e7b02e5518",
+          "name": "http",
+          "content": "{'body': {'bitcoin': {'usd': 77213}}, 'headers': {'access-control-allow-headers': 'Origin, X-Requested-With, Content-Type, Accept, Authorization', 'access-control-allow-methods': 'POST, PUT, DELETE, GET, OPTIONS', 'access-control-allow-origin': '*', 'access-control-expose-headers': 'link, per-page, total', 'access-control-request-method': '*', 'age': '16', 'alt-svc': 'h3=\":443\"; ma=86400', 'alternate-protocol': '443:npn-spdy/2', 'cache-control': 'max-age=30, public, must-revalidate, s-maxage=60', 'cf-cache-status': 'HIT', 'cf-ray': '9f4dfcd49cb3fcd2-FUK', 'content-security-policy-report-only': 'script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;', 'content-type': 'application/json; charset=utf-8', 'date': 'Fri, 01 May 2026 10:08:54 GMT', 'etag': 'W/\"ea3f8b2ec1d662f71d842ecfa132afb0\"', 'referrer-policy': 'strict-origin-when-cross-origin', 'server': 'cloudflare', 'strict-transport-security': 'max-age=15724800; includeSubdomains', 'vary': 'Accept-Encoding, Origin', 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN', 'x-permitted-cross-domain-policies': 'none', 'x-request-id': 'ca203e91-e2e6-4942-a4a5-4abcf5fc70da', 'x-runtime': '0.005202', 'x-xss-protection': '0'}, 'status': 200}"
+        },
+        {
+          "tool_call_id": "call_a3f00734525c4707a0edbfdc",
+          "name": "mission_update",
+          "content": "{'status': 'updated'}"
+        },
+        {
+          "tool_call_id": "call_05c529ff62ea4620aeca7165",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487'}"
+        },
+        {
+          "tool_call_id": "call_17e42824f0994356914beb8f",
+          "name": "mission_get",
+          "content": "{'approach_history': [\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\"], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price using the http tool. Call: http(method=\"GET\", url=\"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd\"). Parse the response to extract the bitcoin.usd price and report it clearly in a formatted message like \"Bitcoin Price: $XXX,XXX USD\".', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:09:01.302229+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': None, 'created_at': '2026-05-01T10:09:01.256384+00:00', 'result': None, 'state': 'Running', 'steps': 0, 'thread_id': '3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487', 'tokens_used': 0}, {'completed_at': '2026-05-01T10:08:42.565898+00:00', 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': \"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\", 'state': 'Done', 'steps': 1, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 10358}], 'status': 'Active', 'success_criteria': None, 'total_threads': 2}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Create basic routine for checking price of Bitcoin every five minutes and send m",
+        "min_message_count": 31
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e023cfbd1ff94b33968678ef",
+            "name": "routine_history",
+            "arguments": {
+              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+            }
+          }
+        ],
+        "input_tokens": 16408,
+        "output_tokens": 58
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_b4d5b1ea6b4b4d3184b1d227",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71'}"
+        },
+        {
+          "tool_call_id": "call_7febebee51a647b38f1187a2",
+          "name": "mission_get",
+          "content": "{'approach_history': [], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': None, 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': None, 'state': 'Running', 'steps': 0, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 0}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        },
+        {
+          "tool_call_id": "call_23968adef6b64abb9ccd2090",
+          "name": "job_status",
+          "content": "{'error': 'Job not found: Job 6d4fae13-fb42-4845-b4ec-a785b136aa71 not found'}"
+        },
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "[no output]"
+        },
+        {
+          "tool_call_id": "call_4d907b74c6b04b5bbd759005",
+          "name": "tool_activate",
+          "content": "{\n  \"kind\": \"wasm_tool\",\n  \"message\": \"Extension 'web_search' is ready.\",\n  \"name\": \"web_search\",\n  \"phase\": \"ready\",\n  \"status\": \"ready\"\n}"
+        },
+        {
+          "tool_call_id": "call_4e9e7350c1f84d73b3b2baee",
+          "name": "mission_get",
+          "content": "{'approach_history': [\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\"], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price from a public API and report it. Use the web_search tool to find the current BTC/USD price, or make an HTTP request to a price API like https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd. Report the price clearly.', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:08:31.354856+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': '2026-05-01T10:08:42.565898+00:00', 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': \"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\", 'state': 'Done', 'steps': 1, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 10358}], 'status': 'Active', 'success_criteria': None, 'total_threads': 1}"
+        },
+        {
+          "tool_call_id": "call_69b042732bfe447c8d0e44b2",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        },
+        {
+          "tool_call_id": "call_b3ac6430a5154168b5e1fde7",
+          "name": "tool_list",
+          "content": "{'builtin_count': 47, 'builtins': [{'default_state': 'always_allow', 'description': 'Search for available extensions to add new capabilities. Extensions include channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can receive and reply there), tools, and MCP servers. Use `tool_install` for explicit installation, then call `tool_activate(name=\"...\")` to make a discovered integration usable. Use the `message` tool for proactive outbound sends. Use discover:true to search online if the built-in registry has no results.', 'locked': False, 'locked_reason': None, 'name': 'tool_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently remove an installed extension (channel, tool, or MCP server) from disk. This action cannot be undone — the WASM binary and configuration files will be deleted.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_remove', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Write content to a file on the LOCAL FILESYSTEM. **Only use for creating new files or complete rewrites.** For targeted edits, use apply_patch instead — it's safer and more efficient. NOT for workspace memory (use memory_write for that). Creates parent directories automatically.\", 'locked': False, 'locked_reason': None, 'name': 'write_file', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Search past memories, decisions, and context. MUST be called before answering questions about prior work, decisions, dates, people, preferences, or todos. Returns relevant snippets with relevance scores.', 'locked': False, 'locked_reason': None, 'name': 'memory_search', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'List contents of a directory on the LOCAL FILESYSTEM. NOT for workspace memory (use memory_tree for that). Shows files and subdirectories with their sizes.', 'locked': False, 'locked_reason': None, 'name': 'list_dir', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Show detailed information about an installed extension, including version and WIT version compatibility.', 'locked': False, 'locked_reason': None, 'name': 'extension_info', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Check the status and details of a specific job by its ID.', 'locked': False, 'locked_reason': None, 'name': 'job_status', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Update the plan progress checklist displayed to the user. Call this when creating a plan, starting execution, completing a step, or when the plan fails. The UI renders this as a live checklist. Always send the FULL list of steps (not incremental diffs).', 'locked': False, 'locked_reason': None, 'name': 'plan_update', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all routines with their status, trigger info, and next fire time.', 'locked': False, 'locked_reason': None, 'name': 'routine_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Manually trigger a routine to run immediately, bypassing schedule, trigger type, and cooldown.', 'locked': False, 'locked_reason': None, 'name': 'routine_fire', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all registered tools with names and descriptions', 'locked': False, 'locked_reason': None, 'name': 'system_tools_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Get or set the permission state for a tool. Use to view current permissions or propose a change (requires user approval). States: always_allow (no prompt), ask_each_time (approval required), disabled (tool hidden from LLM).', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'tool_permission_set', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Install an extension (channel, tool, or MCP server). Use the name from tool_search results, or provide an explicit URL. Also discovers tool source code in the working directory (tools-src/, tool-src/, or direct subdirectories with Cargo.toml).', 'locked': False, 'locked_reason': None, 'name': 'tool_install', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Echoes back the input message. Useful for testing tool execution.', 'locked': False, 'locked_reason': None, 'name': 'echo', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Read the event log for a sandbox job. Shows messages, tool calls, results, and status changes from the container. Use this to check what Claude Code or a worker sub-agent has been doing.', 'locked': False, 'locked_reason': None, 'name': 'job_events', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'View the execution history of a routine. Shows recent runs with status, duration, and results.', 'locked': False, 'locked_reason': None, 'name': 'routine_history', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Emit a structured system event to routines with a system_event trigger. Use this to trigger routines from tool workflows without waiting for cron.', 'locked': False, 'locked_reason': None, 'name': 'event_emit', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'View the workspace memory structure as a tree (database-backed storage). Use this to discover valid workspace paths before calling memory_read or memory_write. The workspace is separate from the local filesystem; use memory_read for files shown here, NOT read_file.', 'locked': False, 'locked_reason': None, 'name': 'memory_tree', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Read a file from the workspace memory (database-backed storage). Use this to read files shown by memory_tree or to inspect a document before patching it with memory_write. NOT for local filesystem files (use read_file for those). If a workspace file does not exist yet, expect a not-found error and then create it with memory_write. Do not pass absolute paths like '/Users/...' or 'C:\\\\...'. Works with identity files, heartbeat checklist, memory, daily logs, or any custom workspace path.\", 'locked': False, 'locked_reason': None, 'name': 'memory_read', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Analyze an image using a vision-capable AI model. Provide a workspace path to the image and an optional analysis question.', 'locked': False, 'locked_reason': None, 'name': 'image_analyze', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': \"Write to persistent memory (database-backed, NOT the local filesystem). Use for important facts, decisions, preferences, workflow docs, or other workspace files that should live in memory rather than on disk. Targets: 'memory' for curated long-term facts, 'daily_log' for timestamped session notes, 'heartbeat' for the periodic checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, or a custom workspace path like 'projects/alpha/notes.md'. Prefer normal writes with 'content' unless you have just read the file and know the exact text to patch with 'old_string'/'new_string'. Never pass absolute filesystem paths like '/Users/...' or 'C:\\\\...'.\", 'locked': False, 'locked_reason': None, 'name': 'memory_write', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Generate an image from a text prompt using an AI image generation model (e.g., FLUX). Returns the generated image data.', 'locked': False, 'locked_reason': None, 'name': 'image_generate', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Create a new job or task for the agent to work on. Use this when the user wants you to do something substantial that should be tracked as a separate job.', 'locked': False, 'locked_reason': None, 'name': 'create_job', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Read a file from the LOCAL FILESYSTEM. **Always read a file before editing it.** NOT for workspace memory paths (use memory_read for those). Returns content with line numbers. Default limit is 2000 lines. For large files, use offset and limit for partial reads.', 'locked': False, 'locked_reason': None, 'name': 'read_file', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Search file contents using regex patterns. Powered by ripgrep. Three output modes: content (matching lines with context), files_with_matches (file paths only, default), count (match counts per file). Use this instead of shell with 'grep' or 'rg'.\", 'locked': False, 'locked_reason': None, 'name': 'grep', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods. Use save_to to download binary files (images, PDFs, etc.) to a local path, e.g. {\"method\":\"GET\",\"url\":\"https://picsum.photos/800/600\",\"save_to\":\"/tmp/photo.jpg\"}.', 'locked': False, 'locked_reason': None, 'name': 'http', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'List extensions and built-in tools with their authentication, activation, and permission status. Set include_available:true to also show registry entries not yet installed. Use kind=\"builtin\" to list only built-in Rust tools.', 'locked': False, 'locked_reason': None, 'name': 'tool_list', 'permission_state': 'always_allow'}, {'default_state': 'always_allow', 'description': 'Get info about any tool: description, parameter names, curated summary guidance, or full discovery schema.', 'locked': False, 'locked_reason': None, 'name': 'tool_info', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Get the agent version and build information', 'locked': False, 'locked_reason': None, 'name': 'system_version', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Execute shell commands. Use for running builds, tests, git operations, and other CLI tasks. Commands run in a subprocess with captured output. Long-running commands have a timeout. When Docker sandbox is enabled, commands run in isolated containers for security.', 'locked': False, 'locked_reason': None, 'name': 'shell', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Undo the most recent modification to a file by restoring its previous content. Only works for changes made by apply_patch or write_file in the current session.', 'locked': True, 'locked_reason': 'This tool always requires explicit approval and cannot be set to always_allow.', 'name': 'file_undo', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Apply targeted edits to a file using search/replace. **Prefer this over write_file** for modifying existing files — it sends only the changed portion. The old_string must match exactly (including whitespace and indentation). The edit will FAIL if old_string is not unique — provide more context to make it unique, or set replace_all=true. **You must read_file before editing.** When editing text from read_file output, preserve the exact indentation (tabs/spaces) as it appears after the line number prefix.', 'locked': False, 'locked_reason': None, 'name': 'apply_patch', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Upgrade installed WASM extensions (channels and tools) to match the current host WIT version. If name is omitted, checks and upgrades all installed WASM extensions. Authentication and secrets are preserved.', 'locked': False, 'locked_reason': None, 'name': 'tool_upgrade', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'List all jobs or filter by status. Shows job IDs, titles, and current status.', 'locked': False, 'locked_reason': None, 'name': 'list_jobs', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Permanently delete a stored secret by name. This cannot be undone.', 'locked': False, 'locked_reason': None, 'name': 'secret_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Edit an existing image using an AI model. Provide the workspace path to the source image and a text prompt describing the desired edits.', 'locked': False, 'locked_reason': None, 'name': 'image_edit', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Update an existing routine. Can change prompt, description, enabled state, cron schedule/timezone, Pass the routine name and only the fields you want to change. This does not convert trigger types. Behavior-changing edits should leave the routine marked unverified until it is tested again.', 'locked': False, 'locked_reason': None, 'name': 'routine_update', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Get current time, parse or format timestamps, convert timezones, or calculate time differences.', 'locked': False, 'locked_reason': None, 'name': 'time', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Fast file pattern matching. Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`). Results sorted by modification time (newest first). Use this instead of shell with `find` or `ls -R`.', 'locked': False, 'locked_reason': None, 'name': 'glob', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'List all stored secrets by name. Never returns values — only names and optional provider metadata. Use this to check what credentials are available before attempting a task that requires them.', 'locked': False, 'locked_reason': None, 'name': 'secret_list', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': \"Create a new routine (scheduled or event-driven task). Supports cron schedules, event pattern matching, system events, and manual triggers. Use this when the user wants something to happen periodically or reactively. Do not use this for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Creation saves the routine, but does not verify that it will execute successfully.\", 'locked': False, 'locked_reason': None, 'name': 'routine_create', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': \"Send a proactive message to a channel. Use normal assistant output to reply in the active conversation; use this tool for proactive notifications, routine/background follow-ups, attachments, or sending to a different channel/recipient. If channel/target are omitted, reuses the current conversation's channel and sender/group when available. If you provide `target` without `channel` and no scoped channel can be resolved, the message may be broadcast across connected channels instead of sent to just one. Supports file attachments: first download the file with the http tool using save_to (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass the file path in the attachments array. Images are sent as photos on Telegram. - Signal: target accepts E.164 (+1234567890) or group ID - Telegram: target accepts username or chat ID - Slack: target accepts channel ID (C0...) or user ID (U0...)\", 'locked': False, 'locked_reason': None, 'name': 'message', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Delete a routine permanently. This also removes all run history.', 'locked': False, 'locked_reason': None, 'name': 'routine_delete', 'permission_state': 'ask_each_time'}, {'default_state': 'ask_each_time', 'description': 'Cancel a running or pending job. The job will be marked as cancelled and stopped.', 'locked': False, 'locked_reason': None, 'name': 'cancel_job', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Parse, query, and transform JSON data. Supports JSONPath-like queries. Use `source_tool_call_id` to reference the full output of a previous tool call (avoids truncation issues with large responses).', 'locked': False, 'locked_reason': None, 'name': 'json', 'permission_state': 'always_allow'}, {'default_state': 'ask_each_time', 'description': 'Initiate authentication for an extension. For OAuth, returns a URL. For manual auth, returns instructions. The user provides their token through a secure channel, never through this tool.', 'locked': False, 'locked_reason': None, 'name': 'tool_auth', 'permission_state': 'ask_each_time'}, {'default_state': 'always_allow', 'description': 'Make an integration usable. This may install, authenticate, and activate it as needed before loading tools, starting channels, or connecting to MCP servers.', 'locked': False, 'locked_reason': None, 'name': 'tool_activate', 'permission_state': 'always_allow'}]}"
+        },
+        {
+          "tool_call_id": "call_81b424003cef45e9be61c621",
+          "name": "tool_activate",
+          "content": "[ACTION FAILED] tool_activate: {'error': \"Tool 'tool_activate' failed: Tool error: Tool tool_activate execution failed: Execution failed: Extension not installed: http\"}"
+        },
+        {
+          "tool_call_id": "call_08b42248eedb43e7b02e5518",
+          "name": "http",
+          "content": "{'body': {'bitcoin': {'usd': 77213}}, 'headers': {'access-control-allow-headers': 'Origin, X-Requested-With, Content-Type, Accept, Authorization', 'access-control-allow-methods': 'POST, PUT, DELETE, GET, OPTIONS', 'access-control-allow-origin': '*', 'access-control-expose-headers': 'link, per-page, total', 'access-control-request-method': '*', 'age': '16', 'alt-svc': 'h3=\":443\"; ma=86400', 'alternate-protocol': '443:npn-spdy/2', 'cache-control': 'max-age=30, public, must-revalidate, s-maxage=60', 'cf-cache-status': 'HIT', 'cf-ray': '9f4dfcd49cb3fcd2-FUK', 'content-security-policy-report-only': 'script-src https://accounts.google.com/gsi/client; frame-src https://accounts.google.com/gsi/; connect-src https://accounts.google.com/gsi/;', 'content-type': 'application/json; charset=utf-8', 'date': 'Fri, 01 May 2026 10:08:54 GMT', 'etag': 'W/\"ea3f8b2ec1d662f71d842ecfa132afb0\"', 'referrer-policy': 'strict-origin-when-cross-origin', 'server': 'cloudflare', 'strict-transport-security': 'max-age=15724800; includeSubdomains', 'vary': 'Accept-Encoding, Origin', 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN', 'x-permitted-cross-domain-policies': 'none', 'x-request-id': 'ca203e91-e2e6-4942-a4a5-4abcf5fc70da', 'x-runtime': '0.005202', 'x-xss-protection': '0'}, 'status': 200}"
+        },
+        {
+          "tool_call_id": "call_a3f00734525c4707a0edbfdc",
+          "name": "mission_update",
+          "content": "{'status': 'updated'}"
+        },
+        {
+          "tool_call_id": "call_05c529ff62ea4620aeca7165",
+          "name": "mission_fire",
+          "content": "{'status': 'fired', 'thread_id': '3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487'}"
+        },
+        {
+          "tool_call_id": "call_17e42824f0994356914beb8f",
+          "name": "mission_get",
+          "content": "{'approach_history': [\"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\"], 'cadence': 'Manual', 'current_focus': None, 'goal': 'Fetch the current Bitcoin price using the http tool. Call: http(method=\"GET\", url=\"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd\"). Parse the response to extract the bitcoin.usd price and report it clearly in a formatted message like \"Bitcoin Price: $XXX,XXX USD\".', 'id': 'f705bc52-e598-4c30-be86-eb0bb223244e', 'last_fire_at': '2026-05-01T10:09:01.302229+00:00', 'name': 'bitcoin-price-check', 'next_fire_at': None, 'recent_threads': [{'completed_at': None, 'created_at': '2026-05-01T10:09:01.256384+00:00', 'result': None, 'state': 'Running', 'steps': 0, 'thread_id': '3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487', 'tokens_used': 0}, {'completed_at': '2026-05-01T10:08:42.565898+00:00', 'created_at': '2026-05-01T10:08:31.303792+00:00', 'result': \"## Bitcoin Price Report\\n\\n**Status:** Failed to fetch Bitcoin price.\\n\\n**Errors:**\\n- API: Invalid API response\\n- Search: action 'web_search' is not callable in this execution context\\n\\n**Recommendation:** Try again later or check https://www.coingecko.com manually\", 'state': 'Done', 'steps': 1, 'thread_id': '6d4fae13-fb42-4845-b4ec-a785b136aa71', 'tokens_used': 10358}], 'status': 'Active', 'success_criteria': None, 'total_threads': 2}"
+        },
+        {
+          "tool_call_id": "call_ac9051b4a2ed4d6ba6e0c5eb",
+          "name": "job_status",
+          "content": "{'error': 'Job not found: Job 3b3b6f86-7f0b-4d7b-ae8a-88ed4bfc8487 not found'}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "# Mission: bitcoin-price-check\n\nGoal: Fetch the current Bitcoin price using the ",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "text",
+        "content": "\n\n```repl\n# Bitcoin price successfully fetched from CoinGecko API\nbitcoin_price = 77213\n\n# Format the price with proper currency formatting\nformatted_price = f\"${bitcoin_price:,}\"\n\n# Create the report\nreport = f\"\"\"\n## Bitcoin Price Report\n\n**Current Price:** {formatted_price} USD\n\n**Source:** CoinGecko API (https://api.coingecko.com/api/v3/simple/price)\n\n**Timestamp:** 2026-05-01 10:09:04 GMT\n\n---\n\n### Next Focus (for next thread)\n- Continue monitoring Bitcoin price every 5 minutes as scheduled\n- Track price changes and trends over time\n- Set up alerts if price deviates significantly from current value\n\n### Goal Status\n**Achieved:** Yes - Successfully fetched and reported Bitcoin price\n\"\"\"\n\nFINAL(report)\n```",
+        "input_tokens": 10313,
+        "output_tokens": 293
+      }
+    }
+  ]
+}

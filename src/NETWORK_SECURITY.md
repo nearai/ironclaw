@@ -272,7 +272,7 @@ Always binds to **loopback only**: `127.0.0.1:9876`. Falls back to `[::1]:9876` 
 
 Both IPv4 and IPv6 loopback addresses are security-equivalent — they are only reachable from the local machine.
 
-**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `OAUTH_CALLBACK_PORT`, `bind_callback_listener()`
+**Reference:** `src/auth/oauth.rs` / `crates/ironclaw_oauth/src/lib.rs` — `OAUTH_CALLBACK_PORT`, `bind_callback_listener()`
 
 ### Lifecycle
 
@@ -290,7 +290,7 @@ The listener is **ephemeral** — it is started only when an OAuth flow is initi
 - **Error parameter checking**: The handler checks for `error=` in the callback query string before extracting the auth code
 - **URL decoding**: Callback parameters are URL-decoded safely
 
-**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `html_escape()`
+**Reference:** `src/auth/oauth.rs` / `crates/ironclaw_oauth/src/lib.rs` — `html_escape()`
 
 ### Built-in OAuth Credentials
 
@@ -302,7 +302,7 @@ Google OAuth client ID and secret are compiled into the binary (with compile-tim
 
 Implicit. The listener is a raw `TcpListener` (not axum) inside a `tokio::time::timeout` future. Once the authorization code or error is received, the future returns and the `TcpListener` is dropped, closing the port. No explicit shutdown signal is needed.
 
-**Reference:** `src/auth/oauth.rs` / `src/llm/oauth_helpers.rs` — `wait_for_callback()`
+**Reference:** `src/auth/oauth.rs` / `crates/ironclaw_oauth/src/lib.rs` — `wait_for_callback()`
 
 ---
 

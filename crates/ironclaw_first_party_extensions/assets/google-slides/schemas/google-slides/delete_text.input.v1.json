@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides delete_text",
+  "description": "Delete text from a shape.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "object_id"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "object_id": {
+      "type": "string",
+      "description": "Shape object ID."
+    },
+    "start_index": {
+      "type": "integer",
+      "description": "Start index. Defaults to 0."
+    },
+    "end_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "End index exclusive."
+    }
+  },
+  "additionalProperties": false
+}

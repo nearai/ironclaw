@@ -22,6 +22,11 @@ pub struct SkillsConfig {
     pub max_active_skills: usize,
     /// Maximum total context tokens allocated to skill prompts.
     pub max_context_tokens: usize,
+    /// Whether regex activation criteria may auto-load skills.
+    ///
+    /// Keyword/tag activation and explicit `/skill`/`$skill` style mentions remain available
+    /// when this is false.
+    pub regex_activation_enabled: bool,
     /// Maximum recursion depth when scanning skill directories for bundle layouts.
     /// Subdirectories without `SKILL.md` are recursed into up to this depth.
     pub max_scan_depth: usize,
@@ -43,6 +48,7 @@ impl Default for SkillsConfig {
             // retires the setup skill, the full budget goes to
             // reactive skills (commitment-triage, decision-capture, etc.).
             max_context_tokens: 6000,
+            regex_activation_enabled: true,
             max_scan_depth: 3,
         }
     }
@@ -82,7 +88,114 @@ impl SkillsConfig {
                 &defaults.max_context_tokens,
                 "SKILLS_MAX_CONTEXT_TOKENS",
             )?,
+            regex_activation_enabled: db_first_bool(
+                ss.regex_activation_enabled,
+                defaults.regex_activation_enabled,
+                "SKILLS_REGEX_ACTIVATION_ENABLED",
+            )?,
             max_scan_depth: parse_optional_env("SKILLS_MAX_SCAN_DEPTH", 3)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex that serialises tests in this module that mutate process-global
+    /// env vars.  Mirrors the `ENV_LOCK` pattern used in `config::runtime`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// `db_first_bool` consults the env var only when the settings value
+    /// equals the default. SkillsSettings defaults `regex_activation_enabled`
+    /// to `true`, so setting `SKILLS_REGEX_ACTIVATION_ENABLED=false` with a
+    /// default settings struct must flip the resolved config to `false`.
+    /// Regression guard for the env-var wiring added in #4144 — the
+    /// `db_first_bool` path was previously untested.
+    #[test]
+    fn skills_config_reads_regex_activation_enabled_from_env() {
+        // Hold the lock for the duration of the test to prevent concurrent
+        // tests from observing a partial env-var mutation.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
+        let prior = std::env::var(key).ok();
+
+        // SAFETY (Rust 2024): no other threads are reading this env var
+        // during the test — SkillsConfig::resolve is called synchronously
+        // on the test thread, and the var is restored before return.
+        unsafe { std::env::set_var(key, "false") };
+
+        let settings = Settings::default();
+        let cfg = SkillsConfig::resolve(&settings).expect("resolve skills config");
+        assert!(
+            !cfg.regex_activation_enabled,
+            "SKILLS_REGEX_ACTIVATION_ENABLED=false must disable regex activation"
+        );
+
+        // Flip it back on and re-resolve to confirm the env value, not a
+        // sticky default, drives the resolved field.
+        unsafe { std::env::set_var(key, "true") };
+        let cfg_on = SkillsConfig::resolve(&settings).expect("resolve skills config");
+        assert!(cfg_on.regex_activation_enabled);
+
+        // Restore.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    /// Three-way precedence test for `regex_activation_enabled`:
+    ///   1. DB/TOML `false` overrides the default `true` (DB wins over env)
+    ///   2. Default `true` + no env var resolves to `true`
+    ///   3. Default `true` + env=`false` resolves to `false` (env path covered
+    ///      by `skills_config_reads_regex_activation_enabled_from_env`)
+    ///
+    /// The DB/TOML path requires NO env mutation, so no ENV_LOCK is needed.
+    #[test]
+    fn skills_config_regex_activation_enabled_precedence() {
+        use crate::settings::SkillsSettings;
+
+        // DB/TOML false — settings deviates from default so db_first_bool
+        // returns the settings value without consulting the env var.
+        let settings_false = Settings {
+            skills: SkillsSettings {
+                regex_activation_enabled: false,
+                ..SkillsSettings::default()
+            },
+            ..Settings::default()
+        };
+        let cfg = SkillsConfig::resolve(&settings_false).expect("resolve with db false");
+        assert!(
+            !cfg.regex_activation_enabled,
+            "DB/TOML regex_activation_enabled=false must take precedence"
+        );
+
+        // Default true + no env var: verify default is preserved.
+        // Guard against process-level env pollution by holding the lock while
+        // we ensure the key is absent.
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
+            let prior = std::env::var(key).ok();
+            // SAFETY (Rust 2024): single-threaded section guarded by ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
+            let settings_default = Settings::default();
+            let cfg_default =
+                SkillsConfig::resolve(&settings_default).expect("resolve with default settings");
+            assert!(
+                cfg_default.regex_activation_enabled,
+                "default must be true when env var is absent"
+            );
+            unsafe {
+                match prior {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 }

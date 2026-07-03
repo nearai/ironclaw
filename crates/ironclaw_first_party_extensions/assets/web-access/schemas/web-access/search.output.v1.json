@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "properties": {
+    "response_id": {
+      "type": "string"
+    },
+    "provider_used": {
+      "type": "string"
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "provider_used": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "snippet": {
+                  "type": "string"
+                }
+              },
+              "required": ["index", "title", "url", "snippet"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["query", "provider_used", "answer", "results"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["response_id", "provider_used", "queries"],
+  "additionalProperties": false
+}

@@ -7,71 +7,10 @@
 //! File: `~/.ironclaw/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
-use std::sync::LazyLock;
 
-const IRONCLAW_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
-
-/// Lazily computed IronClaw base directory, cached for the lifetime of the process.
-static IRONCLAW_BASE_DIR: LazyLock<PathBuf> = LazyLock::new(compute_ironclaw_base_dir);
-
-/// Compute the IronClaw base directory from environment.
-///
-/// This is the underlying implementation used by both the public
-/// `ironclaw_base_dir()` function (which caches the result) and tests
-/// (which need to verify different configurations).
-pub fn compute_ironclaw_base_dir() -> PathBuf {
-    std::env::var(IRONCLAW_BASE_DIR_ENV)
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.as_os_str().is_empty() {
-                default_base_dir()
-            } else if !path.is_absolute() {
-                eprintln!(
-                    "Warning: IRONCLAW_BASE_DIR is a relative path '{}', resolved against current directory",
-                    path.display()
-                );
-                path
-            } else {
-                path
-            }
-        })
-        .unwrap_or_else(|_| default_base_dir())
-}
-
-/// Get the default IronClaw base directory (~/.ironclaw).
-///
-/// Logs a warning if the home directory cannot be determined and falls back to
-/// the current directory.
-fn default_base_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".ironclaw")
-    } else {
-        eprintln!("Warning: Could not determine home directory, using current directory");
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            .join(".ironclaw")
-    }
-}
-
-/// Get the IronClaw base directory.
-///
-/// Override with `IRONCLAW_BASE_DIR` environment variable.
-/// Defaults to `~/.ironclaw` (or `./.ironclaw` if home directory cannot be determined).
-///
-/// Thread-safe: the value is computed once and cached in a `LazyLock`.
-///
-/// # Environment Variable Behavior
-/// - If `IRONCLAW_BASE_DIR` is set to a non-empty path, that path is used.
-/// - If `IRONCLAW_BASE_DIR` is set to an empty string, it is treated as unset.
-/// - If `IRONCLAW_BASE_DIR` contains null bytes, a warning is printed and the default is used.
-/// - If the home directory cannot be determined, a warning is printed and the current directory is used.
-///
-/// # Returns
-/// A `PathBuf` pointing to the base directory. The path is not validated
-/// for existence.
-pub fn ironclaw_base_dir() -> PathBuf {
-    IRONCLAW_BASE_DIR.clone()
-}
+// Base-directory resolution lives in `ironclaw_common::paths`. Re-exported
+// from this module's path for back-compat with existing callers.
+pub use ironclaw_common::paths::{compute_ironclaw_base_dir, ironclaw_base_dir};
 
 /// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
 pub fn ironclaw_env_path() -> PathBuf {
@@ -520,7 +459,7 @@ pub fn pid_lock_path() -> PathBuf {
 /// A PID-based lock that prevents multiple IronClaw instances from running
 /// simultaneously.
 ///
-/// Uses `fs4::try_lock_exclusive()` for atomic locking (no TOCTOU race),
+/// Uses `File::try_lock()` for atomic locking (no TOCTOU race),
 /// then writes the current PID into the locked file for diagnostics.
 /// The OS-level lock is held for the lifetime of this struct and
 /// automatically released on drop (along with the PID file cleanup).
@@ -553,7 +492,6 @@ impl PidLock {
 
     /// Acquire at a specific path (for testing).
     fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
-        use fs4::FileExt;
         use std::fs::OpenOptions;
         use std::io::Write;
 
@@ -572,8 +510,8 @@ impl PidLock {
 
         // Try non-blocking exclusive lock — if another process holds it,
         // this fails immediately instead of blocking.
-        if let Err(e) = file.try_lock_exclusive() {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
+        if let Err(e) = file.try_lock() {
+            if matches!(e, std::fs::TryLockError::WouldBlock) {
                 // Lock held by another process — read its PID for the error message
                 let pid = std::fs::read_to_string(&path)
                     .ok()
@@ -582,7 +520,7 @@ impl PidLock {
                 return Err(PidLockError::AlreadyRunning { pid });
             }
             // Other errors (permissions, unsupported filesystem, etc.)
-            return Err(PidLockError::Io(e));
+            return Err(PidLockError::Io(e.into()));
         }
 
         // We hold the exclusive lock — write our PID
