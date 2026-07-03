@@ -17,7 +17,8 @@ mod support;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{HostManagedModelErrorKind, HostManagedModelResponse};
-use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_reborn_composition::{FailureLane, RetryDisposition, failure_lane, retry_disposition};
+use ironclaw_turns::{TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{
     binary_e2e::RebornBinaryE2EHarness,
     model_replay::{
@@ -64,13 +65,11 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    assert_eq!(
-        failed
-            .failure
-            .as_ref()
-            .expect("failure category")
-            .category(),
-        "host_stage_unavailable_model"
+    assert_failure_lane_alignment(
+        &failed,
+        "host_stage_unavailable_model",
+        FailureLane::Retriable,
+        RetryDisposition::Auto,
     );
 
     // 2) The failed run is retryable: it preserved a resumable checkpoint. This
@@ -153,13 +152,11 @@ async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
     // "interrupted_unexpectedly", but `TurnRunnerWorker::sanitized_driver_failure`
     // only preserves allowlisted driver reason kinds and currently projects the
     // binary run category as "driver_failed".
-    assert_eq!(
-        failed
-            .failure
-            .as_ref()
-            .expect("failure category")
-            .category(),
-        "driver_failed"
+    assert_failure_lane_alignment(
+        &failed,
+        "driver_failed",
+        FailureLane::Retriable,
+        RetryDisposition::UserInitiated,
     );
     assert!(
         failed.checkpoint_id.is_some(),
@@ -219,13 +216,11 @@ async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion(
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    assert_eq!(
-        failed
-            .failure
-            .as_ref()
-            .expect("failure category")
-            .category(),
-        "host_stage_unavailable_capability"
+    assert_failure_lane_alignment(
+        &failed,
+        "host_stage_unavailable_capability",
+        FailureLane::Retriable,
+        RetryDisposition::Auto,
     );
     assert!(
         failed.checkpoint_id.is_some(),
@@ -265,4 +260,32 @@ async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion(
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;
+}
+
+fn assert_failure_lane_alignment(
+    state: &TurnRunState,
+    expected_category: &str,
+    expected_lane: FailureLane,
+    expected_disposition: RetryDisposition,
+) {
+    let failure = state.failure.as_ref().expect("failure category");
+    let category = failure.category();
+    let retryable = state.checkpoint_id.is_some();
+
+    assert_eq!(category, expected_category, "sanitized failure category");
+    assert_eq!(
+        failure_lane(category, retryable),
+        expected_lane,
+        "{category}: FailureLane must match the emitted category + retryable signal"
+    );
+    let disposition = retry_disposition(category, retryable);
+    assert_eq!(
+        disposition, expected_disposition,
+        "{category}: RetryDisposition must match the emitted category + retryable signal"
+    );
+    assert_eq!(
+        disposition.failure_lane(),
+        expected_lane,
+        "{category}: RetryDisposition must imply the same FailureLane"
+    );
 }
