@@ -374,6 +374,10 @@ name = "reborn_group_skills"
 path = "tests/reborn_group_skills/main.rs"
 
 [[test]]
+name = "reborn_group_journeys"
+path = "tests/reborn_group_journeys/main.rs"
+
+[[test]]
 name = "reborn_integration_oauth_refresh"
 required-features = ["libsql"]
 
