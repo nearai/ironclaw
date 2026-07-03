@@ -4,8 +4,6 @@ name: Nightly E2E
 # than inside e2e.yml so callers like Run Tests can reference e2e.yml without
 # inheriting schedule-only issue-writing permissions.
 on:
-  pull_request:
-    branches: [main]
   schedule:
     - cron: "0 3 * * *" # Nightly full E2E at 03:00 UTC
   workflow_dispatch:
@@ -20,7 +18,6 @@ concurrency:
 jobs:
   e2e:
     name: Full E2E
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/main-ci-checks'
     uses: ./.github/workflows/e2e.yml
     with:
       ref: ${{ github.sha }}

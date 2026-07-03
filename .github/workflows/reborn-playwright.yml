@@ -1,8 +1,6 @@
 name: Reborn Playwright
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "20 3 * * *" # Nightly standalone Reborn browser coverage at 03:20 UTC
@@ -17,7 +15,6 @@ concurrency:
 jobs:
   matrix-config:
     name: Configure Reborn Playwright matrix
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/main-ci-checks'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
@@ -66,7 +63,6 @@ jobs:
   build:
     name: Build Reborn Playwright binaries
     needs: matrix-config
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/main-ci-checks'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -104,7 +100,6 @@ jobs:
   test:
     name: Reborn Playwright (${{ matrix.group }})
     needs: [matrix-config, build]
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/main-ci-checks'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -166,7 +161,7 @@ jobs:
   reborn-playwright:
     name: Reborn Playwright
     runs-on: ubuntu-latest
-    if: always() && (github.event_name != 'pull_request' || github.head_ref == 'codex/main-ci-checks')
+    if: always()
     needs: [test]
     steps:
       - name: Check Reborn Playwright shards

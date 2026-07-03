@@ -24,6 +24,7 @@ on:
   push:
     branches:
       - main
+      - codex/main-ci-checks
     paths:
       - "crates/ironclaw_*/**"
       - "docs/reborn/**"

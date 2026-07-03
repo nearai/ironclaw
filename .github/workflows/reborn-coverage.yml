@@ -24,7 +24,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, codex/main-ci-checks]
   workflow_dispatch:
 
 permissions:

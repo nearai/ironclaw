@@ -13,7 +13,7 @@ name: nearai-bench dispatcher tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/main-ci-checks]
     paths:
       - '.github/workflows/nearai-bench.yml'
       - '.github/workflows/nearai-bench-tests.yml'
