@@ -4,12 +4,13 @@ use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, RebornExtensionActionResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    ExtensionImportMode, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
+    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornServicesError,
+    WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -101,10 +102,11 @@ pub(super) async fn import_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
     bundle: Vec<u8>,
+    mode: ExtensionImportMode,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
     let context = lifecycle_surface_context(caller);
     let lifecycle = facade
-        .import_extension_bundle(context, bundle)
+        .import_extension_bundle(context, bundle, mode)
         .await
         .map_err(map_lifecycle_error)?;
     Ok(action_response(&lifecycle, None, None))

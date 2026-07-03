@@ -921,6 +921,9 @@ registerPack("en", {
   "ext.registry.importing": "Importing…",
   "ext.registry.importSuccess": "Tool imported — install it from the registry.",
   "ext.registry.importFailed": "Import failed",
+  "ext.registry.importReplaceConfirm":
+    "This tool is already installed. Replace it for the whole tenant? It stays active if it was active, users keep their credentials and permissions, and the updated tools go live immediately.",
+  "ext.registry.importConflict": "Import cancelled — the tool is already installed.",
 
   // Chat — history
   "chat.history.loading": "Loading...",

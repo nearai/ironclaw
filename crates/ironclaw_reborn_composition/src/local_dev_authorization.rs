@@ -9,7 +9,7 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
     ToolPermissionOverrideKey, ToolPermissionOverrideStore,
 };
-use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
+use ironclaw_authorization::{TrustAwareCapabilityDispatchAuthorizer, effects_are_covered};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, InvocationId, Principal, ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
@@ -166,6 +166,7 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         scope: &ResourceScope,
         capability_id: &CapabilityId,
         grantee: &Principal,
+        effects: &[EffectKind],
     ) -> bool {
         let key = PersistentApprovalPolicyKey::new(
             &operator_tool_permission_scope(scope),
@@ -174,7 +175,23 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
             grantee.clone(),
         );
         match self.persistent_policies.lookup(&key).await {
-            Ok(policy) => policy.and_then(|policy| policy.active_grant()).is_some(),
+            Ok(policy) => {
+                let Some(grant) = policy.and_then(|policy| policy.active_grant()) else {
+                    return false;
+                };
+                // The stored grant snapshots allowed_effects at approval time.
+                // A same-id capability whose effect set has since WIDENED
+                // (extension replaced with a v2) is not covered by that
+                // consent — fall through to a fresh approval gate.
+                let covered = effects_are_covered(effects, &grant.constraints.allowed_effects);
+                if !covered {
+                    tracing::warn!(
+                        capability = %capability_id,
+                        "stored always-allow grant does not cover the capability's current effects; re-gating"
+                    );
+                }
+                covered
+            }
             Err(error) => {
                 // silent-ok: fail-safe to "ask" on store read error; logged for observability.
                 tracing::debug!(
@@ -376,6 +393,27 @@ mod tests {
             .set(AutoApproveSettingInput {
                 scope,
                 enabled: true,
+                updated_by: Principal::User(user_id.clone()),
+            })
+            .await
+            .expect("auto-approve setting update");
+    }
+
+    /// Global auto-approve defaults ON; a test that wants the settings-page
+    /// always-allow to be the ONLY path to `Allow` must turn it off first.
+    async fn disable_global_auto_approve(
+        store: &InMemoryAutoApproveSettingStore,
+        user_id: &UserId,
+    ) {
+        let scope = ironclaw_host_api::ResourceScope::local_default(
+            user_id.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("local resource scope");
+        store
+            .set(AutoApproveSettingInput {
+                scope,
+                enabled: false,
                 updated_by: Principal::User(user_id.clone()),
             })
             .await
@@ -742,6 +780,114 @@ mod tests {
                 ironclaw_host_api::Decision::RequireApproval { .. }
             ),
             "override-store read errors must fail closed even when global auto-approve is enabled, got {decision:?}"
+        );
+    }
+
+    /// Seed a durable settings-page "always allow" policy for `builtin.shell`
+    /// (grantee = the builtin provider, the authorizer's expected grantee) whose
+    /// stored grant covers exactly `allowed_effects`.
+    async fn seed_shell_always_allow(
+        store: &ironclaw_approvals::InMemoryPersistentApprovalPolicyStore,
+        user_id: &UserId,
+        allowed_effects: Vec<EffectKind>,
+    ) {
+        use ironclaw_approvals::{PersistentApprovalAction, PersistentApprovalPolicyStore};
+        use ironclaw_host_api::{GrantConstraints, NetworkPolicy};
+        let scope = operator_tool_permission_scope(
+            &ironclaw_host_api::ResourceScope::local_default(
+                user_id.clone(),
+                ironclaw_host_api::InvocationId::new(),
+            )
+            .expect("local resource scope"),
+        );
+        let provider = Principal::Extension(
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id"),
+        );
+        store
+            .allow(ironclaw_approvals::PersistentApprovalPolicyInput {
+                scope,
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new("builtin.shell").expect("capability id"),
+                grantee: provider.clone(),
+                approved_by: provider,
+                constraints: GrantConstraints {
+                    allowed_effects,
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+                source_approval_request_id: None,
+            })
+            .await
+            .expect("seed always-allow policy");
+    }
+
+    /// #5459 P1.5 security fix: a stored settings-page always-allow must not
+    /// auto-approve a capability whose effect set has WIDENED beyond what was
+    /// approved (the classic footgun after an admin replaces an extension with a
+    /// v2 that adds e.g. ExternalWrite). The gate must fall through to a fresh
+    /// approval. The companion below proves matching effects still auto-approve,
+    /// so this is bounding, not a blanket disable.
+    #[tokio::test]
+    async fn always_allow_does_not_cover_widened_effects_through_store() {
+        let user_id = UserId::new("test-user").expect("user id");
+        let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+        // Global switch OFF: the ONLY path to Allow is the stored always-allow.
+        disable_global_auto_approve(&auto_approve, &user_id).await;
+        let policies = Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+        // Stored grant covers Network — NOT the shell's SpawnProcess effect, so
+        // it does not cover the current dispatch.
+        seed_shell_always_allow(&policies, &user_id, vec![EffectKind::Network]).await;
+
+        let settings = Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(InMemoryToolPermissionOverrideStore::new()),
+            auto_approve,
+            policies,
+        ));
+        let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+        let authorizer = local_dev_authorizer(None, policy, settings);
+
+        let decision =
+            local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
+        assert!(
+            matches!(
+                decision,
+                ironclaw_host_api::Decision::RequireApproval { .. }
+            ),
+            "an always-allow grant that does not cover the current effects must re-gate, got {decision:?}"
+        );
+    }
+
+    /// Companion: an always-allow whose stored grant DOES cover the current
+    /// effect set still auto-approves (so the widening guard above is a bound,
+    /// not a blanket disable of the settings-page always-allow).
+    #[tokio::test]
+    async fn always_allow_covers_matching_effects_through_store() {
+        let user_id = UserId::new("test-user").expect("user id");
+        let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+        // Global switch OFF so the stored always-allow is the ONLY Allow path;
+        // otherwise the default-ON global switch would pass this for free.
+        disable_global_auto_approve(&auto_approve, &user_id).await;
+        let policies = Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+        // Stored grant covers exactly the shell's SpawnProcess effect.
+        seed_shell_always_allow(&policies, &user_id, vec![EffectKind::SpawnProcess]).await;
+
+        let settings = Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(InMemoryToolPermissionOverrideStore::new()),
+            auto_approve,
+            policies,
+        ));
+        let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+        let authorizer = local_dev_authorizer(None, policy, settings);
+
+        let decision =
+            local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
+        assert!(
+            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            "an always-allow grant covering the current effects must auto-approve, got {decision:?}"
         );
     }
 

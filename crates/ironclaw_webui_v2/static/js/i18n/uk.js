@@ -838,6 +838,14 @@ registerPack("uk", {
   "ext.registry.emptyDesc": "Усі доступні розширення вже встановлені або реєстр не налаштований.",
   "ext.registry.availableTitle": "Доступні розширення",
   "ext.registry.noMatch": "Немає розширень, що відповідають фільтру.",
+  "ext.registry.import": "Імпортувати",
+  "ext.registry.importing": "Імпортування…",
+  "ext.registry.importSuccess": "Інструмент імпортовано — встановіть його з реєстру.",
+  "ext.registry.importFailed": "Помилка імпорту",
+  "ext.registry.importReplaceConfirm": "Цей інструмент уже встановлено. Замінити його для всього орендаря? Він залишиться активним, якщо був активним, користувачі збережуть свої облікові дані та дозволи, а оновлені інструменти стануть доступними негайно.",
+  "ext.registry.importConflict": "Імпорт скасовано — інструмент уже встановлено.",
+  "extensions.scope.shared": "спільна",
+  "extensions.scope.private": "моя",
 
   // Chat — history
   "chat.history.loading": "Завантаження...",

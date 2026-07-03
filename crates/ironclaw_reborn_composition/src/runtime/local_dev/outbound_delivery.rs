@@ -5,7 +5,8 @@ use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
+    EffectKind, InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope,
+    UserId,
 };
 use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_product_workflow::{
@@ -260,9 +261,18 @@ impl OutboundDeliveryTargetSetHandler {
             }
             None => {}
         }
+        // The synthetic target-set capability's effect set is compiled in
+        // (ExternalWrite, mirrored from the composition gate wiring) — it
+        // cannot drift the way a replaced registry extension can, but the
+        // provider contract still bounds the stored grant by it.
         if self
             .approval_settings
-            .tool_always_allow(&scope, capability_id, &grantee)
+            .tool_always_allow(
+                &scope,
+                capability_id,
+                &grantee,
+                &[EffectKind::ExternalWrite],
+            )
             .await
             || self.approval_settings.global_auto_approve(&scope).await
         {

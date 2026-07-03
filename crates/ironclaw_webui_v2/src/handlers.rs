@@ -24,10 +24,10 @@ use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
+    CodexLoginStart, ExtensionImportMode, FsMount, LifecyclePackageKind, LifecyclePackageRef,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError,
+    ProjectFsFile, ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
     RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
@@ -1253,20 +1253,47 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// Query parameters for `import_extension`. The body is the raw zip bytes, so
+/// the import mode travels as `?mode=add|replace` instead of a body field.
+#[derive(Debug, Default, Deserialize)]
+pub struct ImportExtensionQuery {
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+fn extension_import_mode(
+    query: &ImportExtensionQuery,
+) -> Result<ExtensionImportMode, WebUiV2HttpError> {
+    match query.mode.as_deref() {
+        None | Some("add") => Ok(ExtensionImportMode::Add),
+        Some("replace") => Ok(ExtensionImportMode::Replace),
+        Some(_) => Err(WebUiV2HttpError::from(RebornServicesError::from(
+            WebUiInboundValidationError::new("mode", WebUiInboundValidationCode::InvalidValue),
+        ))),
+    }
+}
+
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
 /// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
 /// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
 /// added to the Registry. Gated on `operator_webui_config` (admin).
+///
+/// `?mode=add` (default) returns a `409 conflict` when the bundle's id is
+/// already installed; `?mode=replace` replaces the installed extension
+/// tenant-wide in place (activation state, credential bindings, and owner
+/// survive; the updated tools go live without a restart).
 pub async fn import_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Query(query): Query<ImportExtensionQuery>,
     body: axum::body::Bytes,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
+    let mode = extension_import_mode(&query)?;
     let response = state
         .services()
-        .import_extension(caller, body.to_vec())
+        .import_extension(caller, body.to_vec(), mode)
         .await?;
     Ok(Json(response))
 }

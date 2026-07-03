@@ -250,7 +250,7 @@ export function useExtensions() {
   );
 
   const importMutation = useMutation({
-    mutationFn: ({ file }) => importExtension(file),
+    mutationFn: ({ file, mode }) => importExtension(file, mode),
     onSuccess: (res) => {
       if (res.success) {
         setActionResult({
@@ -262,7 +262,18 @@ export function useExtensions() {
       }
       invalidate();
     },
-    onError: (err) => {
+    onError: (err, variables) => {
+      // 409 = the bundle's id is already installed. Ask before replacing it
+      // tenant-wide; a confirmed retry re-imports the same file with
+      // mode=replace (activation state and credentials survive server-side).
+      if (err?.status === 409 && variables?.mode !== "replace") {
+        if (window.confirm(t("ext.registry.importReplaceConfirm"))) {
+          importMutation.mutate({ ...variables, mode: "replace" });
+        } else {
+          setActionResult({ type: "error", message: t("ext.registry.importConflict") });
+        }
+        return;
+      }
       setActionResult({ type: "error", message: err.message });
     },
   });

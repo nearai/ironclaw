@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    ExtensionImportMode, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
     LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
@@ -513,15 +513,19 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
 
     async fn import_extension_bundle(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         bundle: Vec<u8>,
+        mode: ExtensionImportMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let Some(extension_management) = &self.extension_management else {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: "extension management is not available in this runtime".to_string(),
             });
         };
-        extension_management.import_bundle(&bundle).await
+        let caller = lifecycle_resource_scope(&context)?.user_id;
+        extension_management
+            .import_bundle(&bundle, mode, &caller)
+            .await
     }
 }
 

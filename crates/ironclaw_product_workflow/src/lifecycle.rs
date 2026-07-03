@@ -531,11 +531,26 @@ pub trait LifecycleProductFacade: Send + Sync {
         &self,
         _context: LifecycleProductContext,
         _bundle: Vec<u8>,
+        _mode: ExtensionImportMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Err(ProductWorkflowError::InvalidBindingRequest {
             reason: "extension import is not supported by this runtime".to_string(),
         })
     }
+}
+
+/// How an extension bundle import treats an id that is already installed.
+///
+/// `Add` (the default) fails with
+/// [`ProductWorkflowError::ExtensionAlreadyInstalled`] instead of silently
+/// overwriting the installed extension's catalog entry and on-disk assets;
+/// `Replace` performs the tenant-wide in-place replacement (admin-only),
+/// preserving activation state, credential bindings, and owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtensionImportMode {
+    #[default]
+    Add,
+    Replace,
 }
 
 #[derive(Debug, Clone)]

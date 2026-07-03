@@ -838,6 +838,14 @@ registerPack("de", {
   "ext.registry.emptyDesc": "Alle verfügbaren Extensions sind bereits installiert oder es ist keine Registry konfiguriert.",
   "ext.registry.availableTitle": "Verfügbare Extensions",
   "ext.registry.noMatch": "Keine Extensions passen zum Filter.",
+  "ext.registry.import": "Importieren",
+  "ext.registry.importing": "Wird importiert…",
+  "ext.registry.importSuccess": "Tool importiert – installieren Sie es aus der Registry.",
+  "ext.registry.importFailed": "Import fehlgeschlagen",
+  "ext.registry.importReplaceConfirm": "Dieses Tool ist bereits installiert. Für den gesamten Mandanten ersetzen? Es bleibt aktiv, wenn es aktiv war, Benutzer behalten ihre Anmeldedaten und Berechtigungen, und die aktualisierten Tools sind sofort verfügbar.",
+  "ext.registry.importConflict": "Import abgebrochen – das Tool ist bereits installiert.",
+  "extensions.scope.shared": "geteilt",
+  "extensions.scope.private": "eigene",
 
   // Chat — history
   "chat.history.loading": "Laden...",

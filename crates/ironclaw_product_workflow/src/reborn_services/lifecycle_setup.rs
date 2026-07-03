@@ -134,6 +134,11 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::UnsupportedActionKind { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
         }
+        // Import of an already-installed id: a 409 the UI turns into an
+        // explicit "replace for the whole tenant?" confirmation.
+        ProductWorkflowError::ExtensionAlreadyInstalled { .. } => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
         ProductWorkflowError::BindingAccessDenied => {
             RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
         }

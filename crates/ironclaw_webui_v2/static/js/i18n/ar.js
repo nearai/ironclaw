@@ -838,6 +838,14 @@ registerPack("ar", {
   "ext.registry.emptyDesc": "كل الإضافات المتاحة مثبّتة بالفعل، أو لا يوجد سجل مُكوَّن.",
   "ext.registry.availableTitle": "الإضافات المتاحة",
   "ext.registry.noMatch": "لا توجد إضافات تطابق عامل التصفية.",
+  "ext.registry.import": "استيراد",
+  "ext.registry.importing": "جارٍ الاستيراد…",
+  "ext.registry.importSuccess": "تم استيراد الأداة — ثبّتها من السجل.",
+  "ext.registry.importFailed": "فشل الاستيراد",
+  "ext.registry.importReplaceConfirm": "هذه الأداة مثبّتة بالفعل. هل تريد استبدالها للمستأجر بالكامل؟ تبقى نشطة إذا كانت نشطة، ويحتفظ المستخدمون ببيانات اعتمادهم وأذوناتهم، وتصبح الأدوات المحدّثة سارية على الفور.",
+  "ext.registry.importConflict": "تم إلغاء الاستيراد — الأداة مثبّتة بالفعل.",
+  "extensions.scope.shared": "مشترك",
+  "extensions.scope.private": "خاصتي",
 
   // Chat — history
   "chat.history.loading": "جارٍ التحميل...",

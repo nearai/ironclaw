@@ -64,6 +64,14 @@ pub enum ProductWorkflowError {
     #[error("invalid binding request: {reason}")]
     InvalidBindingRequest { reason: String },
 
+    /// An extension import targets an id that is already installed; the caller
+    /// must explicitly opt into the replace flow (import `mode=replace`).
+    /// Distinct from [`Self::InvalidBindingRequest`] so the facade can surface
+    /// a 409 conflict the UI turns into a "replace?" confirmation instead of a
+    /// generic 400.
+    #[error("extension already installed: {reason}")]
+    ExtensionAlreadyInstalled { reason: String },
+
     /// Turn coordinator rejected the submission before typed turn errors were available.
     #[error("turn submission rejected: {reason}")]
     TurnSubmissionRejected { reason: String },
@@ -163,6 +171,14 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                 ProductAdapterError::WorkflowRejected {
                     kind: ProductWorkflowRejectionKind::InvalidRequest,
                     status_code: 400,
+                    retryable: false,
+                    reason: RedactedString::new(reason),
+                }
+            }
+            ProductWorkflowError::ExtensionAlreadyInstalled { reason } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: ProductWorkflowRejectionKind::Conflict,
+                    status_code: 409,
                     retryable: false,
                     reason: RedactedString::new(reason),
                 }

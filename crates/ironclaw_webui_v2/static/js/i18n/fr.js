@@ -838,6 +838,14 @@ registerPack("fr", {
   "ext.registry.emptyDesc": "Toutes les extensions disponibles sont déjà installées, ou aucun registre n’est configuré.",
   "ext.registry.availableTitle": "Extensions disponibles",
   "ext.registry.noMatch": "Aucune extension ne correspond au filtre.",
+  "ext.registry.import": "Importer",
+  "ext.registry.importing": "Importation…",
+  "ext.registry.importSuccess": "Outil importé — installez-le depuis le registre.",
+  "ext.registry.importFailed": "Échec de l'importation",
+  "ext.registry.importReplaceConfirm": "Cet outil est déjà installé. Le remplacer pour tout le locataire ? Il reste actif s'il l'était, les utilisateurs conservent leurs identifiants et autorisations, et les outils mis à jour sont disponibles immédiatement.",
+  "ext.registry.importConflict": "Importation annulée — l'outil est déjà installé.",
+  "extensions.scope.shared": "partagé",
+  "extensions.scope.private": "à moi",
 
   // Chat — history
   "chat.history.loading": "Chargement...",

@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    InstallationOwner, ManifestHash, ManifestSource,
+    ExtensionRuntime, InstallationOwner, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -13,9 +13,10 @@ use ironclaw_host_api::{
     RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleExtensionSummary, LifecycleInstallScope, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    ExtensionImportMode, LifecycleExtensionSummary, LifecycleInstallScope,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    ProductWorkflowError,
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -24,8 +25,9 @@ mod active_publication;
 mod hosted_mcp_test_support;
 
 use crate::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
-    materialize_available_extension, visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, ExtensionAssetStash,
+    extension_asset_paths, imported_extension_package, list_extension_files,
+    materialize_available_extension, materialize_extension_for_replace, visible_capability_ids,
 };
 use crate::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -570,25 +572,303 @@ impl RebornLocalExtensionManagementPort {
     /// Registry immediately. The existing install/activate flow then operates on
     /// it like any other available extension.
     ///
-    /// Takes the catalog WRITE lock and NO `operation_lock`; `install` takes a
-    /// catalog READ lock before `operation_lock`, so the lock order is
-    /// consistent and the two cannot deadlock.
+    /// When the bundle's id is already INSTALLED, `mode` decides:
+    /// - [`ExtensionImportMode::Add`] fails with a 409-mapped
+    ///   [`ProductWorkflowError::ExtensionAlreadyInstalled`] instead of the
+    ///   pre-#5459 silent behavior (overwriting a live extension's on-disk
+    ///   assets and catalog entry with zero confirmation while the installed/
+    ///   published state kept serving the old version — split-brain).
+    /// - [`ExtensionImportMode::Replace`] performs the tenant-wide in-place
+    ///   replacement (admin-only): activation state, credential bindings, and
+    ///   owner survive; the published capability set swaps atomically. See
+    ///   `docs/plans/2026-07-02-tenant-tool-replace-from-zip.md`.
+    ///
+    /// Locking: zip decode/validation is pure and stays outside all locks.
+    /// The catalog WRITE lock is then taken before `operation_lock` — same
+    /// relative order as `install` (catalog READ before `operation_lock`), so
+    /// the two cannot deadlock. Both are held across the whole operation:
+    /// replace mutates files + records + registries, and stalling catalog
+    /// readers for the duration of one admin operation is an accepted cost.
     pub(crate) async fn import_bundle(
         &self,
         bundle: &[u8],
+        mode: ExtensionImportMode,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let files = unzip_extension_bundle(bundle)?;
         let package = imported_extension_package(files)?;
         let package_ref = package.package_ref.clone();
-        let summary = package.summary();
-        materialize_available_extension(self.filesystem.as_ref(), &package).await?;
-        {
-            let mut catalog = self.catalog.write().await;
+        let extension_id = package.package.id.clone();
+
+        let mut catalog = self.catalog.write().await;
+        let _operation_guard = self.operation_lock.lock().await;
+
+        let existing = self.search_installation(&extension_id).await?;
+        let Some(existing) = existing else {
+            // An orphaned manifest row with no installation row still counts
+            // as an occupied slot (mirrors `ensure_slot_available`,
+            // fail-closed): neither mode can safely write over it.
+            if self
+                .installation_store
+                .get_manifest(&extension_id)
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some()
+            {
+                return Err(ProductWorkflowError::ExtensionAlreadyInstalled {
+                    reason: format!(
+                        "extension {} has an orphaned installation record; remove it before importing",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            // Vacant slot: plain import (both modes) — today's behavior.
+            let summary = package.summary();
+            materialize_available_extension(self.filesystem.as_ref(), &package).await?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+            return Ok(response_with_payload(
+                Some(package_ref),
+                LifecyclePhase::Discovered,
+                LifecycleProductPayload::ExtensionSearch {
+                    extensions: vec![LifecycleSearchExtensionSummary {
+                        summary,
+                        installation_phase: None,
+                    }],
+                    count: 1,
+                },
+            ));
+        };
+
+        // Occupied slot. Import is an operator surface (route-gated on
+        // `operator_webui_config`); if a non-operator caller ever reaches an
+        // occupied slot here, fail closed without leaking who owns the id
+        // (same masking rule as `ensure_slot_available`).
+        if !matches!(self.derive_owner(caller), InstallationOwner::Tenant) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension id {} is unavailable", extension_id.as_str()),
+            });
         }
-        Ok(response_with_payload(
+
+        match mode {
+            ExtensionImportMode::Add => Err(ProductWorkflowError::ExtensionAlreadyInstalled {
+                reason: format!(
+                    "extension {} is already installed; import with mode=replace to replace it tenant-wide",
+                    extension_id.as_str()
+                ),
+            }),
+            ExtensionImportMode::Replace => {
+                self.replace_installed_bundle(&mut catalog, package, existing)
+                    .await
+            }
+        }
+    }
+
+    /// Tenant-wide in-place replacement of an installed extension with a new
+    /// bundle of the same id (#5459 P1.5). Two arms by slot owner:
+    ///
+    /// - `Tenant`-owned → hot swap preserving activation state, credential
+    ///   bindings, and owner (the runtime mirror of the restart-time
+    ///   `prepare_manifest_migration` path).
+    /// - `User`-owned → the P1 admin-wins eviction, then a FRESH tenant
+    ///   install of the new bundle. Activation state and bindings do not
+    ///   transfer across owners by design; the evicted user's secrets are
+    ///   never touched (supersede, don't destroy).
+    ///
+    /// Caller must already hold the catalog write guard and `operation_lock`.
+    async fn replace_installed_bundle(
+        &self,
+        catalog: &mut AvailableExtensionCatalog,
+        package: AvailableExtensionPackage,
+        existing: ExtensionInstallation,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let extension_id = package.package.id.clone();
+        let package_ref = package.package_ref.clone();
+
+        if !matches!(
+            package.package.manifest.runtime,
+            ExtensionRuntime::Wasm { .. }
+        ) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} replace supports wasm tool bundles only",
+                    extension_id.as_str()
+                ),
+            });
+        }
+
+        if matches!(existing.owner(), InstallationOwner::User { .. }) {
+            return self
+                .replace_evicting_private_installation(catalog, package, existing)
+                .await;
+        }
+
+        let old_package = self.lifecycle_package(&extension_id).await?;
+        // Hosted-MCP activation publishes the DISCOVERED package (inline
+        // dynamic schemas from live discovery), not the catalog base package;
+        // republishing a new base package would clobber that surface. Static
+        // wasm bundles only, until replace re-runs discovery.
+        if is_hosted_http_mcp_package(&old_package)
+            || !matches!(old_package.manifest.runtime, ExtensionRuntime::Wasm { .. })
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} replace supports wasm tool bundles only",
+                    extension_id.as_str()
+                ),
+            });
+        }
+
+        let was_enabled = existing.activation_state() == ExtensionActivationState::Enabled;
+        let old_version = old_package.manifest.version.clone();
+        let new_version = package.package.manifest.version.clone();
+        let old_manifest = self
+            .installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} manifest is not installed",
+                    extension_id.as_str()
+                ),
+            })?;
+
+        // 1. Files: capture the prune baseline and the byte stash, then write
+        //    with restore-on-failure semantics (never the delete-what-we-wrote
+        //    rollback — that would destroy the live v1 files it overwrote and
+        //    can brick the next restart).
+        let old_files = list_extension_files(self.filesystem.as_ref(), &extension_id).await?;
+        let stash = ExtensionAssetStash::capture(self.filesystem.as_ref(), &package).await?;
+        materialize_extension_for_replace(self.filesystem.as_ref(), &package, &stash).await?;
+
+        // 2. Lifecycle-registry swap. `update` validates capability-id
+        //    collisions against OTHER extensions fail-closed and swaps the
+        //    package's whole capability set atomically, preserving the
+        //    disabled flag (remove+register would silently clear it).
+        {
+            let mut lifecycle = self.lifecycle_service.lock().await;
+            if let Err(error) = lifecycle.update(package.package.clone()).await {
+                drop(lifecycle);
+                let error = map_extension_error(error);
+                if let Err(restore_error) = stash.restore(self.filesystem.as_ref()).await {
+                    return Err(compensation_failure(
+                        "extension replace failed to update lifecycle package and file restore failed",
+                        error,
+                        restore_error,
+                    ));
+                }
+                return Err(error);
+            }
+        }
+
+        // 3. Durable records, migration shape: same installation id, new
+        //    manifest hash, activation state + credential bindings + owner
+        //    preserved (the restart-time migration's exact contract).
+        let plan = prepare_manifest_migration(&package, &existing)?;
+        if let Err(error) = self
+            .installation_store
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
+            .await
+        {
+            let error = map_extension_installation_error(error);
+            if let Err(restore_error) = self.restore_lifecycle_update(&old_package).await {
+                return Err(compensation_failure(
+                    "extension replace failed to persist records and lifecycle restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = stash.restore(self.filesystem.as_ref()).await {
+                return Err(compensation_failure(
+                    "extension replace failed to persist records and file restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            return Err(error);
+        }
+
+        // 4. Republish for Enabled installs: trust AdminEntry re-pin + one
+        //    atomic capability-set swap in the active registry. A FAILED
+        //    publish removes the trust entry while the old package stays
+        //    registered (old capabilities would fail trust closed), so the
+        //    unwind must republish the old package, not merely stop.
+        if was_enabled && let Err(error) = self.active_extensions.publish(&package.package) {
+            if let Err(restore_error) = self.active_extensions.publish(&old_package) {
+                return Err(compensation_failure(
+                    "extension replace failed to republish and active publication restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
+                .restore_installation_records(old_manifest, existing)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension replace failed to republish and record restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self.restore_lifecycle_update(&old_package).await {
+                return Err(compensation_failure(
+                    "extension replace failed to republish and lifecycle restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = stash.restore(self.filesystem.as_ref()).await {
+                return Err(compensation_failure(
+                    "extension replace failed to republish and file restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            return Err(error);
+        }
+
+        // 5. Catalog upsert LAST: it is in-memory and restart-rebuildable, so
+        //    any failure above leaves it consistent with the still-v1 durable
+        //    state (no catalog compensation needed).
+        let summary = package.summary();
+        let new_paths: std::collections::HashSet<String> = extension_asset_paths(&package)?
+            .into_iter()
+            .map(|path| path.as_str().to_string())
+            .collect();
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+
+        // 6. Prune files the new bundle no longer ships. The swap has already
+        //    succeeded; a failed delete leaves the pre-#5459 status quo
+        //    (inert garbage), so warn instead of unwinding a correct replace.
+        for path in old_files {
+            if !new_paths.contains(path.as_str())
+                && let Err(error) = self.filesystem.delete(&path).await
+            {
+                tracing::warn!(
+                    extension_id = %extension_id.as_str(),
+                    path = %path.as_str(),
+                    %error,
+                    "failed to prune superseded extension file after replace"
+                );
+            }
+        }
+
+        tracing::warn!(
+            extension_id = %extension_id.as_str(),
+            old_version = %old_version,
+            new_version = %new_version,
+            enabled = was_enabled,
+            "replaced tenant extension from imported bundle"
+        );
+
+        let mut response = response_with_payload(
             Some(package_ref),
-            LifecyclePhase::Discovered,
+            if was_enabled {
+                LifecyclePhase::Active
+            } else {
+                LifecyclePhase::Installed
+            },
             LifecycleProductPayload::ExtensionSearch {
                 extensions: vec![LifecycleSearchExtensionSummary {
                     summary,
@@ -596,7 +876,106 @@ impl RebornLocalExtensionManagementPort {
                 }],
                 count: 1,
             },
-        ))
+        );
+        response.message = Some(if was_enabled {
+            format!(
+                "Replaced extension {} v{} with v{} for the whole tenant. It is still active; the updated tools are live for every user without a restart.",
+                extension_id.as_str(),
+                old_version,
+                new_version
+            )
+        } else {
+            format!(
+                "Replaced extension {} v{} with v{} for the whole tenant. It was not active; activate it to publish the updated tools.",
+                extension_id.as_str(),
+                old_version,
+                new_version
+            )
+        });
+        Ok(response)
+    }
+
+    /// Replace over a `User`-owned slot: admin-wins eviction (existing P1
+    /// rule) followed by a fresh Tenant install of the new bundle. The fresh
+    /// record starts at `Installed` with empty credential bindings — private
+    /// activation/bindings deliberately do not transfer to the tenant slot.
+    async fn replace_evicting_private_installation(
+        &self,
+        catalog: &mut AvailableExtensionCatalog,
+        package: AvailableExtensionPackage,
+        existing: ExtensionInstallation,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let extension_id = package.package.id.clone();
+        let package_ref = package.package_ref.clone();
+
+        self.evict_private_installation(&extension_id, &existing)
+            .await?;
+        let plan = prepare_install(&package, InstallationOwner::Tenant)?;
+        self.register_lifecycle_package(&package.package).await?;
+
+        let stash = ExtensionAssetStash::capture(self.filesystem.as_ref(), &package).await?;
+        if let Err(error) =
+            materialize_extension_for_replace(self.filesystem.as_ref(), &package, &stash).await
+        {
+            if let Err(rollback_error) = self.rollback_lifecycle_install(&extension_id).await {
+                return Err(compensation_failure(
+                    "extension replace-over-private materialization failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.persist_install_plan(plan).await {
+            if let Err(restore_error) = stash.restore(self.filesystem.as_ref()).await {
+                return Err(compensation_failure(
+                    "extension replace-over-private persistence failed and file restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(rollback_error) = self.rollback_lifecycle_install(&extension_id).await {
+                return Err(compensation_failure(
+                    "extension replace-over-private persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+
+        let summary = package.summary();
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+
+        let mut response = response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Installed,
+            LifecycleProductPayload::ExtensionSearch {
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary,
+                    installation_phase: None,
+                }],
+                count: 1,
+            },
+        );
+        response.message = Some(format!(
+            "Replaced the private install of extension {} with the imported bundle; it is now shared tenant-wide. Activate it to publish the tools.",
+            extension_id.as_str()
+        ));
+        Ok(response)
+    }
+
+    /// Compensation arm for a failed replace: swap the lifecycle registry
+    /// back to the pre-replace package via the same atomic `update`.
+    async fn restore_lifecycle_update(
+        &self,
+        old_package: &ExtensionPackage,
+    ) -> Result<(), ProductWorkflowError> {
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        lifecycle
+            .update(old_package.clone())
+            .await
+            .map_err(map_extension_error)
     }
 
     pub(crate) async fn install(
@@ -2158,6 +2537,281 @@ mod tests {
                 .expect("fixture installed")
                 .is_tenant(),
             "the slot must heal to a tenant install, not stay bricked"
+        );
+    }
+
+    /// Manifest for a keyless, no-network wasm tool with the given capability
+    /// short-names (each becomes `<id>.<name>`). Imports cleanly through the
+    /// real host port catalog (same shape as the ascii-renderer fixture).
+    fn replace_test_manifest(id: &str, version: &str, capabilities: &[&str]) -> String {
+        let mut manifest = format!(
+            "schema_version = \"reborn.extension_manifest.v2\"\n\
+             id = \"{id}\"\n\
+             name = \"Replace Test\"\n\
+             version = \"{version}\"\n\
+             description = \"Replace test fixture\"\n\
+             trust = \"first_party_requested\"\n\n\
+             [runtime]\n\
+             kind = \"wasm\"\n\
+             module = \"wasm/tool.wasm\"\n"
+        );
+        for cap in capabilities {
+            manifest.push_str(&format!(
+                "\n[[capabilities]]\n\
+                 id = \"{id}.{cap}\"\n\
+                 description = \"Capability {cap}\"\n\
+                 effects = [\"dispatch_capability\"]\n\
+                 default_permission = \"allow\"\n\
+                 visibility = \"model\"\n\
+                 input_schema_ref = \"schemas/{cap}.input.json\"\n\
+                 output_schema_ref = \"schemas/{cap}.output.json\"\n"
+            ));
+        }
+        manifest
+    }
+
+    /// Zip a replace-test bundle. `module_bytes` lets a test change the wasm
+    /// content between versions to exercise content-aware behavior.
+    fn replace_test_bundle(manifest: &str, module_bytes: &[u8]) -> Vec<u8> {
+        zip_bundle(&[
+            ("manifest.toml", manifest.as_bytes()),
+            ("wasm/tool.wasm", module_bytes),
+            ("schemas/one.input.json", b"{}".as_slice()),
+            ("schemas/one.output.json", b"{}".as_slice()),
+            ("schemas/two.input.json", b"{}".as_slice()),
+            ("schemas/two.output.json", b"{}".as_slice()),
+        ])
+    }
+
+    fn active_capability_ids(capabilities: &[ActiveExtensionCapability]) -> BTreeSet<String> {
+        capabilities
+            .iter()
+            .map(|capability| capability.id.as_str().to_string())
+            .collect()
+    }
+
+    /// Import `mode=add` of an ALREADY-INSTALLED id must fail with the typed
+    /// conflict (409) instead of the pre-#5459 silent clobber of the live
+    /// extension's on-disk assets — and it must NOT overwrite those assets.
+    #[tokio::test]
+    async fn import_add_mode_conflicts_on_installed_id_without_clobbering() {
+        let (_dir, storage_root, port, _registry, _store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            &admin,
+        )
+        .await
+        .expect("v1 import into a vacant slot");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+        port.install(package_ref, &admin).await.expect("install v1");
+
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        let error = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Add,
+                &admin,
+            )
+            .await
+            .expect_err("add-mode import of an installed id must conflict");
+        assert!(
+            matches!(
+                error,
+                ProductWorkflowError::ExtensionAlreadyInstalled { .. }
+            ),
+            "expected ExtensionAlreadyInstalled, got {error:?}"
+        );
+
+        // The live wasm on disk must still be v1 — add-mode must not have
+        // materialized the v2 bytes.
+        let module =
+            std::fs::read(storage_root.join("system/extensions/replace-me/wasm/tool.wasm"))
+                .expect("materialized module");
+        assert_eq!(
+            module, b"\0asm\x01\0\0\0v1",
+            "add-mode conflict must not overwrite the installed extension's assets"
+        );
+    }
+
+    /// Replace of an ENABLED tenant install swaps the published capability set
+    /// atomically (a new capability appears) while activation state and owner
+    /// survive — the runtime mirror of the restart-time manifest migration.
+    #[tokio::test]
+    async fn import_replace_swaps_capabilities_and_preserves_active_state() {
+        let (_dir, _root, port, _registry, store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            &admin,
+        )
+        .await
+        .expect("v1 import");
+        port.install(package_ref.clone(), &admin)
+            .await
+            .expect("install v1");
+        port.activate(package_ref.clone(), ExtensionActivationMode::Static, &admin)
+            .await
+            .expect("activate v1");
+
+        let before = active_capability_ids(
+            &port
+                .active_model_visible_capabilities()
+                .await
+                .expect("v1 caps"),
+        );
+        assert!(before.contains("replace-me.one"));
+        assert!(!before.contains("replace-me.two"));
+
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        let response = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Replace,
+                &admin,
+            )
+            .await
+            .expect("replace v1 with v2");
+        assert_eq!(
+            response.phase,
+            LifecyclePhase::Active,
+            "an enabled install stays active after replace"
+        );
+
+        let after = active_capability_ids(
+            &port
+                .active_model_visible_capabilities()
+                .await
+                .expect("v2 caps"),
+        );
+        assert!(
+            after.contains("replace-me.one") && after.contains("replace-me.two"),
+            "v2's added capability must be published: {after:?}"
+        );
+
+        let installation = store
+            .get_installation(&ExtensionInstallationId::new("replace-me").unwrap())
+            .await
+            .expect("store read")
+            .expect("installed");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Enabled,
+            "activation state must survive replace"
+        );
+        assert!(
+            installation.owner().is_tenant(),
+            "owner must survive replace"
+        );
+    }
+
+    /// Replace of an INSTALLED-BUT-DISABLED tenant tool stays disabled and does
+    /// not publish the new capability set.
+    #[tokio::test]
+    async fn import_replace_on_disabled_install_stays_disabled() {
+        let (_dir, _root, port, _registry, store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            &admin,
+        )
+        .await
+        .expect("v1 import");
+        port.install(package_ref, &admin).await.expect("install v1");
+
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        let response = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Replace,
+                &admin,
+            )
+            .await
+            .expect("replace disabled install");
+        assert_eq!(response.phase, LifecyclePhase::Installed);
+
+        let installation = store
+            .get_installation(&ExtensionInstallationId::new("replace-me").unwrap())
+            .await
+            .expect("store read")
+            .expect("installed");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Installed,
+            "a disabled install must stay disabled after replace"
+        );
+        let caps = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("caps");
+        assert!(
+            active_capability_ids(&caps).is_empty(),
+            "a disabled install must not publish capabilities"
+        );
+    }
+
+    /// A non-operator caller cannot replace an installed tenant tool through
+    /// import; the slot is masked as unavailable without leaking the owner.
+    #[tokio::test]
+    async fn import_replace_by_member_is_unavailable() {
+        let (_dir, _root, port, _registry, _store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let member = UserId::new("member").expect("member");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            &admin,
+        )
+        .await
+        .expect("v1 import");
+        port.install(package_ref, &admin).await.expect("install v1");
+
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        let error = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Replace,
+                &member,
+            )
+            .await
+            .expect_err("a member cannot replace a tenant tool");
+        assert!(
+            matches!(&error, ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("unavailable")),
+            "member replace must be masked as unavailable, got {error:?}"
         );
     }
 

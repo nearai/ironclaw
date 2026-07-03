@@ -1332,7 +1332,12 @@ fn principal_matches_context(principal: &Principal, context: &ExecutionContext) 
     }
 }
 
-fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool {
+/// True when every required effect is inside the allowed set. Public so
+/// approval-settings providers can bound a stored always-allow grant by the
+/// capability's CURRENT effect set: a replaced extension may widen a
+/// capability's effects, and an existence-only policy check would silently
+/// auto-approve the widened tool with stale consent.
+pub fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool {
     required.iter().all(|effect| allowed.contains(effect))
 }
 

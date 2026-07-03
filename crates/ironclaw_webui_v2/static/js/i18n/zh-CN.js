@@ -838,6 +838,14 @@ registerPack("zh-CN", {
   "ext.registry.emptyDesc": "所有可用扩展已安装，或未配置注册表。",
   "ext.registry.availableTitle": "可用扩展",
   "ext.registry.noMatch": "没有扩展符合筛选条件。",
+  "ext.registry.import": "导入",
+  "ext.registry.importing": "正在导入…",
+  "ext.registry.importSuccess": "工具已导入 — 请从注册表安装。",
+  "ext.registry.importFailed": "导入失败",
+  "ext.registry.importReplaceConfirm": "此工具已安装。要为整个租户替换它吗？如果它处于活动状态，则保持活动状态，用户保留其凭据和权限，更新后的工具立即生效。",
+  "ext.registry.importConflict": "导入已取消 — 该工具已安装。",
+  "extensions.scope.shared": "共享",
+  "extensions.scope.private": "我的",
 
   // Chat — history
   "chat.history.loading": "加载中...",

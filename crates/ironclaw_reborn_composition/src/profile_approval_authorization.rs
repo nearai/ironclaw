@@ -46,11 +46,17 @@ pub(crate) trait ApprovalSettingsProvider: Send + Sync {
 
     async fn global_auto_approve(&self, scope: &ResourceScope) -> bool;
 
+    /// True when a durable settings-page "always allow" policy covers this
+    /// dispatch. `effects` is the capability's CURRENT effect set — the
+    /// provider must bound the stored grant by it, so a replaced extension
+    /// that widened a capability's effects re-gates instead of riding a
+    /// pre-widening consent (fail toward re-asking).
     async fn tool_always_allow(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
         grantee: &Principal,
+        effects: &[EffectKind],
     ) -> bool;
 }
 
@@ -80,6 +86,7 @@ impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
         _scope: &ResourceScope,
         _capability_id: &CapabilityId,
         _grantee: &Principal,
+        _effects: &[EffectKind],
     ) -> bool {
         false
     }
@@ -258,7 +265,12 @@ async fn require_approval_for_profile_policy(
     //    global" and the global switch is off.
     if durable_auto_approval_eligible
         && settings
-            .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
+            .tool_always_allow(
+                &context.resource_scope,
+                &descriptor.id,
+                &expected_grantee,
+                &descriptor.effects,
+            )
             .await
     {
         return decision;
@@ -434,6 +446,7 @@ mod tests {
             _scope: &ResourceScope,
             _capability_id: &CapabilityId,
             _grantee: &Principal,
+            _effects: &[EffectKind],
         ) -> bool {
             self.tool_always_allow
         }

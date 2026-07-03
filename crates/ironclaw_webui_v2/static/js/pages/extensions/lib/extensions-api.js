@@ -54,8 +54,12 @@ export function startExtensionOauth(packageRef, secret) {
     }
   );
 }
-export function importExtension(file) {
-  return apiFetch("/api/webchat/v2/extensions/import", {
+export function importExtension(file, mode) {
+  // mode=replace opts into the tenant-wide in-place replacement of an
+  // already-installed extension (admin-only); the default add mode 409s on a
+  // conflict so the caller can ask the user first.
+  const query = mode === "replace" ? "?mode=replace" : "";
+  return apiFetch(`/api/webchat/v2/extensions/import${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: file,

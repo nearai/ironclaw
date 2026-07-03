@@ -838,6 +838,14 @@ registerPack("hi", {
   "ext.registry.emptyDesc": "सभी उपलब्ध एक्सटेंशन पहले से इंस्टॉल हैं, या कोई रजिस्ट्री कॉन्फ़िगर नहीं है।",
   "ext.registry.availableTitle": "उपलब्ध एक्सटेंशन",
   "ext.registry.noMatch": "फ़िल्टर से मेल खाने वाला कोई एक्सटेंशन नहीं।",
+  "ext.registry.import": "आयात करें",
+  "ext.registry.importing": "आयात हो रहा है…",
+  "ext.registry.importSuccess": "टूल आयात किया गया — इसे रजिस्ट्री से इंस्टॉल करें।",
+  "ext.registry.importFailed": "आयात विफल",
+  "ext.registry.importReplaceConfirm": "यह टूल पहले से इंस्टॉल है। इसे पूरे टेनेंट के लिए बदलें? यदि यह सक्रिय था तो सक्रिय रहता है, उपयोगकर्ता अपने क्रेडेंशियल और अनुमतियाँ बनाए रखते हैं, और अपडेट किए गए टूल तुरंत लागू हो जाते हैं।",
+  "ext.registry.importConflict": "आयात रद्द किया गया — टूल पहले से इंस्टॉल है।",
+  "extensions.scope.shared": "साझा",
+  "extensions.scope.private": "मेरा",
 
   // Chat — history
   "chat.history.loading": "लोड हो रहा है...",

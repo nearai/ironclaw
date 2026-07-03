@@ -613,6 +613,31 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     })
 }
 
+/// Attach the wasm module content digest to a freshly built package when the
+/// module bytes travel inline with the bundle assets (the import and bundled
+/// first-party paths). Filesystem-discovered packages read the module bytes
+/// from disk instead (see [`load_filesystem_packages`]). The digest keys the
+/// runtime's compiled-module cache content-aware, so a replaced module at the
+/// same path is recompiled instead of served stale.
+fn with_wasm_bundle_digest_from_assets(
+    package: ExtensionPackage,
+    assets: &[AvailableExtensionAsset],
+) -> ExtensionPackage {
+    let ExtensionRuntime::Wasm { module } = &package.manifest.runtime else {
+        return package;
+    };
+    let digest = assets.iter().find_map(|asset| {
+        if asset.path != module.as_str() {
+            return None;
+        }
+        match &asset.content {
+            AvailableExtensionAssetContent::Bytes(bytes) => Some(sha256_digest_token(bytes)),
+            AvailableExtensionAssetContent::Filesystem(_) => None,
+        }
+    });
+    package.with_bundle_digest(digest)
+}
+
 fn bundled_extension_package(
     id: &str,
     label: &str,
@@ -653,6 +678,7 @@ fn bundled_extension_package(
             reason: format!("bundled {label} extension package is invalid: {error}"),
         },
     )?;
+    let package = with_wasm_bundle_digest_from_assets(package, &assets);
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
@@ -1450,6 +1476,184 @@ where
     }
 }
 
+/// Byte-level snapshot of the on-disk files a replace will touch, captured
+/// BEFORE any write. [`materialize_available_extension`]'s failure rollback
+/// deletes every path it wrote — including previously-existing files it
+/// OVERWROTE — which is destructive when writing over a live extension root:
+/// the old bytes are unrecoverable when the catalog's asset content points
+/// into that same root (filesystem-discovered entries), and a root missing its
+/// manifest fails the entire runtime restore at next boot. Replace therefore
+/// stashes old bytes and restores them on failure. Bounded by the bundle
+/// decompression ceiling (64 MiB), so the stash cannot exceed the zip cap.
+pub(crate) struct ExtensionAssetStash {
+    /// Paths that existed pre-replace, with their original bytes.
+    previous: Vec<(VirtualPath, Vec<u8>)>,
+    /// Paths the new bundle introduces (deleted on restore).
+    created: Vec<VirtualPath>,
+}
+
+impl ExtensionAssetStash {
+    pub(crate) async fn capture<F>(
+        fs: &F,
+        extension: &AvailableExtensionPackage,
+    ) -> Result<Self, ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let mut previous = Vec::new();
+        let mut created = Vec::new();
+        for asset in &extension.assets {
+            let path = extension_asset_path(&extension.package.id, &asset.path)?;
+            match fs.read_file(&path).await {
+                Ok(bytes) => previous.push((path, bytes)),
+                Err(FilesystemError::NotFound { .. })
+                | Err(FilesystemError::MountNotFound { .. }) => created.push(path),
+                Err(error) => {
+                    return Err(ProductWorkflowError::Transient {
+                        reason: format!(
+                            "failed to stash extension asset {} before replace: {error}",
+                            asset.path
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(Self { previous, created })
+    }
+
+    /// Put the pre-replace bytes back and delete paths the new bundle created.
+    /// Restore failures are collected into an error — a partial restore must
+    /// surface loudly (the restart-time catalog rebuild reads this tree).
+    pub(crate) async fn restore<F>(&self, fs: &F) -> Result<(), ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let mut failures = Vec::new();
+        for (path, bytes) in &self.previous {
+            if let Err(error) = fs.write_file(path, bytes).await {
+                failures.push(format!("{}: {error}", path.as_str()));
+            }
+        }
+        for path in &self.created {
+            match fs.delete(path).await {
+                Ok(()) => {}
+                Err(FilesystemError::NotFound { .. })
+                | Err(FilesystemError::MountNotFound { .. }) => {}
+                Err(error) => failures.push(format!("{}: {error}", path.as_str())),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ProductWorkflowError::Transient {
+                reason: format!(
+                    "failed to restore extension files after aborted replace: {}",
+                    failures.join("; ")
+                ),
+            })
+        }
+    }
+}
+
+/// Materialize a bundle over an existing extension root for the replace flow.
+/// Unlike [`materialize_available_extension`], a mid-way failure restores the
+/// stashed pre-replace bytes instead of deleting the overwritten files.
+/// Replace bundles come from the zip import path, so every asset travels
+/// inline; a filesystem-sourced asset would read from the very root being
+/// replaced (circular), and is rejected.
+pub(crate) async fn materialize_extension_for_replace<F>(
+    fs: &F,
+    extension: &AvailableExtensionPackage,
+    stash: &ExtensionAssetStash,
+) -> Result<(), ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    for asset in &extension.assets {
+        let path = extension_asset_path(&extension.package.id, &asset.path)?;
+        let bytes = match &asset.content {
+            AvailableExtensionAssetContent::Bytes(bytes) => bytes,
+            AvailableExtensionAssetContent::Filesystem(_) => {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "replace bundle asset {} must carry inline bytes",
+                        asset.path
+                    ),
+                });
+            }
+        };
+        if existing_asset_matches(fs, &path, bytes).await {
+            continue;
+        }
+        if let Err(error) = fs.write_file(&path, bytes).await {
+            let write_error = ProductWorkflowError::Transient {
+                reason: format!(
+                    "failed to write replaced extension asset {}: {error}",
+                    asset.path
+                ),
+            };
+            return match stash.restore(fs).await {
+                Ok(()) => Err(write_error),
+                Err(restore_error) => Err(ProductWorkflowError::Transient {
+                    reason: format!(
+                        "replace materialization failed and file restore failed: {write_error}; {restore_error}"
+                    ),
+                }),
+            };
+        }
+    }
+    Ok(())
+}
+
+/// List every file currently materialized under `/system/extensions/<id>/`
+/// (recursive). The replace flow captures this BEFORE writing so it can prune
+/// files the new bundle no longer ships — without it, superseded wasm blobs
+/// and schemas accumulate forever (import only ever overwrites).
+pub(crate) async fn list_extension_files<F>(
+    fs: &F,
+    extension_id: &ExtensionId,
+) -> Result<Vec<VirtualPath>, ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+        .map_err(map_binding_error)?;
+    let mut stack = vec![root];
+    let mut files = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let entries = match fs.list_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
+                continue;
+            }
+            Err(error) => {
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!("failed to list extension files for replace: {error}"),
+                });
+            }
+        };
+        for entry in entries {
+            if entry.file_type == FileType::Directory {
+                stack.push(entry.path);
+            } else {
+                files.push(entry.path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Physical paths the new bundle's assets occupy — the keep-set for pruning.
+pub(crate) fn extension_asset_paths(
+    extension: &AvailableExtensionPackage,
+) -> Result<Vec<VirtualPath>, ProductWorkflowError> {
+    extension
+        .assets
+        .iter()
+        .map(|asset| extension_asset_path(&extension.package.id, &asset.path))
+        .collect()
+}
+
 async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
@@ -1528,16 +1732,34 @@ where
             .clone()
             .try_into()
             .map_err(map_binding_error)?;
-        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
-            .map_err(map_binding_error)?;
+        let mut package =
+            ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
+                .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
             content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
         }];
-        if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
+        if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime.clone() {
             let module_path = module
                 .resolve_under(&package.root)
                 .map_err(map_binding_error)?;
+            // Digest the module bytes so the compiled-module cache key stays
+            // deterministic across restarts (the cache itself is per-process;
+            // the digest is recomputed from disk truth, never persisted). A
+            // missing module file keeps digest=None — discovery has never
+            // rejected such a bundle, and dispatch fails at read time anyway.
+            match fs.read_file(&module_path).await {
+                Ok(bytes) => {
+                    package = package.with_bundle_digest(Some(sha256_digest_token(&bytes)));
+                }
+                Err(FilesystemError::NotFound { .. })
+                | Err(FilesystemError::MountNotFound { .. }) => {}
+                Err(error) => {
+                    return Err(ProductWorkflowError::Transient {
+                        reason: format!("failed to read available extension wasm module: {error}"),
+                    });
+                }
+            }
             assets.push(AvailableExtensionAsset {
                 path: module.as_str().to_string(),
                 content: AvailableExtensionAssetContent::Filesystem(module_path),
@@ -1617,10 +1839,11 @@ pub(crate) fn imported_extension_package(
         .map_err(map_binding_error)?;
     let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())
         .map_err(map_binding_error)?;
-    let assets = files
+    let assets: Vec<AvailableExtensionAsset> = files
         .into_iter()
         .map(|(path, bytes)| bytes_asset(&path, &bytes))
         .collect();
+    let package = with_wasm_bundle_digest_from_assets(package, &assets);
     Ok(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,

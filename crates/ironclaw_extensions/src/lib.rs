@@ -238,6 +238,13 @@ pub struct ExtensionPackage {
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
     pub manifest_digest: Option<String>,
+    /// Content digest of the runtime module bytes (wasm), when the package
+    /// construction site had them. In-memory only — never persisted or
+    /// wire-serialized; recomputed at every construction site so it cannot
+    /// drift from disk truth. Runtime adapters use it to key compiled-module
+    /// caches content-aware, so replacing an extension's module at the same
+    /// path is picked up without a process restart.
+    pub bundle_digest: Option<String>,
     pub descriptor_schema_mode: CapabilityDescriptorSchemaMode,
 }
 
@@ -285,6 +292,7 @@ impl ExtensionPackage {
             manifest,
             capabilities,
             manifest_digest,
+            bundle_digest: None,
             descriptor_schema_mode: CapabilityDescriptorSchemaMode::ManifestRefs,
         })
     }
@@ -316,12 +324,23 @@ impl ExtensionPackage {
             manifest,
             capabilities,
             manifest_digest,
+            bundle_digest: None,
             descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
         })
     }
 
+    /// Attach the runtime-module content digest (see [`Self::bundle_digest`]).
+    pub fn with_bundle_digest(mut self, bundle_digest: Option<String>) -> Self {
+        self.bundle_digest = bundle_digest;
+        self
+    }
+
     pub fn manifest_digest(&self) -> Option<String> {
         self.manifest_digest.clone()
+    }
+
+    pub fn bundle_digest(&self) -> Option<&str> {
+        self.bundle_digest.as_deref()
     }
 
     pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {

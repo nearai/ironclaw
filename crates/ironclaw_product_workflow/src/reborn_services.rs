@@ -45,7 +45,7 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
+    AuthInteractionRejectionKind, AuthInteractionService, ExtensionImportMode, LifecyclePackageRef,
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
@@ -2139,11 +2139,14 @@ pub trait RebornServicesApi: Send + Sync {
 
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
     /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
-    /// test stubs need no change.
+    /// test stubs need no change. `mode` decides what happens when the bundle's
+    /// id is already installed: `Add` returns a 409 conflict, `Replace`
+    /// performs the tenant-wide in-place replacement (admin-only).
     async fn import_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _bundle: Vec<u8>,
+        _mode: ExtensionImportMode,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -3982,8 +3985,9 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         bundle: Vec<u8>,
+        mode: ExtensionImportMode,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
+        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle, mode).await
     }
 
     async fn activate_extension(

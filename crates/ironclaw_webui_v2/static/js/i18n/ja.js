@@ -838,6 +838,14 @@ registerPack("ja", {
   "ext.registry.emptyDesc": "利用可能な拡張機能はすべてインストール済みか、レジストリが設定されていません。",
   "ext.registry.availableTitle": "利用可能な拡張機能",
   "ext.registry.noMatch": "フィルターに一致する拡張機能はありません。",
+  "ext.registry.import": "インポート",
+  "ext.registry.importing": "インポート中…",
+  "ext.registry.importSuccess": "ツールをインポートしました — レジストリからインストールしてください。",
+  "ext.registry.importFailed": "インポートに失敗しました",
+  "ext.registry.importReplaceConfirm": "このツールは既にインストールされています。テナント全体で置き換えますか？アクティブだった場合はアクティブのままで、ユーザーの資格情報と権限は保持され、更新されたツールはすぐに有効になります。",
+  "ext.registry.importConflict": "インポートをキャンセルしました — ツールは既にインストールされています。",
+  "extensions.scope.shared": "共有",
+  "extensions.scope.private": "自分",
 
   // Chat — history
   "chat.history.loading": "読み込み中...",

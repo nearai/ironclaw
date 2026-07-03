@@ -1616,6 +1616,12 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 reason.clone(),
             )))
         }
+        ProductWorkflowError::ExtensionAlreadyInstalled { reason } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                reason.clone(),
+            )))
+        }
         ProductWorkflowError::UnsupportedActionKind { kind } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,

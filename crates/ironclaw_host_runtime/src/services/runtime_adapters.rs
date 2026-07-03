@@ -26,6 +26,7 @@ use crate::{
         trace_runtime_error, trace_runtime_ok,
     },
 };
+use ironclaw_host_api::sha256_digest_token;
 
 type FirstPartyLatencyFields = RuntimeLatencyFields;
 
@@ -691,13 +692,29 @@ where
     }
 }
 
+/// Key for the prepared (compiled) wasm component cache.
+///
+/// The module path alone is NOT sufficient: an admin replace re-materializes
+/// new module bytes at the SAME path (`/system/extensions/<id>/…`), and the
+/// adapter is a process-lifetime singleton — a path-only key would serve the
+/// stale compiled component forever. The package's `bundle_digest` makes the
+/// key content-aware. Entries are INSERTED under the digest of the bytes
+/// actually read (not the digest the package advertises), so a dispatch that
+/// races a replace and reads newer bytes than its registry snapshot cannot
+/// poison the old version's key — the mismatch is just a cache miss.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct PreparedModuleKey {
+    module_path: String,
+    bundle_digest: Option<String>,
+}
+
 pub(super) struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
     host: WitToolHost,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
-    prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
+    prepared: Mutex<HashMap<PreparedModuleKey, Arc<PreparedWitTool>>>,
 }
 
 impl WasmRuntimeAdapter {
@@ -736,7 +753,8 @@ impl WasmRuntimeAdapter {
 
     fn prepared_guard(
         &self,
-    ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
+    ) -> Result<MutexGuard<'_, HashMap<PreparedModuleKey, Arc<PreparedWitTool>>>, DispatchError>
+    {
         self.prepared.lock().map_err(|_| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
         })
@@ -792,8 +810,11 @@ where
                 });
             }
         };
-        let cache_key = module_path.as_str().to_string();
-        let prepared = self.prepared_guard()?.get(&cache_key).cloned();
+        let lookup_key = PreparedModuleKey {
+            module_path: module_path.as_str().to_string(),
+            bundle_digest: request.package.bundle_digest.clone(),
+        };
+        let prepared = self.prepared_guard()?.get(&lookup_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
             return execute_prepared_wasm(self.runtime.clone(), prepared, host, request).await;
@@ -806,6 +827,18 @@ where
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
             })?;
+        // Insert under the digest of the bytes actually read. A package that
+        // carries no digest keeps the legacy path-only key (no verification
+        // is possible); a digest-carrying package whose on-disk bytes changed
+        // underneath it (replace window) lands under the true content hash,
+        // which is exactly the entry post-replace lookups want.
+        let insert_key = PreparedModuleKey {
+            module_path: lookup_key.module_path.clone(),
+            bundle_digest: lookup_key
+                .bundle_digest
+                .as_ref()
+                .map(|_| sha256_digest_token(&wasm_bytes)),
+        };
         let prepared = Arc::new(
             run_wasm_prepare_blocking(
                 self.runtime.clone(),
@@ -819,10 +852,19 @@ where
         );
         let prepared = {
             let mut prepared_cache = self.prepared_guard()?;
-            if let Some(existing) = prepared_cache.get(&cache_key).cloned() {
+            if let Some(existing) = prepared_cache.get(&insert_key).cloned() {
                 existing
             } else {
-                prepared_cache.insert(cache_key, Arc::clone(&prepared));
+                // Same-path entries with a different digest are superseded
+                // compiled components (pre-replace versions); drop them so a
+                // replaced extension does not leak one JIT'd component per
+                // version. In-flight executions hold their own Arc clones,
+                // so eviction only releases the map's reference.
+                prepared_cache.retain(|key, _| {
+                    key.module_path != insert_key.module_path
+                        || key.bundle_digest == insert_key.bundle_digest
+                });
+                prepared_cache.insert(insert_key, Arc::clone(&prepared));
                 prepared
             }
         };
