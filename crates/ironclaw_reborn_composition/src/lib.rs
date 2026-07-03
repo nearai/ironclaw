@@ -118,6 +118,8 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_connectable_channel;

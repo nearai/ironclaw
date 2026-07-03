@@ -88,6 +88,53 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
   );
 });
 
+test("OnboardingPairingCard shows connection-succeeded copy when the resume faults, not the invalid-code error", async () => {
+  const stateUpdates = [];
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        const initialValues = ["PAIRCODE", "", "idle"];
+        return [
+          initialValues[index] ?? initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+  };
+
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "slack" },
+    onSubmit: async () => {
+      // Mirrors submitChannelConnectionPairing throwing on resume_error: the
+      // binding is durable (connected), but the parked turn didn't resume.
+      const error = new Error("channel connection resume did not complete");
+      error.resumeFailed = true;
+      throw error;
+    },
+  });
+
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  await props.onClick();
+
+  const errorUpdates = stateUpdates.filter((update) => update.index === 1).map((u) => u.value);
+  // Cleared first, then the resume-specific message — never the invalid-code copy.
+  assert.equal(errorUpdates[0], "");
+  assert.match(errorUpdates[1], /connected, but this chat couldn't continue/i);
+  // And it drops back to idle (spinner off) rather than hanging on "resuming".
+  assert.deepEqual(
+    stateUpdates.filter((update) => update.index === 2).map((u) => u.value),
+    ["submitting", "idle"],
+  );
+});
+
 test("OnboardingPairingCard holds a connecting state after a successful pair instead of resetting to idle", async () => {
   const stateUpdates = [];
   let stateIndex = 0;

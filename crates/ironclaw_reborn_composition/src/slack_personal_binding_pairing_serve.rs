@@ -47,32 +47,25 @@ const SLACK_PERSONAL_BINDING_PAIRING_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU3
 #[derive(Clone)]
 pub struct SlackPersonalBindingPairingRouteConfig {
     pairing_service: SlackPersonalBindingPairingService,
-    // arch-exempt: optional_arc, resume is an additive follow-up to a successful
-    // pairing bind — the redeem binds the identity with or without it, and the
-    // public serve-composition test / unit helpers mount the route without a
-    // turn-state-backed resume. Production Slack host-beta always wires it. See
-    // docs/plans/2026-07-02-channel-connection-gate.md.
-    channel_connection_resume: Option<Arc<dyn ChannelConnectionResumeService>>,
+    /// Channel-connection gate resume. Redeeming a pairing code continues every
+    /// run the caller has parked on this channel's connection gate (V2 of the
+    /// channel-connection gate; supersedes the browser's fake "Slack is
+    /// connected, continue" message). Required, not optional: production Slack
+    /// host-beta always wires it, so an `Option` here would be the optional-Arc
+    /// smell from `.claude/rules/architecture.md` (production always sets it,
+    /// only tests skip it). Tests pass a no-op fake.
+    channel_connection_resume: Arc<dyn ChannelConnectionResumeService>,
 }
 
 impl SlackPersonalBindingPairingRouteConfig {
-    pub fn new(pairing_service: SlackPersonalBindingPairingService) -> Self {
+    pub fn new(
+        pairing_service: SlackPersonalBindingPairingService,
+        channel_connection_resume: Arc<dyn ChannelConnectionResumeService>,
+    ) -> Self {
         Self {
             pairing_service,
-            channel_connection_resume: None,
+            channel_connection_resume,
         }
-    }
-
-    /// Wire the channel-connection gate resume so redeeming a pairing code
-    /// continues every run the caller has parked on this channel's connection
-    /// gate (V2 of the channel-connection gate; supersedes the browser's fake
-    /// "Slack is connected, continue" message).
-    pub fn with_channel_connection_resume(
-        mut self,
-        resume: Arc<dyn ChannelConnectionResumeService>,
-    ) -> Self {
-        self.channel_connection_resume = Some(resume);
-        self
     }
 }
 
@@ -141,6 +134,14 @@ struct SlackPersonalBindingPairingRedeemRequest {
 pub struct SlackPersonalBindingPairingRedeemResponse {
     pub provider: String,
     pub provider_user_id: String,
+    /// Number of parked runs this redeem continued on the channel-connection
+    /// gate. `0` legitimately means "nothing was parked" (e.g. connecting from
+    /// the Extensions page with no blocked chat).
+    pub resumed_run_count: usize,
+    /// `true` when the identity bound durably but the follow-up resume faulted.
+    /// The connection still succeeded; the caller can retry to continue any
+    /// still-parked chats. Reported (not dropped) so the UI can surface it.
+    pub resume_error: bool,
 }
 
 async fn slack_personal_binding_pairing_redeem_handler(
@@ -165,23 +166,37 @@ async fn slack_personal_binding_pairing_redeem_handler(
         )
         .await?;
     // Continue every run this caller has parked on the Slack connection gate.
-    // A redeem with nothing parked is valid (the resume returns no runs); a
-    // backend resume fault is surfaced rather than masked.
-    if let Some(resume) = &config.channel_connection_resume {
-        resume
-            .resume_channel_connection(ResumeChannelConnectionRequest {
-                scope: ChannelConnectionResumeScope {
-                    tenant_id: caller.tenant_id,
-                    user_id: caller.user_id,
-                },
-                channel: SLACK_CONNECTION_CHANNEL.to_string(),
-            })
-            .await
-            .map_err(SlackPersonalBindingPairingRouteError::from_resume)?;
-    }
+    // Best-effort by design: the identity binding above is already durable, so
+    // the *connection* has succeeded. A resume fault must NOT fail the redeem —
+    // returning 503 here would leave the caller connected yet staring at a
+    // "pairing failed" error, with a code that is now consumed and rejected on
+    // retry. Surface the fault in the logs and the response body instead of
+    // dropping it (error-handling.md: fail loud, never silent).
+    let (resumed_run_count, resume_error) = match config
+        .channel_connection_resume
+        .resume_channel_connection(ResumeChannelConnectionRequest {
+            scope: ChannelConnectionResumeScope {
+                tenant_id: caller.tenant_id,
+                user_id: caller.user_id,
+            },
+            channel: SLACK_CONNECTION_CHANNEL.to_string(),
+        })
+        .await
+    {
+        Ok(response) => (response.resumed_runs.len(), false),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "channel-connection resume after Slack pairing redeem failed; identity binding is durable so the connection stands"
+            );
+            (0, true)
+        }
+    };
     Ok(Json(SlackPersonalBindingPairingRedeemResponse {
         provider: binding.provider.to_string(),
         provider_user_id: binding.provider_user_id.to_string(),
+        resumed_run_count,
+        resume_error,
     }))
 }
 
@@ -196,20 +211,6 @@ fn validate_pairing_channel(channel: &str) -> Result<(), SlackPersonalBindingPai
 enum SlackPersonalBindingPairingRouteError {
     BadRequest,
     Unavailable,
-}
-
-impl SlackPersonalBindingPairingRouteError {
-    /// Map a channel-connection resume failure. The identity was already bound
-    /// durably at this point, so this is a follow-up fault: surface it as a
-    /// retryable Unavailable rather than dropping the error (error-handling.md:
-    /// fail loud, no silent `.ok()?`).
-    fn from_resume(error: ironclaw_product_workflow::ProductWorkflowError) -> Self {
-        tracing::warn!(
-            %error,
-            "channel-connection resume after Slack pairing redeem failed"
-        );
-        Self::Unavailable
-    }
 }
 
 impl From<SlackPersonalBindingPairingError> for SlackPersonalBindingPairingRouteError {
@@ -427,6 +428,7 @@ mod tests {
         );
         slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteConfig::new(
             pairing,
+            Arc::new(NoopResume),
         ))
     }
 
@@ -496,10 +498,40 @@ mod tests {
         }
     }
 
+    /// Resume that always faults, to drive the bind-succeeds/resume-fails path.
+    struct FailingResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for FailingResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "resume backend unavailable".to_string(),
+            })
+        }
+    }
+
+    /// No-op resume for routes/tests that don't exercise resume behavior.
+    struct NoopResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for NoopResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Ok(ResumeChannelConnectionResponse {
+                resumed_runs: Vec::new(),
+            })
+        }
+    }
+
     fn route_mount_with_resume(
         binding_store: Arc<RecordingBindingStore>,
         challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
-        resume: Arc<RecordingResume>,
+        resume: Arc<dyn ChannelConnectionResumeService>,
     ) -> SlackPersonalBindingPairingRouteMount {
         let pairing = SlackPersonalBindingPairingService::new(
             SlackPersonalUserBindingService::new(
@@ -513,10 +545,9 @@ mod tests {
             challenge_store,
             Arc::new(NoopNotifier),
         );
-        slack_personal_binding_pairing_route_mount(
-            SlackPersonalBindingPairingRouteConfig::new(pairing)
-                .with_channel_connection_resume(resume),
-        )
+        slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteConfig::new(
+            pairing, resume,
+        ))
     }
 
     #[tokio::test]
@@ -581,6 +612,54 @@ mod tests {
         assert!(
             resume.calls().is_empty(),
             "resume must not run when the pairing bind fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn redeem_succeeds_when_bind_is_durable_but_resume_faults() {
+        // The identity binding is durable before resume runs, so a resume fault
+        // must not fail the redeem (returning 503 would strand the caller: they
+        // are connected, but the code is consumed and a retry hits the
+        // invalid/expired path). The connection succeeds; the fault is reported
+        // in the body, not dropped.
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let mount = route_mount_with_resume(
+            binding_store.clone(),
+            Arc::new(StaticChallengeStore::found()),
+            Arc::new(FailingResume),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a durable bind must report success even when resume faults"
+        );
+        assert_eq!(
+            binding_store.bound_user_ids(),
+            vec!["user:alice"],
+            "the identity binding is durable regardless of the resume fault"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["resume_error"], true,
+            "the resume fault must be reported to the caller, not silently dropped"
+        );
+        assert_eq!(
+            body["resumed_run_count"], 0,
+            "no runs were continued when resume faulted"
         );
     }
 

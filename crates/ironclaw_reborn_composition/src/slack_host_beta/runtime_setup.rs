@@ -228,8 +228,10 @@ pub(super) async fn build_runtime_mounts(
     Ok(SlackHostBetaMounts {
         events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
         commands,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
-            .with_channel_connection_resume(channel_connection_resume),
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+            channel_connection_resume,
+        ),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: None,

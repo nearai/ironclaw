@@ -49,6 +49,15 @@ use crate::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, Sl
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
 const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
+// Per-(provider, user) inverse index of identity bindings. Primary identity
+// records are keyed by `provider_user_id`, so answering "is THIS user bound?"
+// otherwise scans every paired identity. This index lets the connection check
+// (WebUI extension listing + Slack activation gate) resolve a bound caller by
+// listing only that caller's own bindings. It is maintained best-effort on
+// bind/delete: a missing marker only makes the reader fall back to the scan
+// (correct, just slower), and the reader verifies the primary record before
+// trusting a marker, so a stale marker can never be a false positive.
+const IDENTITY_BY_USER_ROOT: &str = "/tenant-shared/slack-personal-binding/identities-by-user";
 const PAIRING_CODE_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/codes";
 const PAIRING_ACTOR_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/actors";
 const CHANNEL_ROUTE_ROOT: &str = "/tenant-shared/slack-channel-routes";
@@ -197,6 +206,107 @@ where
 
     async fn delete_record(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
         self.filesystem.delete(&self.scope, path).await
+    }
+
+    /// Best-effort write of the per-user index marker for a binding. A missing
+    /// marker only makes the connection check fall back to a scan (correct, just
+    /// slower), so a fault here is logged, not propagated. See
+    /// [`IDENTITY_BY_USER_ROOT`].
+    async fn write_user_binding_index_marker(&self, binding: &RebornUserIdentityBinding) {
+        let path = match Self::identity_user_index_path(
+            binding.provider.as_str(),
+            binding.user_id.as_str(),
+            binding.provider_user_id.as_str(),
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(%error, "could not build Slack user-binding index path");
+                return;
+            }
+        };
+        let marker = StoredUserBindingIndexMarker {
+            provider_user_id: binding.provider_user_id.as_str().to_string(),
+        };
+        if let Err(error) = self.write_record(&path, &marker, CasExpectation::Any).await {
+            tracing::debug!(
+                %error,
+                "failed to write Slack user-binding index marker; connection check will fall back to a scan"
+            );
+        }
+    }
+
+    /// Best-effort delete of a per-user index marker. A stale marker cannot
+    /// cause a false positive (the reader verifies the primary record), so a
+    /// delete fault is logged, not propagated.
+    async fn delete_user_binding_index_marker(
+        &self,
+        provider: &str,
+        user_id: &str,
+        provider_user_id: &str,
+    ) {
+        let path = match Self::identity_user_index_path(provider, user_id, provider_user_id) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+            Err(error) => {
+                tracing::debug!(%error, "failed to delete Slack user-binding index marker");
+            }
+        }
+    }
+
+    /// Fast-path connection check via the per-user index. Returns `true` only
+    /// after verifying the primary record still exists and matches (so a stale
+    /// marker is never a false positive). Returns `false` when the index has no
+    /// verified match — the caller must fall back to the full scan, because
+    /// bindings written before this index existed have no marker.
+    async fn user_binding_via_index_marker(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        let dir = Self::identity_user_index_dir(provider, user_id.as_str())
+            .map_err(map_lookup_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_lookup_fs_error(error)),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            // The marker file name is `path_segment(provider_user_id).json`,
+            // identical to the primary record's file name, so the primary path
+            // is the identity dir plus this entry name — no decoding needed.
+            let primary = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_lookup_fs_error)?;
+            let Some((record, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&primary)
+                .await
+                .map_err(map_lookup_fs_error)?
+            else {
+                // Stale marker (primary gone); skip. Verifying the primary is
+                // what keeps a failed delete-marker from becoming a false
+                // positive.
+                continue;
+            };
+            if identity_record_matches_user_binding(
+                &record,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn acquire_channel_route_replace_lease(
@@ -509,6 +619,35 @@ where
         ))
     }
 
+    fn identity_user_index_dir(
+        provider: &str,
+        user_id: &str,
+    ) -> Result<ScopedPath, FilesystemError> {
+        scoped_path(&format!(
+            "{}/{}/{}",
+            IDENTITY_BY_USER_ROOT,
+            path_segment(provider),
+            path_segment(user_id)
+        ))
+    }
+
+    fn identity_user_index_path(
+        provider: &str,
+        user_id: &str,
+        provider_user_id: &str,
+    ) -> Result<ScopedPath, FilesystemError> {
+        // The marker file name reuses `path_segment(provider_user_id)`, exactly
+        // like the primary record, so the primary path can be rebuilt from a
+        // marker entry name without decoding.
+        scoped_path(&format!(
+            "{}/{}/{}/{}.json",
+            IDENTITY_BY_USER_ROOT,
+            path_segment(provider),
+            path_segment(user_id),
+            path_segment(provider_user_id)
+        ))
+    }
+
     fn pairing_code_path(
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<ScopedPath, FilesystemError> {
@@ -759,6 +898,16 @@ where
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
     ) -> Result<bool, RebornUserIdentityLookupError> {
+        // Fast path: the per-user index resolves a bound caller by listing only
+        // that caller's own bindings. A verified `true` short-circuits the scan;
+        // a miss is inconclusive (bindings predating the index have no marker),
+        // so fall through to the full scan below.
+        if self
+            .user_binding_via_index_marker(provider, user_id, provider_user_id_prefix)
+            .await?
+        {
+            return Ok(true);
+        }
         let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
             .map_err(map_lookup_fs_error)?;
         let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
@@ -836,6 +985,7 @@ where
                 }
                 Err(error) => return Err(map_binding_fs_error(error)),
             }
+            self.write_user_binding_index_marker(&binding).await;
             return Ok(());
         }
 
@@ -851,6 +1001,7 @@ where
             }
             Err(error) => return Err(map_binding_fs_error(error)),
         }
+        self.write_user_binding_index_marker(&binding).await;
         Ok(())
     }
 }
@@ -920,7 +1071,15 @@ where
                 continue;
             }
             match self.delete_record(&path).await {
-                Ok(()) => deleted += 1,
+                Ok(()) => {
+                    deleted += 1;
+                    self.delete_user_binding_index_marker(
+                        provider,
+                        user_id.as_str(),
+                        &current.provider_user_id,
+                    )
+                    .await;
+                }
                 Err(FilesystemError::NotFound { .. }) => {}
                 Err(error) => return Err(map_binding_fs_error(error)),
             }
@@ -1565,6 +1724,14 @@ where
     }
 }
 
+/// Per-user index marker (see [`IDENTITY_BY_USER_ROOT`]). The file name encodes
+/// the `provider_user_id`; the body carries the raw id for debuggability but is
+/// never read on the hot path (the reader verifies the primary record instead).
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredUserBindingIndexMarker {
+    provider_user_id: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSlackUserIdentity {
     provider: String,
@@ -2074,6 +2241,63 @@ mod tests {
                 .await
                 .expect("lookup succeeds"),
             "different user reports not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_connection_check_survives_index_faults() {
+        // The per-user index is a best-effort accelerator: a missing marker must
+        // still resolve via the scan, and a stale marker (primary gone) must
+        // never be reported as a live binding.
+        let state = state();
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+            user_id: user("user:alice"),
+        };
+        state
+            .bind_user_identity(binding.clone())
+            .await
+            .expect("bind");
+
+        let marker = scoped_path(&format!(
+            "{IDENTITY_BY_USER_ROOT}/{}/{}/{}.json",
+            path_segment("slack"),
+            path_segment("user:alice"),
+            path_segment("install-alpha:U123"),
+        ))
+        .unwrap();
+        let primary = scoped_path(&format!(
+            "{IDENTITY_ROOT}/{}/{}.json",
+            path_segment("slack"),
+            path_segment("install-alpha:U123"),
+        ))
+        .unwrap();
+
+        // Legacy shape: primary present, index marker absent -> the scan
+        // fallback still resolves the binding.
+        state.delete_record(&marker).await.expect("drop marker");
+        assert!(
+            state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup"),
+            "a binding with no index marker is still found via the scan fallback"
+        );
+
+        // Stale marker: re-bind to restore the marker, then drop the primary,
+        // leaving the marker dangling. The verify-read must reject it.
+        state
+            .bind_user_identity(binding.clone())
+            .await
+            .expect("rebind");
+        state.delete_record(&primary).await.expect("drop primary");
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup"),
+            "a stale index marker whose primary record is gone is not a false positive"
         );
     }
 

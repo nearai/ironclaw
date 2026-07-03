@@ -651,6 +651,10 @@ mod openai_compat_mount_tests {
 mod slack_personal_binding_pairing_mount_tests {
     use super::*;
     use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_product_workflow::{
+        ChannelConnectionResumeService, ProductWorkflowError, ResumeChannelConnectionRequest,
+        ResumeChannelConnectionResponse,
+    };
     use ironclaw_reborn_composition::slack_serve::SlackUserId;
     use ironclaw_reborn_composition::{
         IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
@@ -662,6 +666,21 @@ mod slack_personal_binding_pairing_mount_tests {
         SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
     };
+
+    /// No-op resume: this test exercises route mounting/auth, not resume.
+    struct NoopChannelConnectionResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for NoopChannelConnectionResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Ok(ResumeChannelConnectionResponse {
+                resumed_runs: Vec::new(),
+            })
+        }
+    }
 
     #[tokio::test]
     async fn pairing_route_mounted_when_config_provided() {
@@ -688,7 +707,10 @@ mod slack_personal_binding_pairing_mount_tests {
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+            Arc::new(NoopChannelConnectionResume),
+        ));
         let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
         let unauthenticated = app

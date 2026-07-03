@@ -34,8 +34,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
       // gate (unmounting the card) a beat later over SSE. Holding the spinner
       // keeps a successful submit from looking like it did nothing.
       setStatus("resuming");
-    } catch {
-      setError(copy.errorMessage);
+    } catch (submitError) {
+      // A resume fault means the connection succeeded but this parked chat
+      // didn't continue; the gate won't clear, so exit the spinner with copy
+      // that says so rather than the generic invalid-code message.
+      setError(submitError?.resumeFailed ? copy.resumeFailedMessage : copy.errorMessage);
       setStatus("idle");
     }
   };
@@ -146,5 +149,8 @@ function pairingCardCopy(onboarding) {
     submitLabel: onboarding?.submitLabel || "Connect",
     submittingLabel: onboarding?.submittingLabel || "Connecting...",
     errorMessage: onboarding?.errorMessage || "Pairing failed. Check the code and try again.",
+    resumeFailedMessage:
+      onboarding?.resumeFailedMessage ||
+      `${displayName} connected, but this chat couldn't continue. Reload the page to keep going.`,
   };
 }

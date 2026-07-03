@@ -753,8 +753,10 @@ pub fn build_slack_host_beta_mounts(
         return Ok(SlackHostBetaMounts {
             events,
             commands,
-            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
-                .with_channel_connection_resume(Arc::clone(&channel_connection_resume)),
+            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
+                pairing,
+                Arc::clone(&channel_connection_resume),
+            ),
             channel_routes,
             tenant_id: config.tenant_id.clone(),
             personal_connection_scope: Some(personal_connection_scope.clone()),
@@ -792,8 +794,10 @@ pub fn build_slack_host_beta_mounts(
     Ok(SlackHostBetaMounts {
         events,
         commands,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing)
-            .with_channel_connection_resume(channel_connection_resume),
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+            channel_connection_resume,
+        ),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: Some(personal_connection_scope.clone()),

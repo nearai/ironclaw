@@ -855,6 +855,15 @@ export function useChat(threadId) {
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }
+      if (response?.resumeError) {
+        // The connection succeeded (binding is durable), but the backend
+        // couldn't continue this parked chat. The gate only clears when the
+        // turn actually resumes, so it will stay pending — surface a distinct,
+        // recoverable error instead of leaving the card spinning forever.
+        const error = new Error("channel connection resume did not complete");
+        error.resumeFailed = true;
+        throw error;
+      }
       // No resolveGate on success: the backend resumes the parked turn and the
       // projection clears this gate (a pairing gate has no AuthFlowRecord, so
       // routing a resolve through resolve_auth_gate would fail anyway).
