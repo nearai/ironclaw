@@ -513,12 +513,43 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
         run: |
-          partition="$((REBORN_ROOT_TEST_PARTITION + 1))/${REBORN_ROOT_TEST_PARTITIONS}"
+          mapfile -t test_names < <(
+            {
+              find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
+              if [ -f tests/support_unit_tests.rs ]; then
+                printf '%s\n' tests/support_unit_tests.rs
+              fi
+            } \
+              | sed -E 's#^tests/##; s#\.rs$##' \
+              | LC_ALL=C sort
+          )
+
+          selected_filters=()
+          for index in "${!test_names[@]}"; do
+            if (( index % REBORN_ROOT_TEST_PARTITIONS != REBORN_ROOT_TEST_PARTITION )); then
+              continue
+            fi
+            selected_filters+=("binary(=${test_names[$index]})")
+          done
+
+          if [ "${#selected_filters[@]}" -eq 0 ]; then
+            echo "No Reborn root tests assigned to partition ${REBORN_ROOT_TEST_PARTITION} of ${REBORN_ROOT_TEST_PARTITIONS}; passing by design"
+            exit 0
+          fi
+
+          filter=""
+          for expression in "${selected_filters[@]}"; do
+            if [ -n "${filter}" ]; then
+              filter="${filter} | "
+            fi
+            filter="${filter}${expression}"
+          done
+
           cargo-nextest nextest run \
             --archive-file target/nextest-archive/reborn-nextest.tar.zst \
             --workspace-remap "$GITHUB_WORKSPACE" \
-            --partition "slice:${partition}" \
-            -E '(binary(/reborn_.*/) - binary(/reborn_group_.*/)) + binary(=support_unit_tests)'
+            --test-threads 1 \
+            -E "${filter}"
 
   reborn-group-tests:
     name: Reborn group tests
