@@ -427,7 +427,7 @@ impl std::fmt::Display for ResourceDimension {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ResourceValue {
-    Decimal(Decimal),
+    Decimal(#[serde(with = "rust_decimal::serde::str")] Decimal),
     Integer(u64),
 }
 
@@ -525,6 +525,7 @@ pub enum ResourceError {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceTally {
+    #[serde(with = "rust_decimal::serde::str")]
     pub usd: Decimal,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1533,7 +1534,7 @@ struct StrictResourceScope {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceEstimate", deny_unknown_fields)]
 struct StrictResourceEstimate {
-    #[serde(default)]
+    #[serde(default, with = "rust_decimal::serde::str_option")]
     usd: Option<Decimal>,
     #[serde(default)]
     input_tokens: Option<u64>,
@@ -1554,6 +1555,7 @@ struct StrictResourceEstimate {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceUsage", deny_unknown_fields)]
 struct StrictResourceUsage {
+    #[serde(with = "rust_decimal::serde::str")]
     usd: Decimal,
     input_tokens: u64,
     output_tokens: u64,
@@ -2610,6 +2612,39 @@ fn decimal_to_f64(d: Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_value_decimal_uses_stable_string_json() {
+        let value = ResourceValue::Decimal(Decimal::new(125, 2));
+        let encoded = serde_json::to_value(&value).unwrap();
+
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "decimal",
+                "value": "1.25"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ResourceValue>(encoded).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn resource_tally_usd_uses_stable_string_json() {
+        let tally = ResourceTally {
+            usd: Decimal::new(625, 2),
+            ..ResourceTally::default()
+        };
+        let encoded = serde_json::to_value(&tally).unwrap();
+
+        assert_eq!(encoded["usd"], "6.25");
+        assert_eq!(
+            serde_json::from_value::<ResourceTally>(encoded).unwrap(),
+            tally
+        );
+    }
 
     #[test]
     fn atomic_snapshot_replace_overwrites_existing_file() {
