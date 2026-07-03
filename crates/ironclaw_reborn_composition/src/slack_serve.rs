@@ -1140,4 +1140,224 @@ mod tests {
 
         assert_eq!(*scope, RateLimitScope::Global);
     }
+
+    /// Caller-level coverage for the `/pair` slash command handler: signature
+    /// verification runs (via the ingress), an already-linked caller gets a
+    /// confirmation instead of a code, an unlinked caller gets a fresh code, and
+    /// a challenge-store fault degrades to an ephemeral reply — never a 5xx that
+    /// Slack renders as "the app did not respond".
+    mod pair_command_tests {
+        use super::*;
+        use crate::slack_actor_identity::{
+            RebornUserIdentityLookup, RebornUserIdentityLookupError,
+        };
+        use crate::slack_personal_binding::{
+            RebornUserIdentityBinding, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
+        };
+        use crate::slack_personal_binding_pairing::{
+            IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallenge,
+            SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
+            SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
+            SlackPersonalBindingPairingNotifier, SlackPersonalUserBinder,
+        };
+        use ironclaw_host_api::UserId;
+
+        struct StubChallengeStore {
+            reissue_ok: bool,
+        }
+
+        #[async_trait]
+        impl SlackPersonalBindingPairingChallengeStore for StubChallengeStore {
+            async fn issue_challenge(
+                &self,
+                _challenge: SlackPersonalBindingPairingChallenge,
+            ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+            {
+                unreachable!("/pair reissues; it never issues a first-time challenge")
+            }
+
+            async fn get_challenge(
+                &self,
+                _code: &SlackPersonalBindingPairingCode,
+            ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+            {
+                Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+            }
+
+            async fn consume_challenge(
+                &self,
+                _code: &SlackPersonalBindingPairingCode,
+            ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+            {
+                Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+            }
+
+            async fn reissue_challenge(
+                &self,
+                challenge: SlackPersonalBindingPairingChallenge,
+            ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+            {
+                if !self.reissue_ok {
+                    return Err(SlackPersonalBindingPairingError::Backend(
+                        "challenge store unavailable".to_string(),
+                    ));
+                }
+                Ok(IssuedSlackPersonalBindingPairingChallenge {
+                    code: SlackPersonalBindingPairingCode::new("PAIR1234").expect("code"),
+                    challenge,
+                })
+            }
+        }
+
+        #[derive(Debug)]
+        struct NoopBinder;
+
+        #[async_trait]
+        impl SlackPersonalUserBinder for NoopBinder {
+            async fn validate_installation_actor(
+                &self,
+                _principal: &SlackPersonalBindingPrincipal,
+                _installation_id: &AdapterInstallationId,
+                _slack_user_id: &SlackUserId,
+            ) -> Result<(), SlackPersonalUserBindingError> {
+                Ok(())
+            }
+
+            async fn bind_installation_actor(
+                &self,
+                _principal: SlackPersonalBindingPrincipal,
+                _installation_id: AdapterInstallationId,
+                _slack_user_id: SlackUserId,
+            ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+                unreachable!("/pair reissues a code; it never binds an actor")
+            }
+        }
+
+        struct NoopNotifier;
+
+        #[async_trait]
+        impl SlackPersonalBindingPairingNotifier for NoopNotifier {
+            async fn send_pairing_challenge(
+                &self,
+                _notification: SlackPersonalBindingPairingNotification,
+            ) -> Result<(), SlackPersonalBindingPairingError> {
+                Ok(())
+            }
+        }
+
+        struct StubLookup {
+            linked: bool,
+        }
+
+        #[async_trait]
+        impl RebornUserIdentityLookup for StubLookup {
+            async fn resolve_user_identity(
+                &self,
+                _provider: &str,
+                _provider_user_id: &str,
+            ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+                Ok(self
+                    .linked
+                    .then(|| UserId::new("user:already-linked").expect("user")))
+            }
+
+            async fn user_has_provider_binding(
+                &self,
+                _provider: &str,
+                _user_id: &UserId,
+            ) -> Result<bool, RebornUserIdentityLookupError> {
+                Ok(false)
+            }
+
+            async fn user_has_provider_binding_with_provider_user_id_prefix(
+                &self,
+                _provider: &str,
+                _user_id: &UserId,
+                _prefix: Option<&str>,
+            ) -> Result<bool, RebornUserIdentityLookupError> {
+                Ok(false)
+            }
+        }
+
+        fn pair_state(linked: bool, reissue_ok: bool) -> SlackCommandsRouteState {
+            let ingress = SlackIngressService::new(Arc::new(FakeSlackResolver::new(Arc::new(
+                FakeSlackDispatcher::verified(),
+            ))));
+            let pairing = SlackPersonalBindingPairingService::new_with_binder(
+                Arc::new(NoopBinder),
+                Arc::new(StubChallengeStore { reissue_ok }),
+                Arc::new(NoopNotifier),
+            );
+            SlackCommandsRouteState::new(ingress, pairing, Arc::new(StubLookup { linked }))
+        }
+
+        async fn post_pair(state: SlackCommandsRouteState) -> Response {
+            let mount = slack_commands_route_mount(state);
+            let request = Request::builder()
+                .method("POST")
+                .uri(SLACK_COMMANDS_PATH)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("X-Slack-Signature", "v0=stub")
+                .header("X-Slack-Request-Timestamp", "1700000000")
+                .body(Body::from("command=%2Fpair&user_id=U123"))
+                .expect("request should build");
+            mount
+                .router
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router should respond")
+        }
+
+        async fn ephemeral_text(response: Response) -> String {
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body should collect")
+                .to_bytes();
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("ephemeral json body");
+            body["text"].as_str().unwrap_or_default().to_string()
+        }
+
+        #[tokio::test]
+        async fn pair_command_mints_a_fresh_code_for_an_unlinked_caller() {
+            let response = post_pair(pair_state(false, true)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let text = ephemeral_text(response).await;
+            assert!(
+                text.contains("PAIR1234"),
+                "the ephemeral reply must carry the fresh pairing code, got: {text}"
+            );
+        }
+
+        #[tokio::test]
+        async fn pair_command_tells_an_already_linked_caller_they_are_connected() {
+            let response = post_pair(pair_state(true, true)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let text = ephemeral_text(response).await;
+            assert!(
+                text.contains("already connected"),
+                "an already-linked caller gets a confirmation, got: {text}"
+            );
+            assert!(
+                !text.contains("PAIR1234"),
+                "an already-linked caller must never be minted a code"
+            );
+        }
+
+        #[tokio::test]
+        async fn pair_command_degrades_to_ephemeral_reply_when_reissue_faults() {
+            // A challenge-store fault must not become a 5xx (Slack renders that as
+            // "the app did not respond"); it surfaces as an ephemeral message.
+            let response = post_pair(pair_state(false, false)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let text = ephemeral_text(response).await;
+            assert!(
+                !text.contains("PAIR1234"),
+                "no code is minted on fault: {text}"
+            );
+        }
+    }
 }
