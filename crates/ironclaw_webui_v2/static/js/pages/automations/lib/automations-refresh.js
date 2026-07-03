@@ -15,9 +15,11 @@ function finiteTimestamp(value) {
 
 function hasRecentUnattachedRunThread(automation, nowMs) {
   const timestamp = finiteTimestamp(automation?.latest_unattached_run_thread_timestamp);
+  const ageMs = timestamp == null ? null : nowMs - timestamp;
   return (
-    timestamp != null &&
-    Math.abs(nowMs - timestamp) <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS
+    ageMs != null &&
+    ageMs >= 0 &&
+    ageMs <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS
   );
 }
 

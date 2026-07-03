@@ -107,14 +107,13 @@ test("nextAutomationsRefetchDelay stops following old unattached run threads", (
   );
 });
 
-test("nextAutomationsRefetchDelay stops following far-future unattached run threads", () => {
+test("nextAutomationsRefetchDelay stops following future unattached run threads", () => {
   assert.equal(
     nextAutomationsRefetchDelay(
       [
         {
           state: "paused",
-          latest_unattached_run_thread_timestamp:
-            10_000 + AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS + 1,
+          latest_unattached_run_thread_timestamp: 10_001,
         },
       ],
       10_000,
