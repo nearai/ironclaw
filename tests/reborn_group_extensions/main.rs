@@ -23,6 +23,7 @@ mod support;
 // by declaration order.
 mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
+mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -60,6 +61,16 @@ async fn extensions_group_e2e() {
     report.record(
         "activate_then_active_cross_thread",
         scenario_activate_then_active_cross_thread::run(&g).await,
+    );
+
+    // Scenario 4 (W4-EXT-MANIFEST-ERR, narrowed): an extension_id absent from
+    // the bundled catalog fails `builtin.extension_install` safely with a
+    // model-visible `Failed{InputEncode}` tool error. Independent of Scenarios
+    // 1-3: it uses a nonexistent id, touching no shared-store state any other
+    // scenario reads.
+    report.record(
+        "install_unknown_extension_id_fails_safely",
+        scenario_install_unknown_extension_id_fails_safely::run(&g).await,
     );
 
     report.assert_all_passed();
