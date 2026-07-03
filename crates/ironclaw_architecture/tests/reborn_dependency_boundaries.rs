@@ -120,6 +120,27 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Canonical Reborn identity layer: it maps external identities to a stable
+    // `UserId` at the bottom of the stack, so among internal ironclaw crates it
+    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
+    // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
+    // as an allowlist so it can never reach UPSTREAM (into
+    // `ironclaw_reborn_composition` / `ironclaw_product_workflow`) or onto the v1
+    // legacy enclave — the "never reach upstream" property the crate guarantees.
+    let reborn_identity_allowed = [
+        "ironclaw_reborn_identity",
+        "ironclaw_host_api",
+        "ironclaw_filesystem",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_reborn_identity",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !reborn_identity_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }

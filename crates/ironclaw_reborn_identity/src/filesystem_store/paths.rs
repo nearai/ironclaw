@@ -22,6 +22,9 @@ pub(super) fn identity_path(
     instance: &str,
     subject: &str,
 ) -> Result<ScopedPath, RebornIdentityError> {
+    // `surface` is interpolated raw, unlike the other key parts: it is the
+    // closed, trusted `SurfaceKind::as_str()` enum ("oauth"/"channel_actor"),
+    // never an adapter-supplied opaque id, so it needs no `segment()` encoding.
     scoped_path(&format!(
         "{IDENTITY_ROOT}/external/{}/{surface}/{}/{}/{}.json",
         segment(tenant),

@@ -7,7 +7,7 @@
 //! centralized in the filesystem layer rather than this crate holding a raw
 //! database handle. The relational guarantees the canonical key needs are
 //! reconstructed on top of the filesystem's compare-and-swap primitive, the
-//! same way [`FilesystemSlackHostState`](../../ironclaw_reborn_composition) does:
+//! same way `FilesystemSlackHostState` (in `ironclaw_reborn_composition`) does:
 //!
 //! - **Keyed lookup** — one record per `(tenant, surface, provider, instance,
 //!   subject)`, addressed by a scoped path (key parts are opaque, separately
