@@ -77,6 +77,7 @@ export function Chat({
     setSuggestions,
     submitAuthToken,
     submitOnboardingPairing,
+    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = useChat(activeThreadId);
@@ -90,6 +91,32 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  // A channel-pairing gate is a `manual_token` auth gate that also carries a
+  // `connection` requirement (gates.js normalizes it onto `pendingGate.connection`).
+  // Render the pairing card off the live gate — wired to a redeem submit and a
+  // run-cancel dismiss — instead of the plain token card. This is the generic,
+  // non-Slack channel-connect path; the durable-timeline `pendingOnboarding` panel
+  // is the separate, no-active-gate entry point below.
+  const channelConnectionGate =
+    pendingGate?.kind === "auth_required" &&
+    pendingGate?.challengeKind === "manual_token" &&
+    pendingGate?.connection
+      ? pendingGate.connection
+      : null;
+  // Normalize the gate's connection context onto the onboarding-shaped prop the
+  // pairing card renders from, so one card component serves both entry points.
+  const gateConnectionOnboarding = channelConnectionGate
+    ? {
+        extensionName: channelConnectionGate.channel,
+        strategy: channelConnectionGate.strategy,
+        instructions: channelConnectionGate.instructions,
+        inputPlaceholder: channelConnectionGate.inputPlaceholder,
+        submitLabel: channelConnectionGate.submitLabel,
+        errorMessage: channelConnectionGate.errorMessage,
+      }
+    : null;
+  const activeThreadHasChannelConnectionGate =
+    activeThreadHasGate && Boolean(channelConnectionGate);
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
@@ -102,11 +129,13 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = activeThreadHasGate
-    ? "Resolve the approval request before sending another message."
-    : activeThreadHasOnboarding
-      ? `Finish connecting ${pendingOnboardingLabel(pendingOnboarding)} before sending another message.`
-    : "";
+  const approvalSubmitWarning = activeThreadHasChannelConnectionGate
+    ? "Finish connecting the channel before sending another message."
+    : activeThreadHasGate
+      ? "Resolve the approval request before sending another message."
+      : activeThreadHasOnboarding
+        ? `Finish connecting ${pendingOnboardingLabel(pendingOnboarding)} before sending another message.`
+        : "";
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
@@ -312,14 +341,22 @@ export function Chat({
                   />
                 `
                 : pendingGate.challengeKind === "manual_token"
-                  ? html`
+                  ? (channelConnectionGate
+                    ? html`
+                  <${OnboardingPairingCard}
+                    onboarding=${gateConnectionOnboarding}
+                    onSubmit=${submitChannelConnectionPairing}
+                    onCancel=${handleCancelRun}
+                  />
+                `
+                    : html`
                   <${AuthTokenCard}
                     gate=${pendingGate}
                     onSubmit=${submitAuthToken}
                     onCancel=${() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
-                `
+                `)
                   : html`
                   <${AuthGenericCard}
                     gate=${pendingGate}

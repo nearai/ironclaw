@@ -1331,6 +1331,48 @@ export function useChat(threadId) {
     [threadId, send, setPendingOnboarding, setIsProcessing],
   );
 
+  // Redeem a channel-pairing code for a LIVE auth gate — a `manual_token`
+  // challenge that also carries a `connection` requirement (gates.js normalizes
+  // it onto `pendingGate.connection`). Distinct from `submitOnboardingPairing`,
+  // which drives the durable-timeline pairing panel: here the pairing context
+  // comes off the gate, and the parked turn resumes through the gate rather than
+  // by re-sending a continuation message. The redeem stores a durable binding and
+  // the server resumes every run this caller parked on the channel.
+  const submitChannelConnectionPairing = React.useCallback(
+    async (code) => {
+      const gate = pendingGateRef.current || pendingGate;
+      const channel = gate?.connection?.channel;
+      if (!gate || !channel) {
+        throw new Error("channel connection is no longer pending");
+      }
+      if (!gate.runId || !gate.gateRef) {
+        throw new Error("channel connection gate is missing run_id and gate_ref");
+      }
+      const trimmed = String(code || "").trim();
+      if (!trimmed) {
+        throw new Error("pairing code is required");
+      }
+      const response = await redeemPairingCode(channel, trimmed, { threadId });
+      if (response?.success === false) {
+        throw new Error(response.message || "Pairing failed");
+      }
+      if (response?.resumeError) {
+        // The binding is durable (connected), but the parked turn didn't resume;
+        // the gate stays pending. Surface a distinct, recoverable error instead of
+        // leaving the pairing card spinning forever.
+        const error = new Error("channel connection resume did not complete");
+        error.resumeFailed = true;
+        throw error;
+      }
+      // The server resumed the parked run on redeem; clear the gate locally and
+      // show processing while the resumed turn streams back over SSE.
+      setPendingGate(null);
+      setIsProcessing(true);
+      return response;
+    },
+    [pendingGate, threadId, setPendingGate, setIsProcessing],
+  );
+
   const startOnboardingOAuth = React.useCallback(async () => {
     const onboarding = pendingOnboardingRef.current;
     if (!onboarding) {
@@ -1537,6 +1579,7 @@ export function useChat(threadId) {
     resolveGate,
     submitAuthToken,
     submitOnboardingPairing,
+    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
     cancelRun,

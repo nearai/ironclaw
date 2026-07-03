@@ -1493,6 +1493,12 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        // Inbound Slack actor resolution now requires a durable OAuth identity
+        // binding; the removed static `slack_user_id` seed no longer maps the
+        // Slack user to a Reborn user. Bind through the production OAuth path
+        // before dispatching the signed event.
+        let binder = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        bind_slack_oauth_user(&binder).await;
         let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
         let body = r#"{
             "type":"event_callback",
@@ -1551,6 +1557,12 @@ mod tests {
             "1710000000.000011",
         );
 
+        // Inbound Slack actor resolution now requires a durable OAuth identity
+        // binding (the static `slack_user_id` seed was removed). The binding is
+        // durable in the shared runtime state, so it survives the route rebuild
+        // this dedup test exercises.
+        let binder = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        bind_slack_oauth_user(&binder).await;
         let first_mount =
             build_slack_events_route_mount(&runtime, config()).expect("first route builds");
         post_signed_slack_event(&first_mount, &body).await;
@@ -1718,6 +1730,11 @@ mod tests {
         )))
         .await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        // The channel-mention actor is resolved through the durable OAuth
+        // identity binding (the static `slack_user_id` seed was removed); bind
+        // the Slack user before dispatching so the event resolves to a Reborn
+        // user and the channel route maps it to the shared subject.
+        bind_slack_oauth_user(&mounts).await;
 
         let body = app_mention_event_body_with(
             "Ev-host-beta-channel-mention",
@@ -1801,6 +1818,10 @@ mod tests {
         .await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
+        // Bind the inbound Slack actor through the OAuth path before the admin
+        // route assignment; the removed static `slack_user_id` seed no longer
+        // maps the Slack user, so an unbound actor's mention fails closed.
+        bind_slack_oauth_user(&mounts).await;
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
         let assign_response = route_mount
             .protected
@@ -3079,6 +3100,28 @@ mod tests {
             "dynamic Slack setup must register its target provider with the runtime"
         );
 
+        // Dynamic Slack setup (bot token + signing secret) now arrives through
+        // the WebUI save rather than static legacy seeding; provide it before
+        // the OAuth binding so the spawned personal DM provisioner can resolve
+        // the installation and register the target.
+        mounts
+            .setup_service
+            .as_ref()
+            .expect("dynamic mounts expose the Slack setup service")
+            .save(crate::slack_setup::SlackInstallationSetupUpdate {
+                installation_id: INSTALLATION.to_string(),
+                team_id: TEAM.to_string(),
+                api_app_id: API_APP.to_string(),
+                user_id: Some(USER.to_string()),
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-host-token")),
+                signing_secret: Some(SecretString::from(SECRET)),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("seed dynamic Slack setup");
+
         bind_slack_oauth_user(&mounts).await;
 
         let runtime_provider = runtime
@@ -3751,20 +3794,17 @@ mod tests {
     }
 
     fn dynamic_runtime_config_without_legacy_actor() -> SlackHostBetaRuntimeConfig {
+        // Production resolves the Slack host-beta runtime config with
+        // `legacy_setup: None` (serve_slack.rs asserts this). Slack secrets now
+        // arrive only through the WebUI dynamic setup save; static legacy
+        // seeding fails closed without a bot token by design. Mirror production:
+        // build with no legacy setup and drive setup through the dynamic path.
         SlackHostBetaRuntimeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             AgentId::new(AGENT).expect("agent"),
             Some(ProjectId::new(PROJECT).expect("project")),
             UserId::new(USER).expect("user"),
         )
-        .with_legacy_setup(SlackHostBetaLegacySetup {
-            installation_id: INSTALLATION.to_string(),
-            team_id: TEAM.to_string(),
-            api_app_id: API_APP.to_string(),
-            user_id: UserId::new(USER).expect("user"),
-            shared_subject_user_id: None,
-            channel_routes: Vec::new(),
-        })
     }
 
     fn config_without_channel_routes() -> SlackHostBetaConfig {
@@ -4571,12 +4611,34 @@ mod tests {
 
         // Wire the delivery hook by calling the dynamic production mount builder
         // used by WebUI-managed Slack setup.
-        let _mounts = build_slack_host_beta_runtime_mounts(
+        let mounts = build_slack_host_beta_runtime_mounts(
             &runtime,
             dynamic_runtime_config_without_legacy_actor(),
         )
         .await
         .expect("dynamic mounts should build");
+
+        // The dynamic delivery hook resolves its driver from the current Slack
+        // setup (skips silently when unconfigured). Provide the WebUI-managed
+        // setup so the hook builds a driver and records the (no-default-target)
+        // delivery outcome the assertion below waits for.
+        mounts
+            .setup_service
+            .as_ref()
+            .expect("dynamic mounts expose the Slack setup service")
+            .save(crate::slack_setup::SlackInstallationSetupUpdate {
+                installation_id: INSTALLATION.to_string(),
+                team_id: TEAM.to_string(),
+                api_app_id: API_APP.to_string(),
+                user_id: Some(USER.to_string()),
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-host-token")),
+                signing_secret: Some(SecretString::from(SECRET)),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("seed dynamic Slack setup");
 
         assert_due_personal_trigger_writes_delivery_record(&runtime, "dynamic-hook-wiring-e2e")
             .await;

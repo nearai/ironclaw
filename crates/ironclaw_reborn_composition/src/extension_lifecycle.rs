@@ -1870,7 +1870,7 @@ mod tests {
                 && message.contains("WebChat")
                 && message.contains("rather than pasting anything into normal chat")
                 && message.contains("continue the user's original request")
-                && message.contains("Do not claim Slack message-reading tools"),
+                && message.contains("user-scoped Slack tools"),
             "Slack activation should guide the model into OAuth setup UI, got: {message}"
         );
         assert!(
