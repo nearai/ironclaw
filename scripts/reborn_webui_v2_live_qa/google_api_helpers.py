@@ -234,20 +234,38 @@ async def _wait_for_google_sheet_marker(
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     last_check: dict[str, object] | None = None
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
-        last_check = await _google_sheet_contains_marker(
-            access_token=access_token,
-            spreadsheet_id=spreadsheet_id,
-            marker=marker,
-            range_name=range_name,
-        )
+        try:
+            last_check = await _google_sheet_contains_marker(
+                access_token=access_token,
+                spreadsheet_id=spreadsheet_id,
+                marker=marker,
+                range_name=range_name,
+            )
+            last_error = None
+        except AssertionError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            last_check = None
+            await asyncio.sleep(2.0)
+            continue
         if last_check.get("found"):
             return last_check
         await asyncio.sleep(2.0)
+    last_error_text = ""
+    if last_error is not None:
+        exc_text = str(last_error)
+        last_error_text = (
+            f" last_error={type(last_error).__name__}: {exc_text}"
+            if exc_text
+            else f" last_error={type(last_error).__name__}"
+        )
     raise AssertionError(
         "Google Sheet marker was not observed before timeout. "
         f"spreadsheet_id_present={bool(spreadsheet_id)} marker={marker!r} "
-        f"last_check={last_check!r}"
+        f"last_check={last_check!r}{last_error_text}"
     )
 
 
