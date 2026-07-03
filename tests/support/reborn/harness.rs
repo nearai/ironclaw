@@ -3161,6 +3161,20 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// W4-AUTHGATE-WIRE: enqueue a FIFO scripted status on the recording
+    /// **network** HTTP egress (see `RecordingNetworkHttpEgress::push_status`).
+    /// For `GithubIssueTools`-backed harnesses, the real WASM HTTP call flows
+    /// through this lane (not `install_http_responses`'s runtime-egress
+    /// matcher) — see `reborn_integration_secret_injection.rs`'s module doc.
+    /// Errors if this harness wired no recording network egress.
+    pub(crate) fn install_network_status_script(&self, status: u16) -> HarnessResult<()> {
+        self.network_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording network egress to script")?
+            .push_status(status);
+        Ok(())
+    }
+
     /// Install a sticky scripted `builtin.shell` process result on the inert
     /// recording process port (mirrors `install_http_responses`). Errors if the
     /// harness has no recording port (e.g. the `.with_live_shell()` path).
@@ -4682,6 +4696,16 @@ impl ironclaw_host_runtime::ToolCallHttpEgress for RecordingRuntimeHttpEgress {
 struct RecordingNetworkHttpEgress {
     default_body: Vec<u8>,
     response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// W4-AUTHGATE-WIRE: FIFO of scripted non-default statuses, consumed ahead
+    /// of the hardcoded `200` default. Lets a test drive the runtime-401
+    /// (credential-injected-but-rejected) path for capabilities whose real
+    /// HTTP call flows through this **network** lane rather than the runtime
+    /// egress `ScriptedHttpResponse` matcher (`GithubIssueTools` — see
+    /// `reborn_integration_secret_injection.rs`'s module doc: `try_with_host_http_egress`
+    /// overwrites the runtime port with the host pipeline over THIS recorder).
+    /// Empty by default — every pre-existing caller keeps the old hardcoded-200
+    /// behavior byte-identical.
+    status_queue: Arc<Mutex<VecDeque<u16>>>,
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
 }
 
@@ -4690,12 +4714,19 @@ impl RecordingNetworkHttpEgress {
         Self {
             default_body: body,
             response_bodies: Arc::new(Mutex::new(VecDeque::new())),
+            status_queue: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn requests(&self) -> Vec<NetworkHttpRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Enqueue one FIFO scripted status, consumed by the next `execute` call
+    /// ahead of the hardcoded `200` default.
+    fn push_status(&self, status: u16) {
+        self.status_queue.lock().unwrap().push_back(status);
     }
 }
 
@@ -4713,8 +4744,9 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| self.default_body.clone());
+        let status = self.status_queue.lock().unwrap().pop_front().unwrap_or(200);
         Ok(NetworkHttpResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
             usage: NetworkUsage {
