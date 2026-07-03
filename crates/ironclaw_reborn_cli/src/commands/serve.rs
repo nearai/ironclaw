@@ -32,7 +32,7 @@ use secrecy::SecretString;
 use crate::context::RebornCliContext;
 use crate::runtime::{
     RuntimeInputOptions, open_trigger_access_store_for_profile,
-    resolve_google_oauth_config_from_env, resolve_slack_personal_oauth_config_from_env,
+    resolve_google_oauth_config_from_env,
 };
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
@@ -75,13 +75,15 @@ impl ServeCommand {
         // the local-dev-yolo host-access disclosure gate fires before any
         // WebUI env-var resolution below; the owner is aligned to the
         // authenticated WebUI user once it is resolved (see `with_owner_id`).
-        let runtime_input = crate::runtime::build_runtime_input_with_options(
+        let built = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
             RuntimeInputOptions {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
+        let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -395,7 +397,12 @@ impl ServeCommand {
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {
-                    Ok(mounts) => Some(mounts),
+                    Ok(mounts) => {
+                        if let Some(slot) = &slack_personal_lazy_slot {
+                            mounts.fill_slack_personal_oauth_slot(slot);
+                        }
+                        Some(mounts)
+                    }
                     Err(error) => {
                         let shutdown_result = runtime.shutdown().await;
                         if let Err(shutdown_error) = shutdown_result {
@@ -507,10 +514,8 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
-            if let Some(slack_personal_oauth) = resolve_slack_personal_oauth_config_from_env()
-                .context("failed to resolve Slack personal OAuth setup config for WebUI")?
-            {
-                serve_config = serve_config.with_slack_personal_oauth(slack_personal_oauth);
+            if let Some(slot) = slack_personal_lazy_slot {
+                serve_config = serve_config.with_slack_personal_oauth(slot);
             }
             if let Some(value) = csp_override {
                 serve_config = serve_config

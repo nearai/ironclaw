@@ -26,7 +26,6 @@ use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::AuthChallengeView;
-use crate::input::OAuthClientConfig;
 use crate::oauth_gate::{
     OAuthGateChallengeRequest, auth_scope_for_blocked_turn, challenge_view_from_flow,
     provider_scopes, turn_gate_query,
@@ -34,6 +33,7 @@ use crate::oauth_gate::{
 use crate::oauth_provider_client::{
     ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
+use crate::slack_setup::SlackPersonalSetupServiceSlot;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
@@ -109,15 +109,18 @@ impl fmt::Debug for SlackPersonalOAuthGateProviderRegistry {
 
 #[derive(Clone)]
 pub(crate) struct SlackPersonalOAuthGateProvider {
-    client: OAuthClientConfig,
+    slot: SlackPersonalSetupServiceSlot,
     secret_store: Arc<dyn SecretStore>,
     setup_lock: Arc<AsyncMutex<()>>,
 }
 
 impl SlackPersonalOAuthGateProvider {
-    pub(crate) fn new(client: OAuthClientConfig, secret_store: Arc<dyn SecretStore>) -> Self {
+    pub(crate) fn new(
+        slot: SlackPersonalSetupServiceSlot,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
-            client,
+            slot,
             secret_store,
             setup_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -206,6 +209,8 @@ impl SlackPersonalOAuthGateProvider {
         if existing.expires_at > Utc::now() {
             return Ok(Some(existing));
         }
+        self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
+            .await;
         flow_manager
             .cancel_flow(&existing.scope, existing.id)
             .await
@@ -218,6 +223,14 @@ impl SlackPersonalOAuthGateProvider {
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
     ) -> Result<PreparedSlackOAuthGateFlow, AuthProductError> {
+        let service = self
+            .slot
+            .get()
+            .ok_or(AuthProductError::BackendUnavailable)?;
+        let (client_id, _client_secret) = service.oauth_credentials().await.map_err(|e| {
+            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+            AuthProductError::BackendUnavailable
+        })?;
         let account_label = CredentialAccountLabel::new("slack_personal")?;
         let state = SlackPersonalOAuthCallbackState::new(
             flow_id,
@@ -232,8 +245,8 @@ impl SlackPersonalOAuthGateProvider {
         let pkce_verifier_hash = pkce_verifier_hash(&pkce_secret)?;
         let pkce_challenge = pkce_s256_challenge(&pkce_secret);
         let authorization_url = build_slack_personal_authorization_url(
-            self.client.client_id.as_str(),
-            self.client.redirect_uri.as_str(),
+            client_id.as_str(),
+            self.slot.redirect_uri().as_str(),
             state.as_str(),
             &pkce_challenge,
             &scopes,
@@ -256,7 +269,15 @@ impl SlackPersonalOAuthGateProvider {
             .put(scope.clone(), pkce_secret_handle(flow_id)?, material, None)
             .await
             .map(|_| ())
-            .map_err(|_| AuthProductError::BackendUnavailable)
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %e,
+                    "failed to store Slack OAuth PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
     }
 
     async fn cleanup_pkce_verifier(&self, scope: &ResourceScope, flow_id: AuthFlowId) {
@@ -281,13 +302,29 @@ impl SlackPersonalOAuthGateProvider {
         let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
             Ok(lease) => lease,
             Err(error) if error.is_unknown_secret() => return Ok(None),
-            Err(_) => return Err(AuthProductError::BackendUnavailable),
+            Err(e) => {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %e,
+                    "failed to lease Slack OAuth PKCE verifier"
+                );
+                return Err(AuthProductError::BackendUnavailable);
+            }
         };
         self.secret_store
             .consume(&scope.resource, lease.id)
             .await
             .map(Some)
-            .map_err(|_| AuthProductError::BackendUnavailable)
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %e,
+                    "failed to consume Slack OAuth PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
     }
 }
 
@@ -295,8 +332,7 @@ impl fmt::Debug for SlackPersonalOAuthGateProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SlackPersonalOAuthGateProvider")
-            .field("client_id", &self.client.client_id.as_str())
-            .field("redirect_uri", &self.client.redirect_uri)
+            .field("slot", &self.slot)
             .finish()
     }
 }
@@ -310,6 +346,8 @@ struct PreparedSlackOAuthGateFlow {
 }
 
 fn pkce_secret_handle(flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
-    SecretHandle::new(format!("slack-personal-oauth-gate-flow-pkce-{flow_id}"))
-        .map_err(|_| AuthProductError::BackendUnavailable)
+    SecretHandle::new(format!("slack-personal-oauth-gate-flow-pkce-{flow_id}")).map_err(|e| {
+        tracing::warn!(flow_id = %flow_id, error = %e, "failed to build Slack OAuth PKCE secret handle");
+        AuthProductError::BackendUnavailable
+    })
 }

@@ -97,6 +97,7 @@ mod profile_approval_authorization;
 mod project_filesystem_reader;
 mod project_service;
 mod projection;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_oauth;
 mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
@@ -197,6 +198,7 @@ pub use hooks::{
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -343,6 +345,8 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_setup::SlackPersonalSetupServiceSlot;
 pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

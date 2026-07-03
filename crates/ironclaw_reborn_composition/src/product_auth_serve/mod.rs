@@ -90,6 +90,7 @@ const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
 const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
+const SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.slack_personal.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
@@ -145,7 +146,7 @@ pub(crate) struct ProductAuthRouteState {
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
     google_oauth: Option<GoogleOAuthRouteConfig>,
-    slack_personal_oauth: Option<crate::input::OAuthClientConfig>,
+    slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -187,18 +188,37 @@ impl ProductAuthRouteState {
 
     pub(crate) fn with_slack_personal_oauth(
         mut self,
-        config: crate::input::OAuthClientConfig,
+        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
     ) -> Self {
-        self.slack_personal_oauth = Some(config);
+        self.slack_personal_oauth = Some(slot);
         self
     }
 
-    fn slack_personal_oauth_config(
+    pub(super) async fn slack_personal_oauth_credentials(
         &self,
-    ) -> Result<&crate::input::OAuthClientConfig, ProductAuthRouteFailure> {
-        self.slack_personal_oauth
-            .as_ref()
-            .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
+    ) -> Result<
+        (
+            ironclaw_auth::OAuthClientId,
+            ironclaw_auth::OAuthRedirectUri,
+        ),
+        ProductAuthRouteFailure,
+    > {
+        let slot = self.slack_personal_oauth.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                "Slack personal OAuth slot not configured (IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI not set)"
+            );
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+        let service = slot.get().ok_or_else(|| {
+            tracing::warn!("Slack personal OAuth slot not yet filled (startup race)");
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+        let (client_id, _secret) = service.oauth_credentials().await.map_err(|e| {
+            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+            ProductAuthRouteFailure::malformed_config()
+        })?;
+        let redirect_uri = slot.redirect_uri().clone();
+        Ok((client_id, redirect_uri))
     }
 
     fn store_pkce_verifier(
@@ -432,6 +452,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         GOOGLE_OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         GOOGLE_OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors.push(descriptor(
+        SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors

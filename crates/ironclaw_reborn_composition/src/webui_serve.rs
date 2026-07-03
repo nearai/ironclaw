@@ -258,7 +258,7 @@ pub struct WebuiServeConfig {
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
-    pub(crate) slack_personal_oauth: Option<crate::input::OAuthClientConfig>,
+    pub(crate) slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
     /// Optional Slack personal-binding WebUI OAuth route config.
     /// Host binaries must opt in explicitly after wiring a host-owned
     /// Slack OAuth client plus identity binding store.
@@ -391,9 +391,12 @@ impl WebuiServeConfig {
         self
     }
 
-    /// Slack personal (user-token) OAuth client config for the WebUI setup flow.
-    pub fn with_slack_personal_oauth(mut self, config: crate::input::OAuthClientConfig) -> Self {
-        self.slack_personal_oauth = Some(config);
+    /// Slack personal (user-token) OAuth lazy slot for the WebUI setup flow.
+    pub fn with_slack_personal_oauth(
+        mut self,
+        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
+    ) -> Self {
+        self.slack_personal_oauth = Some(slot);
         self
     }
 

@@ -40,6 +40,7 @@ use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
     RuntimeCredentialAccountSelectionService,
 };
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_oauth::SlackPersonalOAuthGateProviderRegistry;
 use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
@@ -476,6 +477,7 @@ pub struct RebornProductAuthServices {
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Slack personal (user-token) blocked-gate provider registry. Parallel to
     /// `oauth_gate_registry` (approach B: Google path untouched).
+    #[cfg(feature = "slack-v2-host-beta")]
     slack_oauth_gate_registry: Option<Arc<SlackPersonalOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
@@ -493,9 +495,8 @@ pub struct RebornProductAuthServices {
 
 impl std::fmt::Debug for RebornProductAuthServices {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RebornProductAuthServices")
-            .field("flow_manager", &"Arc<dyn AuthFlowManager>")
+        let mut dbg = formatter.debug_struct("RebornProductAuthServices");
+        dbg.field("flow_manager", &"Arc<dyn AuthFlowManager>")
             .field("interaction_service", &"Arc<dyn AuthInteractionService>")
             .field(
                 "manual_token_flow_service",
@@ -527,12 +528,13 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
-            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
-            .field(
-                "slack_oauth_gate_registry",
-                &self.slack_oauth_gate_registry.is_some(),
-            )
-            .finish()
+            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some());
+        #[cfg(feature = "slack-v2-host-beta")]
+        dbg.field(
+            "slack_oauth_gate_registry",
+            &self.slack_oauth_gate_registry.is_some(),
+        );
+        dbg.finish()
     }
 }
 
@@ -566,6 +568,7 @@ impl RebornProductAuthServices {
             host_managed_nearai_credential_scope: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
+            #[cfg(feature = "slack-v2-host-beta")]
             slack_oauth_gate_registry: None,
             flow_record_source: None,
         }
@@ -755,6 +758,7 @@ impl RebornProductAuthServices {
         self
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn with_slack_oauth_gate_registry(
         mut self,
         registry: Arc<SlackPersonalOAuthGateProviderRegistry>,
@@ -1130,6 +1134,7 @@ impl RebornProductAuthServices {
         {
             return Ok(Some(pkce));
         }
+        #[cfg(feature = "slack-v2-host-beta")]
         if let Some(registry) = &self.slack_oauth_gate_registry
             && let Some(pkce) = registry
                 .pkce_verifier_for_flow(scope, provider, flow_id)
@@ -1506,6 +1511,7 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         {
             return Ok(Some(view));
         }
+        #[cfg(feature = "slack-v2-host-beta")]
         if let Some(registry) = &self.slack_oauth_gate_registry
             && let Some(view) = registry
                 .challenge_for_blocked_gate(OAuthGateChallengeRequest {

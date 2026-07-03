@@ -200,6 +200,7 @@ pub(super) async fn build_runtime_mounts(
         channel_routes,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
+        setup_service: Some(setup_service),
     })
 }
 
@@ -269,8 +270,10 @@ async fn seed_legacy_slack_setup(
                 .shared_subject_user_id
                 .as_ref()
                 .map(ToString::to_string),
-            bot_token: Some(legacy_setup.bot_token),
-            signing_secret: Some(legacy_setup.signing_secret),
+            bot_token: None,
+            signing_secret: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
         })
         .await
         .map_err(|error| SlackHostBetaBuildError::InvalidConfig {
@@ -1121,7 +1124,7 @@ mod tests {
 
     use ironclaw_host_api::{SecretHandle, UserId};
     use ironclaw_secrets::InMemorySecretStore;
-    use secrecy::{ExposeSecret, SecretString};
+
     use tokio::sync::RwLock;
 
     use super::*;
@@ -1208,8 +1211,6 @@ mod tests {
                     "CENG",
                     UserId::new("user:eng-team-agent").unwrap(),
                 )],
-                signing_secret: SecretString::from("legacy-signing-secret"),
-                bot_token: SecretString::from("xoxb-legacy"),
             },
         )
         .await
@@ -1227,22 +1228,6 @@ mod tests {
         assert_eq!(
             setup.shared_subject_user_id.as_deref(),
             Some("user:shared-slack")
-        );
-        assert_eq!(
-            setup_service
-                .bot_token(&setup)
-                .await
-                .expect("bot token")
-                .expose_secret(),
-            "xoxb-legacy"
-        );
-        assert_eq!(
-            setup_service
-                .signing_secret(&setup)
-                .await
-                .expect("signing secret")
-                .expose_secret(),
-            "legacy-signing-secret"
         );
 
         let recorded_routes = route_store.routes.lock().unwrap().clone();
@@ -1296,8 +1281,6 @@ mod tests {
                     "CLEGACY",
                     UserId::new("user:legacy-agent").unwrap(),
                 )],
-                signing_secret: SecretString::from("legacy-signing-secret"),
-                bot_token: SecretString::from("xoxb-legacy"),
             },
         )
         .await
@@ -1324,6 +1307,8 @@ mod tests {
             shared_subject_user_id: None,
             bot_token_handle: SecretHandle::new(format!("bot_{revision}")).unwrap(),
             signing_secret_handle: SecretHandle::new(format!("signing_{revision}")).unwrap(),
+            oauth_client_id: None,
+            oauth_client_secret_handle: None,
             revision,
             updated_at: chrono::Utc::now(),
         }
