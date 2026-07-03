@@ -241,12 +241,27 @@ impl<'a> PromptPlanningPipeline<'a> {
         }
 
         let surface = self.visible_surface(surface_filter).await?;
-        let capability_view = LoopModelCapabilityView {
-            visible_capability_ids: surface
+        // The capability view drives call-time authorization (the model-visible
+        // capability filter), which must permit every tool the model can legitimately
+        // invoke this turn — not just the advertised subset. Under progressive tool
+        // disclosure the surface narrows `descriptors` to the advertised set but
+        // carries the full reachable catalog in `callable_capability_ids`; use that
+        // wider set so bridge / forgiving-direct calls to disclosed-but-unadvertised
+        // tools aren't rejected as "outside the model-visible capability view".
+        // Advertising and prompt rendering still use the narrow `descriptors`.
+        // `None` callable_capability_ids means no narrowing is in effect, so fall
+        // back to `descriptors` (preserves non-disclosure behavior exactly). A
+        // `Some(_)` set is used verbatim, even when empty.
+        let visible_capability_ids = match &surface.callable_capability_ids {
+            Some(callable) => callable.clone(),
+            None => surface
                 .descriptors
                 .iter()
                 .map(|descriptor| descriptor.capability_id.clone())
                 .collect(),
+        };
+        let capability_view = LoopModelCapabilityView {
+            visible_capability_ids,
         };
         self.state.surface_version = Some(surface.version.clone());
         if let Some(exit) = self.cancel_boundary().await? {

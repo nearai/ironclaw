@@ -714,6 +714,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         Ok(VisibleCapabilitySurface {
             version: self.visible_surface_version.clone(),
             descriptors,
+            callable_capability_ids: None,
         })
     }
 

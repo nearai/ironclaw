@@ -82,23 +82,42 @@ impl SyntheticIds {
         worker_index: usize,
         operation_index: usize,
     ) -> Result<UserTurnContext, String> {
-        let (_, user_index, global_index) =
-            self.synthetic_indexes(args, worker_index, operation_index);
-        let thread_user_index = self.thread_user_index(args, user_index, global_index);
-        self.user_turn_context_for_indexes(user_index, thread_user_index)
+        let actor_user_index = partitioned_worker_index(
+            self.users.len(),
+            args.concurrency,
+            worker_index,
+            operation_index,
+        );
+        let thread_user_index =
+            self.thread_user_index(args, actor_user_index, worker_index, operation_index);
+        // Spread one owner's concurrent load across `threads_per_owner` distinct
+        // threads that all share that owner's single `/turns/state.json`. This
+        // is what makes the filesystem turn-state CAS actually contend
+        // cross-thread (the production shape); with the default 1, behavior is
+        // unchanged (one thread per owner).
+        let thread_slot = if args.threads_per_owner > 1 {
+            Some(
+                worker_index.wrapping_mul(31).wrapping_add(operation_index)
+                    % args.threads_per_owner,
+            )
+        } else {
+            None
+        };
+        self.user_turn_context_for_indexes(actor_user_index, thread_user_index, thread_slot)
     }
 
     pub(crate) fn user_turn_context_for_user_index(
         &self,
         user_index: usize,
     ) -> Result<UserTurnContext, String> {
-        self.user_turn_context_for_indexes(user_index, user_index)
+        self.user_turn_context_for_indexes(user_index, user_index, None)
     }
 
     fn user_turn_context_for_indexes(
         &self,
         actor_user_index: usize,
         thread_user_index: usize,
+        thread_slot: Option<usize>,
     ) -> Result<UserTurnContext, String> {
         if actor_user_index >= self.users.len() {
             return Err(format!(
@@ -116,8 +135,17 @@ impl SyntheticIds {
         let tenant_id = self.tenants[tenant_index].clone();
         let user_id = self.users[actor_user_index].clone();
         let thread_owner_user_id = self.users[thread_user_index].clone();
-        let thread_id = ThreadId::new(format!("thread-{tenant_index:04}-{thread_user_index:06}"))
-            .map_err(|error| error.to_string())?;
+        // The owner (and thus the per-user `/turns/state.json`) is keyed by
+        // `thread_user_index`; the optional slot adds a distinct thread *under*
+        // that same owner so multiple threads share — and contend on — one
+        // turn-state document.
+        let thread_id = match thread_slot {
+            Some(slot) => ThreadId::new(format!(
+                "thread-{tenant_index:04}-{thread_user_index:06}-{slot:04}"
+            )),
+            None => ThreadId::new(format!("thread-{tenant_index:04}-{thread_user_index:06}")),
+        }
+        .map_err(|error| error.to_string())?;
         let thread_scope = ThreadScope {
             tenant_id: tenant_id.clone(),
             agent_id: self.agent_id.clone(),
@@ -141,11 +169,22 @@ impl SyntheticIds {
         })
     }
 
-    fn thread_user_index(&self, args: &Args, user_index: usize, global_index: usize) -> usize {
+    fn thread_user_index(
+        &self,
+        args: &Args,
+        user_index: usize,
+        worker_index: usize,
+        operation_index: usize,
+    ) -> usize {
         if args.active_thread_count == 0 {
             user_index
         } else {
-            global_index % args.active_thread_count
+            partitioned_worker_index(
+                args.active_thread_count,
+                args.concurrency,
+                worker_index,
+                operation_index,
+            )
         }
     }
 
@@ -162,4 +201,24 @@ impl SyntheticIds {
         let tenant_index = user_index % self.tenants.len();
         (tenant_index, user_index, global_index)
     }
+}
+
+fn partitioned_worker_index(
+    pool_size: usize,
+    worker_count: usize,
+    worker_index: usize,
+    operation_index: usize,
+) -> usize {
+    let worker_count = worker_count.max(1);
+    if pool_size < worker_count {
+        return worker_index % pool_size;
+    }
+
+    let base_len = pool_size / worker_count;
+    let remainder = pool_size % worker_count;
+    let partition_len = base_len + usize::from(worker_index < remainder);
+    let partition_start = worker_index
+        .saturating_mul(base_len)
+        .saturating_add(worker_index.min(remainder));
+    partition_start + operation_index % partition_len
 }

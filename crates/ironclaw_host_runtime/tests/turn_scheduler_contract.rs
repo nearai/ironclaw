@@ -2018,6 +2018,7 @@ async fn canceled_hanging_executor_lease_expires_to_cancelled() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn expired_lease_reconciler_fails_running_run() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
@@ -2037,6 +2038,7 @@ async fn expired_lease_reconciler_fails_running_run() {
         .with_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
 
     let request = submit_turn_request("thread-expired", "idem-expired");
+    let thread_id = request.scope.thread_id.to_string();
     let scope = request.scope.clone();
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
     store
@@ -2049,28 +2051,37 @@ async fn expired_lease_reconciler_fails_running_run() {
         .unwrap()
         .unwrap();
 
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let state = store
-                .get_run_state(ironclaw_turns::GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await
-                .unwrap();
-            if state.status == TurnStatus::Failed {
-                assert_eq!(
-                    state.failure.as_ref().map(|failure| failure.category()),
-                    Some("lease_expired")
-                );
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("expired lease was not reconciled");
+    let failed_state = wait_for_status(&*store, scope, run_id, TurnStatus::Failed).await;
+    assert_eq!(
+        failed_state
+            .failure
+            .as_ref()
+            .map(|failure| failure.category()),
+        Some("lease_expired")
+    );
     handle.shutdown().await;
+
+    let run_id_str = run_id.to_string();
+    logs_assert(|lines: &[&str]| {
+        let found = lines.iter().any(|line| {
+            line.contains("turn run scheduler recovered expired lease")
+                && line.contains(&format!("thread_id={thread_id}"))
+                && line.contains(&format!("run_id={run_id_str}"))
+                && line.contains("failure_category=lease_expired")
+        });
+        if found {
+            Ok(())
+        } else {
+            let matching: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("turn run scheduler recovered expired lease"))
+                .collect();
+            Err(format!(
+                "no expired lease recovery log found with thread_id={thread_id}, run_id={run_id_str}; \
+                 lines_with_message={matching:?}"
+            ))
+        }
+    });
 }
 
 /// A `TurnRunTransitionPort` whose `claim_next_run` blocks until a `Notify` is
@@ -2228,7 +2239,8 @@ async fn wait_for_status<S>(
     scope: TurnScope,
     run_id: ironclaw_turns::TurnRunId,
     expected: TurnStatus,
-) where
+) -> TurnRunState
+where
     S: TurnStateStore + ?Sized,
 {
     timeout(Duration::from_secs(2), async {
@@ -2241,13 +2253,13 @@ async fn wait_for_status<S>(
                 .await
                 .unwrap();
             if state.status == expected {
-                return;
+                return state;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("run did not reach expected status");
+    .expect("run did not reach expected status")
 }
 
 fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {

@@ -47,10 +47,9 @@ case "${package}" in
     printf '%s\n' "--features test-support,host-auth-mint"
     ;;
   ironclaw_product_workflow)
-    printf '%s\n' "--features test-support"
-    ;;
-  ironclaw_product_workflow_storage)
-    printf '%s\n' "--features libsql"
+    # `libsql` compiles + runs the durable idempotency-ledger contract folded in
+    # from the former ironclaw_product_workflow_storage crate.
+    printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_reborn_composition)
     printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
@@ -60,6 +59,15 @@ case "${package}" in
     ;;
   ironclaw_reborn_event_store)
     printf '%s\n' "--features libsql"
+    ;;
+  ironclaw_hooks)
+    # The durable libSQL/Postgres backends + parity matrix folded into this
+    # crate are exercised by the dedicated hooks-parity job in
+    # platform-and-compat.yml (postgres,libsql,integration,contract-tests).
+    # Keep this reborn-closure job light — the framework's own unit tests only —
+    # so it does not pull the heavy libSQL/Postgres driver deps that the default
+    # fallback would otherwise add now that the crate declares a `libsql` feature.
+    printf '%s\n' "--features contract-tests"
     ;;
   ironclaw_reborn_webui_ingress)
     printf '%s\n' "--features dev-in-memory-session"
@@ -71,16 +79,19 @@ case "${package}" in
     # DB paths without a Postgres server (which the crate-tests job has none of).
     printf '%s\n' "--features test-support,libsql"
     ;;
-  ironclaw_webui_v2 | ironclaw_webui_v2_static)
+  ironclaw_webui_v2)
     printf '%s\n' "--features webui-v2-beta"
+    ;;
+  ironclaw_reborn_openai_compat)
+    # `libsql` compiles + runs the durable ref-store contract folded in from the
+    # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
+    printf '%s\n' "--features libsql"
     ;;
   ironclaw_architecture | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
-  ironclaw_reborn_openai_compat | \
-  ironclaw_reborn_openai_compat_storage | \
   ironclaw_reborn_traces | \
   ironclaw_slack_v2_adapter | \
   ironclaw_telegram_v2_adapter | \

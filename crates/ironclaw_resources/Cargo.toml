@@ -37,5 +37,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 rust_decimal_macros = "1"
 tempfile = "3"

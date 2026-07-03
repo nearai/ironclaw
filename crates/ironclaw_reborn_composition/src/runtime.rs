@@ -51,6 +51,7 @@ use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ModelGatewayBackedSystemInferencePort,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
@@ -67,7 +68,8 @@ use ironclaw_reborn::milestone_events::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
+    RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
+    build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -99,6 +101,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::run_profile::UserProfileContext;
 
+use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
@@ -162,7 +165,11 @@ const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 // `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
 // `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
 // lives in the crate that owns the *concrete type* and can see the trait.
-struct MemoryBackedUserProfileSourceAdapter(MemoryBackedUserProfileSource);
+//
+// `pub(crate)` so the `test_support::build_user_profile_source_for_test`
+// forwarder can reuse this single adapter instead of duplicating the orphan-rule
+// workaround in the test harness.
+pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUserProfileSource);
 
 #[async_trait::async_trait]
 impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
@@ -339,6 +346,7 @@ mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
+mod latency;
 mod local_dev;
 #[cfg(test)]
 #[path = "runtime/tests/outbound_delivery.rs"]
@@ -347,7 +355,9 @@ mod production;
 mod runtime_turn_scheduler;
 mod skills;
 
-#[cfg(test)]
+#[cfg(feature = "test-support")]
+pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
@@ -478,6 +488,13 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
+    /// flush the full snapshot durably (recovering in-flight turns on the next
+    /// restart, not just gate-blocked ones). `None` when no local runtime is
+    /// wired (e.g. production-parts launches); the durable filesystem store
+    /// already persists every transition, so it needs no shutdown flush.
+    #[cfg(feature = "inmemory-turn-state")]
+    turn_state_flush: Option<Arc<LocalDevTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -761,7 +778,12 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        // Durable filesystem store: async `Result`; in-memory authority
+        // (no-DB builds or `inmemory-turn-state`): sync infallible.
+        #[cfg(all(
+            any(feature = "libsql", feature = "postgres"),
+            not(feature = "inmemory-turn-state")
+        ))]
         {
             self.turn_state
                 .persistence_snapshot()
@@ -774,7 +796,10 @@ impl LocalDevApprovalTurnRunLocator {
                     approval_turn_locator_unavailable()
                 })
         }
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        #[cfg(any(
+            feature = "inmemory-turn-state",
+            not(any(feature = "libsql", feature = "postgres"))
+        ))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -798,6 +823,84 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 ) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
+}
+
+/// Test-support forwarder for the `project_create` synthetic-capability wrap
+/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
+/// without widening any production type's visibility; mirrors the
+/// approval-gate-evidence forwarder above.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_project_create_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_project_create_capability_for_test(
+        inner,
+        project_service,
+        fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
+/// Test-support forwarder (E-SKILL seam): build the local-dev filesystem skill
+/// context source exactly as production does in [`build_reborn_runtime`], and
+/// hand back just the `HostSkillContextSource` (for prompt injection) plus the
+/// `activation_source` (backing `skill_activate`) that `test_support.rs` needs.
+/// Reuses the private [`local_dev_filesystem_skill_context_source`] so the
+/// wiring never drifts, but deliberately does NOT return the internal
+/// [`LocalDevSkillContextSource`] struct — that type (and its
+/// `execution_adapter` field) stays private to this module; only the two
+/// fields an external caller actually consumes cross the boundary. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
+) -> Result<
+    (
+        Arc<dyn HostSkillContextSource>,
+        Arc<LocalDevSelectableSkillContextSource>,
+    ),
+    RebornRuntimeError,
+> {
+    let built = local_dev_filesystem_skill_context_source(
+        local_runtime,
+        tenant_id,
+        regex_skill_activation_enabled,
+    )?;
+    Ok((built.source, built.activation_source))
+}
+
+/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
+/// synthetic-capability wrap. Bridges the private `local_dev` module to
+/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_skill_activation_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_skill_activation_capability_for_test(
+        inner,
+        skill_activation_source,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
 }
 
 #[async_trait::async_trait]
@@ -886,7 +989,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
             .runs
             .iter()
             .filter(|run| {
-                run.scope == turn_scope
+                run.scope.same_thread(&turn_scope)
                     && run.status == TurnStatus::BlockedApproval
                     && run.gate_ref.is_some()
                     && snapshot_run_actor_matches(&snapshot, run, &actor)
@@ -919,7 +1022,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
             .runs
             .iter()
             .find(|run| {
-                run.scope == turn_scope
+                run.scope.same_thread(&turn_scope)
                     && run.status == TurnStatus::BlockedApproval
                     && run.gate_ref.as_ref() == Some(gate_ref)
                     && snapshot_run_actor_matches(&snapshot, run, &actor)
@@ -938,7 +1041,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
                     && checkpoint
                         .scope
                         .as_ref()
-                        .is_none_or(|stored| stored == &turn_scope)
+                        .is_none_or(|stored| stored.same_thread(&turn_scope))
             })
             .filter_map(|checkpoint| {
                 snapshot
@@ -946,7 +1049,7 @@ impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
                     .iter()
                     .find(|run| {
                         run.run_id == checkpoint.run_id
-                            && run.scope == turn_scope
+                            && run.scope.same_thread(&turn_scope)
                             && snapshot_run_actor_matches(&snapshot, run, &actor)
                     })
                     .map(|run| run.run_id)
@@ -963,13 +1066,17 @@ fn snapshot_run_actor_matches(
     run: &TurnRunRecord,
     actor: &TurnActor,
 ) -> bool {
-    snapshot
-        .turns
-        .iter()
-        .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
+    snapshot.turns.iter().any(|turn| {
+        turn.turn_id == run.turn_id && turn.scope.same_thread(&run.scope) && turn.actor == *actor
+    })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Only referenced by the durable filesystem snapshot path (async `Result`);
+// the in-memory authority's snapshot is infallible.
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    not(feature = "inmemory-turn-state")
+))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -1437,20 +1544,15 @@ impl RebornRuntime {
     /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
     /// is intentionally read-only (it backs setup-marker reads — see
     /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
-    /// an attachment through it fails closed with `PermissionDenied`. Build a
-    /// read-write view over the same root using the read-write `workspace_mounts`
-    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
-    /// attachment is addressable at its recorded `storage_key`.
+    /// an attachment through it fails closed with `PermissionDenied`. Delegates
+    /// to `RebornServices::read_write_workspace_filesystem` — the single owner
+    /// of this recipe, shared with the `local_dev_attachment_test_support_for_test`
+    /// C-ATTACH test seam so the two views can never drift apart.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services.local_runtime.as_ref().map(|rt| {
-            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
-                Arc::clone(&rt.extension_filesystem),
-                rt.workspace_mounts.clone(),
-            ))
-        })
+        self.services.read_write_workspace_filesystem()
     }
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
@@ -1689,15 +1791,46 @@ impl RebornRuntime {
         cancellation: CancellationToken,
         capture_skill_execution_plan: bool,
     ) -> Result<AssistantReply, RebornRuntimeError> {
-        let submitted = self
+        let total_started_at = live_latency_started_at();
+        let submit_started_at = total_started_at;
+        let submitted = match self
             .submit_user_turn(
                 conversation,
                 text,
                 &cancellation,
                 capture_skill_execution_plan,
             )
-            .await?;
+            .await
+        {
+            Ok(submitted) => {
+                trace_runtime_latency_ok(
+                    "submit_user_turn",
+                    &conversation.0,
+                    Some(submitted.run_id),
+                    submit_started_at,
+                );
+                submitted
+            }
+            Err(error) => {
+                trace_runtime_latency_error(
+                    "submit_user_turn",
+                    &conversation.0,
+                    None,
+                    submit_started_at,
+                    &error,
+                );
+                trace_runtime_latency_error(
+                    "send_user_message",
+                    &conversation.0,
+                    None,
+                    total_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
 
+        let wait_started_at = live_latency_started_at();
         let reply = async {
             let terminal_state = self
                 .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
@@ -1718,6 +1851,21 @@ impl RebornRuntime {
             })
         }
         .await;
+        match &reply {
+            Ok(_) => trace_runtime_latency_ok(
+                "wait_for_terminal_and_read_reply",
+                &conversation.0,
+                Some(submitted.run_id),
+                wait_started_at,
+            ),
+            Err(error) => trace_runtime_latency_error(
+                "wait_for_terminal_and_read_reply",
+                &conversation.0,
+                Some(submitted.run_id),
+                wait_started_at,
+                error,
+            ),
+        }
 
         if let Some(skill_activation_source) = &self.skill_activation_source
             && let Err(clear_error) = skill_activation_source
@@ -1726,6 +1874,13 @@ impl RebornRuntime {
             if reply.is_ok() {
                 // Primary turn succeeded, so the cleanup failure is the only
                 // error to surface.
+                trace_runtime_latency_error(
+                    "send_user_message",
+                    &conversation.0,
+                    Some(submitted.run_id),
+                    total_started_at,
+                    &clear_error,
+                );
                 return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
             }
             // Primary turn already failed: don't mask it with the cleanup
@@ -1737,6 +1892,21 @@ impl RebornRuntime {
             );
         }
 
+        match &reply {
+            Ok(_) => trace_runtime_latency_ok(
+                "send_user_message",
+                &conversation.0,
+                Some(submitted.run_id),
+                total_started_at,
+            ),
+            Err(error) => trace_runtime_latency_error(
+                "send_user_message",
+                &conversation.0,
+                Some(submitted.run_id),
+                total_started_at,
+                error,
+            ),
+        }
         reply
     }
 
@@ -1754,14 +1924,30 @@ impl RebornRuntime {
         capture_skill_execution_plan: bool,
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
+        let send_lock_started_at = live_latency_started_at();
         let _send_guard = send_lock.lock_owned().await;
+        trace_runtime_latency_ok(
+            "send_lock_wait",
+            &conversation.0,
+            None,
+            send_lock_started_at,
+        );
         // Stopped only when every worker has exited; a single crashed worker must not
         // reject submissions while others run.
         if self.turn_scheduler.is_stopped() {
-            return Err(RebornRuntimeError::WorkerStopped);
+            let error = RebornRuntimeError::WorkerStopped;
+            trace_runtime_latency_error(
+                "submit_user_turn_preflight",
+                &conversation.0,
+                None,
+                send_lock_started_at,
+                &error,
+            );
+            return Err(error);
         }
         let scope = self.turn_scope_for(&conversation.0);
-        let accepted = self
+        let accept_started_at = live_latency_started_at();
+        let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
                 scope: self.thread_scope.clone(),
@@ -1780,7 +1966,27 @@ impl RebornRuntime {
                 content: MessageContent::text(text.to_string()),
             })
             .await
-            .map_err(|error| RebornRuntimeError::ThreadService(error.to_string()))?;
+        {
+            Ok(accepted) => {
+                trace_runtime_latency_ok(
+                    "accept_inbound_message",
+                    &conversation.0,
+                    None,
+                    accept_started_at,
+                );
+                accepted
+            }
+            Err(error) => {
+                trace_runtime_latency_error(
+                    "accept_inbound_message",
+                    &conversation.0,
+                    None,
+                    accept_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::ThreadService(error.to_string()));
+            }
+        };
 
         let accepted_message_ref = AcceptedMessageRef::new(format!("msg:{}", accepted.message_id))
             .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
@@ -1796,19 +2002,52 @@ impl RebornRuntime {
                 .skill_execution_adapter
                 .as_ref()
                 .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
-            adapter
-                .record_user_message_for_execution(
-                    scope.clone(),
-                    accepted_message_ref.clone(),
-                    text,
-                )
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            let skill_record_started_at = live_latency_started_at();
+            if let Err(error) = adapter.record_user_message_for_execution(
+                scope.clone(),
+                accepted_message_ref.clone(),
+                text,
+            ) {
+                trace_runtime_latency_error(
+                    "record_skill_execution_message",
+                    &conversation.0,
+                    None,
+                    skill_record_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::TurnSubmission(error.to_string()));
+            }
+            trace_runtime_latency_ok(
+                "record_skill_execution_message",
+                &conversation.0,
+                None,
+                skill_record_started_at,
+            );
         } else if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            let skill_record_started_at = live_latency_started_at();
+            if let Err(error) = skill_activation_source.record_user_message(
+                scope.clone(),
+                accepted_message_ref.clone(),
+                text,
+            ) {
+                trace_runtime_latency_error(
+                    "record_skill_activation_message",
+                    &conversation.0,
+                    None,
+                    skill_record_started_at,
+                    &error,
+                );
+                return Err(RebornRuntimeError::TurnSubmission(error.to_string()));
+            }
+            trace_runtime_latency_ok(
+                "record_skill_activation_message",
+                &conversation.0,
+                None,
+                skill_record_started_at,
+            );
         }
 
+        let turn_submit_started_at = live_latency_started_at();
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
@@ -1830,8 +2069,24 @@ impl RebornRuntime {
             })
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+                trace_runtime_latency_ok(
+                    "turn_coordinator_submit_turn",
+                    &conversation.0,
+                    Some(*run_id),
+                    turn_submit_started_at,
+                );
+                response
+            }
             Err(error) => {
+                trace_runtime_latency_error(
+                    "turn_coordinator_submit_turn",
+                    &conversation.0,
+                    None,
+                    turn_submit_started_at,
+                    &error,
+                );
                 if let Some(skill_activation_source) = &self.skill_activation_source {
                     skill_activation_source
                         .clear_accepted_message(&scope, &accepted_message_ref)
@@ -1864,12 +2119,19 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
+        let notify_started_at = live_latency_started_at();
         self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
             run_id,
             status: submit_status,
             event_cursor: submit_cursor,
         });
+        trace_runtime_latency_ok(
+            "turn_scheduler_notify",
+            &conversation.0,
+            Some(run_id),
+            notify_started_at,
+        );
 
         Ok(SubmittedTurn {
             _send_guard,
@@ -1953,6 +2215,16 @@ impl RebornRuntime {
         self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
+        }
+        // Everything that mutates turn state (trigger poller, credential-refresh
+        // worker, scheduler/runner) is now stopped, so the in-memory authority is
+        // quiescent. Flush its full snapshot durably so a planned restart recovers
+        // in-flight turns, not just gate-blocked ones. No-op unless a durable sink
+        // is attached; the durable filesystem store persists every transition and
+        // needs no shutdown flush (hence this is only wired under the feature).
+        #[cfg(feature = "inmemory-turn-state")]
+        if let Some(turn_state) = &self.turn_state_flush {
+            turn_state.flush().await;
         }
         Ok(())
     }
@@ -2465,6 +2737,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
+        tool_disclosure,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -3087,6 +3360,10 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    // Resolve the disclosure mode once so the runtime config and the system-prompt
+    // disclosure-protocol injection agree on a single value.
+    let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3123,10 +3400,12 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            text_only_driver: Default::default(),
+            host: Default::default(),
+            tool_disclosure: resolved_tool_disclosure,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
-            ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -3139,6 +3418,7 @@ pub async fn build_reborn_runtime(
                 DefaultSystemPromptIdentitySource::try_new(
                     local_runtime.local_dev_storage_root.clone(),
                     local_runtime.default_system_prompt_path.clone(),
+                    resolved_tool_disclosure.is_bridged(),
                 )
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: error.to_string(),
@@ -3425,9 +3705,16 @@ pub async fn build_reborn_runtime(
         )
     });
 
+    // Concrete in-memory store handle for the graceful-shutdown flush (see the
+    // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
+    // doesn't disturb its later use.
+    #[cfg(feature = "inmemory-turn-state")]
+    let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        #[cfg(feature = "inmemory-turn-state")]
+        turn_state_flush,
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
@@ -8301,6 +8588,100 @@ output_schema_ref = "schemas/write.output.json"
         );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Caller-level regression for the production attachment-landing path:
+    /// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
+    /// `build_webui_services`/`build_openai_compat_route_mount` call — through
+    /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
+    /// through the same `ProjectScopedAttachmentReader` production wires
+    /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
+    /// shared `RebornServices::read_write_workspace_filesystem` recipe via the
+    /// `local_dev_attachment_test_support_for_test` seam, but never call through
+    /// this `RebornRuntime` wrapper itself; this closes that gap so a future
+    /// regression in the wrapper (not just the shared recipe) fails a test
+    /// instead of only breaking WebUI/OpenAI-compatible attachment landing in
+    /// production.
+    #[tokio::test]
+    async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "attachment mount ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-attachment-mount-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-attachment-mount-tenant".to_string(),
+            agent_id: "runtime-attachment-mount-agent".to_string(),
+            source_binding_id: "runtime-attachment-mount-source".to_string(),
+            reply_target_binding_id: "runtime-attachment-mount-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let read_write_filesystem = runtime
+            .webui_workspace_filesystem()
+            .expect("local-dev runtime composes a read-write webui workspace filesystem");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        // Mirrors production's `attachment_read_port` wiring (read-only
+        // `workspace_filesystem`), so the read side is the same authority a
+        // vision-capable model's multimodal part would resolve through.
+        let read_port = crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+            &local_runtime.workspace_filesystem,
+        ));
+        let lander =
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(read_write_filesystem);
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
+            agent_id: AgentId::new("runtime-attachment-mount-agent").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
+            mission_id: None,
+        };
+        let refs = ironclaw_product_workflow::InboundAttachmentLander::land(
+            &lander,
+            &thread_scope,
+            "msg-attachment-mount",
+            vec![ironclaw_attachments::InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("mount-check.png".to_string()),
+                bytes: b"attachment-mount-bytes".to_vec(),
+            }],
+        )
+        .await
+        .expect("landing through the production webui workspace filesystem succeeds");
+        let storage_key = refs[0]
+            .storage_key
+            .as_deref()
+            .expect("landed attachment carries a storage_key");
+
+        let read_back = ironclaw_loop_support::LoopAttachmentReadPort::read_attachment_bytes(
+            &read_port,
+            &thread_scope.to_resource_scope(),
+            storage_key,
+        )
+        .await
+        .expect("reading the landed attachment back through the read port succeeds");
+
+        assert_eq!(read_back, b"attachment-mount-bytes".to_vec());
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

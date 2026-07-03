@@ -30,7 +30,7 @@ use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
 };
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
@@ -387,6 +387,7 @@ pub struct RebornRuntimeInput {
     #[cfg(feature = "root-llm-provider")]
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
+    pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
@@ -445,6 +446,7 @@ impl RebornRuntimeInput {
             #[cfg(feature = "root-llm-provider")]
             boot: None,
             runner: TurnRunnerSettings::default(),
+            tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
@@ -549,6 +551,11 @@ impl RebornRuntimeInput {
 
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_tool_disclosure(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = Some(mode);
         self
     }
 

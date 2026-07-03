@@ -55,6 +55,18 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             ),
             ("model_latency_ms", summary.model_latency_ms.to_string()),
             (
+                "model_latency_source",
+                summary.model_latency_source.as_str().to_string(),
+            ),
+            (
+                "provider_model",
+                summary.provider_model.as_deref().unwrap_or("-").to_string(),
+            ),
+            (
+                "provider_max_tokens",
+                summary.provider_max_tokens.to_string(),
+            ),
+            (
                 "model_latency_profile",
                 summary.model_latency_profile.as_str().to_string(),
             ),
@@ -151,6 +163,10 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
         "Run summary",
         &[
             ("backend", args.backend.as_str().to_string()),
+            (
+                "turn_state_backend",
+                args.turn_state_backend.as_str().to_string(),
+            ),
             ("preset", format_preset(args.preset)),
             ("scenario", args.scenario.as_str().to_string()),
             ("run_id", run_id.to_string()),
@@ -178,6 +194,15 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             ),
             ("prefill_concurrency", args.prefill_concurrency.to_string()),
             ("model_latency_ms", args.model_latency_ms.to_string()),
+            (
+                "model_latency_source",
+                args.model_latency_source.as_str().to_string(),
+            ),
+            (
+                "provider_model",
+                args.provider_model.as_deref().unwrap_or("-").to_string(),
+            ),
+            ("provider_max_tokens", args.provider_max_tokens.to_string()),
             (
                 "model_latency_profile",
                 args.model_latency_profile.as_str().to_string(),

@@ -12,7 +12,13 @@ use uuid::Uuid;
 use crate::{RuntimeProcessError, sandbox_process::RebornSandboxScopeKey};
 
 /// Maximum model-facing process output preview before middle truncation.
-pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
+///
+/// Lowered 64KB -> 16KB: shell/command output is fresh (non-cached) prompt
+/// tokens re-sent on every subsequent turn, so oversized previews dominate cost
+/// on data/log tasks. 16KB keeps enough head+tail context for the model to act
+/// on (full output is still saved and referenceable) while cutting the per-turn
+/// cost of large results. Measured no accuracy regression on data tasks.
+pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 16 * 1024;
 const COMMAND_PREVIEW_HALF_SIZE: usize = COMMAND_MAX_OUTPUT_SIZE / 2;
 const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
 const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);

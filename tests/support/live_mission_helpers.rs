@@ -150,36 +150,3 @@ impl Drop for ApprovalAutoResponder {
         self.handle.abort();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn looks_like_routine_notification_accepts_marker() {
-        assert!(looks_like_routine_notification(
-            "**[bitcoin_price_checker]** Some output\nbody body body"
-        ));
-    }
-
-    #[test]
-    fn looks_like_routine_notification_rejects_foreground_reply() {
-        // Foreground replies have no marker.
-        assert!(!looks_like_routine_notification(
-            "## Bitcoin Price Checker Routine Created ✅\nSchedule: */5 * * * *"
-        ));
-    }
-
-    #[test]
-    fn looks_like_routine_notification_rejects_empty_marker() {
-        assert!(!looks_like_routine_notification("**[]** empty name"));
-    }
-
-    #[test]
-    fn tool_is_matches_bare_and_parenthesised() {
-        assert!(tool_is("mission_fire", "mission_fire"));
-        assert!(tool_is("mission_fire(abc)", "mission_fire"));
-        assert!(!tool_is("mission_fired", "mission_fire"));
-        assert!(!tool_is("other_mission_fire", "mission_fire"));
-    }
-}

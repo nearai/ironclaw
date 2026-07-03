@@ -108,6 +108,13 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 0)]
     pub(crate) active_thread_count: usize,
 
+    /// Distinct threads per owner-user that share one `/turns/state.json`. Set
+    /// above 1 to reproduce the production contention shape (a user's foreground
+    /// turn plus routine turns on different threads concurrently writing the same
+    /// per-user turn-state document). Default 1 = one thread per owner.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) threads_per_owner: usize,
+
     /// Synthetic tenants distributed across users.
     #[arg(long, default_value_t = 1)]
     pub(crate) tenants: usize,
@@ -124,8 +131,24 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 4)]
     pub(crate) prefill_concurrency: usize,
 
+    /// Exercise the gate-blocked turn path: every Nth measured user-turn
+    /// operation blocks its run on a gate (alternating approval/auth), resumes
+    /// it, then re-claims and completes. 0 (default) = never block, the pure
+    /// claim/complete hot path. Combine with
+    /// `--turn-state-backend memory-persist-on-block` to drive persist-on-block
+    /// writes under concurrency and confirm the durable sink does not
+    /// reintroduce contention.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) gate_blocked_every: usize,
+
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
+
+    /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
+    /// per-user state.json (CAS, current production path); `memory` = one shared
+    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
+    pub(crate) turn_state_backend: TurnStateBackend,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
@@ -250,6 +273,18 @@ pub(crate) struct Args {
     /// Synthetic model latency for mixed-user-session operations.
     #[arg(long, default_value_t = 0)]
     pub(crate) model_latency_ms: u64,
+
+    /// Source for mixed-user-session model waits. `provider` sends real LLM requests.
+    #[arg(long, value_enum, default_value_t = ModelLatencySource::Synthetic)]
+    pub(crate) model_latency_source: ModelLatencySource,
+
+    /// Optional per-request model override for provider-backed model latency.
+    #[arg(long)]
+    pub(crate) provider_model: Option<String>,
+
+    /// Max output tokens for provider-backed model latency requests.
+    #[arg(long, default_value_t = 16)]
+    pub(crate) provider_max_tokens: u32,
 
     /// Synthetic model latency profile for mixed-user-session operations.
     #[arg(long, value_enum, default_value_t = ModelLatencyProfile::Fixed)]
@@ -425,6 +460,56 @@ impl Backend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TurnStateBackend {
+    /// Durable per-user `state.json` via the filesystem store (per-step CAS
+    /// read-modify-write). The current production path; livelocks under
+    /// concurrent same-user writers.
+    Filesystem,
+    /// One shared in-process `InMemoryTurnStateStore` authority — coordination
+    /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
+    Memory,
+    /// The shipped hosted-single-tenant-volume config: the shared in-memory
+    /// authority with a durable persist-on-block sink attached. The sink fires
+    /// only when the gate-blocked set changes (off the hot path), so this
+    /// measures the extra cost the durability wiring adds to the normal
+    /// claim/complete path versus plain `Memory`.
+    MemoryPersistOnBlock,
+}
+
+impl TurnStateBackend {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Filesystem => "filesystem",
+            Self::Memory => "memory",
+            Self::MemoryPersistOnBlock => "memory-persist-on-block",
+        }
+    }
+
+    /// Whether a durable persist-on-block sink is attached to the in-memory
+    /// authority.
+    pub(crate) fn persists_on_block(self) -> bool {
+        matches!(self, Self::MemoryPersistOnBlock)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelLatencySource {
+    Synthetic,
+    Provider,
+}
+
+impl ModelLatencySource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::Provider => "provider",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ModelLatencyProfile {
@@ -562,11 +647,17 @@ struct RunSummary {
     trace_interval_seconds: u64,
     users: usize,
     active_thread_count: usize,
+    threads_per_owner: usize,
+    turn_state_backend: TurnStateBackend,
+    gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
     prefill_turns_per_thread: usize,
     prefill_concurrency: usize,
     model_latency_ms: u64,
+    model_latency_source: ModelLatencySource,
+    provider_model: Option<String>,
+    provider_max_tokens: u32,
     model_latency_profile: ModelLatencyProfile,
     model_latency_jitter_ms: u64,
     model_latency_spike_every: usize,
@@ -818,6 +909,27 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
     }
+    if matches!(args.model_latency_source, ModelLatencySource::Provider) {
+        if !matches!(args.scenario, Scenario::MixedUserSession) {
+            return Err(
+                "--model-latency-source provider requires --scenario mixed-user-session"
+                    .to_string(),
+            );
+        }
+        if args.provider_max_tokens == 0 {
+            return Err("--provider-max-tokens must be greater than 0".to_string());
+        }
+        if args.suite.is_some()
+            || ramp::is_enabled(args)
+            || sweep::is_enabled(args)
+            || args.repetitions > 1
+        {
+            return Err(
+                "--model-latency-source provider cannot be combined with suite, ramp, sweep, or repeated runs"
+                    .to_string(),
+            );
+        }
+    }
     if args.repetitions == 0 {
         return Err("--repetitions must be greater than 0".to_string());
     }
@@ -903,6 +1015,15 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.sweep_users.contains(&0) {
         return Err("--sweep-users values must be greater than 0".to_string());
     }
+    let max_concurrency = args
+        .sweep_concurrency
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(args.concurrency);
+    let max_concurrency = args
+        .ramp_concurrency
+        .map_or(max_concurrency, |ramp_max| max_concurrency.max(ramp_max));
     let min_user_count = args.sweep_users.iter().copied().min().unwrap_or(args.users);
     let max_active_thread_count = args
         .sweep_active_thread_count
@@ -916,6 +1037,20 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if max_active_thread_count > min_user_count {
         return Err(
             "--active-thread-count and --sweep-active-thread-count values must be less than or equal to every --sweep-users value"
+                .to_string(),
+        );
+    }
+    if args.scenario.is_user_turn()
+        && args
+            .sweep_active_thread_count
+            .iter()
+            .copied()
+            .chain(std::iter::once(args.active_thread_count))
+            .any(|active_thread_count| active_thread_count == 0)
+        && max_concurrency > min_user_count
+    {
+        return Err(
+            "user-turn scenarios with --active-thread-count 0 require --users to be greater than or equal to --concurrency"
                 .to_string(),
         );
     }
@@ -989,6 +1124,18 @@ fn validate_args(args: &Args) -> Result<(), String> {
         }
         if args.prefill_threads > args.users {
             return Err("--prefill-threads must be less than or equal to --users".to_string());
+        }
+        // Prefill warms one thread per owner (`user_turn_context_for_user_index`,
+        // no slot), while measured runs spread across `threads_per_owner`
+        // slot-suffixed threads. Combining the two would warm different thread
+        // IDs than the workload benchmarks, so reject it rather than silently
+        // prefilling the wrong threads.
+        if args.threads_per_owner > 1 {
+            return Err(
+                "--prefill-threads is incompatible with --threads-per-owner > 1 (prefill would \
+                 warm different thread IDs than the measured slotted threads)"
+                    .to_string(),
+            );
         }
         if let Some(min_sweep_users) = args.sweep_users.iter().min()
             && args.prefill_threads > *min_sweep_users
@@ -1086,6 +1233,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.trace_interval_seconds.to_string())
             .arg("--model-latency-ms")
             .arg(args.model_latency_ms.to_string())
+            .arg("--model-latency-source")
+            .arg(args.model_latency_source.as_str())
+            .arg("--provider-max-tokens")
+            .arg(args.provider_max_tokens.to_string())
             .arg("--model-latency-profile")
             .arg(args.model_latency_profile.as_str())
             .arg("--model-latency-jitter-ms")
@@ -1122,6 +1273,9 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .stderr(Stdio::piped());
         if let Some(preset) = args.preset {
             command.arg("--preset").arg(preset.as_str());
+        }
+        if let Some(model) = &args.provider_model {
+            command.arg("--provider-model").arg(model);
         }
         if let Some(label) = &args.suite_case_label {
             command.arg("--suite-case-label").arg(label);
@@ -1622,11 +1776,17 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         trace_interval_seconds: args.trace_interval_seconds,
         users: args.users,
         active_thread_count: args.active_thread_count,
+        threads_per_owner: args.threads_per_owner,
+        turn_state_backend: args.turn_state_backend,
+        gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
         prefill_turns_per_thread: args.prefill_turns_per_thread,
         prefill_concurrency: args.prefill_concurrency,
         model_latency_ms: args.model_latency_ms,
+        model_latency_source: args.model_latency_source,
+        provider_model: args.provider_model.clone(),
+        provider_max_tokens: args.provider_max_tokens,
         model_latency_profile: args.model_latency_profile,
         model_latency_jitter_ms: args.model_latency_jitter_ms,
         model_latency_spike_every: args.model_latency_spike_every,
@@ -1754,7 +1914,9 @@ where
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
     let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(PersistentResourceGovernor::new(store)))
+    Ok(Arc::new(
+        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
+    ))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
