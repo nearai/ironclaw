@@ -311,36 +311,32 @@ def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> 
 
 
 def _has_persisted_slack_personal_dm_target(reborn_home: Path, user_id: str) -> bool:
+    return _persisted_slack_personal_dm_payload(reborn_home, user_id) is not None
+
+
+def _persisted_slack_personal_dm_payload(reborn_home: Path, user_id: str) -> dict[str, object] | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
-        return False
+        return None
     with sqlite3.connect(db_path) as db:
-        row = db.execute(
-            "SELECT COUNT(*) FROM root_filesystem_entries "
-            "WHERE path LIKE '%slack-personal-binding/dm-targets%' "
-            "AND CAST(contents AS TEXT) LIKE ?",
-            (f"%{user_id}%",),
-        ).fetchone()
-    return bool(row and int(row[0]) > 0)
+        rows = db.execute(
+            "SELECT contents FROM root_filesystem_entries "
+            "WHERE path LIKE '%/slack-personal-binding/dm-targets/%' "
+            "ORDER BY path"
+        ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("user_id") == user_id:
+            return payload
+    return None
 
 
 def _persisted_slack_personal_dm_channel_id(reborn_home: Path, user_id: str) -> str | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    if not db_path.exists():
-        return None
-    with sqlite3.connect(db_path) as db:
-        row = db.execute(
-            "SELECT contents FROM root_filesystem_entries "
-            "WHERE path LIKE '%slack-personal-binding/dm-targets%' "
-            "AND CAST(contents AS TEXT) LIKE ? "
-            "ORDER BY path LIMIT 1",
-            (f"%{user_id}%",),
-        ).fetchone()
-    if not row:
-        return None
-    try:
-        payload = json.loads(row[0])
-    except (TypeError, json.JSONDecodeError):
+    payload = _persisted_slack_personal_dm_payload(reborn_home, user_id)
+    if payload is None:
         return None
     channel_id = str(payload.get("dm_channel_id") or "").strip()
     return channel_id or None

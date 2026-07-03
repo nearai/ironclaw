@@ -784,6 +784,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm(None))
 
+    def test_browser_diagnostic_redaction_handles_empty_auth_token_and_llm_keys(self):
+        value = (
+            "prefix abc "
+            "sk-test1234567890abcdefghijklmnop "
+            "sk-ant-test1234567890"
+        )
+
+        with patch.object(run_live_qa, "AUTH_TOKEN", ""):
+            redacted = run_live_qa._redact_browser_diagnostic_value(value)
+
+        self.assertIn("prefix abc", redacted)
+        self.assertIn("<REDACTED_OPENAI_KEY>", redacted)
+        self.assertIn("<REDACTED_ANTHROPIC_KEY>", redacted)
+        self.assertNotIn("sk-test1234567890abcdefghijklmnop", redacted)
+        self.assertNotIn("sk-ant-test1234567890", redacted)
+
     def test_slack_dm_route_discovery_prefers_configured_user(self):
         captured: dict[str, object] = {}
 
@@ -902,6 +918,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("must be a DM", str(result.details["error"]))
         self.assertEqual(result.details["slack_delivery_target_kind"], "non_dm")
+
+    def test_slack_delivery_channel_ignores_failed_route_discovery_channel_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            run_live_qa,
+            "_slack_preflight",
+            return_value={
+                "route_discovery": {
+                    "checked": True,
+                    "ok": False,
+                    "channel_id": "D0STALE",
+                }
+            },
+        ):
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=Path(tmpdir),
+                reborn_home=Path(tmpdir) / "reborn-home",
+                env={},
+            )
+
+            self.assertIsNone(run_live_qa._slack_delivery_channel_id(ctx))
 
     def test_qa_7a_connect_capabilities_match_chat_connect_flow(self):
         self.assertEqual(
@@ -1577,6 +1614,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(
                 run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web"),
+                "D0QA",
+            )
+
+    def test_slack_personal_dm_lookup_requires_exact_user_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            result = run_live_qa._seed_slack_personal_dm_target(
+                home,
+                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                auth_user_id="user:web-extra",
+                slack_user_id="UQAUSER",
+                dm_channel_id="D0QA",
+            )
+
+            self.assertTrue(result["seeded"], result)
+            self.assertFalse(
+                run_live_qa._has_slack_delivery_target("", home, "user:web")
+            )
+            self.assertIsNone(
+                run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web")
+            )
+            self.assertEqual(
+                run_live_qa._persisted_slack_personal_dm_channel_id(
+                    home,
+                    "user:web-extra",
+                ),
                 "D0QA",
             )
 

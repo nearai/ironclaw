@@ -52,6 +52,17 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertIn('"access_token":"<REDACTED>"', browser_events.read_text(encoding="utf-8"))
             self.assertIn("Strict scrub redacted diagnostic artifacts", result.stdout)
 
+    def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            product_log.write_text("aws_access_key = akia1234567890abcdef\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse(product_log.exists())
+
     def test_strict_scrub_deletes_unsafe_artifacts_and_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

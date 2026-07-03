@@ -558,7 +558,11 @@ def prepare_reborn_home(
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
         slack_route_discovery = _discover_slack_dm_route_channel(config, process_env)
-        channel_id = str(slack_route_discovery.get("channel_id") or "").strip()
+        channel_id = (
+            str(slack_route_discovery.get("channel_id") or "").strip()
+            if slack_route_discovery.get("ok")
+            else ""
+        )
         if channel_id:
             slack_user_id = str(slack_route_discovery.get("dm_user_id") or "").strip()
             slack_route_discovery["personal_dm_seed"] = _seed_slack_personal_dm_target(
@@ -797,7 +801,8 @@ def _redact_browser_diagnostic_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     text = str(value)
-    text = text.replace(AUTH_TOKEN, "<REDACTED_AUTH_TOKEN>")
+    if AUTH_TOKEN:
+        text = text.replace(AUTH_TOKEN, "<REDACTED_AUTH_TOKEN>")
     text = re.sub(
         r"(?i)([?&](?:token|code|state|access_token|refresh_token|id_token)=)[^&#\s]+",
         r"\1<REDACTED>",
@@ -812,6 +817,8 @@ def _redact_browser_diagnostic_value(value: object) -> object:
     text = re.sub(r"(?i)(cookie\s*:\s*)[^\r\n]+", r"\1<REDACTED>", text)
     text = re.sub(r"xox[baprs]-[A-Za-z0-9-]{10,}", "<REDACTED_SLACK_TOKEN>", text)
     text = re.sub(r"ya29\.[A-Za-z0-9._-]{20,}", "<REDACTED_GOOGLE_TOKEN>", text)
+    text = re.sub(r"sk-ant-[A-Za-z0-9_-]{10,}", "<REDACTED_ANTHROPIC_KEY>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "<REDACTED_OPENAI_KEY>", text)
     return text
 
 
@@ -973,8 +980,15 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
             await action(page)
         except Exception:
             screenshot = output_dir / f"{case_name}.failure.png"
-            await page.screenshot(path=str(screenshot), full_page=True)
-            diagnostics.screenshot_path = screenshot
+            try:
+                await page.screenshot(path=str(screenshot), full_page=True)
+                diagnostics.screenshot_path = screenshot
+            except Exception as screenshot_exc:
+                diagnostics.record(
+                    "diagnostic_error",
+                    source="screenshot_capture",
+                    error=repr(screenshot_exc),
+                )
             try:
                 await context.tracing.stop(path=str(diagnostics.trace_path))
                 diagnostics.trace_written = True
@@ -988,8 +1002,12 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
         finally:
             try:
                 diagnostics.write_summary()
-            except Exception:
-                pass
+            except Exception as summary_exc:
+                print(
+                    "[reborn-webui-v2-live-qa] failed to write browser diagnostics "
+                    f"summary for {case_name}: {type(summary_exc).__name__}: {summary_exc}",
+                    flush=True,
+                )
             await context.close()
             await browser.close()
 
@@ -1698,14 +1716,17 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     slack = _slack_preflight(ctx)
     discovery = slack.get("route_discovery")
     if isinstance(discovery, dict):
-        seed = discovery.get("personal_dm_seed")
-        if isinstance(seed, dict):
-            seeded_channel_id = str(seed.get("dm_channel_id") or "").strip()
-            if seeded_channel_id:
-                return seeded_channel_id
-        channel_id = str(discovery.get("channel_id") or "").strip()
-        if channel_id:
-            return channel_id
+        if discovery.get("checked") and not discovery.get("ok"):
+            return None
+        if discovery.get("ok"):
+            seed = discovery.get("personal_dm_seed")
+            if isinstance(seed, dict):
+                seeded_channel_id = str(seed.get("dm_channel_id") or "").strip()
+                if seeded_channel_id:
+                    return seeded_channel_id
+            channel_id = str(discovery.get("channel_id") or "").strip()
+            if channel_id:
+                return channel_id
     persisted_channel_id = _persisted_slack_personal_dm_channel_id(ctx.reborn_home, _auth_user_id())
     if persisted_channel_id:
         return persisted_channel_id
