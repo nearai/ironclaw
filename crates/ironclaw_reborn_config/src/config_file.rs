@@ -804,6 +804,14 @@ impl RebornConfigFile {
                         Cow::Owned(format!("slack.channel_routes[{index}].channel_id")),
                         channel_id,
                     )?;
+                    if channel_id.starts_with('D') {
+                        return Err(RebornConfigFileError::InvalidField {
+                            path: attributed_path.display().to_string(),
+                            field: format!("slack.channel_routes[{index}].channel_id"),
+                            reason: "Slack shared-channel routes must not use DM channel IDs"
+                                .to_string(),
+                        });
+                    }
                 }
                 if let Some(subject_user_id) = &route.subject_user_id {
                     check_non_empty_trimmed(
@@ -1458,6 +1466,27 @@ subject_user_id = "user:eng-team-agent"
         assert_eq!(
             slack.channel_routes[0].subject_user_id.as_deref(),
             Some("user:eng-team-agent")
+        );
+    }
+
+    #[test]
+    fn rejects_dm_prefixed_slack_channel_route_channel_id() {
+        let toml = r#"
+[slack]
+enabled = true
+
+[[slack.channel_routes]]
+channel_id = "D0HOST"
+subject_user_id = "user:eng-team-agent"
+"#;
+        let error = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("DM-prefixed channel route IDs must fail validation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("slack.channel_routes[0].channel_id"),
+            "message: {error}"
         );
     }
 
