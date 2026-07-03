@@ -191,12 +191,17 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /\$\{logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" \/>`\}/,
-    "floating logs control should reserve space with an end-of-content spacer",
+    /<div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">/,
+    "floating logs control should be clipped to the transcript area, not the composer",
   );
   assert.match(
     messageListSource,
-    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-5 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
+    /\$\{logsPath && html`<div aria-hidden="true" className="h-40 shrink-0" \/>`\}/,
+    "floating logs control should reserve enough end-of-content space to clear the composer",
+  );
+  assert.match(
+    messageListSource,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-32 right-5[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\]/,
     "floating logs button classes should live in a module-level constant",
   );
   assert.match(
