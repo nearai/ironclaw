@@ -21,11 +21,14 @@ struct MatrixRow {
 enum FailureSetup {
     ModelError,
     CapabilityProtocolError,
+    CapabilityInvalidInputRecoverable,
+    CapabilityInvalidOutputRecoverable,
     IterationLimit,
     InvalidModelOutput,
     DriverBugApprovalSkip,
     NoProgressDetected,
     PolicyDenied,
+    CapabilityPolicyDeniedRecoverable,
     CompactionUnavailable,
     TranscriptWriteFailed,
     CheckpointRejected,
@@ -85,6 +88,24 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: true,
     },
     MatrixRow {
+        label: "ModelError <- capability Failed(InvalidInput)",
+        setup: FailureSetup::CapabilityInvalidInputRecoverable,
+        // stack #5389 makes this recoverable; matrix asserts recovery.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::ModelError,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
+        label: "CapabilityProtocolError <- capability Failed(InvalidOutput)",
+        setup: FailureSetup::CapabilityInvalidOutputRecoverable,
+        // stack #5389 makes this recoverable; matrix asserts recovery.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::CapabilityProtocolError,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
         label: "IterationLimit <- family_with_iteration_limit(0)",
         setup: FailureSetup::IterationLimit,
         expected_kind: ExpectedTerminal::Failed {
@@ -133,6 +154,15 @@ const ROWS: &[MatrixRow] = &[
         // capability outcomes into model-visible tool-error results; with a
         // follow-up model reply the planned executor completes instead of
         // surfacing LoopFailureKind::PolicyDenied.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::PolicyDenied,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
+        label: "PolicyDenied <- capability Failed(PolicyDenied)",
+        setup: FailureSetup::CapabilityPolicyDeniedRecoverable,
+        // stack #5389 makes this recoverable; matrix asserts recovery.
         expected_kind: ExpectedTerminal::CompletedDivergence {
             planned_kind: LoopFailureKind::PolicyDenied,
         },
@@ -207,6 +237,28 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             ))]);
             run_local(crate::families::default(), host, None).await
         }
+        FailureSetup::CapabilityInvalidInputRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after invalid input"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                CapabilityFailureKind::InvalidInput,
+                "invalid input supplied by model",
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
+        FailureSetup::CapabilityInvalidOutputRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after invalid output"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                CapabilityFailureKind::InvalidOutput,
+                "invalid tool output",
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
         FailureSetup::IterationLimit => {
             let host = MockHost::new(vec![reply_response_with_text("iteration explanation")]);
             run_local(family_with_iteration_limit(0), host, None).await
@@ -266,6 +318,17 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                         ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
                     safe_summary: "provider call denied".to_string(),
                 },
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
+        FailureSetup::CapabilityPolicyDeniedRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after policy denial"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                CapabilityFailureKind::PolicyDenied,
+                "capability policy denied",
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -472,6 +535,14 @@ fn batch_outcome(
         outcomes: vec![outcome],
         stopped_on_suspension: false,
     }
+}
+
+fn failed_capability(error_kind: CapabilityFailureKind, safe_summary: &str) -> CapabilityOutcome {
+    CapabilityOutcome::Failed(ironclaw_turns::run_profile::CapabilityFailure {
+        error_kind,
+        safe_summary: safe_summary.to_string(),
+        detail: None,
+    })
 }
 
 fn batch_outcome_stopped(

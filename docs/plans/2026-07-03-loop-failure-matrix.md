@@ -49,6 +49,14 @@ transcript message (6 explainable kinds; bounded 10s model call, before Final ch
 `retry_turn` → resume from latest resumable checkpoint). Main has **no retry-from-failed
 at all** — every failure is terminal for the user.
 
+Stack note: this branch now sits on top of #5389 and #5390. #5389 changes
+model-fixable capability failures into model-visible tool errors that continue
+the loop instead of terminating it; the matrix asserts those recovered outcomes
+directly. #5390 adds the `FailureLane` / `RetryDisposition` classifiers keyed on
+the sanitized category string plus the run's `retryable` signal; this matrix PR
+does not own that classifier, but proves real failure paths emit the inputs that
+feed it.
+
 ## 3. The matrix
 
 Layers: **E** = executor (`ironclaw_agent_loop` tests, MockHost), **B** = binary/driver
@@ -71,18 +79,23 @@ variant-agnostic mechanism (checkpoint-presence retry contracts + store/runner t
 | PolicyDenied | capability denials; gate abort | `with_batch_outcomes(Denied)` | E | tables + unit | executor | **yes** | category only, terminal | matrix row |
 | CompactionUnavailable | prompt/compaction stage | `set_compaction_outcome(Err)` | E | comp table only | executor happy-path | **yes** | category only, terminal | **add to turns table** + matrix row |
 
+Additional #5389 recovery rows live in the executor matrix: capability
+`Failed(InvalidInput)` (planned terminal kind `ModelError`), `Failed(InvalidOutput)`
+(planned `CapabilityProtocolError`), and `Failed(PolicyDenied)` (planned
+`PolicyDenied`) now complete after the model receives a tool-error result.
+
 P2/P4 (all variants): ≡ shared — `retry_failed_turn_store_contract.rs` (both directions,
 incl. explicit-nonresumable refusal) + `turn_runner` retryable-mapping tests + the ModelError
 E2E (`reborn_failure_retry_resume_e2e.rs`). The matrix adds **one more binary-level P4 row**
 (capability-stage failure → retry resumes) so P4 isn't proven only through the model stage.
 
-## 4. Known one-off gaps to close alongside the matrix
+## 4. Known one-off gaps/status
 
-- `all_failure_kinds_produce_stable_sanitized_category_strings`
-  (`loop_exit/tests/mod.rs:1006`) omits `CheckpointUnavailable` + `CompactionUnavailable`
-  and has **no exhaustiveness guard** — add both + an exhaustive-match guard so a new
-  variant fails compilation, mirroring the parity-guarded composition table.
-- Legacy `text_loop_driver` private name map omits `CompactionUnavailable` (drift risk).
+- RESOLVED in the matrix: `all_failure_kinds_produce_stable_sanitized_category_strings`
+  now includes `CheckpointUnavailable` + `CompactionUnavailable` and has an
+  exhaustive-match guard so a new `LoopFailureKind` variant fails compilation.
+- STILL OPEN: legacy `text_loop_driver` private name map omits
+  `CompactionUnavailable` (drift risk).
 - Prefer scripted-outcome injection over enum construction everywhere: the mapping logic
   (`executor/mapping.rs`, `capability_failure_kind`, recovery) is itself under test.
 - Cancellation: cooperative cancel (`request_cancellation`) yields `LoopExit::Cancelled`
@@ -91,37 +104,60 @@ E2E (`reborn_failure_retry_resume_e2e.rs`). The matrix adds **one more binary-le
 ## 5a. Divergences found by the executor matrix (asserted as actual behavior)
 
 The table-driven test (`executor/tests/failure_matrix.rs`) asserts what the code
-DOES; these divergences from the expected rows are documented, not silently fixed:
+DOES; these divergences from the original expected rows are documented, not
+silently fixed:
 
-1. **Approval gate + `SkipAndContinue` completes instead of `DriverBug`.**
+1. **STILL OPEN — Approval gate + `SkipAndContinue` completes instead of
+   `DriverBug`.**
    `GateOutcome::validate_for_gate_kind` declares it invalid, but `GateStage`
    never enforces it — the run completes (the gated call is skipped, not
    executed). Enforcement would be a behavior change; flagged for owner review.
-2. **`NoProgressDetected` is in the explainable set but gets no explanation.**
+2. **STILL OPEN — `NoProgressDetected` is in the explainable set but gets no
+   explanation.**
    The `StopKind::NoProgressDetected` failure path never calls
    `attach_failure_explanation`, contradicting Part-1's own explainable-set
    intent. Candidate fix on the failed branch only — NOTE: the no-progress path
    is PinchBench-load-bearing (final-answer nudge), so any change must leave the
    nudge untouched and be benchmarked.
-3. **A single `Denied` capability outcome recovers and completes** (denial is
-   fed back to the model as a tool error; the model adapts). Terminal
-   `PolicyDenied` requires repeated denials (no-progress) or a gate abort. This
-   is the no-borking contract working as designed — kept as a matrix row
-   asserting recovery, which is itself a strong vs-main datapoint.
-4. **`TranscriptWriteFailed` / `CheckpointRejected` never surface as
+3. **RESOLVED BY STACK #5389 — model-fixable capability failures recover and
+   complete.** A single `Denied` outcome is fed back to the model as a tool
+   error, and the stack now does the same for capability
+   `Failed(InvalidInput)`, `Failed(InvalidOutput)`, and
+   `Failed(PolicyDenied)`. Terminal `ModelError` / `CapabilityProtocolError` /
+   `PolicyDenied` still exist for true run-ending paths or exhausted recovery,
+   but these model-fixable rows are intentionally recovered. The matrix labels
+   those rows "stack #5389 makes this recoverable; matrix asserts recovery".
+4. **STILL OPEN / legacy-only — `TranscriptWriteFailed` / `CheckpointRejected`
+   never surface as
    `LoopExit::Failed` in the planned executor** — they surface as executor
    host-stage errors (`HostUnavailable{Transcript}` / `CheckpointFailed`) which
    the runner maps to retryable host-stage failures. The enum origins are
    legacy-`text_loop_driver`-only, confirming §1.4.
 
-5. **`interrupted_unexpectedly` is lost at the runner boundary.** The planned
+5. **STILL OPEN — `interrupted_unexpectedly` is lost at the runner boundary.**
+   The planned
    driver's `map_executor_error` maps an in-flight `Cancelled` host error to
    `interrupted_unexpectedly`, but runner sanitization projects the run failure
    as `driver_failed` — the category is overwritten before it reaches the user
    (binary-level divergence test locks both sides). Candidate follow-up:
    preserve the driver-mapped category through runner sanitization.
 
-## 5. Definition of 100% coverage (acceptance)
+## 6. Relationship to #5390 FailureLane
+
+#5390 owns the pure classifier unit tests: `failure_lane(category, retryable)`
+and `retry_disposition(category, retryable)` are tested exhaustively against the
+canonical category list in `ironclaw_reborn_composition`.
+
+This matrix is complementary. It drives real executor/binary paths and proves
+the emitted sanitized categories and retryable checkpoint signal are the inputs
+the classifier expects. The actual `failure_lane()` / `retry_disposition()`
+calls live in the binary E2E test because `ironclaw_agent_loop` has no dependency
+on `ironclaw_reborn_composition`, and adding that dependency would be outside
+this test/doc-only change. Executor-tier rows still assert their real terminal
+or recovered loop outcome; binary rows assert the classifier alignment for the
+observed `(category, retryable)` pair.
+
+## 7. Definition of 100% coverage (acceptance)
 
 Every variant has exactly one of:
 (a) a real-origin injection row asserting P1+P3 at its declared layer (+ shared P2/P4), or
