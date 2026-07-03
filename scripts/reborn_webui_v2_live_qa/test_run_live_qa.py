@@ -1597,6 +1597,30 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     config_path.read_text(encoding="utf-8"),
                 )
 
+    def test_signed_slack_event_cases_prefer_real_route_user_actor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text("[slack]\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID": "UQAUSER",
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID": "U0REBORNQA",
+                },
+                clear=True,
+            ):
+                changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
+                    config_path,
+                    ["qa_5d_slack_strategy_doc_answer"],
+                )
+
+            self.assertTrue(changed)
+            self.assertEqual(user_id, "UQAUSER")
+            self.assertIn(
+                'slack_user_id = "UQAUSER"',
+                config_path.read_text(encoding="utf-8"),
+            )
+
     def test_slack_personal_dm_seed_satisfies_delivery_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)

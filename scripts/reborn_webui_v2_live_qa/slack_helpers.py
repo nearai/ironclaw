@@ -135,10 +135,13 @@ def _configure_slack_legacy_actor_if_needed(
     }
     if not signed_slack_event_cases.intersection(selected_cases):
         return False, None
-    slack_user_id = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
-        "U0REBORNQA",
-    ).strip()
+    slack_user_id = (
+        _slack_dm_route_user_id()
+        or os.environ.get(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
+            "U0REBORNQA",
+        ).strip()
+    )
     if not slack_user_id:
         return False, None
     changed = _set_slack_section_key(config_path, "slack_user_id", slack_user_id)
