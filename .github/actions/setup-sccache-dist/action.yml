@@ -155,5 +155,7 @@ runs:
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         sccache --stop-server || true
         if [[ "${dist_enabled}" == "true" ]]; then
-          sccache --dist-status
+          if ! sccache --dist-status; then
+            echo "::warning title=sccache-dist scheduler probe failed::Distributed compilation may fall back or fail if the scheduler remains unavailable."
+          fi
         fi
