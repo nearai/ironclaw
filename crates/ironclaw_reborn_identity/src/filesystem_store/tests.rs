@@ -716,7 +716,8 @@ async fn corrupt_persisted_user_id_surfaces_invalid_user_id() {
     // silently dropped. Drives both the `lookup` fast path and `resolve_or_create`.
     let store = store();
     let t = tenant("t");
-    let path = identity_path(t.as_str(), "oauth", "google", "", "g-corrupt").expect("path");
+    let path =
+        identity_path(t.as_str(), SurfaceKind::Oauth, "google", "", "g-corrupt").expect("path");
     store
         .write_record(
             &path,
@@ -760,7 +761,8 @@ async fn corrupt_json_body_surfaces_backend_error() {
     // `Backend` (deserialize failure), not panic and not be swallowed.
     let store = store();
     let t = tenant("t");
-    let path = identity_path(t.as_str(), "oauth", "google", "", "g-badjson").expect("path");
+    let path =
+        identity_path(t.as_str(), SurfaceKind::Oauth, "google", "", "g-badjson").expect("path");
     store
         .filesystem
         .put(

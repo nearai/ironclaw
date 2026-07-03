@@ -150,7 +150,7 @@ where
     async fn identity_user(
         &self,
         tenant: &str,
-        surface: &str,
+        surface: SurfaceKind,
         provider: &str,
         instance: &str,
         subject: &str,
@@ -213,7 +213,7 @@ where
         }
 
         let tenant = identity.tenant_id.as_str();
-        let surface = identity.surface_kind.as_str();
+        let surface = identity.surface_kind;
         let provider = identity.provider_kind.as_str();
         // No installation (browser OAuth) maps to "" so the key stays total.
         let instance = identity
@@ -358,7 +358,7 @@ where
             .unwrap_or("");
         self.identity_user(
             key.tenant_id.as_str(),
-            key.surface_kind.as_str(),
+            key.surface_kind,
             key.provider_kind.as_str(),
             instance,
             key.external_subject_id.as_str(),
@@ -378,7 +378,7 @@ where
             .unwrap_or("");
         let path = identity_path(
             key.tenant_id.as_str(),
-            key.surface_kind.as_str(),
+            key.surface_kind,
             key.provider_kind.as_str(),
             instance,
             key.external_subject_id.as_str(),
@@ -421,7 +421,7 @@ where
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError> {
         let tenant = identity.tenant_id.as_str();
-        let surface = identity.surface_kind.as_str();
+        let surface = identity.surface_kind;
         let provider = identity.provider_kind.as_str();
         let instance = identity
             .provider_instance_id
