@@ -63,7 +63,7 @@ pub use oauth_product_auth::{
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    wrap_outbound_delivery_capabilities_for_test,
+    OutboundDeliveryCapabilityTestParts, wrap_outbound_delivery_capabilities_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};

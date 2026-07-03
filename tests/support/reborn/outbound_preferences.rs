@@ -27,6 +27,15 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 
+/// `set_calls` + `last_accepted` bundled behind ONE mutex (not two) so a
+/// concurrent reader can never observe a `set` that recorded its call id but
+/// not yet its accepted summary, or vice versa.
+#[derive(Default)]
+struct FakeOutboundState {
+    set_calls: Vec<RebornOutboundDeliveryTargetId>,
+    last_accepted: Option<RebornOutboundDeliveryTargetSummary>,
+}
+
 /// A fixed in-memory `OutboundPreferencesProductFacade` double.
 ///
 /// Stateful: `set_outbound_preferences` accepting a known target updates
@@ -36,8 +45,7 @@ use ironclaw_product_workflow::{
 /// facade method.
 pub(crate) struct FakeOutboundPreferencesFacade {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
-    set_calls: Mutex<Vec<RebornOutboundDeliveryTargetId>>,
-    last_accepted: Mutex<Option<RebornOutboundDeliveryTargetSummary>>,
+    state: Mutex<FakeOutboundState>,
 }
 
 impl FakeOutboundPreferencesFacade {
@@ -49,8 +57,7 @@ impl FakeOutboundPreferencesFacade {
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
             ],
-            set_calls: Mutex::new(Vec::new()),
-            last_accepted: Mutex::new(None),
+            state: Mutex::new(FakeOutboundState::default()),
         })
     }
 
@@ -58,9 +65,10 @@ impl FakeOutboundPreferencesFacade {
     /// read-back that a `Completed` outcome actually reached the facade seam (a
     /// no-op set that still fabricated a success payload would leave this empty).
     pub(crate) fn recorded_set_target_ids(&self) -> Vec<String> {
-        self.set_calls
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_calls
             .iter()
             .map(|id| id.as_str().to_string())
             .collect()
@@ -84,9 +92,10 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         let last_accepted = self
-            .last_accepted
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_accepted
             .clone();
         match last_accepted {
             Some(summary) => Ok(RebornOutboundPreferencesResponse {
@@ -109,14 +118,14 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
         let Some(summary) = self.find_target(&target_id).cloned() else {
             return Err(target_not_found());
         };
-        self.set_calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(target_id);
-        *self
-            .last_accepted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.clone());
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.set_calls.push(target_id);
+            state.last_accepted = Some(summary.clone());
+        }
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(summary),
             final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,

@@ -908,38 +908,14 @@ pub(crate) fn wrap_skill_activation_capability_for_test(
 /// `local_dev` module to `test_support`; mirrors the `project_create` /
 /// `skill_activate` forwarders above. Tests only.
 #[cfg(feature = "test-support")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    facade: std::sync::Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>,
-    fallback_user_id: ironclaw_host_api::UserId,
-    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-    capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
-    tool_permission_overrides: std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-    auto_approve: std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
-    persistent_policies: std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
-    target_set_requires_approval: bool,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
-    local_dev::wrap_outbound_delivery_capabilities_for_test(
-        inner,
-        facade,
-        fallback_user_id,
-        approval_requests,
-        capability_leases,
-        tool_permission_overrides,
-        auto_approve,
-        persistent_policies,
-        target_set_requires_approval,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
+    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
 }
 
 #[async_trait::async_trait]

@@ -177,11 +177,17 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
         .assert_reply_contains("could not activate")
         .await
         .expect("run recovered and finalized");
+    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+    // has a second, unrelated `Err` path (JSON serialization failure of the
+    // captured request) — asserting the exact "not found" message text rules
+    // that out, so an infra-level failure can't masquerade as proof the
+    // skill's instructions were absent.
+    let err = harness
+        .assert_model_request_contains("BLOAT_SKILL_FILLER")
+        .await
+        .expect_err("a failed activation must not inject the skill's instructions");
     assert!(
-        harness
-            .assert_model_request_contains("BLOAT_SKILL_FILLER")
-            .await
-            .is_err(),
-        "a failed activation must not inject the skill's instructions"
+        err.to_string().starts_with("no model request contained"),
+        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
     );
 }

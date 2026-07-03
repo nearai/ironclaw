@@ -3505,18 +3505,20 @@ impl HostRuntimeCapabilityHarness {
             port =
                 ironclaw_reborn_composition::test_support::wrap_outbound_delivery_capabilities_for_test(
                     port,
-                    Arc::clone(&parts.facade)
-                        as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>,
-                    self.user_id.clone(),
-                    recording_approval_requests,
-                    Arc::clone(&approval.capability_leases),
-                    Arc::clone(&parts.tool_permission_overrides),
-                    auto_approve,
-                    Arc::clone(&parts.persistent_approval_policies),
-                    parts.requires_approval,
-                    run_context.clone(),
-                    input_resolver.clone(),
-                    result_writer.clone(),
+                    ironclaw_reborn_composition::test_support::OutboundDeliveryCapabilityTestParts {
+                        facade: Arc::clone(&parts.facade)
+                            as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>,
+                        fallback_user_id: self.user_id.clone(),
+                        approval_requests: recording_approval_requests,
+                        capability_leases: Arc::clone(&approval.capability_leases),
+                        tool_permission_overrides: Arc::clone(&parts.tool_permission_overrides),
+                        auto_approve,
+                        persistent_policies: Arc::clone(&parts.persistent_approval_policies),
+                        target_set_requires_approval: parts.requires_approval,
+                        run_context: run_context.clone(),
+                        input_resolver: input_resolver.clone(),
+                        result_writer: result_writer.clone(),
+                    },
                 )?;
         }
         // skill_activate (E-SKILL): wrapped only for `skill_activation_tools`.
