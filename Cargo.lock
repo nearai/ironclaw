@@ -3931,6 +3931,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
  "ironclaw_gateway",
+ "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",

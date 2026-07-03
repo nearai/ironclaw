@@ -87,6 +87,66 @@ async fn mcp_tool_call_reaches_mock_server() {
     assert_recorded_tools_call(&server, "search", "needle-xyz-42");
 }
 
+/// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
+/// application/json, text/event-stream` header (`crates/ironclaw_mcp/src/lib.rs`),
+/// but here the mock server answers every leg with SSE framing instead of
+/// plain JSON. Exercises `parse_mcp_response`/`response_is_sse` against a
+/// real reqwest response's headers, not just the hand-built fixtures in the
+/// crate-tier `parse_mcp_response_accepts_both_advertised_framings`.
+#[tokio::test]
+async fn mcp_tool_call_over_sse_framed_responses() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": ["mock result"]}),
+    }])
+    .await;
+    server.enable_sse_framing();
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call(
+                "mock-mcp.search",
+                serde_json::json!({"query": "needle-sse-99"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search for something")
+        .await
+        .expect("turn completes");
+    h.assert_reply_contains("done")
+        .await
+        .expect("final reply finalized over SSE-framed handshake");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool invoked despite SSE framing on every leg");
+    // Confirms the SSE-framed `initialize` leg round-tripped with the
+    // scripted arguments intact, not just that the recorder fired.
+    assert_recorded_tools_call(&server, "search", "needle-sse-99");
+    // Distinct from the assert above: proves the tool result surfaced back to
+    // the model over the SSE-framed wire, not just that the call was recorded.
+    h.assert_tool_result_contains("mock result")
+        .await
+        .expect("scripted mock result surfaced through the SSE-framed response");
+    // `LoopbackMcpRuntimeHttpEgress` pre-declares the capability schema
+    // locally, so the client never sends a live `tools/list` (see
+    // `with_mock_mcp` docs). Pins that `enable_sse_framing` covered exactly
+    // this three-leg handshake, not a superset with an untested `tools/list`.
+    let methods: Vec<String> = server
+        .recorded_requests()
+        .into_iter()
+        .map(|r| r.method)
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["initialize", "notifications/initialized", "tools/call"]
+    );
+}
+
 /// Guards `assert_mcp_tool_called` against vacuous pass: when no MCP tool ran
 /// (plain echo turn on the default backend), the assertion must return `Err`.
 #[tokio::test]
@@ -169,6 +229,58 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
     h.assert_tool_error(ToolErrorClass::Failed, "backend")
         .await
         .expect("server 5xx surfaced as a model-visible Failed tool error");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized (not terminal driver_unavailable)");
+}
+
+/// Error path — MCP `tools/call` returns a valid, successful JSON-RPC response
+/// whose parsed `result` payload exceeds the host's MCP output-size limit
+/// (`McpRuntimeConfig::default().max_output_bytes` = 1 MiB, wired by
+/// `build_loopback_mcp_runtime` in `tests/support/reborn/harness_mcp.rs`). The
+/// client surfaces this as `Failed{OutputTooLarge}` (recoverable, model-visible
+/// — `reason` token `"output_too_large"`), and the run completes. Distinct wire
+/// path from both cases above: this trips neither the HTTP status gate nor the
+/// JSON-RPC error-field guard — the HTTP call and JSON-RPC parse both succeed —
+/// it trips the POST-parse `output_bytes > max_output_bytes` check in
+/// `McpRuntime::execute_extension_json` (`crates/ironclaw_mcp/src/lib.rs`),
+/// which is a wholly different mechanism from an HTTP-egress
+/// `response_body_limit` rejection: `LoopbackMcpRuntimeHttpEgress` (this
+/// harness's test-only egress) never enforces `response_body_limit` against the
+/// real bytes it reads back, so only this post-parse size check is reachable at
+/// this test tier — a genuinely oversized HTTP response body would just be read
+/// in full and only then rejected once parsed.
+#[tokio::test]
+async fn mcp_tool_call_output_too_large_surfaces_failed() {
+    // `content` serializes (inside the mock server's `{"content":[{"type":
+    // "text","text": <json-string>}]}` wrapper) to roughly `oversized_len + 60`
+    // bytes — comfortably over the 1 MiB (1_048_576 byte) limit with a wide
+    // margin so the exact escaping/wrapper overhead can't make this test flaky.
+    let oversized_len = 1_200_000usize;
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": ["x".repeat(oversized_len)]}),
+    }])
+    .await;
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn completes");
+    assert_recorded_tools_call(&server, "search", "x");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool call reached the server before the output-size rejection");
+    h.assert_tool_error(ToolErrorClass::Failed, "output_too_large")
+        .await
+        .expect("oversized MCP output surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");

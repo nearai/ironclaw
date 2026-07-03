@@ -8,28 +8,16 @@
 //!
 //! Thread A-install calls `builtin.extension_install` for "notion". Thread
 //! A-remove (a distinct conversation) calls `builtin.extension_remove` for the
-//! same package. Thread B calls `builtin.extension_search` for "notion" and
-//! asserts the result does NOT carry `installation_phase: "installed"` — the
-//! field is absent in search results for extensions that are not installed.
-//! Because all three conversations use different conversation IDs but the same
+//! same package (arg shape `{"extension_id": "<id>"}`, identical to install/
+//! activate; success output carries `"removed":true` — both confirmed from
+//! `extension_lifecycle_capabilities.rs`'s unit tests). Thread B calls
+//! `builtin.extension_search` for "notion" and asserts the result does NOT
+//! carry `installation_phase: "installed"` — the field is entirely absent for
+//! extensions that are not installed (confirmed from the same unit tests),
+//! and reappears/disappears as the lifecycle state changes. Because all three
+//! conversations use different conversation IDs but the same
 //! `Arc<HostRuntimeCapabilityHarness>`, this proves cross-thread extension
 //! removal persistence: a remove in thread A is durably visible to thread B.
-//!
-//! The `builtin.extension_remove` arg shape is `{"extension_id": "<id>"}`,
-//! identical to `builtin.extension_install` and `builtin.extension_activate`
-//! (confirmed from `schemas/builtin/extension_remove.input.v1.json`).
-//!
-//! The remove output carries `"removed":true` in its payload on success
-//! (confirmed from the unit test in `extension_lifecycle_capabilities.rs` that
-//! calls `assert_eq!(remove["payload"]["removed"], true)`).
-//!
-//! The search output contains `installation_phase: "installed"` only when the
-//! extension is in the installed lifecycle state — the field is entirely absent
-//! when the extension is not installed (confirmed from the unit test that calls
-//! `assert_eq!(available_github.get("installation_phase"), None)` before install
-//! and `assert_eq!(installed_github["installation_phase"], "installed")` after).
-//! After removal the extension reverts to the pre-install state, so
-//! `installation_phase` disappears again.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -66,10 +54,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // A distinct conversation_id → distinct binding/thread scope, but the
     // same `HostRuntimeCapabilityHarness`, so the remover can see and delete
     // the installation that Phase 1 just wrote.
-    //
-    // Capability: `builtin.extension_remove`
-    // Arg shape:  `{"extension_id": "<id>"}` — same as install/activate
-    // Success output: payload carries `"removed":true`
     let remover = g
         .thread("ext-remove-phase-remove")
         .script([
