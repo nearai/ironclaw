@@ -20,19 +20,9 @@
 //! regresses, the sentinel never reaches a captured request and the assert fails.
 //!
 //! The second test below pins the OTHER half of E-SKILL: criteria-based
-//! (keyword) auto-activation stays OFF on the coordinator path. No
-//! `skill_activate` tool call is scripted, and `seed_system_skill_for_test`'s
-//! SKILL.md already carries `activation.keywords: ["greet"]` with
-//! `regex_skill_activation_enabled=true` wired unconditionally (`harness.rs`'s
-//! `skill_activation_tools`) — but `SkillActivationMode::ActivationCriteria`
-//! selection (`ironclaw_first_party_extension_ports::activation::select_skill_activations`)
-//! never runs on this path: it only fires when `take_message_for_run` returns
-//! `Some`, populated by `record_user_message`, whose sole production caller is
-//! the legacy `RebornRuntime::submit_user_turn` — the coordinator stack never
-//! records the message. So a keyword-matching message alone must NOT inject
-//! the skill prompt; the explicit `builtin.skill_activate` capability path
-//! (proven above) remains the supported mechanism (product decision, see
-//! closed issue #5530).
+//! (keyword) auto-activation stays OFF on the coordinator path (product
+//! decision, closed issue #5530) — see the mechanism note on that test for
+//! why.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -85,16 +75,14 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
 }
 
 // INTENTIONAL: `SkillActivationMode::ActivationCriteria` (keyword/regex
-// auto-activation) does NOT fire on the modern `TurnCoordinator`/agent-loop
-// path — auto-activation is disabled on purpose (product decision, see closed
-// issue #5530). The explicit `builtin.skill_activate` capability path is the
-// supported mechanism and is what this binary covers. Mechanically: criteria
-// selection only runs when `take_message_for_run` returns `Some`, populated by
-// `record_user_message`, whose sole production caller is the legacy
-// `RebornRuntime::submit_user_turn` — the coordinator stack never records the
-// message, so criteria selection stays inert there by design. This test pins
-// that intentional OFF state: a keyword-matching message alone must NOT inject
-// the skill.
+// auto-activation) does not fire on the modern `TurnCoordinator`/agent-loop
+// path — disabled on purpose (product decision, closed issue #5530). The
+// explicit `builtin.skill_activate` capability path (proven above) is the
+// supported mechanism. Mechanically: criteria selection only runs when
+// `take_message_for_run` returns `Some`, populated by `record_user_message`,
+// whose sole production caller is the legacy `RebornRuntime::submit_user_turn`
+// — the coordinator stack never records the message, so criteria selection
+// stays inert here by design.
 #[tokio::test]
 async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
     let group = RebornIntegrationGroup::skill_activation_tools()

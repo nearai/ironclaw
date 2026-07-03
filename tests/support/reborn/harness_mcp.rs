@@ -1,4 +1,4 @@
-//! Reborn integration-test harness — mock-MCP scaffolding (slice 6).
+//! Reborn integration-test harness — mock-MCP scaffolding.
 //!
 //! Extracted from `harness.rs` to keep that file focused: this module owns the
 //! loopback mock-MCP wiring — the real `McpRuntime` built over a loopback HTTP
@@ -43,7 +43,7 @@ use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_r
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Slice 6: concrete loopback MCP runtime — an `McpRuntime` wired over the
+/// Concrete loopback MCP runtime — an `McpRuntime` wired over the
 /// test-only `LoopbackMcpRuntimeHttpEgress` so the mock-MCP integration test
 /// reaches a real in-process HTTP server (no real network).
 pub(super) type LoopbackMcpRuntime = McpRuntime<
@@ -66,7 +66,7 @@ pub(super) fn build_loopback_mcp_runtime(mcp_url: &str) -> HarnessResult<Arc<Loo
     Ok(mcp_runtime)
 }
 
-/// Slice 6: variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
 /// that also wires a loopback MCP runtime for the mock-MCP integration test.
 ///
 /// The `first_party_egress` covers any first-party tool calls (recording, no
@@ -212,7 +212,7 @@ fn first_party_and_mcp_trust_policy(mcp_provider_id: &str) -> HarnessResult<Host
     )])?)
 }
 
-/// Network policy for the slice-6 loopback mock MCP server. The mock binds to
+/// Network policy for the loopback mock MCP server. The mock binds to
 /// `http://127.0.0.1:<port>/mcp`, so the policy must permit the loopback host and
 /// must NOT deny private/loopback IP ranges (127.0.0.1 is loopback). An empty
 /// `allowed_targets` (the `NetworkPolicy::default()`) is rejected by the host
@@ -230,7 +230,7 @@ pub(super) fn mcp_loopback_network_policy() -> NetworkPolicy {
 }
 
 /// Test-only `RuntimeHttpEgress` that routes MCP traffic to the loopback mock
-/// MCP server using a real HTTP client (slice 6 design).
+/// MCP server using a real HTTP client.
 ///
 /// Unlike `RecordingRuntimeHttpEgress`, this makes REAL HTTP connections so the
 /// `MockMcpServer` actually receives the JSON-RPC handshake. It:

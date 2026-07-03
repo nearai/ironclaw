@@ -277,18 +277,13 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Execute `builtin.profile_set` under the run's CANONICAL binding
-        // subject user (the hashed `UserId` the actor `host-user` resolves
-        // to), not the constructor's fixed test user, so capability dispatch
-        // and the loop's `resolve_user_profile` read-back share the SAME
-        // `(tenant, user)` — matching production and mirroring
-        // `live_approvals`'s alignment above. Without this, a second thread's
-        // loop resolves the profile under the canonical binding subject user
-        // while the write dispatched under the fixed constructor user, so the
-        // read-back never sees it. This is ALSO why `profile_tools` cannot go
-        // through `build_with_capability` (see its doc comment): the
-        // capability depends on `base`, so `base` must be resolved first and
-        // reused here, exactly like `live_approvals`.
+        // Execute `builtin.profile_set` under the run's canonical binding
+        // subject user, mirroring `live_approvals`'s alignment above.
+        // Without this, a second thread's loop resolves the profile under
+        // the canonical subject user while the write dispatched under the
+        // fixed constructor user, so the read-back never sees it. Also why
+        // this cannot go through `build_with_capability`: the capability
+        // depends on `base`, so `base` must be resolved first.
         let subject_user = base.canonical_subject_user()?;
         let host_runtime = HostRuntimeCapabilityHarness::profile_tools()
             .await?
@@ -383,12 +378,7 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-management group. See
-    /// [`RebornIntegrationGroup::skill_management_tools`]. Reuses the SAME
-    /// `HostRuntimeCapabilityHarness::skill_management_tools()` preset the
-    /// QA/trace-tier harness already wires (`harness.rs`'s
-    /// `with_host_runtime_skill_management_capabilities`), so the int-tier
-    /// group and the trace-tier smoke test never drift on capability ids /
-    /// mounts / policy.
+    /// [`RebornIntegrationGroup::skill_management_tools`].
     pub async fn skill_management_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime = HostRuntimeCapabilityHarness::skill_management_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));

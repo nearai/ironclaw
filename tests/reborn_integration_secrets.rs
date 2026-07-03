@@ -12,9 +12,6 @@
 
 #![cfg(feature = "libsql")]
 
-// The support tree is large and shared; a single-test file exercises only a
-// slice of it, so suppress dead-code warnings on the includes (matches
-// `reborn_integration_greeting.rs`).
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;
@@ -150,7 +147,6 @@ async fn secret_read_back_fails_for_unknown_handle() {
         .await
         .expect("put secret");
 
-    // Requesting a handle that was never written must fail.
     let unknown_handle = SecretHandle::new("nonexistent").expect("valid unknown handle");
     let result = store.lease_once(&scope, &unknown_handle).await;
     assert!(

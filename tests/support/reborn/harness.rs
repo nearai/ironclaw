@@ -324,8 +324,8 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    /// Snapshot of every command string recorded by the inert process port
-    /// (slice 5). Empty on the echo recording backend or the live-shell path.
+    /// See [`HostRuntimeCapabilityHarness::process_commands`]; empty for the
+    /// Echo recording backend.
     pub(crate) fn recorded_process_commands(&self) -> Vec<String> {
         match self {
             Self::Recording(_) => Vec::new(),
@@ -2081,17 +2081,9 @@ impl HostRuntimeCapabilityHarness {
         .await?;
         harness.network_policy = wildcard_test_policy();
         harness.additional_provider_trust = bundled_extension_provider_trust()?;
-        // `publish_bundled_extension_for_test` makes the github package's
-        // METADATA dispatchable (registry + trust), but `build_local_runtime`
-        // mounts `/system/extensions` at an EMPTY per-harness tempdir
-        // (`factory.rs`: `create_dir_all(root.join("system/extensions"))`) —
-        // NOT at the real asset directory `local_dev_root_filesystem` mounts
-        // on the OTHER (`github_issue_tools_*`) harness path. Without the
-        // actual WASM module bytes reachable at that mount, dispatch fails
-        // with `host_creation_failed` when the runtime tries to compile
-        // `wasm/github_tool.wasm`. Copy the real asset directory into the
-        // harness's own tempdir mount so the module is genuinely loadable —
-        // additive, test-only, no production wiring changes.
+        // See point 2 of this constructor's doc comment: registry presence
+        // alone isn't enough, the WASM asset bytes must be copied into this
+        // harness's own tempdir mount too.
         copy_dir_recursive(
             &github_support::asset_root(),
             &harness
@@ -3965,9 +3957,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
                 factory.with_capability_execution_mount(capability_id.clone(), mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
-        // E-PROJ: inject the local-dev synthetic `project_create` capability when
-        // this harness surfaces it (project_tools). One linear step — no
-        // capability-specific branching inline in the assembly chain above.
+        // E-PROJ: see `apply_synthetic_capability_wrappers`'s doc comment.
         let port = self.harness.apply_synthetic_capability_wrappers(
             port,
             run_context,

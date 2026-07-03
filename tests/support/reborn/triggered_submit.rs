@@ -133,17 +133,7 @@ impl RebornIntegrationHarness {
 
     /// Submit a turn through the REAL `TrustedTriggerFireSubmitter` so it carries
     /// a genuine `TurnOriginKind::ScheduledTrigger` origin, end to end (E-TRIGGERED-SUBMIT).
-    ///
-    /// Builds a synthetic `TriggerFire` + `TriggerMaterializedPrompt::for_fire` (test
-    /// ctor) and hands them to the production `trusted_trigger_fire_submitter`, over a
-    /// fresh, per-call `InMemoryConversationServices` dedicated to the trigger path —
-    /// the same conversation-services type production's own local-dev build wires for
-    /// this exact purpose (`ironclaw_reborn_composition::runtime.rs`,
-    /// `build_trigger_poller_services_from_conversation_services`), NOT the harness's
-    /// unrelated direct-chat product-workflow binding service (a different axis, even
-    /// in real production). The harness's REAL shared `coordinator` is passed through
-    /// unchanged, so the submitted run lands in the same turn store/scheduler as every
-    /// other harness turn.
+    /// See the module docs for how the fire/prompt/conversation-services are built.
     ///
     /// The submitted run then executes autonomously on the background scheduler; no
     /// scripted model gateway is registered for the trigger's own resolved scope, so it

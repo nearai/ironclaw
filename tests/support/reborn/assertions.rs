@@ -1,21 +1,14 @@
-//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`]
-//! — the canonical, richer egress-assertion API (design §3.3 `assertions.rs`,
-//! §3.6 P1 ergonomics).
+//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`].
 //!
-//! Slice 2 co-located three asserts in `builder.rs`
-//! (`assert_reply_contains`/`assert_tool_invoked`/`assert_egress_request_matching`,
-//! a single substring host check). This slice grows the `assert_*` family past
-//! that threshold, so the egress/tool-result assertions move to their own file
-//! per the long-planned split. They read the captured Tier-2
-//! `RuntimeHttpEgressRequest`s and recorded capability results through the
-//! `pub(super)` accessors on the harness (`captured_egress_requests` /
-//! `captured_capability_results`) rather than re-reaching internals.
+//! These read the captured Tier-2 `RuntimeHttpEgressRequest`s and recorded
+//! capability results through the `pub(super)` accessors on the harness
+//! (`captured_egress_requests` / `captured_capability_results`) rather than
+//! re-reaching internals.
 //!
 //! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
 //! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
-//! over the SAME captured `RecordingRuntimeHttpEgress` request log slice 2 wired
-//! — there is one runtime-lane egress-assertion API, not a parallel one (the
-//! O-egress MCP/OAuth interceptor folds its per-URL needs in here). The one
+//! over the SAME captured `RecordingRuntimeHttpEgress` request log — there is
+//! one runtime-lane egress-assertion API, not a parallel one. The one
 //! exception is `assert_network_egress_header_contains`, which reads the
 //! recording *network* egress lane — required for the T0-SECRET-INJECT
 //! credential-injection proof, whose harness routes through the host egress
@@ -283,11 +276,8 @@ impl RebornIntegrationHarness {
             .iter()
             .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
             .map(|message| {
-                // Fail loud on a missing `content` field, and on a decode
-                // error, rather than silently dropping the message
-                // (.claude/rules/error-handling.md) — a malformed or
-                // content-less envelope must surface as its own diagnosis,
-                // not degrade into a misleading "not found" from the caller.
+                // Fail loud, per .claude/rules/error-handling.md — see doc
+                // comment above for why this must not silently skip.
                 let Some(content) = message.content.as_deref() else {
                     return Err("ToolResultReference message missing content".into());
                 };
@@ -652,18 +642,13 @@ fn redact_data_url(url: &str) -> String {
 }
 
 /// Multi-turn baseline-sliced variants of the thread-history assertions
-/// (`assert_tool_error*`, conversation-history containment) + the conversation
-/// history assert.
+/// (`assert_tool_error*`, conversation-history containment).
 ///
-/// The `assert_tool_error*` family above scans the FULL thread history and is
-/// documented (`assert_tool_error` doc) as safe only for single-turn harnesses:
-/// on a thread with more than one turn it cannot tell which turn produced a
-/// given `ToolResultReference`. The `*_since` methods here close that gap using
-/// the same `[baseline..]` slice idiom the egress/invocation assertions use
-/// (`assert_egress_count` etc.), but over thread-history message COUNT rather
-/// than a shared in-process recorder: capture [`history_len`] at the start of a
-/// turn, then assert `*_since(baseline, ..)` after it, and only the messages
-/// that turn appended are considered.
+/// The full-history family above is safe only for single-turn harnesses (see
+/// the `assert_tool_error` doc). These `*_since` methods close that gap using
+/// the same `[baseline..]` slice idiom as the egress assertions, but over
+/// thread-history message COUNT: capture [`history_len`] at the start of a
+/// turn, then assert `*_since(baseline, ..)` after it.
 impl RebornIntegrationHarness {
     /// Full persisted thread-history for this harness's thread, in sequence
     /// order. The baseline-sliced `*_since` assertions read this; kept private
@@ -705,11 +690,9 @@ impl RebornIntegrationHarness {
         })
     }
 
-    /// `persisted_tool_error_summaries`, but over only the `[baseline..]` slice
-    /// of thread history — the multi-turn-safe collector shared by the `*_since`
-    /// tool-error assertions. Mirrors the full-history collector's fail-loud
-    /// decode contract: a `ToolResultReference` with missing `content` or an
-    /// undecodable envelope is an `Err`, never silently skipped.
+    /// `persisted_tool_error_summaries`, but over only the `[baseline..]` slice —
+    /// shared collector for the `*_since` tool-error assertions. Same fail-loud
+    /// decode contract as the full-history collector above.
     async fn persisted_tool_error_summaries_since(
         &self,
         baseline: usize,

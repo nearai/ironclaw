@@ -22,9 +22,6 @@
 //! The Slack push/delivery-routing matrix stays with the services-shell spike
 //! (C-TRIGGERED-DELIVERY defer).
 
-// The support tree is large and shared; a single-test file exercises only a
-// slice of it, so suppress dead-code warnings on the includes (matches
-// `reborn_qa_recorded_behavior.rs`).
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;

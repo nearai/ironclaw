@@ -1,11 +1,11 @@
-//! Reborn integration-test framework — slice 2 tool-calling turn.
+//! Reborn integration-test framework — tool-calling turn.
 //!
 //! Proves the tool path + the §3.7 two-tier egress design end-to-end: the
 //! scripted model emits a `builtin.http` tool call → the real first-party tool
 //! runtime executes it through `RuntimeHttpEgress` → the call is captured by the
-//! recording egress (Tier-2) → the model finalizes a text reply. Same single
-//! LLM seam as slice 1 (scripted `TraceLlm` beneath the real decorator chain);
-//! no network, no services, no keys, no Docker, no `integration` feature.
+//! recording egress (Tier-2) → the model finalizes a text reply. Uses the same
+//! scripted `TraceLlm` seam beneath the real decorator chain as other harness
+//! tests; no network, no services, no keys, no Docker, no `integration` feature.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]

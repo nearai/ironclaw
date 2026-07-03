@@ -92,7 +92,6 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
-                // Slice 6: real MCP runtime backed by the loopback mock server.
                 let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
                     &mcp_url,
                     MOCK_MCP_PROVIDER_ID,
@@ -102,15 +101,14 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::GithubIssueTools => {
-                // T0-SECRET-INJECT: GitHub WASM caps behind `GithubHarnessAuthorizer`
-                // (InjectCredentialAccountOnce). No approval gate / user alignment —
-                // the authorizer allows every dispatch outright.
+                // T0-SECRET-INJECT (see the `GithubIssueTools` variant docs above):
+                // no approval gate / user alignment — the authorizer allows every
+                // dispatch outright.
                 let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::WebAccessTools => {
-                // C-WEBACCESS: real web-access.* capabilities behind the plain
-                // default GrantAuthorizer (no credentials to inject).
+                // C-WEBACCESS — see the `WebAccessTools` variant docs above.
                 let host_runtime = HostRuntimeCapabilityHarness::web_access_tools().await?;
                 host_runtime.install_web_access_responses(web_access_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))

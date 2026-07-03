@@ -79,7 +79,6 @@ async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
         .expect("harness builds");
     h.submit_turn("fetch items").await.expect("turn completes");
 
-    // The passing BeforeCapability hook did not block dispatch: the tool ran.
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran through the real capability path");

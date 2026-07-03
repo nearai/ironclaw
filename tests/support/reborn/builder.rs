@@ -9,10 +9,8 @@
 //! resolution, `CompletionRequest`/tool-definition assembly, and the
 //! retry/routing/circuit/cache decorators for real.
 //!
-//! Slice 1 scope: InMemory storage, single text reply, `build → submit_turn →
-//! assert_reply_contains`.
-//! Slice 3: `StorageMode { InMemory, LibSql }` — the builder defaults to
-//! `InMemory`; `.storage(StorageMode::LibSql)` selects a real SQLite file in a
+//! `StorageMode { InMemory, LibSql }` — the builder defaults to `InMemory`;
+//! `.storage(StorageMode::LibSql)` selects a real SQLite file in a
 //! per-`build()` `TempDir`. Both modes ride **one** `CompositeRootFilesystem`
 //! at `/tenants/...` so thread history and turn state share the same backend
 //! and the same production path layout.
@@ -223,7 +221,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Opt-in to real shell execution for this harness (slice 5). By default the
+    /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
     ///
@@ -308,7 +306,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
+    /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
     /// harness registers a single MCP capability `"<provider>.search"` (where
@@ -627,10 +625,6 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert the finalized assistant reply in thread history contains `text`.
-    ///
-    /// (Co-located with the harness fields it reads. When the `assert_*` family
-    /// grows — `assert_capability_denied`/`assert_capability_order`, design §3.3 —
-    /// it can move to a dedicated `assertions.rs` with deliberate field accessors.)
     pub async fn assert_reply_contains(&self, text: &str) -> HarnessResult<()> {
         self.thread_harness
             .assert_final_reply(self.binding.thread_id.clone(), text)
@@ -851,7 +845,7 @@ impl RebornIntegrationHarness {
     /// Assert that a `builtin.shell` command was recorded by the inert process
     /// port and that the recorded command string contains `substr`. This proves
     /// the shell tool call was dispatched through the process port without
-    /// spawning a real OS process (slice 5 safety invariant).
+    /// spawning a real OS process (a safety invariant).
     ///
     /// Checks only the `[baseline_process_count..]` delta so a group thread
     /// never spuriously passes on a prior thread's entry (R2).
@@ -886,7 +880,7 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert that the MCP tool named `tool_name` (the name on the mock server,
-    /// e.g. `"search"`) was invoked via the real MCP runtime (slice 6).
+    /// e.g. `"search"`) was invoked via the real MCP runtime.
     ///
     /// Internally maps `tool_name` → capability id `"mock-mcp.{tool_name}"` and
     /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
@@ -1020,13 +1014,8 @@ impl RebornIntegrationHarness {
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
     /// authorization failure to the model rather than re-dispatching the gate.
     ///
-    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
-    /// precondition `ApprovalInteractionService` uses for its production
-    /// approval-resume path. That precondition is enforced server-side
-    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
-    /// stale or wrong (non-approval) gate ref fails the resume with
-    /// `TurnError::InvalidTransition` instead of silently resuming whatever
-    /// gate class happens to be blocked.
+    /// See [`approve_gate`](Self::approve_gate) for why this resumes with
+    /// `ResumeTurnPrecondition::BlockedApprovalGate`.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_local_dev_gate(gate_ref)
@@ -1325,8 +1314,8 @@ pub(crate) fn apply_hermetic_env() {
     });
 }
 
-/// Assemble a `ResolveBindingRequest` from a verified inbound envelope. Slice 1
-/// is DirectChat-only, so the route kind is `Direct`.
+/// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
+/// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
     envelope: &ironclaw_product_adapters::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {
