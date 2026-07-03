@@ -343,6 +343,7 @@ impl std::fmt::Display for ResourceAccount {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
+    #[serde(with = "rust_decimal::serde::str_option")]
     pub max_usd: Option<Decimal>,
     pub max_input_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,

@@ -671,6 +671,44 @@ mod tests {
     }
 
     #[test]
+    fn approved_gate_with_increased_decimal_limit_reloads() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scope = gate_scope("tenant-fs", "alice");
+        let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store = FilesystemBudgetGateStore::new(scoped);
+        let gate = sample_gate();
+        let id = gate.id;
+        let increased_limit = ResourceLimits {
+            max_usd: Some(dec!(1000.00)),
+            ..ResourceLimits::default()
+        };
+
+        store.open(&scope, gate).unwrap();
+        store
+            .resolve(
+                &scope,
+                id,
+                BudgetGateOutcome::Approve {
+                    increased_limit: increased_limit.clone(),
+                    by: UserId::new("alice").unwrap(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+
+        let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let reloaded = store2.get(&scope, id).unwrap().unwrap();
+        assert!(matches!(
+            reloaded.status,
+            BudgetGateStatus::Approved {
+                increased_limit: ref reloaded_limit,
+                ..
+            } if reloaded_limit == &increased_limit
+        ));
+    }
+
+    #[test]
     fn expire_pending_older_than_persists_terminal_state() {
         let backend = Arc::new(InMemoryBackend::new());
         let scope = gate_scope("tenant-fs", "alice");
