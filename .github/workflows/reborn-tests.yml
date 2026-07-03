@@ -238,7 +238,23 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
+      - name: Resolve distributed sccache eligibility
+        id: sccache-dist-eligibility
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          case "${PACKAGE}" in
+            ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_reborn|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_sandbox_core)
+              echo "enabled=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice title=Distributed sccache skipped::${PACKAGE} compiles wasmtime-wasi proc macros that read registry source files unavailable on the remote builder."
+              ;;
+            *)
+              echo "enabled=true" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+
       - name: Setup distributed sccache
+        if: steps.sccache-dist-eligibility.outputs.enabled == 'true'
         uses: ./.github/actions/setup-sccache-dist
         with:
           scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
