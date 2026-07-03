@@ -45,16 +45,16 @@ runs:
         fi
 
         mkdir -p "${HOME}/.config/sccache"
-        cat > "${HOME}/.config/sccache/config" <<EOF
-        [dist]
-        scheduler_url = "${SCCACHE_DIST_SCHEDULER_URL}"
-        toolchains = []
-        toolchain_cache_size = 5368709120
-
-        [dist.auth]
-        type = "token"
-        token = "${SCCACHE_DIST_AUTH_TOKEN}"
-        EOF
+        {
+          printf '%s\n' "[dist]"
+          printf 'scheduler_url = "%s"\n' "${SCCACHE_DIST_SCHEDULER_URL}"
+          printf '%s\n' "toolchains = []"
+          printf '%s\n' "toolchain_cache_size = 5368709120"
+          printf '%s\n' ""
+          printf '%s\n' "[dist.auth]"
+          printf '%s\n' 'type = "token"'
+          printf 'token = "%s"\n' "${SCCACHE_DIST_AUTH_TOKEN}"
+        } > "${HOME}/.config/sccache/config"
         chmod 600 "${HOME}/.config/sccache/config"
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         sccache --stop-server || true
