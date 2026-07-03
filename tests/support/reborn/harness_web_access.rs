@@ -37,10 +37,7 @@
 
 #![allow(dead_code)] // Test-only scaffolding; not every consumer exercises every helper.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
@@ -92,8 +89,8 @@ pub(super) fn asset_root() -> PathBuf {
     repo_root().join("crates/ironclaw_first_party_extensions/assets/web-access")
 }
 
-fn repo_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> PathBuf {
+    super::repo_root()
 }
 
 /// Trust policy admitting the test-only `web-access` provider as first-party,

@@ -186,7 +186,7 @@ fn network_response_from_http_exchange_response(
 }
 
 pub fn qa_fixture_path(fixture_name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    super::repo_root()
         .join("tests/fixtures/llm_traces/reborn_qa")
         .join(format!("{fixture_name}.json"))
 }

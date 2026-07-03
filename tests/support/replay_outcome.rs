@@ -298,7 +298,10 @@ async fn capture_engine_threads() -> Vec<ThreadSummary> {
 macro_rules! assert_replay_snapshot {
     ($name:expr, $outcome:expr) => {{
         let mut settings = ::insta::Settings::clone_current();
-        settings.set_snapshot_path(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots"));
+        let repo_root = ::std::env::var_os("GITHUB_WORKSPACE")
+            .or_else(|| ::std::env::var_os("CARGO_MANIFEST_DIR"))
+            .unwrap_or_else(|| ::std::ffi::OsString::from(env!("CARGO_MANIFEST_DIR")));
+        settings.set_snapshot_path(::std::path::PathBuf::from(repo_root).join("tests/snapshots"));
         settings.set_prepend_module_to_snapshot(false);
         settings.set_sort_maps(true);
         settings.set_omit_expression(true);

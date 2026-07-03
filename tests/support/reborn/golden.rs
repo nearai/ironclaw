@@ -121,7 +121,7 @@ impl RebornIntegrationHarness {
             &self.scripted_llm.captured_tool_definitions(),
         ));
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots"));
+        settings.set_snapshot_path(super::repo_root().join("tests/snapshots"));
         settings.set_prepend_module_to_snapshot(false);
         settings.set_omit_expression(true);
         settings.bind(|| {

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::{
@@ -72,6 +72,6 @@ pub fn asset_root() -> PathBuf {
     repo_root().join("crates/ironclaw_first_party_extensions/assets/github")
 }
 
-fn repo_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> PathBuf {
+    super::repo_root()
 }

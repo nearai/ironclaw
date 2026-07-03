@@ -1650,10 +1650,9 @@ impl TestRig {
 /// `filename` is relative to `tests/fixtures/llm_traces/recorded/`.
 #[cfg(feature = "libsql")]
 pub async fn run_recorded_trace(filename: &str) {
-    let path = format!(
-        "{}/tests/fixtures/llm_traces/recorded/{filename}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = super::repo_root()
+        .join("tests/fixtures/llm_traces/recorded")
+        .join(filename);
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
@@ -1668,10 +1667,9 @@ pub async fn run_recorded_trace(filename: &str) {
 /// Like [`run_recorded_trace`] but routes through the engine v2 pipeline.
 #[cfg(feature = "libsql")]
 pub async fn run_recorded_trace_v2(filename: &str) {
-    let path = format!(
-        "{}/tests/fixtures/llm_traces/recorded/{filename}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = super::repo_root()
+        .join("tests/fixtures/llm_traces/recorded")
+        .join(filename);
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()

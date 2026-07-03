@@ -2861,10 +2861,8 @@ mod trace_llm_tests {
 
     #[tokio::test]
     async fn from_json_file() {
-        let fixture_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/llm_traces/simple_text.json"
-        );
+        let fixture_path =
+            crate::support::repo_root().join("tests/fixtures/llm_traces/simple_text.json");
         let llm = TraceLlm::from_file(fixture_path).unwrap();
 
         assert_eq!(llm.model_name(), "test-model");

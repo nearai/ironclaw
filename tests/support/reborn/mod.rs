@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 pub mod approval;
 pub mod assertions;
 pub mod builder;
@@ -30,3 +32,10 @@ pub mod scripted_provider;
 pub mod session_thread;
 pub mod test_adapter;
 pub mod triggered_submit;
+
+pub fn repo_root() -> PathBuf {
+    std::env::var_os("GITHUB_WORKSPACE")
+        .or_else(|| std::env::var_os("CARGO_MANIFEST_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
