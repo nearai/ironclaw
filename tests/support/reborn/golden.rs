@@ -121,10 +121,7 @@ fn normalize_volatile(rendered: &str) -> String {
     let clock =
         regex::Regex::new(r"Current date/time at loop start: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
             .expect("valid loop-start-clock regex");
-    let rendered = clock.replace_all(
-        rendered,
-        "Current date/time at loop start: <TIMESTAMP>",
-    );
+    let rendered = clock.replace_all(rendered, "Current date/time at loop start: <TIMESTAMP>");
     let attachment_date = regex::Regex::new(r"/attachments/\d{4}-\d{2}-\d{2}/")
         .expect("valid attachment-landing-date regex");
     attachment_date

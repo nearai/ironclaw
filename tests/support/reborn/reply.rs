@@ -88,9 +88,7 @@ impl RebornScriptedReply {
     /// entry per the harness's "one entry per model call" discipline — the
     /// caller must follow it with exactly one more entry (the post-execution
     /// model call reacting to however many tool results come back).
-    pub fn tool_calls<'a>(
-        calls: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
-    ) -> Self {
+    pub fn tool_calls<'a>(calls: impl IntoIterator<Item = (&'a str, serde_json::Value)>) -> Self {
         let tool_calls = calls
             .into_iter()
             .map(|(capability_id, arguments)| TraceToolCall {

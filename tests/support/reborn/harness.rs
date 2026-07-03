@@ -2662,9 +2662,8 @@ impl HostRuntimeCapabilityHarness {
         // in `FaultInjectingProjectService` only when the harness opted in
         // (`with_project_service_fault_injection`) — every other harness keeps
         // the real service unwrapped and behaves exactly as before.
-        let project_service: Option<Arc<dyn ProjectService>> = services
-            .local_dev_project_service_for_test()
-            .map(|inner| {
+        let project_service: Option<Arc<dyn ProjectService>> =
+            services.local_dev_project_service_for_test().map(|inner| {
                 if project_service_fault_injection {
                     super::project_service_fault::FaultInjectingProjectService::wrapping(inner)
                         as Arc<dyn ProjectService>

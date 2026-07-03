@@ -260,7 +260,10 @@ async fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
         .expect("run recovered and finalized");
     // Neither candidate's instructions may leak into a later model request —
     // an ambiguous selection activates nothing.
-    for sentinel in ["SYSTEM_DUPLICATE_SKILL_SENTINEL", "USER_DUPLICATE_SKILL_SENTINEL"] {
+    for sentinel in [
+        "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+        "USER_DUPLICATE_SKILL_SENTINEL",
+    ] {
         let err = harness
             .assert_model_request_contains(sentinel)
             .await

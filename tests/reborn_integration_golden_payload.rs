@@ -163,7 +163,9 @@ async fn golden_parallel_tool_calls() {
         .build()
         .await
         .expect("harness builds");
-    h.submit_turn("fetch both items").await.expect("turn completes");
+    h.submit_turn("fetch both items")
+        .await
+        .expect("turn completes");
     h.assert_golden_payload("parallel_tool_calls");
     h.assert_reply_eq("fetched both")
         .await
@@ -191,9 +193,14 @@ async fn golden_image_attachment_turn() {
         .build()
         .await
         .expect("thread builds");
-    h.submit_turn_with_image_attachment("what's in this image?", "diagram.png", PNG_MIME, PNG_BYTES.to_vec())
-        .await
-        .expect("turn completes");
+    h.submit_turn_with_image_attachment(
+        "what's in this image?",
+        "diagram.png",
+        PNG_MIME,
+        PNG_BYTES.to_vec(),
+    )
+    .await
+    .expect("turn completes");
     h.assert_golden_payload("image_attachment");
     h.assert_reply_eq("I see a diagram")
         .await
