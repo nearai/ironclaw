@@ -4284,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_common"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono-tz",
@@ -5362,7 +5362,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_safety"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aho-corasick",
  "criterion",
@@ -5418,7 +5418,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_skill_learning"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "ironclaw_skills",
@@ -5428,7 +5428,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_skills"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",

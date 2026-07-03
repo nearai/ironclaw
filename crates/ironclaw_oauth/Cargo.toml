@@ -14,7 +14,7 @@ publish = false
 dist = false
 
 [dependencies]
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "net", "time", "macros", "rt"] }
