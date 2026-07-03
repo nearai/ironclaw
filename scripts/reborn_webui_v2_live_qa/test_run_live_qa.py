@@ -612,6 +612,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_forbidden_auth_phrase_ignores_positive_no_auth_required_copy(self):
+        self.assertFalse(
+            run_live_qa._forbidden_phrase_matches(
+                "activation succeeded with no additional authentication required.",
+                "authentication required",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._forbidden_phrase_matches(
+                "google sheets connected; no authentication required.",
+                "authentication required",
+            )
+        )
+        self.assertTrue(
+            run_live_qa._forbidden_phrase_matches(
+                "google sheets cannot connect because authentication required.",
+                "authentication required",
+            )
+        )
+
     def test_wait_for_assistant_reply_matches_combined_assistant_blocks(self):
         class FakeApprove:
             @property

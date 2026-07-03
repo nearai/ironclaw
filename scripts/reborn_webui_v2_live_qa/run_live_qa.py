@@ -1103,7 +1103,11 @@ async def _live_chat_case(
         )
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
-            matches = [phrase for phrase in forbidden_text if phrase.lower() in text]
+            matches = [
+                phrase
+                for phrase in forbidden_text
+                if _forbidden_phrase_matches(text, phrase)
+            ]
             if matches:
                 raise AssertionError(
                     "assistant reply contained forbidden failure text: "
@@ -1138,6 +1142,21 @@ async def _live_chat_case(
                 **observed,
             },
         )
+
+
+def _forbidden_phrase_matches(normalized_text: str, phrase: str) -> bool:
+    normalized_phrase = phrase.lower()
+    if normalized_phrase == "authentication required":
+        benign_auth_phrases = (
+            "no additional authentication required",
+            "no authentication required",
+            "without additional authentication required",
+        )
+        text = normalized_text
+        for benign_phrase in benign_auth_phrases:
+            text = text.replace(benign_phrase, "")
+        return normalized_phrase in text
+    return normalized_phrase in normalized_text
 
 
 async def _live_chat_with_extensions_case(
@@ -3527,7 +3546,11 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
 
     started = time.monotonic()
     case_name = "qa_7a_slack_product_channel_connect"
-    prompt = _qa_sheet_prompt(case_name)
+    prompt = (
+        'In WebUI, ask IronClaw "connect to Slack for my configured DM delivery '
+        'target." Go through the flow\n'
+        "Expected result: Slack DM delivery target is connected"
+    )
     observed: dict[str, object] = {"chat_connect_prompt": prompt}
     try:
         slack = _slack_preflight(ctx)
@@ -3581,7 +3604,7 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 await _wait_for_assistant_reply(
                     page,
                     marker=None,
-                    required_text=["slack"],
+                    required_text=["slack", "dm|delivery|target|connected"],
                     timeout=180.0,
                 ),
             )
