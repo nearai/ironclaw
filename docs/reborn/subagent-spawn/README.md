@@ -1,6 +1,8 @@
 # Subagent Spawn for the Reborn Agent Loop — Design
 
-**Status:** Implemented for blocking mode; background mode deferred
+**Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
+
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`). `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`).
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
@@ -74,7 +76,7 @@ exist because of that review.
 
 | Term | Meaning |
 |---|---|
-| **Turn / run** | One unit of work in a thread scope. `TurnCoordinator::submit_turn` queues it; a `TurnRunnerWorker` claims and drives it. |
+| **Turn / run** | One unit of work in a thread scope. `TurnCoordinator::submit_turn` queues it; `TurnRunScheduler` claims it and `RebornTurnRunExecutor` drives it. |
 | **`TurnScope`** | `(tenant_id, agent_id?, project_id?, thread_id)` — the coordination key. Active-run exclusivity is per-scope. |
 | **`LoopFamily`** | A sealed, static composition of the nine loop strategies — the *mechanics* of a loop. Built-in only; not a plugin system. |
 | **`PlannedDriver`** | Adapts one `LoopFamily` + the executor to the `AgentLoopDriver` contract. A run reaches a family only via run-profile → driver → family. |
@@ -117,7 +119,7 @@ field; `EffectKind` is deliberately not propagated to the loop layer.
 
 The mechanism therefore is:
 
-`spawn_subagent` is an **ordinary capability** in the visible surface. Surface
+When enabled, `spawn_subagent` is an **ordinary capability** in the visible surface. Surface
 visibility is not authority. The executor invokes it through the existing
 `invoke_capability_batch` path, and the host-side capability-port impl delegates
 to an explicit kernel-mediated subagent-spawn service before any thread, goal,
@@ -232,8 +234,8 @@ turn execution; `ironclaw_processes` owns OS-level work — and produces more
 code, not less.
 
 **Conclusion:** a child agent loop is **not** an OS process. It is a
-`TurnRunId`-keyed run driven by the same `TurnRunnerWorker` pool that drives the
-parent, selected by the `subagent` `LoopFamily`. `Process` and the subagent
+`TurnRunId`-keyed run driven by the same scheduler/executor control plane that
+drives the parent, selected by the `subagent` `LoopFamily`. `Process` and the subagent
 mechanism are **peer effect kinds** (each with its own `CapabilityOutcome`
 variant), not stacked layers.
 

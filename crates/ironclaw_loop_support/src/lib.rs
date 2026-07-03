@@ -62,6 +62,7 @@ pub use capability_port::{
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+    PerSurfaceCapabilityDenyDecorator,
 };
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
@@ -132,7 +133,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -820,6 +821,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
         Ok(VisibleCapabilitySurface {
             version: empty_surface_version()?,
             descriptors: Vec::new(),
+            callable_capability_ids: None,
         })
     }
 
@@ -1474,6 +1476,16 @@ pub trait HostManagedModelGateway: Send + Sync {
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
+    /// Production gateways return None (identity) → host uses `self` unchanged.
+    /// Test harnesses override this to route per-thread scripted gateways.
+    fn resolve_for_scope(
+        &self,
+        _scope: &TurnScope,
+    ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
+        None
     }
 }
 

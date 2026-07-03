@@ -505,6 +505,7 @@ mod tests {
                 _request: VisibleCapabilityRequest,
             ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
                 Ok(VisibleCapabilitySurface {
+                    callable_capability_ids: None,
                     version: CapabilitySurfaceVersion::new("surface-v1")
                         .expect("valid surface version"),
                     descriptors: HOST_SURFACE

@@ -8,7 +8,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from helpers import REBORN_V2_AUTH_TOKEN, sse_stream
 from reborn_webui_harness import (
     close_reborn_server,
     reborn_bearer_headers,
@@ -155,25 +154,15 @@ async def test_reborn_legacy_responses_continue_and_retrieve(
     assert _response_output_text(retrieved_body).strip()
 
 
-async def test_reborn_legacy_responses_streaming_raw_sse(reborn_openai_compat_server):
-    async with sse_stream(
-        reborn_openai_compat_server,
-        path="/v1/responses",
-        method="POST",
-        token=REBORN_V2_AUTH_TOKEN,
-        headers={"Content-Type": "application/json"},
+async def test_reborn_legacy_responses_streaming_raw_sse(reborn_responses_client):
+    async with reborn_responses_client.stream(
+        "POST",
+        "/v1/responses",
         json={"model": "default", "input": "Say hi", "stream": True},
     ) as response:
-        assert response.status == 200
+        assert response.status_code == 200
         events: list[str] = []
-        while True:
-            line = (await response.content.readline()).decode(
-                "utf-8",
-                errors="replace",
-            )
-            if not line:
-                break
-            line = line.rstrip("\r\n")
+        async for line in response.aiter_lines():
             if line.startswith("event:"):
                 events.append(line.removeprefix("event:").strip())
             if "response.completed" in events:

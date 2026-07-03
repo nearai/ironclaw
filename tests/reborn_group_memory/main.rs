@@ -6,9 +6,11 @@
 //!
 //! ## Why one sequential `#[tokio::test]`
 //!
-//! Scenario 1's writer must complete before the reader runs; a shared group
-//! instance cannot be split across Cargo test cases without fragile global
-//! state. One orchestrating function gives deterministic ordering for free.
+//! Each scenario's writer must complete before its reader/searcher/lister runs;
+//! a shared group instance cannot be split across Cargo test cases without
+//! fragile global state. One orchestrating function gives deterministic ordering
+//! for free. Each scenario seeds its own data, so they are independent and the
+//! ordering between scenarios does not matter.
 
 #[allow(dead_code)]
 #[path = "../support/reborn/mod.rs"]
@@ -17,6 +19,8 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_memory_search_finds_seeded;
+mod scenario_memory_tree_reflects_structure;
 mod scenario_write_then_read_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -34,6 +38,20 @@ async fn memory_group_e2e() {
     report.record(
         "write_then_read_cross_thread",
         scenario_write_then_read_cross_thread::run(&g).await,
+    );
+
+    // Scenario 2: seed a document, then locate it via `memory_search` from a
+    // different conversation over the shared FTS-backed store.
+    report.record(
+        "memory_search_finds_seeded",
+        scenario_memory_search_finds_seeded::run(&g).await,
+    );
+
+    // Scenario 3: seed a nested document, then assert `memory_tree` reflects the
+    // directory structure when listed from a different conversation.
+    report.record(
+        "memory_tree_reflects_structure",
+        scenario_memory_tree_reflects_structure::run(&g).await,
     );
 
     report.assert_all_passed();

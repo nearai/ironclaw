@@ -39,6 +39,39 @@ fn expect_err<T>(result: Result<T, FilesystemError>) -> FilesystemError {
     }
 }
 
+#[test]
+fn scoped_path_class_buckets_known_segments_and_redacts_unknowns() {
+    let cases = [
+        ("/workspace/project/file.txt", PathClass::Workspace),
+        ("/memory/profile.json", PathClass::Memory),
+        ("/artifacts/run/output.json", PathClass::Artifacts),
+        ("/turns/state.json", PathClass::Turns),
+        ("/resources/snapshot.json", PathClass::Resources),
+        ("/users/alice/private.txt", PathClass::Other),
+        ("/tenants/acme/users/alice/secrets", PathClass::Other),
+    ];
+
+    for (raw, expected) in cases {
+        let path = ScopedPath::new(raw).unwrap();
+        assert_eq!(scoped_path_class(&path), expected);
+    }
+}
+
+#[test]
+fn scoped_path_detail_labels_known_snapshots_without_exposing_paths() {
+    let cases = [
+        ("/turns/state.json", "turn_state_snapshot"),
+        ("/resources/snapshot.json", "resource_governor_snapshot"),
+        ("/resources/budget-gates.json", "budget_gate_snapshot"),
+        ("/resources/other.json", "unknown"),
+    ];
+
+    for (raw, expected) in cases {
+        let path = ScopedPath::new(raw).unwrap();
+        assert_eq!(scoped_path_detail(&path), expected);
+    }
+}
+
 fn scoped_in_memory(permissions: MountPermissions) -> ScopedFilesystem<InMemoryBackend> {
     ScopedFilesystem::with_fixed_view(
         Arc::new(InMemoryBackend::new()),

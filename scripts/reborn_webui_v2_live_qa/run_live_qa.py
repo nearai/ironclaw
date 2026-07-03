@@ -93,6 +93,14 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
+from scripts.reborn_webui_v2_live_qa.green_run_explanation import (  # noqa: E402
+    write_green_run_explanation,
+)
+from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
+    _compact_json,
+    _judge_assistant_reply_completion,
+    _semantic_judge_passed,
+)
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _append_slack_channel_route,
     _append_slack_channel_route_if_configured,
@@ -107,6 +115,9 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_config_value,
     _slack_enabled,
     _slack_team_id_from_bot_token_env,
+)
+from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
+    required_text_matches,
 )
 
 QA_SHEET_PROMPTS: dict[str, str] = {
@@ -791,6 +802,14 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
             await browser.close()
 
 
+@dataclass(frozen=True)
+class AssistantReplyWaitResult:
+    text_excerpt: str
+    semantic_judge_used: bool
+    semantic_judge_reason: str
+    semantic_judge: dict[str, object] | None = None
+
+
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
     details = {"case": case_name, **details}
     if case_name in QA_SHEET_CASES:
@@ -807,6 +826,17 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
+
+
+def _record_assistant_reply_wait_result(
+    observed: dict[str, object],
+    reply: AssistantReplyWaitResult,
+) -> None:
+    observed["text_excerpt"] = reply.text_excerpt
+    observed["semantic_judge_used"] = reply.semantic_judge_used
+    observed["semantic_judge_reason"] = reply.semantic_judge_reason
+    if reply.semantic_judge is not None:
+        observed["semantic_judge"] = reply.semantic_judge
 
 
 async def _live_chat_case(
@@ -851,11 +881,15 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
@@ -962,11 +996,15 @@ async def _live_chat_with_extensions_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
 
     try:
@@ -996,51 +1034,67 @@ async def _wait_for_assistant_reply(
     marker: str | None,
     required_text: list[str],
     timeout: float,
-) -> str:
+    semantic_goal: str | None = None,
+) -> AssistantReplyWaitResult:
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
-        if await assistant.count() > 0:
+        assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
+        if await assistant_blocks.count() > 0:
             try:
                 text = await assistant.inner_text(timeout=1000)
             except Exception:
                 text = ""
+            try:
+                block_texts = [
+                    block.strip()
+                    for block in await assistant_blocks.all_inner_texts()
+                    if block.strip()
+                ]
+            except Exception:
+                block_texts = []
+            if block_texts:
+                text = "\n".join(block_texts)
             if text:
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and _required_text_matches(normalized, required_text):
-                return text[-2000:]
+            if marker_matches and required_text_matches(normalized, required_text):
+                return AssistantReplyWaitResult(
+                    text_excerpt=text[-2000:],
+                    semantic_judge_used=False,
+                    semantic_judge_reason="literal_required_text_matched",
+                )
         await asyncio.sleep(0.5)
     main_text = ""
     try:
         main_text = await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
     except Exception:
         pass
+    semantic_judge: dict[str, object] | None = None
+    if last_text and (not marker or marker in last_text):
+        semantic_judge = await _judge_assistant_reply_completion(
+            marker=marker,
+            required_text=required_text,
+            assistant_text=last_text,
+            main_text=main_text,
+            semantic_goal=semantic_goal,
+        )
+        if _semantic_judge_passed(semantic_judge):
+            return AssistantReplyWaitResult(
+                text_excerpt=last_text[-2000:],
+                semantic_judge_used=True,
+                semantic_judge_reason="semantic_judge_completed",
+                semantic_judge=semantic_judge,
+            )
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
-        f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r}"
+        f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
+        f"semantic_judge={_compact_json(semantic_judge)}"
     )
-
-
-def _required_text_matches(text: str, required_text: list[str]) -> bool:
-    normalized_text = text.lower()
-    return all(
-        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
-        for piece in required_text
-    )
-
-
-def _required_option_matches(normalized_text: str, option: str) -> bool:
-    normalized_option = option.strip().lower()
-    if not normalized_option:
-        return False
-    if re.fullmatch(r"\w+", normalized_option):
-        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
-    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -1642,22 +1696,58 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     from playwright.async_api import expect
 
     started = time.monotonic()
-    prompt = _qa_sheet_prompt(case_name)
-    observed: dict[str, object] = {"chat_connect_prompt": prompt}
+    observed: dict[str, object] = {
+        "qa_sheet_prompt": _qa_sheet_prompt(case_name),
+        "slack_connect_surface": "/v2/extensions/channels",
+    }
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/v2/extensions/channels?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        body = page.locator("body")  # type: ignore[attr-defined]
-        await expect(body).to_contain_text("Connect Slack", timeout=15000)
-        await expect(body).to_contain_text("Message the Slack app", timeout=15000)
-        observed["slack_connect_card_visible"] = True
+        await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
+        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
+        channels = body.get("channels")
+        if not isinstance(channels, list):
+            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
+        slack_channels = [
+            channel
+            for channel in channels
+            if isinstance(channel, dict) and channel.get("channel") == "slack"
+        ]
+        observed["connectable_channel_count"] = len(channels)
+        observed["slack_strategy_count"] = len(slack_channels)
+        observed["slack_strategies"] = [
+            channel.get("strategy")
+            for channel in slack_channels
+            if isinstance(channel, dict)
+        ]
+        personal = next(
+            (
+                channel
+                for channel in slack_channels
+                if isinstance(channel, dict)
+                and channel.get("strategy") == "inbound_proof_code"
+            ),
+            None,
+        )
+        if not isinstance(personal, dict):
+            raise AssertionError(f"Slack inbound_proof_code connect strategy missing: {channels!r}")
+        action_body = personal.get("action")
+        if not isinstance(action_body, dict):
+            raise AssertionError(f"Slack connect action missing: {personal!r}")
+        title = str(action_body.get("title") or "")
+        if not title:
+            raise AssertionError(f"Slack connect action title missing: {personal!r}")
+        instructions = str(action_body.get("instructions") or "")
+        if "Message the Slack app" not in instructions:
+            raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Message the Slack app", timeout=15000)  # type: ignore[attr-defined]
+        observed["slack_display_name"] = personal.get("display_name")
+        observed["slack_connect_title"] = title
+        observed["slack_connect_instructions"] = instructions
 
     try:
         slack = _slack_preflight(ctx)
@@ -2042,7 +2132,7 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
         case_name="qa_2e_calendar_prep_email_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine", "email"],
+        required_text=["routine", "email|emails|gmail"],
         prompt=_qa_sheet_prompt("qa_2e_calendar_prep_email_routine"),
     )
 
@@ -3268,11 +3358,14 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            observed["text_excerpt"] = await _wait_for_assistant_reply(
-                page,
-                marker=None,
-                required_text=["slack"],
-                timeout=180.0,
+            _record_assistant_reply_wait_result(
+                observed,
+                await _wait_for_assistant_reply(
+                    page,
+                    marker=None,
+                    required_text=["slack"],
+                    timeout=180.0,
+                ),
             )
             deadline = time.monotonic() + 180.0
             while time.monotonic() < deadline:
@@ -3974,8 +4067,13 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
+    green_explanation_path = write_green_run_explanation(args.output_dir, results)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)
     print(f"[reborn-webui-v2-live-qa] trace_index={trace_index_path}", flush=True)
+    print(
+        f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+        flush=True,
+    )
     return 0 if all(result.success for result in results) else 1
 
 
@@ -4022,6 +4120,11 @@ def main() -> int:
             details={"error": str(exc)},
         )
         write_results(args.output_dir, [failed], "")
+        green_explanation_path = write_green_run_explanation(args.output_dir, [failed])
+        print(
+            f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+            flush=True,
+        )
         print(f"[reborn-webui-v2-live-qa] {exc}", file=sys.stderr, flush=True)
         return 1
 

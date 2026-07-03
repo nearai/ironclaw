@@ -24,8 +24,12 @@ from unittest.mock import patch
 
 if __package__:
     from . import run_live_qa
+    from . import semantic_judge
+    from . import text_match
 else:
     import run_live_qa
+    import semantic_judge
+    import text_match
 
 
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
@@ -36,6 +40,46 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_home=Path("/tmp/reborn-home"),
             env={},
         )
+
+    def _fake_assistant_reply_page(self, response_text: str):
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return response_text
+
+            async def all_inner_texts(self):
+                return [response_text]
+
+        class FakeMain:
+            async def inner_text(self, **_kwargs):
+                return response_text
+
+        class FakePage:
+            def locator(self, selector):
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "main":
+                    return FakeMain()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        return FakePage()
 
     def test_dismiss_visible_connect_action_clicks_only_visible_card(self):
         class FakeDismiss:
@@ -85,6 +129,145 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertFalse(absent_result)
         self.assertFalse(absent.clicked)
+
+    def test_slack_connect_case_uses_extensions_channels_surface(self):
+        class FakePage:
+            def __init__(self) -> None:
+                self.gotos: list[tuple[str, str | None]] = []
+
+            async def goto(self, url: str, wait_until: str | None = None) -> None:
+                self.gotos.append((url, wait_until))
+
+            def locator(self, selector: str) -> str:
+                return selector
+
+        class FakeExpectation:
+            def __init__(self, selector: str) -> None:
+                self.selector = selector
+
+            async def to_contain_text(
+                self,
+                text: str,
+                timeout: int | None = None,
+            ) -> None:
+                expected_texts.append((self.selector, text, timeout))
+
+        def fake_expect(selector: str) -> FakeExpectation:
+            return FakeExpectation(selector)
+
+        async def fake_with_page(
+            _output_dir: Path,
+            _case_name: str,
+            action,
+        ) -> None:
+            await action(fake_page)
+
+        async def fake_fetch_webui_json(_page: object, path: str) -> dict[str, object]:
+            fetched_paths.append(path)
+            return {
+                "channels": [
+                    {
+                        "channel": "slack",
+                        "display_name": "Slack",
+                        "strategy": "admin_managed_channels",
+                        "action": {"title": "Choose Slack channel"},
+                    },
+                    {
+                        "channel": "slack",
+                        "display_name": "Slack",
+                        "strategy": "inbound_proof_code",
+                        "action": {
+                            "title": "Slack account connection",
+                            "instructions": "Message the Slack app, then enter the code here.",
+                        },
+                    },
+                ]
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "preflight.json").write_text(
+                json.dumps(
+                    {
+                        "checks": {
+                            "slack": {
+                                "enabled_in_config": True,
+                                "env_present": True,
+                                "auth_test": {
+                                    "ok": True,
+                                    "team_id": "T123",
+                                    "user_id": "U123",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_page = FakePage()
+            fetched_paths: list[str] = []
+            expected_texts: list[tuple[str, str, int | None]] = []
+            playwright_module = types.ModuleType("playwright")
+            playwright_async_api = types.ModuleType("playwright.async_api")
+            playwright_async_api.expect = fake_expect
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=output_dir,
+                reborn_home=output_dir / "reborn-home",
+                env={},
+            )
+
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": playwright_module,
+                        "playwright.async_api": playwright_async_api,
+                    },
+                ),
+                patch.object(run_live_qa, "_with_page", new=fake_with_page),
+                patch.object(
+                    run_live_qa,
+                    "_fetch_webui_json",
+                    new=fake_fetch_webui_json,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._slack_connect_case(
+                        ctx,
+                        case_name="qa_3a_slack_connect",
+                    )
+                )
+
+        self.assertTrue(result.success, result.details)
+        self.assertEqual(
+            fake_page.gotos,
+            [
+                (
+                    "http://127.0.0.1:3000/v2/extensions/channels?"
+                    f"token={run_live_qa.AUTH_TOKEN}",
+                    "domcontentloaded",
+                )
+            ],
+        )
+        self.assertEqual(
+            fetched_paths,
+            ["/api/webchat/v2/channels/connectable"],
+        )
+        observed_expectations = [text for _selector, text, _timeout in expected_texts]
+        self.assertIn("Channels", observed_expectations)
+        self.assertIn("Slack account connection", observed_expectations)
+        self.assertIn("Message the Slack app", observed_expectations)
+        self.assertNotIn("Connect Slack", observed_expectations)
+        self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
+        self.assertEqual(
+            result.details["slack_connect_surface"],
+            "/v2/extensions/channels",
+        )
+        self.assertEqual(
+            result.details["slack_connect_title"],
+            "Slack account connection",
+        )
 
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):
         captured_chat: dict[str, dict[str, object]] = {}
@@ -375,58 +558,225 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_required_text_accepts_explicit_alternatives(self):
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bug messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "records bug messages in a sheet",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for debug messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertFalse(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bugfix messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "fires every 5 minutes and watches slack for bug: messages",
                 ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "https://near.ai responded with HTTP 200 - the endpoint is up and running fine.",
                 ["status|http|200|up|running|responded"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "Trigger created. Schedule: every 5 minutes. Action: fetch latest releases.",
                 ["routine|trigger|automation|cron|schedule|created"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 "The email from firat.sertgoz@near.ai is already in the sheet.",
                 ["ABC|sheet|spreadsheet", "email|row|near.ai|near ai"],
             )
         )
         self.assertTrue(
-            run_live_qa._required_text_matches(
+            text_match.required_text_matches(
                 'Discussion thread "vibe coded eh" (id=47005839) mentions NEAR AI.',
                 ["news.ycombinator.com|hacker news|hn|discussion|id="],
             )
+        )
+
+    def test_wait_for_assistant_reply_matches_combined_assistant_blocks(self):
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 2
+
+            async def inner_text(self, **_kwargs):
+                return "latest news on that company\nEmails a concise briefing"
+
+            async def all_inner_texts(self):
+                return [
+                    'The routine has been created successfully. Routine: "30-min meeting briefing"',
+                    "latest news on that company\nEmails a concise briefing",
+                ]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        reply = asyncio.run(
+            run_live_qa._wait_for_assistant_reply(
+                FakePage(),
+                marker=None,
+                required_text=["routine", "email|emails|gmail"],
+                timeout=1.0,
+            )
+        )
+
+        text = reply.text_excerpt
+        self.assertIn("routine", text.lower())
+        self.assertIn("emails", text.lower())
+        self.assertFalse(reply.semantic_judge_used)
+        self.assertEqual(reply.semantic_judge_reason, "literal_required_text_matched")
+
+    def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
+        response_text = (
+            "Schedule: Every hour\n"
+            "Delivery: Slack channel CQA123\n"
+            "Trigger ID: trigger-123"
+        )
+
+        captured: dict[str, object] = {}
+
+        async def fake_judge(**kwargs):
+            captured.update(kwargs)
+            return {
+                "completed": True,
+                "confidence": 0.91,
+                "reason": "The response confirms an hourly Slack scheduled trigger.",
+            }
+
+        async def fake_sleep(_seconds):
+            return None
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_judge_assistant_reply_completion",
+                side_effect=fake_judge,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
+        ):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page(response_text),
+                    marker=None,
+                    required_text=["routine"],
+                    timeout=0.001,
+                    semantic_goal="Create an hourly Hacker News keyword Slack routine.",
+                )
+            )
+
+        text = reply.text_excerpt
+        self.assertIn("Trigger ID", text)
+        self.assertTrue(reply.semantic_judge_used)
+        self.assertEqual(reply.semantic_judge_reason, "semantic_judge_completed")
+        self.assertEqual(reply.semantic_judge["confidence"], 0.91)
+        self.assertEqual(captured["required_text"], ["routine"])
+        self.assertIn("hourly Hacker News", captured["semantic_goal"])
+
+    def test_wait_for_assistant_reply_does_not_judge_missing_marker(self):
+        response_text = "The routine has been created. Trigger ID: trigger-123"
+
+        async def fail_if_called(**_kwargs):
+            raise AssertionError("semantic judge should not run when marker is missing")
+
+        async def fake_sleep(_seconds):
+            return None
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_judge_assistant_reply_completion",
+                side_effect=fail_if_called,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
+        ):
+            with self.assertRaisesRegex(AssertionError, "marker='REBORN_QA_DONE'"):
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        self._fake_assistant_reply_page(response_text),
+                        marker="REBORN_QA_DONE",
+                        required_text=["routine"],
+                        timeout=0.001,
+                    )
+                )
+
+    def test_semantic_judge_passed_respects_confidence_threshold(self):
+        with patch.dict(
+            os.environ,
+            {"REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MIN_CONFIDENCE": "0.9"},
+        ):
+            self.assertTrue(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": True, "confidence": 0.9}
+                )
+            )
+            self.assertFalse(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": True, "confidence": 0.89}
+                )
+            )
+            self.assertFalse(
+                semantic_judge._semantic_judge_passed(
+                    {"completed": False, "confidence": 1.0}
+                )
+            )
+
+    def test_semantic_judge_completion_content_handles_unexpected_shapes(self):
+        self.assertEqual(semantic_judge._completion_content(None), "")
+        self.assertEqual(semantic_judge._completion_content({"choices": "bad"}), "")
+        self.assertEqual(semantic_judge._completion_content({"choices": ["bad"]}), "")
+        self.assertEqual(
+            semantic_judge._completion_content({"choices": [{"message": "bad"}]}),
+            "",
+        )
+        self.assertEqual(
+            semantic_judge._completion_content(
+                {"choices": [{"message": {"content": '{"completed": true}'}}]}
+            ),
+            '{"completed": true}',
+        )
+
+    def test_semantic_judge_json_parser_handles_non_string_inputs(self):
+        self.assertIsNone(semantic_judge._parse_json_object(None))
+        self.assertIsNone(semantic_judge._parse_json_object(123))
+        self.assertEqual(
+            semantic_judge._parse_json_object('prefix {"completed": true} suffix'),
+            {"completed": True},
         )
 
     def test_slack_delivery_target_dm_detection(self):
@@ -579,7 +929,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             await action(FakePage())
 
         async def fake_wait_for_assistant_reply(_page, **_kwargs):
-            return "Slack is connected"
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt="Slack is connected",
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+            )
 
         async def fake_approve_visible_tool_gate(_page):
             return None
@@ -2226,6 +2580,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue((output_dir / "traces" / "case_a.json").exists())
             self.assertTrue((output_dir / "traces" / "case_b.json").exists())
             self.assertTrue((output_dir / "traces" / "index.json").exists())
+            self.assertTrue((output_dir / "green-run-explanation.json").exists())
+            green_explanation = json.loads(
+                (output_dir / "green-run-explanation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(green_explanation["successful_cases"], 2)
 
 
 if __name__ == "__main__":

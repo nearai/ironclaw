@@ -83,6 +83,19 @@ impl TurnScope {
         self.thread_owner.explicit_owner_user_id()
     }
 
+    /// Canonical thread identity match: `(tenant_id, agent_id, project_id?,
+    /// thread_id)`, deliberately ignoring `thread_owner`. This mirrors the
+    /// active-run exclusivity key documented for this crate — owner/actor
+    /// identity is matched separately and must not gate thread identity.
+    /// Use this instead of `==` when comparing scopes that may have been
+    /// reconstructed without the original explicit owner.
+    pub fn same_thread(&self, other: &Self) -> bool {
+        self.tenant_id == other.tenant_id
+            && self.agent_id == other.agent_id
+            && self.project_id == other.project_id
+            && self.thread_id == other.thread_id
+    }
+
     pub fn has_explicit_thread_owner(&self) -> bool {
         self.thread_owner.is_explicit()
     }
@@ -226,5 +239,43 @@ mod tests {
                 "owner_user_id": "user:slack-subject"
             })
         );
+    }
+
+    #[test]
+    fn same_thread_ignores_thread_owner_but_matches_identity() {
+        // Regression guard: a run stored with an explicit thread owner (e.g. an
+        // automation-triggered run owned by its creator) must still match a
+        // scope reconstructed without that owner via `TurnScope::new`. Full `==`
+        // would compare `thread_owner` and miss it — that mismatch silently hid
+        // pending automation approvals from the notification listing.
+        let owned =
+            make_scope_with_explicit_owner(Some(UserId::from_trusted("user:creator".to_string())));
+        let ownerless = make_scope_with_explicit_owner(None);
+        let actor_fallback = TurnScope::new(
+            owned.tenant_id.clone(),
+            owned.agent_id.clone(),
+            owned.project_id.clone(),
+            owned.thread_id.clone(),
+        );
+
+        // Differing thread_owner, identical identity → same thread.
+        assert_ne!(owned, actor_fallback, "precondition: `==` differs on owner");
+        assert!(owned.same_thread(&actor_fallback));
+        assert!(actor_fallback.same_thread(&owned));
+        assert!(owned.same_thread(&ownerless));
+
+        // Differing canonical identity → not the same thread.
+        let other_thread = TurnScope::new(
+            owned.tenant_id.clone(),
+            owned.agent_id.clone(),
+            owned.project_id.clone(),
+            ThreadId::from_trusted("thread:other".to_string()),
+        );
+        let other_agent = make_scope_with_agent(
+            AgentId::from_trusted("agent:other".to_string()),
+            owned.project_id.clone(),
+        );
+        assert!(!owned.same_thread(&other_thread));
+        assert!(!owned.same_thread(&other_agent));
     }
 }

@@ -80,6 +80,24 @@ impl MockMcpServer {
         self.state.recorded_requests.lock().unwrap().clone()
     }
 
+    /// Force every subsequent otherwise-successful `tools/call` response to
+    /// carry this HTTP status (sticky), keeping the normal JSON-RPC body. The
+    /// `initialize`/`tools/list` handshake is unaffected. Use for the MCP
+    /// server-5xx error-path case.
+    pub fn force_http_status(&self, status: u16) {
+        let status = StatusCode::from_u16(status)
+            .unwrap_or_else(|_| panic!("invalid HTTP status code for force_http_status: {status}"));
+        *self.state.force_status.lock().unwrap() = Some(status);
+    }
+
+    /// Force every subsequent `tools/call` to return a top-level JSON-RPC error
+    /// object with this code/message (sticky). The response still carries a
+    /// valid `result`, so the client's error-detection guard is the only thing
+    /// keeping it from parsing as Completed. Use for the MCP tool-call-error case.
+    pub fn set_tool_call_error(&self, code: i64, message: impl Into<String>) {
+        *self.state.force_tool_call_error.lock().unwrap() = Some((code, message.into()));
+    }
+
     pub fn clear_recorded_requests(&self) {
         self.state.recorded_requests.lock().unwrap().clear();
     }
@@ -123,6 +141,18 @@ struct MockState {
     /// `Mcp-Session-Id` per handshake so multi-user isolation tests can
     /// observe that each activation binds its own session.
     session_counter: std::sync::Mutex<u64>,
+    /// Sticky HTTP status override for error-path tests: when set, every
+    /// otherwise-successful `tools/call` response is returned with this status
+    /// (keeping the normal JSON-RPC success body, so a client that wrongly
+    /// accepts a non-2xx status would parse it as Completed). Drives the
+    /// server-5xx MCP error case. Scoped to `tools/call` only — the
+    /// `initialize`/`tools/list` handshake is unaffected.
+    force_status: std::sync::Mutex<Option<StatusCode>>,
+    /// Sticky `tools/call` JSON-RPC error override: when set, `tools/call`
+    /// returns a top-level `error` object (alongside a valid `result`, so the
+    /// client's error-detection guard is the only thing preventing a spurious
+    /// Completed). Drives the tool-call-error MCP case.
+    force_tool_call_error: std::sync::Mutex<Option<(i64, String)>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -178,6 +208,8 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
         session_counter: std::sync::Mutex::new(0),
+        force_status: std::sync::Mutex::new(None),
+        force_tool_call_error: std::sync::Mutex::new(None),
     });
 
     let app = Router::new()
@@ -256,6 +288,8 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
         session_counter: std::sync::Mutex::new(0),
+        force_status: std::sync::Mutex::new(None),
+        force_tool_call_error: std::sync::Mutex::new(None),
     });
 
     let app = Router::new()
@@ -487,18 +521,34 @@ async fn handle_mcp(
                 result
             };
 
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": req.id,
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": serde_json::to_string(&content).unwrap_or_default()
-                        }
-                    ]
-                }
-            })
+            let success_result = serde_json::json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string(&content)
+                            .expect("serializing serde_json::Value for mock MCP content should not fail")
+                    }
+                ]
+            });
+            // Sticky tool-call error override: emit a top-level JSON-RPC `error`
+            // object AND a valid `result`. A conformant client returns on the
+            // `error` field; the `result` is present so that removing that guard
+            // (the mutation) would flip the outcome to Completed — making the
+            // error-path test able to detect the mutant.
+            if let Some((code, message)) = state.force_tool_call_error.lock().unwrap().clone() {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {"code": code, "message": message},
+                    "result": success_result
+                })
+            } else {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "result": success_result
+                })
+            }
         }
         _ => serde_json::json!({
             "jsonrpc": "2.0",
@@ -507,14 +557,26 @@ async fn handle_mcp(
         }),
     };
 
+    // Sticky HTTP status override (server-5xx case): keep the normal JSON-RPC
+    // body but return it with the forced status. Scoped to `tools/call` so the
+    // `initialize`/`tools/list` handshake still succeeds and the error is
+    // observed at the tool invocation, not activation. A conformant client
+    // rejects a non-2xx status before parsing; a client that wrongly accepts it
+    // would parse the valid body as Completed — so the mutation is detectable.
+    let status = if req.method == "tools/call" {
+        state.force_status.lock().unwrap().unwrap_or(StatusCode::OK)
+    } else {
+        StatusCode::OK
+    };
+
     if let Some(session_id) = response_session_id {
         (
-            StatusCode::OK,
+            status,
             [("mcp-session-id", session_id.as_str())],
             Json(response),
         )
             .into_response()
     } else {
-        Json(response).into_response()
+        (status, Json(response)).into_response()
     }
 }

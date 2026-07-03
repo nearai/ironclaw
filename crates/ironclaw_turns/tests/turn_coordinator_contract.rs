@@ -31,7 +31,8 @@ use ironclaw_turns::{
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
     TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
     TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, TurnSurfaceType,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
+    TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -865,6 +866,538 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Cancelled);
     assert!(!cancelled.already_terminal);
+}
+
+/// Captures every snapshot the in-memory store hands the durable block sink so
+/// a test can assert both *that* persistence fired and *what* it persisted.
+#[derive(Default)]
+struct RecordingBlockPersistence {
+    snapshots: Mutex<Vec<ironclaw_turns::TurnPersistenceSnapshot>>,
+}
+
+impl RecordingBlockPersistence {
+    fn snapshots(&self) -> Vec<ironclaw_turns::TurnPersistenceSnapshot> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateBlockPersistence for RecordingBlockPersistence {
+    async fn persist(&self, snapshot: &ironclaw_turns::TurnPersistenceSnapshot) {
+        self.snapshots.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+/// The in-memory turn-state authority is volatile, but a turn parked on a human
+/// gate (approval/auth) must survive a process restart. This exercises the
+/// persist-on-block contract end to end: the durable sink fires only when the
+/// gate-blocked set changes (block, then resume) and never on the plain
+/// claim/complete hot path, and the last persisted snapshot rehydrates a fresh
+/// store with the blocked run intact.
+#[tokio::test]
+async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    // Hot path: a turn that runs to completion without ever blocking must not
+    // touch the durable sink — that is the contention the sink must not
+    // reintroduce.
+    let hot_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-hot", "idem-hot"))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(store.as_ref(), hot_run_id, "thread-hot").await;
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/complete hot path must not persist to the block sink"
+    );
+
+    // Block a turn on an approval gate — the blocked set changes, so the sink
+    // fires with a snapshot that carries the blocked run.
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate", "idem-gate"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:approval").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        approval_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let after_block = sink.snapshots();
+    assert_eq!(
+        after_block.len(),
+        1,
+        "blocking a run must persist exactly once"
+    );
+    let persisted_run = after_block
+        .last()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("blocked run present in persisted snapshot")
+        .clone();
+    assert_eq!(persisted_run.status, TurnStatus::BlockedApproval);
+
+    // Auth gates take the same durable path: block a second run on an auth gate
+    // (via `block_run`, the path a `BlockedReason::Auth` uses) and confirm the
+    // sink fires again with the run recorded as `BlockedAuth`. This is the case
+    // that most needs durability — a turn parked on auth must survive a deploy.
+    let auth_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate-auth", "idem-gate-auth"))
+            .await
+            .unwrap(),
+    );
+    let auth_runner_id = TurnRunnerId::new();
+    let auth_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            scope_filter: Some(scope("thread-gate-auth")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id: auth_run_id,
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: GateRef::new("auth-gate").unwrap(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let after_auth_block = sink.snapshots();
+    assert_eq!(
+        after_auth_block.len(),
+        2,
+        "blocking a run on an auth gate must persist"
+    );
+
+    // The latest snapshot now carries both parked runs. Rehydrate a fresh store
+    // from it — both the approval- and auth-blocked runs must come back blocked
+    // so a later "Approve"/token submission lands on a real run.
+    let blocked_snapshot = after_auth_block.last().unwrap().clone();
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        blocked_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_runs = restored.persistence_snapshot().runs;
+    let restored_approval = restored_runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("approval-blocked run survives rehydration");
+    assert_eq!(restored_approval.status, TurnStatus::BlockedApproval);
+    let restored_auth = restored_runs
+        .iter()
+        .find(|record| record.run_id == auth_run_id)
+        .expect("auth-blocked run survives rehydration");
+    assert_eq!(restored_auth.status, TurnStatus::BlockedAuth);
+
+    // Resuming the approval gate changes the blocked set, so the sink fires
+    // again with that run no longer blocked.
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-gate"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-gate-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+    assert_eq!(
+        sink.snapshots().len(),
+        3,
+        "resuming a blocked run must persist the blocked-set change"
+    );
+
+    // A resumed run completes from `Running`, not from a blocked state. The
+    // durable snapshot must still converge to the terminal state so a restart
+    // does not rehydrate an already-finished run as a live `Queued`/`Running`
+    // run — persist-on-block tracks the gate-touched run through its terminal
+    // transition to guarantee this.
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+        })
+        .await
+        .unwrap();
+    let after_complete = sink.snapshots();
+    assert_eq!(
+        after_complete.len(),
+        4,
+        "completing a gate-resumed run must persist its terminal state"
+    );
+    let terminal_snapshot = after_complete.last().unwrap().clone();
+    let terminal_run = terminal_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("resumed run present in terminal snapshot");
+    assert_eq!(terminal_run.status, TurnStatus::Completed);
+
+    // Rehydrate from the terminal snapshot — the run must come back Completed,
+    // not Queued/Running, so recovery does not re-run a finished turn.
+    let restored_terminal = InMemoryTurnStateStore::from_persistence_snapshot(
+        terminal_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_terminal_run = restored_terminal
+        .persistence_snapshot()
+        .runs
+        .into_iter()
+        .find(|record| record.run_id == run_id)
+        .expect("completed run survives rehydration");
+    assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
+}
+
+/// A run recovered *from a restart snapshot* while blocked must still receive a
+/// durable terminal-convergence write when it later resumes and completes —
+/// otherwise the next restart would resurrect the finished run as live. This
+/// exercises the seeding of the gate-persisted set on rehydration
+/// (`with_block_persistence` after `from_persistence_snapshot`), the path a live
+/// block never covers.
+#[tokio::test]
+async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
+    // Build a durable snapshot that contains a gate-blocked run, as a restart
+    // would recover.
+    let origin = Arc::new(
+        InMemoryTurnStateStore::default()
+            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
+    );
+    let coordinator = DefaultTurnCoordinator::new(origin.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-recover", "idem-recover"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    origin
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("recover-gate").unwrap();
+    origin
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let recovery_snapshot = origin.persistence_snapshot();
+
+    // Restart: rehydrate a fresh store from that snapshot and attach a fresh
+    // sink. The recovered blocked run must be seeded into the gate-persisted set.
+    let restored_sink = Arc::new(RecordingBlockPersistence::default());
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            recovery_snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap()
+        .with_block_persistence(restored_sink.clone()),
+    );
+
+    // Resume the recovered gate, then claim + complete it.
+    restored
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-recover"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("src-recover").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-recover").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-recover-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let resume_runner = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    restored
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+        })
+        .await
+        .unwrap();
+
+    // Completing the recovered run must have persisted its terminal state, so a
+    // subsequent restart rehydrates it as Completed, not live.
+    let terminal_snapshot = restored_sink
+        .snapshots()
+        .pop()
+        .expect("terminal persist after recovery resume/complete");
+    let terminal_run = terminal_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("recovered run present in terminal snapshot");
+    assert_eq!(
+        terminal_run.status,
+        TurnStatus::Completed,
+        "recovered gate-blocked run must persist its terminal state, not stay Queued/Running"
+    );
+}
+
+/// The narrow window: a gate-touched run that has already *resumed* (persisted as
+/// `Queued`, not `Blocked`) when a restart snapshots it. Status alone no longer
+/// says "gate-touched", so seeding must key off the retained `checkpoint_id`.
+/// Otherwise the recovered run completes untracked, its terminal state is never
+/// persisted, and every subsequent restart re-runs the finished turn.
+#[tokio::test]
+async fn rehydrated_resumed_run_persists_terminal_state() {
+    // Build a snapshot where a gate-touched run has already resumed (Queued).
+    let origin = Arc::new(
+        InMemoryTurnStateStore::default()
+            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
+    );
+    let coordinator = DefaultTurnCoordinator::new(origin.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-resumed-recover",
+                "idem-resumed-recover",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    origin
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-resumed-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("resumed-recover-gate").unwrap();
+    origin
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    origin
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-resumed-recover"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("src-resumed-recover").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-resumed-recover").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resumed-recover-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let recovery_snapshot = origin.persistence_snapshot();
+    // Precondition: the run is captured as Queued (resumed), not Blocked.
+    assert_eq!(
+        recovery_snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .expect("resumed run present in snapshot")
+            .status,
+        TurnStatus::Queued,
+    );
+
+    // Restart: rehydrate + attach a fresh sink. The resumed gate-touched run must
+    // be re-tracked from its retained checkpoint marker.
+    let restored_sink = Arc::new(RecordingBlockPersistence::default());
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            recovery_snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap()
+        .with_block_persistence(restored_sink.clone()),
+    );
+    let resume_runner = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    restored
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-resumed-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+        })
+        .await
+        .unwrap();
+
+    let terminal_snapshot = restored_sink
+        .snapshots()
+        .pop()
+        .expect("terminal persist after recovered resumed run completes");
+    assert_eq!(
+        terminal_snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .expect("recovered resumed run present in terminal snapshot")
+            .status,
+        TurnStatus::Completed,
+        "a resumed gate-touched run recovered from a restart must still persist its terminal state"
+    );
+}
+
+/// Graceful-shutdown flush must durably capture **in-flight, non-blocked** runs,
+/// not just gate-blocked ones — that is what makes a planned deploy (SIGTERM)
+/// recover in-progress turns instead of dropping them. Persist-on-block never
+/// fires for a plain running turn, so only `flush()` covers it.
+#[tokio::test]
+async fn flush_persists_in_flight_non_blocked_run() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-flush", "idem-flush"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-flush")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // The run is now Running (in-flight) and never blocked, so persist-on-block
+    // has not fired — the hot path stays off the sink.
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/run must not persist on the hot path"
+    );
+
+    // Graceful shutdown flush captures the in-flight run.
+    store.flush().await;
+    let flushed = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    let record = flushed
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("in-flight run present in flushed snapshot");
+    assert!(
+        matches!(record.status, TurnStatus::Running | TurnStatus::Queued),
+        "flush must capture the in-flight non-blocked run, got {:?}",
+        record.status
+    );
+
+    // And it rehydrates, so a restart recovers the in-flight run.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        flushed,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        restored
+            .persistence_snapshot()
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id),
+        "in-flight run survives flush + rehydration"
+    );
 }
 
 #[tokio::test]

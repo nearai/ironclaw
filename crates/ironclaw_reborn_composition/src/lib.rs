@@ -182,6 +182,8 @@ pub use extension_lifecycle_command::{
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
 #[cfg(feature = "test-support")]
+pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_summary::reborn_failure_summary_for_category;
@@ -343,6 +345,7 @@ pub use slack_serve::{
     slack_events_route_mount,
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
+pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -887,6 +890,8 @@ where
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
+    #[error("invalid reborn production configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]
