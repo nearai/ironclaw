@@ -1,7 +1,8 @@
-export function activeSidebarThreadIdFromPath(pathname) {
+export function activeRouteThreadIdFromPath(pathname) {
   if (typeof pathname !== "string") return null;
 
-  const trimmed = pathname.replace(/\/+$/, "");
+  const cleanPath = pathname.split(/[?#]/)[0];
+  const trimmed = cleanPath.replace(/\/+$/, "");
   if (!trimmed.startsWith("/chat/")) return null;
 
   const remainder = trimmed.slice("/chat/".length);
@@ -12,4 +13,11 @@ export function activeSidebarThreadIdFromPath(pathname) {
   } catch {
     return remainder;
   }
+}
+
+export function routeSynchronizedThreadsState(threadsState, pathname) {
+  return {
+    ...threadsState,
+    activeThreadId: activeRouteThreadIdFromPath(pathname),
+  };
 }

@@ -1,6 +1,5 @@
-import { Link, useLocation } from "react-router";
+import { Link } from "react-router";
 import { html } from "../lib/html.js";
-import { activeSidebarThreadIdFromPath } from "../lib/sidebar-active-thread.js";
 import { SidebarFooter } from "./sidebar-footer.js";
 import { SidebarNav } from "./sidebar-nav.js";
 import { SidebarThreads } from "./sidebar-threads.js";
@@ -20,9 +19,6 @@ export function Sidebar({
   onSelectThread,
   onDeleteThread,
 }) {
-  const location = useLocation();
-  const activeSidebarThreadId = activeSidebarThreadIdFromPath(location.pathname);
-
   return html`
     <aside
       id=${id}
@@ -51,7 +47,7 @@ export function Sidebar({
       <div className="mt-3 flex min-h-0 flex-1 flex-col">
         <${SidebarThreads}
           threads=${threadsState.threads}
-          activeThreadId=${activeSidebarThreadId}
+          activeThreadId=${threadsState.activeThreadId}
           rebornProjectsEnabled=${rebornProjectsEnabled}
           onSelect=${onSelectThread}
           onDelete=${onDeleteThread}
