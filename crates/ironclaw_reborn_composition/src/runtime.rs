@@ -8584,11 +8584,10 @@ output_schema_ref = "schemas/write.output.json"
         // Mirrors production's `attachment_read_port` wiring (read-only
         // `workspace_filesystem`), so the read side is the same authority a
         // vision-capable model's multimodal part would resolve through.
-        let read_port = crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+        let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
             &local_runtime.workspace_filesystem,
         ));
-        let lander =
-            crate::attachment_landing::ProjectScopedAttachmentLander::new(read_write_filesystem);
+        let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
         let thread_scope = ThreadScope {
             tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),

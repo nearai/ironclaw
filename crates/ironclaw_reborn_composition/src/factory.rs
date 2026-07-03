@@ -627,16 +627,12 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
-            read_port: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
-                    &local_runtime.workspace_filesystem,
-                )),
-            ),
-            lander: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentLander::new(
-                    read_write_workspace_filesystem,
-                ),
-            ),
+            read_port: Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&local_runtime.workspace_filesystem),
+            )),
+            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+                read_write_workspace_filesystem,
+            )),
         })
     }
 }
