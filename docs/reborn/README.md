@@ -67,6 +67,7 @@ If a topic is not covered there yet, use the crate-local `CLAUDE.md` files, publ
 | Local per-worktree environment | `docs/reborn/harness/local-dev.md` |
 | Replay and compatibility fixtures | `docs/reborn/harness/replay.md` |
 | Logs, events, traces, debug bundles | `docs/reborn/harness/observability.md` |
+| Change-category landing policy for review | `docs/reborn/harness/landing-policy.md` |
 
 ## Existing harness assets
 
