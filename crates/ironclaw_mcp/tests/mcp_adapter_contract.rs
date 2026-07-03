@@ -803,6 +803,63 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
     );
 }
 
+/// Coverage gap noted in review of the SSE contract tests: the loopback MCP
+/// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
+/// path) is only ever exercised over JSON-framed `tools/list` responses
+/// elsewhere in this file. A real MCP server is free to answer `tools/list`
+/// as a single SSE event (same as `tools/call` in
+/// `concrete_mcp_sse_client_parses_event_stream_through_shared_egress`), so
+/// this drives discovery against an SSE-framed response and asserts the
+/// parsed tool schemas are byte-identical to the JSON-framed discovery result.
+#[tokio::test]
+async fn concrete_mcp_http_client_discovers_tool_schemas_over_sse_framing() {
+    let sse_egress = RecordingRuntimeEgress::sse();
+    let sse_client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(sse_egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let sse_output = sse_client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "sse".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/sse".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let json_client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::json_rpc())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+    let json_output = json_client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sse_output.tools, json_output.tools,
+        "SSE-framed tools/list must parse to the same tool schemas as JSON-framed tools/list"
+    );
+    assert_eq!(sse_egress.requests().len(), 3);
+}
+
 #[tokio::test]
 async fn concrete_mcp_http_client_maps_discovery_auth_status_to_auth_required() {
     let client = McpHostHttpClient::new(
@@ -1401,9 +1458,9 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     }
                 }
             }
-            "tools/list" => Ok(runtime_json_response(
-                json_rpc_id(&request.body),
-                json!({
+            "tools/list" => {
+                let id = json_rpc_id(&request.body);
+                let result = json!({
                     "tools": [
                         {
                             "name": "search",
@@ -1433,9 +1490,18 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             }
                         }
                     ]
-                }),
-                vec![],
-            )),
+                });
+                match self.mode {
+                    RecordedResponseMode::Json
+                    | RecordedResponseMode::JsonMissingProtocolVersion => {
+                        Ok(runtime_json_response(id, result, vec![]))
+                    }
+                    RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
+                    RecordedResponseMode::AuthRequired => {
+                        unreachable!("auth-required mode returns before JSON-RPC method dispatch")
+                    }
+                }
+            }
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
     }

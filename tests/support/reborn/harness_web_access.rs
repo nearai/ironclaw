@@ -10,9 +10,9 @@
 //! `tools/call`) to the Exa MCP endpoint. This harness wires the real
 //! production handler registration,
 //! `ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers`
-//! (`crates/ironclaw_reborn_composition/src/web_access.rs`, `pub` since the
-//! self-review that landed this file), instead of duplicating the
-//! `FirstPartyCapabilityHandler` dispatch/error-mapping glue here. Only the
+//! (`crates/ironclaw_reborn_composition/src/web_access.rs`), instead of
+//! duplicating the `FirstPartyCapabilityHandler` dispatch/error-mapping glue
+//! here. Only the
 //! manifest/schema loading below and the trust/network policy further down
 //! remain harness-local — those are test-support concerns (reading assets
 //! off disk, scoping a test-only trust policy), not business logic that

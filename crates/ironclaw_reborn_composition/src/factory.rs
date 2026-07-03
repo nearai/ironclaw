@@ -638,6 +638,60 @@ impl RebornServices {
             ),
         })
     }
+
+    /// Test-support access to the local-dev per-tool permission override store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_override`,
+    /// which the synthetic `outbound_delivery_target_set` capability consults for
+    /// its settings decision — a `Disabled` override drives the `policy_denied`
+    /// route. Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_tool_permission_overrides_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        Some(overrides)
+    }
+
+    /// Test-support access to the local-dev persistent approval-policy store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_always_allow`.
+    /// Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_persistent_approval_policies_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+            local_runtime.persistent_approval_policies.clone();
+        Some(policies)
+    }
+
+    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
+    /// github) directly into the local-dev active-extension registry + trust
+    /// policy, bypassing the multi-turn `builtin.extension_install` →
+    /// `builtin.extension_activate` capability handshake. Reaches the SAME
+    /// `ActiveExtensionPublisher::publish` step `activate()` calls
+    /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
+    /// so a harness that needs a bundled capability (like `github.*`)
+    /// reachable for dispatch without scripting install/activate turns can
+    /// seed it at construction time. Returns `None` for production-profile
+    /// compositions without a local-dev runtime (mirrors
+    /// `extension_installation_store_for_test`).
+    #[cfg(feature = "test-support")]
+    pub fn publish_bundled_extension_for_test(
+        &self,
+        package: &ironclaw_extensions::ExtensionPackage,
+    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(
+            extension_management
+                .active_extensions_for_test()
+                .publish(package),
+        )
+    }
 }
 
 /// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]

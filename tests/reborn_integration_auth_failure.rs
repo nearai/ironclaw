@@ -30,16 +30,12 @@
 //! `credential_refresh_worker` that powers arm b) so the file compiles and
 //! produces zero tests when neither database feature is active.
 
-// The support tree is large and shared; a single-test file exercises only a
-// slice of it, so suppress dead-code warnings on the includes.
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
-// Imports and helpers are gated alongside the test functions so that building
-// without a database feature produces zero unused-import warnings.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::{Duration, Utc};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -66,10 +62,6 @@ fn test_scope() -> AuthProductScope {
 }
 
 // ─── arm a: pure-store revoke ─────────────────────────────────────────────────
-//
-// Proves that `CredentialAccountService::update_status(.., Revoked)` persists
-// the status transition so a subsequent `get_account` reads back `Revoked`.
-// Does not touch the refresh sweep or the HTTP egress.
 
 /// Create a `Configured` credential account, mark it `Revoked` via
 /// `update_status`, and verify the durable read-back carries `Revoked`.
@@ -84,8 +76,6 @@ async fn revoked_account_reads_back_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();
     let scope = test_scope();
 
-    // Step 1 — create a Configured account via the OAuth connect flow.
-    // After this, bundle.egress.captured_count() == 1 (initial token exchange).
     let account = connect_google_account(&bundle, &scope, 0x11).await;
     assert_eq!(
         account.status,
@@ -94,7 +84,6 @@ async fn revoked_account_reads_back_revoked() {
     );
     let account_id = account.id;
 
-    // Step 2 — mark the account Revoked directly (no sweep required).
     let updated = bundle
         .services
         .credential_account_service()
@@ -107,8 +96,8 @@ async fn revoked_account_reads_back_revoked() {
         "update_status return value must carry Revoked"
     );
 
-    // Step 3 — durable read-back: proves the mutation committed to the store,
-    // not merely returned from update_status in-memory.
+    // Durable read-back proves the mutation committed to the store, not
+    // merely returned from update_status in-memory.
     let read_back = bundle
         .services
         .credential_account_service()
@@ -159,16 +148,13 @@ async fn invalid_grant_sweep_marks_account_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();
     let scope = test_scope();
 
-    // Step 1 — run the OAuth connect flow to create a Google credential account.
-    // The default egress returns 200 with an access + refresh token body.
-    // After this, egress.captured_count() == 1.
+    // egress.captured_count() == 1 after this (initial token exchange).
     let account = connect_google_account(&bundle, &scope, 0x22).await;
     let account_id = account.id;
 
-    // Step 2 — queue an invalid_grant error response for the next egress call
-    // (the sweep's refresh request).  The default 200 body stays in place for
-    // any calls after that, but the sweep only makes one refresh call per
-    // candidate, so only this one error is needed.
+    // The sweep makes exactly one refresh call per candidate, so a single
+    // queued invalid_grant response is enough; the constructor-default 200
+    // body stays in place for any calls after that.
     bundle.egress.push_response(
         400,
         serde_json::json!({"error": "invalid_grant"})
@@ -176,14 +162,10 @@ async fn invalid_grant_sweep_marks_account_revoked() {
             .into_bytes(),
     );
 
-    // Step 3 — freeze the clock 3 days ahead so the account (just created,
+    // Freeze the clock 3 days ahead so the account (just created,
     // updated_at ≈ now) appears idle past the 2-day threshold.
     let frozen_now = Utc::now() + Duration::days(3);
 
-    // Step 4 — run the sweep.  The queued 400 invalid_grant response causes
-    // `HostOAuthProviderClient::refresh_token` to return
-    // `AuthProductError::InvalidGrant`, which `refresh_account` maps to
-    // `report_terminal_refresh_status(.., Revoked)`.
     bundle
         .sweep_for_refresh(
             vec![account],
@@ -192,8 +174,6 @@ async fn invalid_grant_sweep_marks_account_revoked() {
         )
         .await;
 
-    // Step 5 — egress must have captured exactly 2 calls: the initial token
-    // exchange (200) and the sweep refresh attempt (400 invalid_grant).
     assert_eq!(
         bundle.egress.captured_count(),
         2,
@@ -201,8 +181,8 @@ async fn invalid_grant_sweep_marks_account_revoked() {
          (total: initial exchange + sweep refresh attempt)"
     );
 
-    // Step 6 — durable read-back: proves the invalid_grant caused the Revoked
-    // status to be committed to the store.
+    // Durable read-back proves the invalid_grant error is what committed the
+    // Revoked status, not just the sweep's in-memory return value.
     let post_sweep = bundle
         .services
         .credential_account_service()
@@ -223,10 +203,6 @@ async fn invalid_grant_sweep_marks_account_revoked() {
 }
 
 // ─── negative guard ────────────────────────────────────────────────────────────
-//
-// Proves that `Revoked` in arm (b) is caused by the `invalid_grant` error, not
-// by the sweep machinery itself.  The same flow with a normal 200 egress must
-// leave the account `Configured` (after a successful token rotation).
 
 /// A credential-refresh sweep with a normal `200` egress MUST NOT mark the
 /// account `Revoked`.
@@ -239,11 +215,9 @@ async fn normal_sweep_does_not_mark_account_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();
     let scope = test_scope();
 
-    // Step 1 — connect (egress call 1: 200 with access + refresh token).
     let account = connect_google_account(&bundle, &scope, 0x33).await;
     let account_id = account.id;
 
-    // Step 2 — sweep with a frozen clock 3 days ahead (account appears idle).
     // No error response is queued; the default 200 egress is used throughout.
     let frozen_now = Utc::now() + Duration::days(3);
     bundle
@@ -254,14 +228,12 @@ async fn normal_sweep_does_not_mark_account_revoked() {
         )
         .await;
 
-    // Step 3 — the sweep must have made exactly 2 egress calls (connect + refresh).
     assert_eq!(
         bundle.egress.captured_count(),
         2,
         "negative-guard sweep must trigger one refresh call (total: connect + refresh)"
     );
 
-    // Step 4 — the account must NOT be Revoked after a successful refresh.
     let post_sweep = bundle
         .services
         .credential_account_service()
@@ -287,12 +259,6 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 }
 
 // ─── FIFO + default-fallback unit test ───────────────────────────────────────
-//
-// Drives `ScriptedOAuthTokenEgress::execute` directly (no OAuth flow, no DB,
-// no network) to verify the queued per-call override FIFO and the
-// constructor-default fallback path, plus the `captured_count` accessor.
-// Not gated on any database feature — it exercises only the scripted egress
-// type itself.
 
 /// [`ScriptedOAuthTokenEgress`] queued responses are consumed in FIFO order;
 /// once the queue is exhausted, subsequent calls fall back to the constructor
@@ -311,18 +277,16 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
     };
     use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
 
-    // Default response: 400 with `{"error":"invalid_grant"}`.
     let egress = ScriptedOAuthTokenEgress::with_error_response(400, "invalid_grant");
 
-    // Queue two per-call overrides (FIFO: body_a first, body_b second).
     let body_a = b"queued-response-A".to_vec();
     let body_b = b"queued-response-B".to_vec();
     egress.push_response(200, body_a.clone());
     egress.push_response(500, body_b.clone());
 
-    // Build a minimal dummy request.  `ScriptedOAuthTokenEgress::execute`
-    // only reads `request.body.len()` and records the full request; the other
-    // fields are unused by the scripted impl.
+    // `ScriptedOAuthTokenEgress::execute` only reads `request.body.len()` and
+    // records the full request; the other fields are unused by the scripted
+    // impl, so this dummy request leaves them empty/default.
     let dummy_request = || RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Wasm,
         scope: ResourceScope::local_default(
@@ -342,7 +306,6 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
         timeout_ms: None,
     };
 
-    // Call 1: first queued override consumed (FIFO).
     let resp1 = egress
         .execute(dummy_request())
         .await
@@ -356,7 +319,6 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
         "call 1 must return the first queued body"
     );
 
-    // Call 2: second queued override consumed (FIFO).
     let resp2 = egress
         .execute(dummy_request())
         .await
@@ -370,7 +332,6 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
         "call 2 must return the second queued body"
     );
 
-    // Call 3: queue exhausted — falls back to the constructor default.
     let resp3 = egress
         .execute(dummy_request())
         .await
@@ -385,7 +346,6 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
         "call 3 must fall back to the default error body containing 'invalid_grant'; got: {resp3_body}"
     );
 
-    // All three execute calls must be captured.
     assert_eq!(
         egress.captured_count(),
         3,

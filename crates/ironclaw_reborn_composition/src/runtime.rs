@@ -903,6 +903,21 @@ pub(crate) fn wrap_skill_activation_capability_for_test(
     )
 }
 
+/// Test-support forwarder (C-SYNTH outbound seam) for the two
+/// `outbound_delivery_*` synthetic-capability wraps. Bridges the private
+/// `local_dev` module to `test_support`; mirrors the `project_create` /
+/// `skill_activate` forwarders above. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(

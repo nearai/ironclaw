@@ -18,9 +18,8 @@ use ironclaw_llm::{
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
-// Re-export shared types from recording module so existing test code can
-// still import them from here.
-// Re-export all shared types so downstream test files can import from here.
+// Re-export shared types from `recording` so downstream test files can
+// import them from here.
 #[allow(unused_imports)]
 pub use ironclaw_llm::recording::{
     ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
