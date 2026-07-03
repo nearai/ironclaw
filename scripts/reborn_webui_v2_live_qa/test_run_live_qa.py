@@ -1616,6 +1616,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web"),
                 "D0QA",
             )
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            with sqlite3.connect(db_path) as db:
+                row = db.execute(
+                    """
+                    SELECT path, contents FROM root_filesystem_entries
+                    WHERE path LIKE '%/outbound/communication-preferences/%'
+                    """
+                ).fetchone()
+            self.assertIsNotNone(row)
+            preference = json.loads(row[1])
+            self.assertTrue(row[0].endswith(".json"))
+            self.assertEqual(
+                preference["scope"],
+                {
+                    "kind": "personal",
+                    "tenant_id": "reborn-cli",
+                    "user_id": "user:web",
+                },
+            )
+            self.assertIn("adapter:8:slack_v2;", preference["final_reply_target"])
+            self.assertIn("installation:13:install-alpha;", preference["final_reply_target"])
+            self.assertIn("space:4:T123;", preference["final_reply_target"])
+            self.assertIn("conversation:4:D0QA;", preference["final_reply_target"])
+            self.assertIn("actor_kind:10:slack_user;", preference["final_reply_target"])
+            self.assertIn("actor:7:UQAUSER;", preference["final_reply_target"])
+            self.assertEqual(preference["updated_by"], "user:web")
 
     def test_slack_personal_dm_lookup_requires_exact_user_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:

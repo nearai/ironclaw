@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
@@ -342,6 +343,90 @@ def _persisted_slack_personal_dm_channel_id(reborn_home: Path, user_id: str) -> 
     return channel_id or None
 
 
+def _hash_scoped_part(hasher: "hashlib._Hash", value: str) -> None:
+    encoded = value.encode("utf-8")
+    hasher.update(len(encoded).to_bytes(8, "big"))
+    hasher.update(encoded)
+
+
+def _communication_preference_path(tenant_id: str, user_id: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"v2:")
+    for part in ("personal", tenant_id, user_id):
+        _hash_scoped_part(hasher, part)
+    return f"/tenants/{tenant_id}/users/{user_id}/outbound/communication-preferences/{hasher.hexdigest()}.json"
+
+
+def _binding_segment(name: str, value: str) -> str:
+    return f"{name}:{len(value.encode('utf-8'))}:{value};"
+
+
+def _slack_personal_dm_reply_target(
+    *,
+    installation_id: str,
+    team_id: str,
+    user_id: str,
+    slack_user_id: str,
+    dm_channel_id: str,
+) -> str:
+    return "reply:" + "".join(
+        [
+            _binding_segment("adapter", "slack_v2"),
+            _binding_segment("installation", installation_id),
+            _binding_segment("agent", "reborn-cli-agent"),
+            _binding_segment("project", ""),
+            _binding_segment("space", team_id),
+            _binding_segment("conversation", dm_channel_id),
+            _binding_segment("topic", ""),
+            _binding_segment("actor_kind", "slack_user"),
+            _binding_segment("actor", slack_user_id),
+        ]
+    )
+
+
+def _seed_slack_outbound_default_target(
+    db_path: Path,
+    *,
+    installation_id: str,
+    team_id: str,
+    user_id: str,
+    slack_user_id: str,
+    dm_channel_id: str,
+    now: str,
+) -> dict[str, object]:
+    tenant_id = "reborn-cli"
+    path = _communication_preference_path(tenant_id, user_id)
+    final_reply_target = _slack_personal_dm_reply_target(
+        installation_id=installation_id,
+        team_id=team_id,
+        user_id=user_id,
+        slack_user_id=slack_user_id,
+        dm_channel_id=dm_channel_id,
+    )
+    _put_root_filesystem_json(
+        db_path,
+        path,
+        {
+            "scope": {
+                "kind": "personal",
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            },
+            "final_reply_target": final_reply_target,
+            "progress_target": None,
+            "approval_prompt_target": None,
+            "auth_prompt_target": None,
+            "default_modality": None,
+            "updated_at": now,
+            "updated_by": user_id,
+        },
+    )
+    return {
+        "path": path,
+        "final_reply_target": final_reply_target,
+    }
+
+
 def _seed_slack_personal_dm_target(
     reborn_home: Path,
     config_text: str,
@@ -386,9 +471,19 @@ def _seed_slack_personal_dm_target(
             "updated_at": now,
         },
     )
+    outbound_default = _seed_slack_outbound_default_target(
+        db_path,
+        installation_id=installation_id,
+        team_id=team_id,
+        user_id=auth_user_id,
+        slack_user_id=slack_user_id,
+        dm_channel_id=dm_channel_id,
+        now=now,
+    )
     return {
         "seeded": True,
         "path": path,
+        "outbound_default": outbound_default,
         "installation_id": installation_id,
         "team_id": team_id,
         "user_id": auth_user_id,
