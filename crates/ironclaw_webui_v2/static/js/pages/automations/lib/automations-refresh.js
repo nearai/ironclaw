@@ -19,7 +19,10 @@ function hasRecentUnattachedRunThread(automation, nowMs) {
   return runs.some((run) => {
     if (!run?.run_id || run.thread_id) return false;
     const timestamp = finiteTimestamp(run.timestamp);
-    return timestamp != null && nowMs - timestamp <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS;
+    return (
+      timestamp != null &&
+      Math.abs(nowMs - timestamp) <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS
+    );
   });
 }
 
