@@ -28,9 +28,9 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # Per-test windows for the handful of scenarios that genuinely need more
 # than 60s (live-recorded fixtures + heavy integration).
 [[profile.default.overrides]]
-filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(=engine_v2_tests::snapshot_zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
+filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 [[profile.ci.overrides]]
-filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(=engine_v2_tests::snapshot_zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
+filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }

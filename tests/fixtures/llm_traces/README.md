@@ -31,7 +31,6 @@ scripts/replay-snap.sh review       # interactive diff review (cargo insta revie
 scripts/replay-snap.sh accept       # accept all pending snapshots
 scripts/replay-snap.sh test         # run the replay gate locally (cargo insta test --check)
 scripts/replay-snap.sh record <name>  # record a fresh fixture against a real LLM
-scripts/trace-coverage.sh           # report which EventKind variants have snapshot coverage
 ```
 
 CI runs the gate via `cargo insta test --test-runner nextest` with

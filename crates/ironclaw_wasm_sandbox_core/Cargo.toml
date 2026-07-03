@@ -10,4 +10,4 @@ ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 thiserror = "2"
 tracing = "0.1"
 wasmtime = { version = "46.0.1", features = ["component-model"] }
-wasmtime-wasi = "46.0.1"
+wasmtime-wasi.workspace = true
