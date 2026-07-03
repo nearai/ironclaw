@@ -9,6 +9,18 @@ import urllib.parse
 
 from scripts.reborn_webui_v2_live_qa.env_helpers import _first_env_value
 
+try:
+    import httpx as _httpx
+except ModuleNotFoundError:
+    _httpx = None
+
+
+class _NoHttpxHTTPError(Exception):
+    pass
+
+
+_HTTPX_HTTP_ERROR = _httpx.HTTPError if _httpx is not None else _NoHttpxHTTPError
+
 _SPREADSHEET_ID_PATTERNS = (
     re.compile(r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)", re.IGNORECASE),
     re.compile(r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})", re.IGNORECASE),
@@ -246,7 +258,7 @@ async def _wait_for_google_sheet_marker(
             last_error = None
         except AssertionError:
             raise
-        except Exception as exc:
+        except _HTTPX_HTTP_ERROR as exc:
             last_error = exc
             last_check = None
             await asyncio.sleep(2.0)

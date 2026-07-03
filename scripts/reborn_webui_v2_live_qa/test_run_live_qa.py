@@ -1586,16 +1586,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["error"], "TimeoutError")
 
     def test_wait_for_google_sheet_marker_retries_transient_read_errors(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
         attempts = 0
 
         async def fake_google_sheet_contains_marker(**_kwargs):
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-                raise TimeoutError()
+                raise FakeHttpxReadError("read timed out")
             return {"found": True, "row_count": 2}
 
         with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
             patch.object(
                 google_api_helpers,
                 "_google_sheet_contains_marker",
@@ -1616,10 +1620,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
 
     def test_wait_for_google_sheet_marker_reports_empty_exception_type(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
         async def fake_google_sheet_contains_marker(**_kwargs):
-            raise TimeoutError()
+            raise FakeHttpxReadError("")
 
         with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
             patch.object(
                 google_api_helpers,
                 "_google_sheet_contains_marker",
@@ -1627,7 +1635,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
         ):
-            with self.assertRaisesRegex(AssertionError, "last_error=TimeoutError"):
+            with self.assertRaisesRegex(AssertionError, "last_error=FakeHttpxReadError"):
                 asyncio.run(
                     google_api_helpers._wait_for_google_sheet_marker(
                         access_token="access-token",
@@ -1654,6 +1662,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
         ):
             with self.assertRaisesRegex(AssertionError, "HTTP 403"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=1.0,
+                    )
+                )
+
+        self.assertEqual(attempts, 1)
+
+    def test_wait_for_google_sheet_marker_propagates_unexpected_errors(self):
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("bad sheet payload")
+
+        with (
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(ValueError, "bad sheet payload"):
                 asyncio.run(
                     google_api_helpers._wait_for_google_sheet_marker(
                         access_token="access-token",
