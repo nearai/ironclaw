@@ -5116,31 +5116,40 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "root-llm-provider")]
     struct RuntimeEnvGuard {
-        name: &'static str,
-        previous: Option<String>,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<String>)>,
     }
 
     #[cfg(feature = "root-llm-provider")]
     impl RuntimeEnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = ironclaw_common::env_helpers::env_or_override(name);
-            ironclaw_common::env_helpers::set_runtime_env(name, value);
-            Self { name, previous }
+        fn new() -> Self {
+            Self {
+                _env_lock: ironclaw_common::env_helpers::lock_env(),
+                previous: Vec::new(),
+            }
         }
 
-        fn unset(name: &'static str) -> Self {
+        fn set(&mut self, name: &'static str, value: &str) {
+            let previous = ironclaw_common::env_helpers::env_or_override(name);
+            ironclaw_common::env_helpers::set_runtime_env(name, value);
+            self.previous.push((name, previous));
+        }
+
+        fn unset(&mut self, name: &'static str) {
             let previous = ironclaw_common::env_helpers::env_or_override(name);
             ironclaw_common::env_helpers::remove_runtime_env(name);
-            Self { name, previous }
+            self.previous.push((name, previous));
         }
     }
 
     #[cfg(feature = "root-llm-provider")]
     impl Drop for RuntimeEnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => ironclaw_common::env_helpers::set_runtime_env(self.name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(self.name),
+            for (name, previous) in self.previous.iter().rev() {
+                match previous {
+                    Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
+                    None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                }
             }
         }
     }
@@ -5402,7 +5411,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(feature = "root-llm-provider")]
     #[tokio::test]
     async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
-        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token");
+        let mut _env_guard = RuntimeEnvGuard::new();
+        _env_guard.set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token");
         let session_dir = tempfile::tempdir().expect("session tempdir");
         let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
@@ -5462,7 +5472,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(feature = "root-llm-provider")]
     #[tokio::test]
     async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
-        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token");
+        let mut _env_guard = RuntimeEnvGuard::new();
+        _env_guard.set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token");
         let root = tempfile::tempdir().expect("tempdir");
         let session_dir = tempfile::tempdir().expect("session tempdir");
         let local_dev_root = root.path().join("local-dev");
@@ -5551,8 +5562,9 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let mut _env_guard = RuntimeEnvGuard::new();
+        _env_guard.unset("NEARAI_SESSION_TOKEN");
+        _env_guard.unset("NEARAI_API_KEY");
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -5701,8 +5713,9 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let mut _env_guard = RuntimeEnvGuard::new();
+        _env_guard.unset("NEARAI_SESSION_TOKEN");
+        _env_guard.unset("NEARAI_API_KEY");
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -6067,8 +6080,9 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let mut _env_guard = RuntimeEnvGuard::new();
+        _env_guard.unset("NEARAI_SESSION_TOKEN");
+        _env_guard.unset("NEARAI_API_KEY");
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");
