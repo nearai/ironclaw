@@ -120,6 +120,7 @@ mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_connection;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_connectable_channel;
