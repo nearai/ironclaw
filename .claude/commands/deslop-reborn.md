@@ -105,7 +105,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   and the largest / hottest modules**, and scope the PR to the slice you fully understand (§2).
 - Branch off the freshest integration base: `git fetch origin && git switch -c deslop/<crate-short-name> origin/main`
   (e.g. `deslop/turns`). Confirm it builds before you start (`cargo build -p <crate> --all-targets`).
-  The repo's PR target is **`staging`** — you will `gh pr create --base staging` in §8 (confirm against
+  The repo's PR target is **`main`** — you will `gh pr create --base main` in §8 (confirm against
   the base shown by the repo config if unsure).
 
 ## 4. Fan out the review — PARALLEL sub-agents (this is the core of the loop)
@@ -283,7 +283,7 @@ after your fixes**.
    `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
    (The commit-msg hook requires a regression test with every `fix` — write it test-first, §Testing
    Discipline in CLAUDE.md.)
-3. **Push and open the PR** with `gh pr create --base staging`. PR body states: the **crate**, the
+3. **Push and open the PR** with `gh pr create --base main`. PR body states: the **crate**, the
    **findings grouped by angle** (quality / architecture & security / interface & contract & invariants
    / coverage), **what you changed** for each, any **deliberate tradeoff** left in place with its
    justification, which **gates ran locally** and what is **CI-deferred** (integration/e2e needing
