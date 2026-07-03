@@ -12,12 +12,16 @@
 mod reborn_support;
 mod support;
 
+use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{HostManagedModelErrorKind, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use reborn_support::{
     harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
-    model_replay::{RebornModelReplayStep, RebornTraceReplayModelGateway},
+    model_replay::{
+        RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
+    },
 };
+use serde_json::json;
 
 /// First model call fails (provider rejects the request); the run must end as a
 /// sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
@@ -105,6 +109,155 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
 
     // Both scripted steps were consumed: the failing call and the recovered
     // retry call.
+    assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+/// A host-managed model call can surface `Cancelled` without any cooperative
+/// cancel signal. `planned_driver` maps that executor error to
+/// `interrupted_unexpectedly`; the binary runner currently projects the
+/// non-allowlisted driver failure as the generic driver category.
+#[tokio::test]
+async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
+    let model_gateway =
+        RebornTraceReplayModelGateway::with_scripted_steps([RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::Cancelled,
+            message: "model provider cancelled the in-flight request".to_string(),
+        }]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-model-cancelled-divergence",
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-model-cancelled-divergence",
+            "Answer after a cancelled model call",
+        )
+        .await
+        .expect("submit text");
+    let failed = harness
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
+        .await
+        .expect("failed run");
+    // matrix-divergence: `map_executor_error` produces
+    // "interrupted_unexpectedly", but `TurnRunnerWorker::sanitized_driver_failure`
+    // only preserves allowlisted driver reason kinds and currently projects the
+    // binary run category as "driver_failed".
+    assert_eq!(
+        failed
+            .failure
+            .as_ref()
+            .expect("failure category")
+            .category(),
+        "driver_failed"
+    );
+    assert!(
+        failed.checkpoint_id.is_some(),
+        "a model-stage cancellation before a trustworthy LoopExit still preserves the BeforeModel checkpoint"
+    );
+    assert!(
+        !harness.milestones().iter().any(|milestone| matches!(
+            milestone.kind,
+            LoopHostMilestoneKind::AssistantReplyFinalized { .. }
+        )),
+        "a cancelled model call must not fabricate a final assistant reply"
+    );
+    assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+/// The first run reaches the capability stage and the capability host returns a
+/// permanent invocation error. The runner must still fail the run with a
+/// retryable capability-stage category, preserve the checkpoint, and allow a
+/// retry to resume to a final answer.
+#[tokio::test]
+async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                CapabilityId::new("test.echo").expect("valid capability id"),
+                "call-capability-fails",
+                json!({"message": "please use the test capability"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "Recovered after capability failure.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-capability-failure-retry-resume",
+        model_gateway,
+        RecordingTestCapabilityPort::invocation_error(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-capability-failure-retry-resume",
+            "Use the test capability and then answer",
+        )
+        .await
+        .expect("submit text");
+    let failed = harness
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
+        .await
+        .expect("failed run");
+    assert_eq!(
+        failed
+            .failure
+            .as_ref()
+            .expect("failure category")
+            .category(),
+        "host_stage_unavailable_capability"
+    );
+    assert!(
+        failed.checkpoint_id.is_some(),
+        "a retryable capability-stage failure must preserve a resume checkpoint"
+    );
+    assert_eq!(
+        harness.capability_invocations().len(),
+        1,
+        "the failed first run must reach exactly one capability invocation"
+    );
+    assert!(
+        !harness.milestones().iter().any(|milestone| matches!(
+            milestone.kind,
+            LoopHostMilestoneKind::AssistantReplyFinalized { .. }
+        )),
+        "a failed capability invocation must not fabricate a final assistant reply"
+    );
+
+    let retry = harness
+        .retry_turn(submitted.run_id)
+        .await
+        .expect("retry the failed run");
+    assert_ne!(
+        retry.run_id, submitted.run_id,
+        "retry must spawn a distinct run"
+    );
+    assert_eq!(retry.status, TurnStatus::Queued);
+
+    harness
+        .wait_for_status(retry.run_id, TurnStatus::Completed)
+        .await
+        .expect("retry run completes");
+    harness
+        .assert_final_reply("Recovered after capability failure.")
+        .await
+        .expect("recovered reply persisted to the thread");
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;
