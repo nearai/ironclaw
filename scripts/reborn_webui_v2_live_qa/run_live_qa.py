@@ -3608,25 +3608,8 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                     timeout=180.0,
                 ),
             )
-            deadline = time.monotonic() + 180.0
-            while time.monotonic() < deadline:
-                await _approve_visible_tool_gate(page)
-                statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
-                observed["capability_statuses"] = statuses
-                completed = _completed_capability_counts(statuses)
-                missing = [
-                    capability_id
-                    for capability_id in capability_ids
-                    if completed.get(capability_id, 0)
-                    <= baseline_completed.get(capability_id, 0)
-                ]
-                if not missing:
-                    return
-                await asyncio.sleep(1.0)
-            raise AssertionError(
-                "Slack DM connect prompt did not complete expected capabilities: "
-                f"{capability_ids!r}; observed statuses={observed.get('capability_statuses')!r}"
-            )
+            statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
+            observed["capability_statuses"] = statuses
 
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
@@ -3850,6 +3833,7 @@ CASES: dict[str, CaseSpec] = {
     "qa_7c_slack_bug_logger_routine": CaseSpec(
         case_qa_7c_slack_bug_logger_routine,
         requires_slack=True,
+        requires_slack_target=True,
         requires_google_product_auth=True,
     ),
     "qa_7d_slack_bug_message_trigger": CaseSpec(

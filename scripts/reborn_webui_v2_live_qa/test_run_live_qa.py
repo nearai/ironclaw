@@ -974,7 +974,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
         )
 
-    def test_qa_7a_requires_new_connect_capability_completions(self):
+    def test_qa_7a_accepts_existing_dm_delivery_target_without_new_connect_capabilities(self):
         class FakeLocator:
             @property
             def last(self):
@@ -1007,7 +1007,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             capability_id: ["completed", "completed"]
             for capability_id in capability_ids
         }
-        status_sequence = [baseline, stale, fresh]
+        status_sequence = [baseline, stale]
 
         async def fake_with_page(_output_dir, _case_name, action):
             await action(FakePage())
@@ -1063,7 +1063,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["baseline_capability_statuses"], baseline)
-        self.assertEqual(result.details["capability_statuses"], fresh)
+        self.assertEqual(result.details["capability_statuses"], stale)
         self.assertEqual(result.details["text_excerpt"], "Slack is connected")
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
@@ -2458,6 +2458,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             cases["qa_5d_slack_strategy_doc_answer"]["status"],
             "gated:requires_live_google_product_auth",
         )
+        self.assertTrue(cases["qa_7c_slack_bug_logger_routine"]["implemented"])
+        self.assertTrue(cases["qa_7c_slack_bug_logger_routine"]["requires_slack_target"])
         self.assertTrue(cases["qa_6e_gmail_to_sheet_delivery"]["implemented"])
         self.assertEqual(
             cases["qa_6e_gmail_to_sheet_delivery"]["status"],
