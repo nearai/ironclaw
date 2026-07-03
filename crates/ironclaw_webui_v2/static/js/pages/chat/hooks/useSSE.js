@@ -52,29 +52,11 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectAttempts = 0;
     const maxReconnectDelay = 30_000;
 
-    function clearReconnectTimer() {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    }
-
-    function scheduleReconnect() {
-      clearReconnectTimer();
-      reconnectAttempts++;
-      const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    }
-
     function connect() {
       if (document.visibilityState === "hidden") {
         setStatus("paused");
         return;
       }
-      clearReconnectTimer();
       setStatus(reconnectAttempts > 0 ? "reconnecting" : "connecting");
 
       es = openEventStream({
@@ -89,9 +71,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es.onerror = () => {
         if (es) es.close();
-        es = null;
         setStatus("disconnected");
-        scheduleReconnect();
+        reconnectAttempts++;
+        const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
+        reconnectTimer = setTimeout(connect, delay);
       };
 
       const dispatchFrame = (event, fallbackType) => {
@@ -128,7 +111,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function disconnectForHiddenTab() {
-      clearReconnectTimer();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       if (es) {
         es.close();
         es = null;
@@ -149,7 +135,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      clearReconnectTimer();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (es) es.close();
     };
   }, [enabled, threadId]);

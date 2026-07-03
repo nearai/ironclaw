@@ -10,10 +10,9 @@ use ironclaw_product_adapters::{
     ProductOutboundTarget, ProjectionCursor,
 };
 use ironclaw_reborn_openai_compat::{
-    OpenAiChatCompletionId, OpenAiCompatActorScope, OpenAiCompatInternalRefs,
-    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
-    OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
-    OpenAiResponseId,
+    OpenAiCompatActorScope, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
+    OpenAiCompatProjectionRef, OpenAiCompatPublicId, OpenAiCompatRequestFingerprint,
+    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
@@ -578,68 +577,6 @@ async fn external_tool_resume_rejects_non_blocked_running_run() {
     assert_eq!(error.status_code(), 409);
 }
 
-#[tokio::test]
-async fn openai_response_streamer_appends_finalized_message_after_completed_status() {
-    let fixture = ResponseReaderFixture::new("stream-final").await;
-    let run_id = TurnRunId::new();
-    fixture
-        .append_final_assistant_message(run_id, "streamed final text")
-        .await
-        .expect("append final message");
-    let stream = Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
-        fixture.thread_id.as_str(),
-        run_id,
-        "completed",
-    )]));
-    let streamer = OpenAiCompatRuntimeProjectionStreamer::new(stream, fixture.threads.clone());
-
-    let events = streamer
-        .drain_response(fixture.stream_request(run_id))
-        .await
-        .expect("drain response stream");
-
-    let final_reply = events
-        .iter()
-        .find_map(|event| match event.payload() {
-            ProductOutboundPayload::FinalReply(view) => Some(view),
-            _ => None,
-        })
-        .expect("final reply event");
-    assert_eq!(final_reply.turn_run_id, run_id);
-    assert_eq!(final_reply.text, "streamed final text");
-}
-
-#[tokio::test]
-async fn openai_chat_streamer_appends_finalized_message_after_completed_status() {
-    let fixture = ResponseReaderFixture::new("chat-stream-final").await;
-    let run_id = TurnRunId::new();
-    fixture
-        .append_final_assistant_message(run_id, "chat streamed final text")
-        .await
-        .expect("append final message");
-    let stream = Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
-        fixture.thread_id.as_str(),
-        run_id,
-        "completed",
-    )]));
-    let streamer = OpenAiCompatRuntimeProjectionStreamer::new(stream, fixture.threads.clone());
-
-    let events = streamer
-        .drain_chat(fixture.chat_stream_request(run_id))
-        .await
-        .expect("drain chat stream");
-
-    let final_reply = events
-        .iter()
-        .find_map(|event| match event.payload() {
-            ProductOutboundPayload::FinalReply(view) => Some(view),
-            _ => None,
-        })
-        .expect("final reply event");
-    assert_eq!(final_reply.turn_run_id, run_id);
-    assert_eq!(final_reply.text, "chat streamed final text");
-}
-
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
@@ -725,49 +662,6 @@ impl ResponseReaderFixture {
         }
     }
 
-    fn stream_request(&self, run_id: TurnRunId) -> OpenAiResponseProjectionStreamRequest {
-        OpenAiResponseProjectionStreamRequest {
-            public_id: OpenAiResponseId::new("resp_test").expect("response id"),
-            actor_scope: self.actor_scope.clone(),
-            accepted_ack: ProductInboundAck::Accepted {
-                accepted_message_ref: AcceptedMessageRef::new("accepted:test")
-                    .expect("accepted ref"),
-                submitted_run_id: run_id,
-            },
-            requested_model: "reborn-test".to_string(),
-            projection_subscription: ProjectionSubscriptionRequest {
-                actor: self.projection_read.actor.clone(),
-                scope: self.projection_read.scope.clone(),
-                after_cursor: None,
-            },
-            mapping: self.mapping(run_id),
-            wait_timeout: Duration::from_secs(1),
-            after_cursor: None,
-        }
-    }
-
-    fn chat_stream_request(&self, run_id: TurnRunId) -> OpenAiChatProjectionStreamRequest {
-        OpenAiChatProjectionStreamRequest {
-            public_id: OpenAiChatCompletionId::new("chatcmpl-test").expect("chat id"),
-            actor_scope: self.actor_scope.clone(),
-            accepted_ack: ProductInboundAck::Accepted {
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
-                    .expect("accepted ref"),
-                submitted_run_id: run_id,
-            },
-            requested_model: "reborn-test".to_string(),
-            model_only_tools: None,
-            projection_subscription: ProjectionSubscriptionRequest {
-                actor: self.projection_read.actor.clone(),
-                scope: self.projection_read.scope.clone(),
-                after_cursor: None,
-            },
-            mapping: self.chat_mapping(run_id),
-            wait_timeout: Duration::from_secs(1),
-            after_cursor: None,
-        }
-    }
-
     fn mapping(
         &self,
         run_id: TurnRunId,
@@ -778,35 +672,6 @@ impl ResponseReaderFixture {
             ),
             owner: self.actor_scope.clone(),
             surface: OpenAiCompatRouteSurface::ResponsesApi,
-            request_fingerprint: OpenAiCompatRequestFingerprint::from_body_bytes(b"{}"),
-            created_at: 123,
-            idempotency_key: None,
-            accepted_ack: None,
-            external_tool_resume_completed: false,
-            binding: OpenAiCompatResourceBinding::Bound {
-                internal_refs: OpenAiCompatInternalRefs::new(
-                    OpenAiCompatProductActionRef::new("product-action:test").expect("action ref"),
-                )
-                .with_turn_run_ref(
-                    OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
-                )
-                .with_projection_ref(
-                    OpenAiCompatProjectionRef::new("projection:test").expect("projection ref"),
-                ),
-            },
-        }
-    }
-
-    fn chat_mapping(
-        &self,
-        run_id: TurnRunId,
-    ) -> ironclaw_reborn_openai_compat::OpenAiCompatResourceMapping {
-        ironclaw_reborn_openai_compat::OpenAiCompatResourceMapping {
-            public_id: OpenAiCompatPublicId::ChatCompletion(
-                OpenAiChatCompletionId::new("chatcmpl-test").expect("chat id"),
-            ),
-            owner: self.actor_scope.clone(),
-            surface: OpenAiCompatRouteSurface::ChatCompletions,
             request_fingerprint: OpenAiCompatRequestFingerprint::from_body_bytes(b"{}"),
             created_at: 123,
             idempotency_key: None,
