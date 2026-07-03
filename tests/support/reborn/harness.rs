@@ -1579,6 +1579,22 @@ impl HarnessCapabilityMode {
     }
 }
 
+/// Backing handles for the two synthetic `outbound_delivery_*` capabilities
+/// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`. Bundles
+/// the injected facade double + the settings stores the production
+/// `outbound_delivery_capabilities` wiring consumes, so the harness struct
+/// widens by ONE field instead of four. The auto-approve store and
+/// approval-request/lease stores are already held as sibling harness fields
+/// (`auto_approve_settings` / `approval_parts`) and re-used, not duplicated here.
+struct OutboundTargetToolsParts {
+    /// Concrete double (not the trait object) so tests can read `set` calls back;
+    /// upcast to `Arc<dyn OutboundPreferencesProductFacade>` at wrap time.
+    facade: Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
+    requires_approval: bool,
+    tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
+    persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+}
+
 pub(crate) struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
@@ -1633,6 +1649,11 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// both over); `None` for the lower-level constructors and the Echo backend.
     /// Read back via `attachment_test_support_for_test`.
     attachment_test_support: Option<ironclaw_reborn_composition::AttachmentTestSupport>,
+    /// Backing handles for the synthetic `outbound_delivery_*` capabilities
+    /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
+    /// `create_capability_port` wraps the port with the two capabilities via
+    /// `apply_synthetic_capability_wrappers` when this is `Some`.
+    outbound_target_tools: Option<OutboundTargetToolsParts>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1648,6 +1669,15 @@ struct HostRuntimeHarnessOptions {
     /// so `skill_activate` resolves the seeded user skill against the same
     /// tenant the turn runs under. `None` for every other harness variant.
     skill_activation_tenant: Option<TenantId>,
+    /// Injected outbound-delivery facade double + `target_set` approval flag,
+    /// when this harness surfaces the synthetic `outbound_delivery_*`
+    /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
+    /// this. `new_with_options` pairs the facade with the local-dev settings
+    /// stores captured from `RebornServices` to build `OutboundTargetToolsParts`.
+    outbound_target_facade: Option<(
+        Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
+        bool,
+    )>,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1660,6 +1690,7 @@ impl HostRuntimeHarnessOptions {
             runtime_policy,
             seed_extension_credentials: false,
             skill_activation_tenant: None,
+            outbound_target_facade: None,
         }
     }
 
@@ -1670,6 +1701,15 @@ impl HostRuntimeHarnessOptions {
 
     fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
         self.skill_activation_tenant = Some(tenant);
+        self
+    }
+
+    fn with_outbound_target_tools(
+        mut self,
+        facade: Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
+        target_set_requires_approval: bool,
+    ) -> Self {
+        self.outbound_target_facade = Some((facade, target_set_requires_approval));
         self
     }
 }
@@ -1863,6 +1903,7 @@ impl HostRuntimeCapabilityHarness {
             project_service: None,
             skill_activation_source: None,
             attachment_test_support: None,
+            outbound_target_tools: None,
         })
     }
 
@@ -1924,6 +1965,51 @@ impl HostRuntimeCapabilityHarness {
             .enable_global_auto_approve_for_product_and_harness_users()
             .await?;
         Ok(harness)
+    }
+
+    /// C-SYNTH outbound: harness surfacing the two local-dev synthetic
+    /// `outbound_delivery_*` capabilities over an injected
+    /// [`FakeOutboundPreferencesFacade`] double.
+    /// `create_capability_port` injects them via
+    /// `apply_synthetic_capability_wrappers` because
+    /// `outbound_target_tools` is `Some`. `target_set` runs with
+    /// `requires_approval = true`, so its settings decision is exercised for
+    /// real: global auto-approve (default ON) → `Allow`; a `Disabled` tool
+    /// override (`disable_outbound_target_set_tool`) → `Deny`; auto-approve
+    /// disabled → `Ask` (approval gate). The RETURNED harness leaves global
+    /// auto-approve at its default-ON state so the happy/`NotFound` arms
+    /// dispatch through `Allow`; the gate arm disables it per-test.
+    pub(crate) async fn outbound_target_tools() -> HarnessResult<Self> {
+        let facade =
+            super::outbound_preferences::FakeOutboundPreferencesFacade::with_default_targets();
+        Self::new_with_options(
+            "reborn-e2e-outbound-target-tools",
+            vec![
+                CapabilityId::new(
+                    ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+                )?,
+                CapabilityId::new(
+                    ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                )?,
+            ],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ExternalWrite,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-outbound-target-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_outbound_target_tools(facade, true),
+        )
+        .await
     }
 
     /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
@@ -2236,6 +2322,7 @@ impl HostRuntimeCapabilityHarness {
             runtime_policy,
             seed_extension_credentials,
             skill_activation_tenant,
+            outbound_target_facade,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2291,6 +2378,27 @@ impl HostRuntimeCapabilityHarness {
             None
         };
         let attachment_test_support = services.local_dev_attachment_test_support_for_test();
+        // C-SYNTH outbound: pair the injected facade double with the local-dev
+        // settings stores production's `outbound_delivery_capabilities` consumes,
+        // captured from `RebornServices` before the `host_runtime` move. Only
+        // `outbound_target_tools()` supplies the facade.
+        let outbound_target_tools = match outbound_target_facade {
+            Some((facade, requires_approval)) => {
+                let tool_permission_overrides = services
+                    .local_dev_tool_permission_overrides_for_test()
+                    .ok_or("outbound_target_tools requires a local-dev tool-override store")?;
+                let persistent_approval_policies = services
+                    .local_dev_persistent_approval_policies_for_test()
+                    .ok_or("outbound_target_tools requires a local-dev persistent-policy store")?;
+                Some(OutboundTargetToolsParts {
+                    facade,
+                    requires_approval,
+                    tool_permission_overrides,
+                    persistent_approval_policies,
+                })
+            }
+            None => None,
+        };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -2326,6 +2434,7 @@ impl HostRuntimeCapabilityHarness {
             project_service,
             skill_activation_source,
             attachment_test_support,
+            outbound_target_tools,
         })
     }
 
@@ -2474,6 +2583,7 @@ impl HostRuntimeCapabilityHarness {
             project_service: None,
             skill_activation_source: None,
             attachment_test_support: None,
+            outbound_target_tools: None,
         })
     }
 
@@ -2570,6 +2680,7 @@ impl HostRuntimeCapabilityHarness {
             project_service: None,
             skill_activation_source: None,
             attachment_test_support: None,
+            outbound_target_tools: None,
         })
     }
 
@@ -2645,6 +2756,7 @@ impl HostRuntimeCapabilityHarness {
             project_service: None,
             skill_activation_source: None,
             attachment_test_support: None,
+            outbound_target_tools: None,
         })
     }
 
@@ -2706,6 +2818,7 @@ impl HostRuntimeCapabilityHarness {
             project_service: None,
             skill_activation_source: None,
             attachment_test_support: None,
+            outbound_target_tools: None,
         })
     }
 
@@ -2931,6 +3044,57 @@ impl HostRuntimeCapabilityHarness {
         self.project_service.clone()
     }
 
+    /// C-SYNTH outbound: the injected facade double, for read-back that a
+    /// `target_set` actually reached the facade seam
+    /// (`recorded_set_target_ids`). `Some` only for `outbound_target_tools()`.
+    pub(crate) fn outbound_preferences_facade_for_test(
+        &self,
+    ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>> {
+        self.outbound_target_tools
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.facade))
+    }
+
+    /// C-SYNTH outbound: persist a `Disabled` per-tool permission override for
+    /// `outbound_delivery_target_set` under `(tenant, user)`, driving the
+    /// handler's settings decision to `Deny` → `Failed{policy_denied}`. The
+    /// scope must be the run's EFFECTIVE dispatch user (the thread binding actor,
+    /// `harness.binding.actor_user_id`) — the same `(tenant, user)`
+    /// `StoreApprovalSettingsProvider::tool_override` reads it back under
+    /// (`PersistentApprovalScope` = tenant+user, invocation-independent). `Some`
+    /// only for `outbound_target_tools()`.
+    pub(crate) async fn disable_outbound_target_set_tool(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+    ) -> HarnessResult<()> {
+        let parts = self
+            .outbound_target_tools
+            .as_ref()
+            .ok_or("harness has no outbound_target_tools backing store")?;
+        let scope = ResourceScope {
+            tenant_id,
+            user_id: user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        parts
+            .tool_permission_overrides
+            .set(ironclaw_approvals::CapabilityPermissionOverrideInput {
+                scope,
+                capability_id: CapabilityId::new(
+                    ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                )?,
+                state: ironclaw_approvals::CapabilityPermissionOverride::Disabled,
+                updated_by: Principal::User(user_id),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
     /// `skill_context_source` in `into_group`, so activated-skill instructions
     /// inject into the model request. `Some` only for `skill_activation_tools()`.
@@ -3020,11 +3184,10 @@ impl HostRuntimeCapabilityHarness {
     /// surfaces, in one linear step (keeps the capability-specific knowledge out
     /// of `create_capability_port`'s main assembly chain).
     ///
-    /// Partial synthetic wrap: `project_create` (E-PROJ) and `skill_activate`
-    /// (E-SKILL), each layered independently when this harness both holds the
-    /// backing handle and surfaces the capability in its allowlist, so other
-    /// local-dev groups are unaffected. The `outbound_delivery_*` synthetic
-    /// capabilities are wired by their own coverage PRs. See
+    /// Partial synthetic wrap: `project_create` (E-PROJ), `skill_activate`
+    /// (E-SKILL), and the two `outbound_delivery_*` capabilities (C-SYNTH
+    /// outbound), each layered independently when this harness holds the backing
+    /// handle, so other local-dev groups are unaffected. See
     /// `LocalDevCapabilityPortFactory::build_inner()` for the full production set.
     fn apply_synthetic_capability_wrappers(
         &self,
@@ -3046,6 +3209,52 @@ impl HostRuntimeCapabilityHarness {
                     port,
                     Arc::clone(project_service),
                     self.user_id.clone(),
+                    run_context.clone(),
+                    input_resolver.clone(),
+                    result_writer.clone(),
+                )?;
+        }
+        // outbound_delivery_* (C-SYNTH outbound): wrapped only for
+        // `outbound_target_tools`. The facade double is injected at the
+        // production-wired trait seam; the settings/approval stores are the same
+        // ones `outbound_delivery_capabilities` consumes in production (the
+        // auto-approve + approval-request/lease stores are reused from the
+        // sibling `auto_approve_settings` / `approval_parts` harness fields).
+        if let Some(parts) = &self.outbound_target_tools {
+            let approval = self.approval_parts.as_ref().ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "outbound_target_tools requires local-dev approval stores",
+                )
+            })?;
+            let auto_approve = self.auto_approve_settings.clone().ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "outbound_target_tools requires the local-dev auto-approve store",
+                )
+            })?;
+            // Record the synthetic capability's approval scope into
+            // `pending_approval_scopes` (the host-runtime recorder can't see a
+            // port-level synthetic gate) so `approve_local_dev_gate` /
+            // `deny_local_dev_gate` resolve it; delegates to the inner store the
+            // evidence/approve/deny paths read.
+            let recording_approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+                Arc::new(RecordingApprovalRequestStore {
+                    inner: Arc::clone(&approval.approval_requests),
+                    pending_approval_scopes: Arc::clone(&self.pending_approval_scopes),
+                });
+            port =
+                ironclaw_reborn_composition::test_support::wrap_outbound_delivery_capabilities_for_test(
+                    port,
+                    Arc::clone(&parts.facade)
+                        as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>,
+                    self.user_id.clone(),
+                    recording_approval_requests,
+                    Arc::clone(&approval.capability_leases),
+                    Arc::clone(&parts.tool_permission_overrides),
+                    auto_approve,
+                    Arc::clone(&parts.persistent_approval_policies),
+                    parts.requires_approval,
                     run_context.clone(),
                     input_resolver.clone(),
                     result_writer.clone(),
@@ -3295,6 +3504,75 @@ impl HostRuntime for RecordingHostRuntime {
 
     async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
         self.inner.health().await
+    }
+}
+
+/// Records `(ApprovalRequestId, ResourceScope)` on `save_pending`, then delegates
+/// every method to the inner store. Synthetic local-dev capabilities (e.g.
+/// `outbound_delivery_target_set`) persist their approval requests directly to
+/// the approval store rather than through the host runtime, so
+/// [`RecordingHostRuntime`] (which only observes host-runtime-level gates) never
+/// captures their scope. Wrapping the store the synthetic capability writes
+/// through restores the same `pending_approval_scopes` bookkeeping the
+/// `approve_local_dev_gate` / `deny_local_dev_gate` lookups depend on. Delegation
+/// is total, so the inner store the evidence/approve/deny paths read stays the
+/// single source of truth.
+struct RecordingApprovalRequestStore {
+    inner: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
+}
+
+#[async_trait]
+impl ironclaw_run_state::ApprovalRequestStore for RecordingApprovalRequestStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ironclaw_host_api::approval::ApprovalRequest,
+    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+        self.pending_approval_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request.id, scope.clone());
+        self.inner.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ironclaw_run_state::ApprovalRecord>, ironclaw_run_state::RunStateError> {
+        self.inner.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+        self.inner.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+        self.inner.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+        self.inner.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ironclaw_run_state::ApprovalRecord>, ironclaw_run_state::RunStateError> {
+        self.inner.records_for_scope(scope).await
     }
 }
 

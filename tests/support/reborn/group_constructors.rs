@@ -88,6 +88,16 @@ impl RebornIntegrationGroup {
         Self::builder().skill_activation_tools().await
     }
 
+    /// Group surfacing the two synthetic `outbound_delivery_*` capabilities over
+    /// an injected facade double (C-SYNTH outbound seam). `target_set` requires
+    /// approval; global auto-approve defaults ON so the happy/`NotFound` arms
+    /// dispatch through `Allow`. The approval-gate arm disables auto-approve
+    /// per-test with `disable_auto_approve`; the deny arm persists a `Disabled`
+    /// tool override via `capability_harness().disable_outbound_target_set_tool`.
+    pub async fn outbound_target_tools() -> HarnessResult<Self> {
+        Self::builder().outbound_target_tools().await
+    }
+
     /// Group with the skill-management verbs (`skill_list`/`skill_install`/
     /// `skill_remove`) at int tier (C-SKILL). Previously covered ONLY at the
     /// QA/trace tier (`with_host_runtime_skill_management_capabilities`,
@@ -243,6 +253,26 @@ impl RebornIntegrationGroupBuilder {
             "greets the user warmly",
             "GREET_SKILL_PROMPT_SENTINEL",
         )?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build an outbound-target-tools group. See
+    /// [`RebornIntegrationGroup::outbound_target_tools`]. Mirrors `live_approvals`
+    /// / `profile_tools`: the synthetic `outbound_delivery_*` capabilities run
+    /// under the run's CANONICAL binding subject user (via `with_user_id`), so
+    /// the dispatch-time settings/auto-approve scope
+    /// (`_shared.auto_approve_scope()` = `(tenant, capability user)`) aligns with
+    /// the run's effective dispatch user — the approval-gate arm's
+    /// `disable_auto_approve` and the deny arm's `disable_outbound_target_set_tool`
+    /// both target that exact `(tenant, user)`. Auto-approve is left at its
+    /// default-ON state (no disable here); the gate arm disables it per-test.
+    pub async fn outbound_target_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let subject_user = base.canonical_subject_user()?;
+        let host_runtime = HostRuntimeCapabilityHarness::outbound_target_tools()
+            .await?
+            .with_user_id(subject_user);
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
