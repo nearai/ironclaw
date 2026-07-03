@@ -820,24 +820,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result["dm_user_source"], "env")
         self.assertEqual(captured["data"]["users"], "UQAUSER")
 
-    def test_slack_dm_route_discovery_ignores_synthetic_inbound_user(self):
-        captured: dict[str, object] = {}
-
-        class FakeResponse:
-            def json(self):
-                return {
-                    "ok": True,
-                    "channel": {
-                        "id": "DSLACKBOT",
-                        "is_im": True,
-                    },
-                }
-
-        def fake_post(_url, **kwargs):
-            captured.update(kwargs)
-            return FakeResponse()
-
-        fake_httpx = types.SimpleNamespace(post=fake_post)
+    def test_slack_dm_route_discovery_rejects_missing_real_route_user(self):
+        fake_httpx = types.SimpleNamespace(
+            post=lambda *_args, **_kwargs: self.fail("Slack API should not be called")
+        )
         with (
             patch.dict(
                 os.environ,
@@ -851,10 +837,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["dm_user_id"], "USLACKBOT")
-        self.assertEqual(result["dm_user_source"], "fallback_slackbot")
-        self.assertEqual(captured["data"]["users"], "USLACKBOT")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "missing_slack_route_user_id")
+        self.assertIn("REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID", result["required_env"])
 
     def test_qa_7a_requires_dm_delivery_target(self):
         with (
@@ -1533,27 +1518,146 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     config_path.read_text(encoding="utf-8"),
                 )
 
-    def test_slack_route_append_matches_exact_user_channel_pair(self):
+    def test_slack_personal_dm_seed_satisfies_delivery_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text(
-                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "D0QA"\n'
-                'subject_user_id = "U0FIRST"\n',
-                encoding="utf-8",
+            home = Path(tmpdir)
+            result = run_live_qa._seed_slack_personal_dm_target(
+                home,
+                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                auth_user_id="user:web",
+                slack_user_id="UQAUSER",
+                dm_channel_id="D0QA",
             )
 
             self.assertTrue(
-                run_live_qa._append_slack_channel_route(
-                    config_path,
-                    subject_user_id="U0SECOND",
-                    channel_id="D0QA",
-                )
+                run_live_qa._has_slack_delivery_target("", home, "user:web"),
+                result,
+            )
+            self.assertEqual(
+                run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web"),
+                "D0QA",
             )
 
-            config = config_path.read_text(encoding="utf-8")
-            self.assertEqual(config.count('channel_id = "D0QA"'), 2)
-            self.assertIn('subject_user_id = "U0FIRST"', config)
-            self.assertIn('subject_user_id = "U0SECOND"', config)
+    def test_slack_channel_route_no_longer_satisfies_delivery_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            config = (
+                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "C0QA"\n'
+                'subject_user_id = "user:web"\n'
+            )
+
+            self.assertFalse(
+                run_live_qa._has_slack_delivery_target(config, home, "user:web")
+            )
+
+    def test_with_page_writes_browser_diagnostics_on_failure(self):
+        class FakeTracing:
+            async def start(self, **_kwargs):
+                return None
+
+            async def stop(self, *, path=None):
+                if path:
+                    Path(path).write_text("trace", encoding="utf-8")
+
+        class FakeRequest:
+            def url(self):
+                return "https://example.test/callback?token=secret-token"
+
+            def method(self):
+                return "GET"
+
+            def failure(self):
+                return {"errorText": "net::ERR_FAILED"}
+
+        class FakeMessage:
+            def type(self):
+                return "error"
+
+            def text(self):
+                return "bearer super-secret-token"
+
+            def location(self):
+                return {"url": "https://example.test/app.js"}
+
+        class FakePage:
+            def on(self, event, callback):
+                if event == "console":
+                    callback(FakeMessage())
+                if event == "pageerror":
+                    callback(RuntimeError("page exploded"))
+
+            async def screenshot(self, *, path, full_page):
+                Path(path).write_text(f"screenshot full_page={full_page}", encoding="utf-8")
+
+        class FakeContext:
+            def __init__(self):
+                self.tracing = FakeTracing()
+                self.page = FakePage()
+
+            def on(self, event, callback):
+                if event == "requestfailed":
+                    callback(FakeRequest())
+                if event == "page":
+                    callback(self.page)
+
+            async def new_page(self):
+                return self.page
+
+            async def close(self):
+                return None
+
+        class FakeBrowser:
+            def __init__(self):
+                self.context = FakeContext()
+
+            async def new_context(self):
+                return self.context
+
+            async def close(self):
+                return None
+
+        class FakeChromium:
+            async def launch(self, **_kwargs):
+                return FakeBrowser()
+
+        class FakePlaywright:
+            def __init__(self):
+                self.chromium = FakeChromium()
+
+        class FakeAsyncPlaywright:
+            async def __aenter__(self):
+                return FakePlaywright()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        async def failing_action(_page):
+            raise AssertionError("boom")
+
+        fake_async_api = types.SimpleNamespace(
+            async_playwright=lambda: FakeAsyncPlaywright()
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            sys.modules,
+            {
+                "playwright": types.SimpleNamespace(),
+                "playwright.async_api": fake_async_api,
+            },
+        ):
+            output_dir = Path(tmpdir)
+            with self.assertRaises(AssertionError):
+                asyncio.run(
+                    run_live_qa._with_page(output_dir, "case_a", failing_action)
+                )
+
+            diagnostics_dir = output_dir / "browser-diagnostics" / "case_a"
+            events = (diagnostics_dir / "browser-events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("requestfailed", events)
+            self.assertIn("console", events)
+            self.assertIn("<REDACTED>", events)
+            self.assertTrue((diagnostics_dir / "browser-summary.json").exists())
+            self.assertTrue((diagnostics_dir / "playwright-trace.zip").exists())
+            self.assertTrue((output_dir / "case_a.failure.png").exists())
 
     def test_slack_config_values_are_toml_escaped(self):
         with tempfile.TemporaryDirectory() as tmpdir:

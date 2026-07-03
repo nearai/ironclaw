@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Tests for live canary artifact scrubbing."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "live-canary" / "scrub-artifacts.sh"
+
+
+class ScrubArtifactsTests(unittest.TestCase):
+    def run_scrub(self, artifact_dir: Path, *, strict: bool) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["STRICT_ARTIFACT_SCRUB"] = "true" if strict else "false"
+        runner_temp = artifact_dir.parent / f"{artifact_dir.name}-runner-temp"
+        runner_temp.mkdir(parents=True, exist_ok=True)
+        env["RUNNER_TEMP"] = str(runner_temp)
+        return subprocess.run(
+            [str(SCRIPT), str(artifact_dir)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            browser_events = root / "browser-events.jsonl"
+            product_log.write_text(
+                "authorization: bearer super-secret-token\n"
+                "access_token: ya29.abcdefghijklmnopqrstuvwxyz\n",
+                encoding="utf-8",
+            )
+            browser_events.write_text('{"access_token":"browser-secret"}\n', encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(product_log.exists())
+            self.assertTrue(browser_events.exists())
+            self.assertIn("<REDACTED>", product_log.read_text(encoding="utf-8"))
+            self.assertIn('"access_token":"<REDACTED>"', browser_events.read_text(encoding="utf-8"))
+            self.assertIn("Strict scrub redacted diagnostic artifacts", result.stdout)
+
+    def test_strict_scrub_deletes_unsafe_artifacts_and_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unsafe = root / "raw.html"
+            unsafe.write_text("api_key: secret-value\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse(unsafe.exists())
+
+    def test_non_strict_scrub_is_report_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact = root / "raw.html"
+            artifact.write_text("api_key: secret-value\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=False)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(artifact.exists())
+            matches = (root / "scrub-matches.txt").read_text(encoding="utf-8")
+            self.assertIn("<REDACTED>", matches)
+
+
+if __name__ == "__main__":
+    unittest.main()

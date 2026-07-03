@@ -177,6 +177,9 @@ fn parse_slack_channel_route_config(
     let subject_field = format!("channel_routes[{index}].subject_user_id");
     let channel_id = optional_slack_config_value(&channel_field, &route.channel_id)?
         .ok_or_else(|| anyhow!("[slack].{channel_field} must be set"))?;
+    if channel_id.starts_with('D') {
+        anyhow::bail!("[slack].{channel_field} must not be a Slack DM channel id");
+    }
     let subject_user_id =
         optional_slack_user_id_config_value(&subject_field, &route.subject_user_id)?
             .ok_or_else(|| anyhow!("[slack].{subject_field} must be set"))?;
@@ -595,6 +598,39 @@ mod tests {
             "legacy-signing-secret"
         );
         assert_eq!(legacy.bot_token.expose_secret(), "xoxb-legacy");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_config_channel_route_rejects_dm_channel_id() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("D0HOST".to_string()),
+                subject_user_id: Some("user:eng-team-agent".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_config_for_serve(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("channel route must reject Slack DM channel IDs");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[slack].channel_routes[0].channel_id"),
+            "message: {error}"
+        );
     }
 
     #[cfg(not(feature = "slack-v2-host-beta"))]

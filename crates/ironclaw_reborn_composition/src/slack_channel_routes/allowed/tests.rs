@@ -562,6 +562,34 @@ async fn allowed_channel_admin_rejects_invalid_channel_without_mutating_store() 
 }
 
 #[tokio::test]
+async fn allowed_channel_admin_rejects_dm_channel_without_mutating_store() {
+    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
+
+    let response = mount
+        .protected
+        .oneshot(request("PUT", r#"{"channel_ids":["D0HOST"]}"#, TENANT))
+        .await
+        .expect("save responds");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        store
+            .list_routes(
+                &TenantId::new(TENANT).expect("tenant"),
+                &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                TEAM,
+                0,
+                DEFAULT_LIST_LIMIT,
+            )
+            .await
+            .expect("routes list")
+            .routes
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn allowed_channel_admin_rejects_more_than_max_allowed_channels_without_mutating_store() {
     let store = Arc::new(InMemorySlackChannelRouteStore::new());
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
