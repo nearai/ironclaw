@@ -70,6 +70,7 @@ impl RebornCapabilityBackend {
         shell_mode: ShellMode,
         keyed_http_responses: Vec<ScriptedHttpResponse>,
         web_access_response_bodies: Vec<Vec<u8>>,
+        github_network_statuses: Vec<u16>,
     ) -> HarnessResult<GroupCapability> {
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
@@ -105,6 +106,20 @@ impl RebornCapabilityBackend {
                 // no approval gate / user alignment — the authorizer allows every
                 // dispatch outright.
                 let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
+                // W4-AUTHGATE-WIRE: wire keyed HTTP responses onto this backend too
+                // (previously only `BuiltinHttpTools` installed them). A no-op for
+                // existing callers that never populate `keyed_http_responses` for
+                // this backend.
+                host_runtime.install_http_responses(keyed_http_responses)?;
+                // The real github WASM HTTP call flows through the **network**
+                // egress lane, not the runtime-egress lane the matcher above
+                // scripts (`try_with_host_http_egress` overwrites the runtime
+                // port — see `reborn_integration_secret_injection.rs`'s module
+                // doc), so a runtime-401-after-injection scenario scripts the
+                // status here instead. A no-op (empty vec) for existing callers.
+                for status in github_network_statuses {
+                    host_runtime.install_network_status_script(status)?;
+                }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::WebAccessTools => {

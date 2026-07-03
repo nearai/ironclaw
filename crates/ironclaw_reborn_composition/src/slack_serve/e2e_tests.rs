@@ -735,22 +735,57 @@ impl ConversationBindingService for NoopTriggeredBindingService {
 
 /// Poll-only [`TurnCoordinator`] for driving a [`TriggeredRunDeliveryDriver`].
 ///
-/// The triggered-delivery path only calls `get_run_state`. This scripts the
-/// first poll as `BlockedApproval` (with the gate) so the driver posts the
-/// approval prompt and records the delivered gate route, then `Completed` so the
-/// driver delivers the seeded final reply and records a terminal outcome. The
-/// other `TurnCoordinator` methods are never reached on this path.
+/// The triggered-delivery path only calls `get_run_state` (and, for the
+/// OAuth-not-DM backstop, `cancel_run`). This scripts the first poll as the
+/// configured `first_poll_status`/`first_poll_gate_ref` — `BlockedApproval` +
+/// `GATE` via [`Self::new`], or an arbitrary status (e.g. `BlockedAuth` +
+/// `AUTH_GATE`) via [`Self::new_with_first_poll`] — so the driver posts the
+/// corresponding gate prompt and records the delivered gate route, then
+/// `Completed` on every subsequent poll so the driver delivers the seeded final
+/// reply and records a terminal outcome. `prepare_turn`/`submit_turn`/
+/// `resume_turn` are never reached on this path.
 struct ScriptedTriggerCoordinator {
     template: TurnRunState,
     polls: AtomicUsize,
+    first_poll_status: TurnStatus,
+    first_poll_gate_ref: Option<GateRef>,
+    cancel_calls: Mutex<Vec<TurnRunId>>,
 }
 
 impl ScriptedTriggerCoordinator {
     fn new(template: TurnRunState) -> Self {
+        Self::new_with_first_poll(
+            template,
+            TurnStatus::BlockedApproval,
+            Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
+        )
+    }
+
+    /// Like [`Self::new`] but scripts an arbitrary first-poll status/gate_ref
+    /// (e.g. `BlockedAuth` + `AUTH_GATE`) instead of the hardcoded
+    /// `BlockedApproval`/`GATE` pair `new` uses. Additive: `new`'s behavior (and
+    /// its existing callers) is unchanged.
+    fn new_with_first_poll(
+        template: TurnRunState,
+        first_poll_status: TurnStatus,
+        first_poll_gate_ref: Option<GateRef>,
+    ) -> Self {
         Self {
             template,
             polls: AtomicUsize::new(0),
+            first_poll_status,
+            first_poll_gate_ref,
+            cancel_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Number of `cancel_run` calls observed so far. Used by the OAuth-not-DM
+    /// backstop test to assert the blocked run is cancelled exactly once.
+    fn cancel_call_count(&self) -> usize {
+        self.cancel_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
@@ -774,16 +809,29 @@ impl TurnCoordinator for ScriptedTriggerCoordinator {
         unreachable!("triggered delivery driver never resumes turns")
     }
 
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unreachable!("approval-only triggered scenario never cancels the run")
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        // Reached only by the OAuth-not-DM backstop (`cancel_auth_blocked_run`),
+        // which cancels the run before posting the auth-unavailable notice. The
+        // approval-only scenario (`Self::new`) never triggers this arm.
+        self.cancel_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.run_id);
+        Ok(CancelRunResponse {
+            run_id: request.run_id,
+            status: TurnStatus::Cancelled,
+            event_cursor: EventCursor::default(),
+            already_terminal: false,
+            actor: None,
+        })
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         let poll = self.polls.fetch_add(1, Ordering::SeqCst);
         let mut state = self.template.clone();
         if poll == 0 {
-            state.status = TurnStatus::BlockedApproval;
-            state.gate_ref = Some(GateRef::new(GATE).expect("gate ref")); // safety: static test gate ref is valid.
+            state.status = self.first_poll_status;
+            state.gate_ref = self.first_poll_gate_ref.clone();
         } else {
             state.status = TurnStatus::Completed;
             state.gate_ref = None;
@@ -1109,6 +1157,407 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         requests[0].decision,
         ApprovalInteractionDecision::ApproveOnce
     );
+}
+
+/// Build a Slack shared-channel reply-target binding ref for team `T-A` /
+/// channel `C123` — i.e. NOT a personal DM. `slack_reply_target_is_personal_dm`
+/// requires the conversation id to start with `D`; `C123` fails that check by
+/// construction. Used to drive `TriggeredRunDeliveryDriver` through its
+/// send-time OAuth-DM backstop (`TriggeredNotificationFailure::OAuthTargetNotDm`):
+/// an OAuth-carrying auth prompt whose resolved `auth_prompt_target` is not a
+/// personal DM must never post the setup link.
+fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
+    fn seg(name: &str, value: &str) -> String {
+        format!("{}:{}:{};", name, value.len(), value)
+    }
+    const NON_DM_CHANNEL: &str = "C123";
+    let raw = format!(
+        "{}{}{}{}{}{}{}{}{}",
+        seg("adapter", ADAPTER),
+        seg("installation", INSTALLATION),
+        seg("agent", AGENT),
+        seg("project", ""),
+        seg("space", TEAM),
+        seg("conversation", NON_DM_CHANNEL),
+        seg("topic", ""),
+        seg("actor_kind", SLACK_USER_ACTOR_KIND),
+        seg("actor", SLACK_USER),
+    );
+    crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+        .expect("channel reply target binding ref") // safety: static test binding ref is valid.
+}
+
+/// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
+/// matching the auth-prompt shape (JSON `text` field containing "Authentication
+/// required" — the literal body `triggered_notification_for_state` sets for the
+/// `BlockedAuth` arm) has been captured, then return every such match. Times out
+/// after 5 s.
+///
+/// Mirrors `wait_for_approval_prompt_messages`'s "filter by shape, not raw
+/// count" rationale: `ScriptedTriggerCoordinator` auto-advances from
+/// `BlockedAuth` to `Completed` on the very next poll with no real user action in
+/// between, so the background delivery loop can post a second, final-reply
+/// `chat.postMessage` before this test gets around to asserting.
+async fn wait_for_auth_prompt_messages(egress: &RecordingEgress) -> Vec<serde_json::Value> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let matches: Vec<serde_json::Value> = egress
+                .requests()
+                .into_iter()
+                .filter(|request| request.path().as_str() == "/api/chat.postMessage")
+                .filter_map(|request| serde_json::from_slice(request.body()).ok())
+                .filter(|payload: &serde_json::Value| {
+                    payload["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Authentication required"))
+                })
+                .collect();
+            if !matches.is_empty() {
+                return matches;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver posts the auth-prompt chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
+}
+
+/// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
+/// has been captured, then return every recorded `chat.postMessage` payload.
+/// Times out after 5 s. Used by the OAuth-not-DM backstop test, where the
+/// coordinator scripts exactly one `get_run_state` poll (the `OAuthTargetNotDm`
+/// arm cancels the run and returns without polling again), so — unlike
+/// `wait_for_auth_prompt_messages` / `wait_for_approval_prompt_messages` — there
+/// is no second, racing final-reply message to filter out.
+async fn wait_for_any_posted_messages(egress: &RecordingEgress) -> Vec<serde_json::Value> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let matches: Vec<serde_json::Value> = egress
+                .requests()
+                .into_iter()
+                .filter(|request| request.path().as_str() == "/api/chat.postMessage")
+                .filter_map(|request| serde_json::from_slice(request.body()).ok())
+                .collect();
+            if !matches.is_empty() {
+                return matches;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver posts at least one chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
+}
+
+/// Auth-gate twin of `triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope`:
+/// a triggered run (personal, foreign thread scope) blocks on auth instead of
+/// approval. `TriggeredRunDeliveryDriver` resolves the creator's `auth_prompt_target`
+/// preference to their Slack DM and posts the OAuth setup link there — mirroring
+/// the inbound DM auth-prompt assertion shape in
+/// `slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack`, but driven
+/// through the triggered delivery path (a real `TriggeredRunDeliveryDriver`, no
+/// inbound HTTP event) instead of an inbound message.
+///
+/// `TriggeredRunDeliveryDriver` only ever resolves to the creator's *personal*
+/// target (never a channel — see its struct doc comment: "delivers the result to
+/// the creator's personal Slack DM"), so there is no "channel" arm to mirror
+/// `slack_channel_auth_prompt_omits_setup_link_after_immediate_ack` with here.
+/// The discriminating negative arm instead exercises the driver's own DM-only
+/// backstop, in
+/// `triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_cancels_run`
+/// below: when the resolved auth-prompt target is not a personal DM, the setup
+/// link must never be posted and the run must be cancelled instead.
+#[tokio::test]
+async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
+    let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
+    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
+    let foreign_scope = foreign_run_scope();
+    let run_id = TurnRunId::new();
+
+    // Seed the creator's personal auth-prompt preference so the triggered auth
+    // prompt resolves to team T-A / channel D123 — a personal DM.
+    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let dm_target = dm_reply_target_binding_ref();
+    outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                final_reply_target: Some(dm_target.clone()),
+                progress_target: None,
+                approval_prompt_target: None,
+                auth_prompt_target: Some(dm_target.clone()),
+                default_modality: None,
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: None,
+        })
+        .await
+        .expect("seed personal preference"); // safety: in-memory store should not fail.
+
+    // Seed the finalized assistant message the driver delivers once the scripted
+    // coordinator reports Completed on the second poll.
+    let threads = InMemorySessionThreadService::default();
+    threads
+        .ensure_thread(EnsureThreadRequest {
+            scope: ThreadScope {
+                tenant_id: tenant.clone(),
+                agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+                project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+                owner_user_id: Some(user.clone()),
+                mission_id: None,
+            },
+            thread_id: Some(foreign_scope.thread_id.clone()),
+            created_by_actor_id: "test-actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("ensure foreign triggered thread");
+    append_final_assistant_message(
+        &threads,
+        &foreign_scope,
+        run_id,
+        "Triggered run complete after auth.",
+    )
+    .await
+    .expect("seed final assistant message");
+
+    let template = turn_state(
+        foreign_scope.clone(),
+        TurnActor::new(user.clone()),
+        run_id,
+        TurnStatus::BlockedAuth,
+        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        dm_target,
+        AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
+    );
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(ScriptedTriggerCoordinator::new_with_first_poll(
+            template,
+            TurnStatus::BlockedAuth,
+            Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        ));
+
+    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
+        adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
+        installation_id: AdapterInstallationId::new(INSTALLATION).expect("installation id"), // safety: static test installation id is valid.
+        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
+        auth_requirement: slack_request_signature_auth_requirement(),
+    }));
+
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+
+    let driver_egress = RecordingEgress::default();
+    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let route_store: Arc<dyn DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let services = SlackFinalReplyDeliveryServices {
+        binding_service: Arc::new(NoopTriggeredBindingService),
+        thread_service: Arc::new(threads),
+        turn_coordinator: coordinator,
+        outbound_store,
+        route_store: route_store.clone(),
+        communication_preferences: preferences,
+        adapter,
+        egress: Arc::new(driver_egress.clone()),
+        delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        auth_challenges: Some(auth_challenges),
+        auth_flow_canceller: None,
+        approval_requests: None,
+    };
+    let driver = TriggeredRunDeliveryDriver::with_settings(
+        services,
+        SlackFinalReplyDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(2),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+            max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+        },
+        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        route_store,
+        AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+    );
+
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
+        creator_user_id: user.clone(),
+        agent_id: None,
+        project_id: None,
+        prompt: "triggered auth prompt".to_string(),
+    };
+    driver
+        .on_trigger_submitted(fire, run_id, foreign_scope)
+        .await;
+
+    // The driver posted the auth prompt naming the auth requirement to the Slack
+    // DM, carrying the OAuth setup link. Bounded-poll for the auth-prompt-shaped
+    // message specifically (see `wait_for_auth_prompt_messages` doc comment): the
+    // background delivery loop may already be racing ahead to post a second,
+    // final-reply message by the time this assertion runs.
+    let auth_prompts = wait_for_auth_prompt_messages(&driver_egress).await;
+    assert_eq!(
+        auth_prompts.len(),
+        1,
+        "expected exactly one auth-prompt chat.postMessage; got {auth_prompts:?}"
+    );
+    let prompt_payload = &auth_prompts[0];
+    assert_eq!(prompt_payload["channel"], CHANNEL);
+    let prompt_text = prompt_payload["text"]
+        .as_str()
+        .expect("auth prompt body carries a text field");
+    assert!(
+        prompt_text.contains("Authentication required"),
+        "auth prompt body must name the auth requirement: {prompt_text}"
+    );
+    assert!(
+        prompt_text.contains("Setup link: https://provider.example/oauth"),
+        "auth prompt body must carry the OAuth setup link when resolved to the \
+         creator's personal DM: {prompt_text}"
+    );
+    auth_provider.assert_single_call();
+}
+
+/// Discriminating negative arm for
+/// `triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope` (see its
+/// doc comment for why a "channel" arm does not apply to
+/// `TriggeredRunDeliveryDriver`). When the creator's `auth_prompt_target`
+/// preference resolves to a non-DM target, the send-time OAuth-DM backstop
+/// (`require_direct_message_target` in `deliver_triggered_notification`) must
+/// reject the OAuth-carrying prompt before it is ever posted — the setup link is
+/// never leaked to a shared channel. `deliver_triggered_run` handles the
+/// resulting `OAuthTargetNotDm` failure by cancelling the blocked run and posting
+/// the plain-text auth-unavailable notice (`SLACK_AUTH_UNAVAILABLE_MESSAGE`)
+/// instead, using `final_reply_target` (still the DM here) so the notice itself
+/// is still observable.
+#[tokio::test]
+async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_cancels_run() {
+    let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
+    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
+    let foreign_scope = foreign_run_scope();
+    let run_id = TurnRunId::new();
+
+    // auth_prompt_target resolves to a shared channel (not a DM); final_reply_target
+    // stays the DM so the follow-up deny notice can still be delivered and inspected.
+    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let dm_target = dm_reply_target_binding_ref();
+    let channel_target = non_dm_channel_reply_target_binding_ref();
+    outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                final_reply_target: Some(dm_target.clone()),
+                progress_target: None,
+                approval_prompt_target: None,
+                auth_prompt_target: Some(channel_target),
+                default_modality: None,
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: None,
+        })
+        .await
+        .expect("seed personal preference"); // safety: in-memory store should not fail.
+
+    let threads = InMemorySessionThreadService::default();
+
+    let template = turn_state(
+        foreign_scope.clone(),
+        TurnActor::new(user.clone()),
+        run_id,
+        TurnStatus::BlockedAuth,
+        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        dm_target,
+        AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
+    );
+    let coordinator = Arc::new(ScriptedTriggerCoordinator::new_with_first_poll(
+        template,
+        TurnStatus::BlockedAuth,
+        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+    ));
+
+    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
+        adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
+        installation_id: AdapterInstallationId::new(INSTALLATION).expect("installation id"), // safety: static test installation id is valid.
+        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
+        auth_requirement: slack_request_signature_auth_requirement(),
+    }));
+
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+
+    let driver_egress = RecordingEgress::default();
+    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let route_store: Arc<dyn DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let services = SlackFinalReplyDeliveryServices {
+        binding_service: Arc::new(NoopTriggeredBindingService),
+        thread_service: Arc::new(threads),
+        turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+        outbound_store,
+        route_store: route_store.clone(),
+        communication_preferences: preferences,
+        adapter,
+        egress: Arc::new(driver_egress.clone()),
+        delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        auth_challenges: Some(auth_challenges),
+        auth_flow_canceller: None,
+        approval_requests: None,
+    };
+    let driver = TriggeredRunDeliveryDriver::with_settings(
+        services,
+        SlackFinalReplyDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(2),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+            max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+        },
+        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        route_store,
+        AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+    );
+
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
+        creator_user_id: user.clone(),
+        agent_id: None,
+        project_id: None,
+        prompt: "triggered auth prompt not dm".to_string(),
+    };
+    driver
+        .on_trigger_submitted(fire, run_id, foreign_scope)
+        .await;
+
+    // The coordinator scripts exactly one `get_run_state` poll on this path (the
+    // `OAuthTargetNotDm` arm cancels the run and returns without polling again),
+    // so there is no racing second message to filter out — bounded-poll for "at
+    // least one" is sufficient and deterministic.
+    let messages = wait_for_any_posted_messages(&driver_egress).await;
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one chat.postMessage — the auth-unavailable deny notice; \
+         the OAuth-carrying prompt must never be posted to a non-DM target; got {messages:?}"
+    );
+    let text = messages[0]["text"]
+        .as_str()
+        .expect("deny notice carries a text field");
+    assert!(
+        !text.contains("Setup link:") && !text.contains("https://provider.example/oauth"),
+        "OAuth setup link must never be posted to a non-DM target: {text}"
+    );
+    assert!(
+        text.contains("Ironclaw web app"),
+        "expected the auth-unavailable deny notice, got: {text}"
+    );
+    assert_eq!(
+        coordinator.cancel_call_count(),
+        1,
+        "the blocked run must be cancelled exactly once when the OAuth target is not a DM"
+    );
+    auth_provider.assert_single_call();
 }
 
 /// Bare `approve gate:<ref>` (explicit gate ref) in the DM resolves through the

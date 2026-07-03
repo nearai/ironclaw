@@ -101,6 +101,9 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
+    /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
+    /// backend's **network**-egress lane (see `with_github_network_status`).
+    github_network_statuses: Vec<u16>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
@@ -288,6 +291,23 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// W4-AUTHGATE-WIRE: script the GitHub WASM capability's real HTTP call to
+    /// come back with `status` instead of the default `200` fixture (FIFO,
+    /// one call consumed per queued status). Unlike `with_keyed_http_responses`
+    /// (the runtime-egress lane), the `GithubIssueTools` backend's real call
+    /// flows through the **network** egress lane — see
+    /// `reborn_integration_secret_injection.rs`'s module doc
+    /// (`try_with_host_http_egress` overwrites the runtime port with the host
+    /// pipeline over the recording network egress) — so a runtime-401 (the
+    /// credential-injected-but-401 auth-gate path, distinct from
+    /// `github_issue_tools_auth_required`'s credential-*missing* path) must be
+    /// scripted here instead. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
+    pub fn with_github_network_status(mut self, status: u16) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.github_network_statuses.push(status);
+        self
+    }
+
     /// Wire the real first-party `web-access.search` / `web-access.get_content`
     /// capabilities (C-WEBACCESS). `response_bodies` scripts the three-leg Exa
     /// MCP handshake (`initialize` → `notifications/initialized` → `tools/call`)
@@ -345,6 +365,7 @@ impl RebornIntegrationHarnessBuilder {
                 self.shell_mode,
                 self.keyed_http_responses,
                 self.web_access_response_bodies,
+                self.github_network_statuses,
             )
             .await?;
 
@@ -473,6 +494,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
+            github_network_statuses: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
