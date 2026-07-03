@@ -16,9 +16,11 @@
 //! - [`RebornIntegrationHarness::submit_triggered_turn`] — submit only; the
 //!   run then fails benignly on the scope-miss sentinel (asserts submit-time
 //!   state, e.g. the persisted origin).
-//! - [`RebornIntegrationHarness::submit_triggered_turn_scripted`] — mirrors
-//!   the production materializer (binding resolve + thread-recorded prompt +
-//!   real content ref) and registers a scripted gateway for the fire's exact
+//! - [`RebornIntegrationHarness::submit_triggered_turn_scripted`] — materializes
+//!   through the REAL production trusted-trigger pipeline
+//!   (`ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test`:
+//!   authorize, validate, resolve binding, thread-recorded prompt, real
+//!   content ref) and registers a scripted gateway for the fire's exact
 //!   scope, so the triggered run can be driven to completion or through
 //!   mid-fire gates (scope-aware `wait`/`approve`/`deny` helpers below).
 
@@ -33,24 +35,18 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
-    ResolveConversationRequest, trusted_trigger_fire_submitter,
+    AdapterInstallationId, AdapterKind, ExternalActorRef, InMemoryConversationServices,
+    trusted_trigger_fire_submitter,
 };
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
 use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
-    ThreadScope,
-};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
-    TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerTrustedInboundBinding,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
+    TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{
@@ -179,37 +175,29 @@ impl RebornIntegrationHarness {
     /// submission (to completion, or to a mid-fire gate) instead of failing
     /// benignly on the scope-miss sentinel.
     ///
-    /// Mirrors the production trigger poller's materializer
-    /// (`ConversationContentRefMaterializer::materialize_prompt`,
-    /// `crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs`
-    /// — `pub(crate)` there, hence mirrored, not called), which the plain
-    /// `submit_triggered_turn`'s `TriggerMaterializedPrompt::for_fire` shortcut
-    /// skips:
-    /// 1. resolve-or-create the trigger's conversation binding (same fresh
-    ///    `InMemoryConversationServices`, same canonical
-    ///    `TriggerTrustedInboundBinding::for_fire` derivation) — this mints the
-    ///    fire's `TurnScope` BEFORE the submit;
-    /// 2. record the prompt as a real inbound thread message
-    ///    (`ensure_thread` + `accept_inbound_message`, production's
-    ///    `record_trigger_prompt` shape) so the loop host's thread-context
-    ///    read finds the trigger thread — without this the run fails
-    ///    `driver_unavailable` on `unknown thread`;
-    /// 3. materialize the prompt with the REAL `thread-message:<id>` content
-    ///    ref (production's shape), not the synthetic `for_fire` ref;
-    /// 4. register the scripted gateway for the EXACT resolved scope on the
-    ///    group's `ScopeRegistryGateway` (the same real-chain construction
-    ///    thread gateways use: `scripted_trace_llm` → `provider_chain_over` →
-    ///    `LlmProviderModelGateway`, preserving the
-    ///    one-fake-at-the-vendor-SDK-seam invariant), then submit through the
-    ///    production submitter over the SAME conversation services — its own
-    ///    resolve reuses the just-created binding, so the run executes under
-    ///    the pre-registered scope with no race.
+    /// Materializes through the REAL production trusted-trigger pipeline via
+    /// `ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test`
+    /// (authorize, validate, resolve-or-create binding, record the prompt as
+    /// a real inbound thread message, build the real `thread-message:<id>`
+    /// content ref, AND return the resolved `TurnScope`) rather than
+    /// hand-mirroring `trigger_resolve_request` + `record_trigger_prompt` +
+    /// the content-ref shape field-by-field — flagged as a drift trap on PR
+    /// #5584 (trusted-trigger materialization is an ownership boundary,
+    /// `AGENTS.md:61`) and extracted as the agreed fast-follow. This
+    /// mirrors the production trigger poller's OWN materializer
+    /// (`ConversationContentRefMaterializer::materialize_prompt`) exactly,
+    /// since it now calls the SAME code, not a copy of it — which the plain
+    /// `submit_triggered_turn`'s `TriggerMaterializedPrompt::for_fire`
+    /// shortcut still skips.
     ///
-    /// Two production materializer steps are intentionally NOT mirrored:
-    /// `authorize_trigger_fire` and `validate_trusted_trigger_prompt` — both
-    /// are poller-side pre-flight already pinned by
-    /// `trigger_poller_trusted_submit.rs`'s own crate-tier tests, and neither
-    /// affects the submit→run wire this seam exists to drive.
+    /// After materialization: register the scripted gateway for the EXACT
+    /// resolved scope on the group's `ScopeRegistryGateway` (the same
+    /// real-chain construction thread gateways use: `scripted_trace_llm` →
+    /// `provider_chain_over` → `LlmProviderModelGateway`, preserving the
+    /// one-fake-at-the-vendor-SDK-seam invariant), then submit through the
+    /// production submitter over the SAME conversation services — its own
+    /// resolve reuses the just-created binding, so the run executes under the
+    /// pre-registered scope with no race.
     pub(crate) async fn submit_triggered_turn_scripted(
         &self,
         prompt: &str,
@@ -219,91 +207,26 @@ impl RebornIntegrationHarness {
         let fire = self.triggered_fire(prompt, fire_slot);
 
         let conversations = self.trigger_conversations_with_paired_actor().await?;
+        // Unsize-coerced to `Arc<dyn SessionThreadService>` at the call below
+        // (the parameter type), so no trait import is needed here.
+        let thread_service = Arc::new(self.thread_harness.service_instance()?);
+        let default_agent_id = self
+            .binding
+            .agent_id
+            .clone()
+            .ok_or("triggered submit requires a harness binding with an agent id")?;
 
-        // Production materializer step 1: resolve the binding (mints the scope).
-        let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
-        let resolve_request = ResolveConversationRequest {
-            tenant_id: self.binding.tenant_id.clone(),
-            adapter_kind: AdapterKind::new(trusted_inbound_binding.adapter_kind())?,
-            adapter_installation_id: AdapterInstallationId::new(
-                trusted_inbound_binding.adapter_installation_id(),
-            )?,
-            external_actor_ref: ExternalActorRef::new(
-                trusted_inbound_binding.external_actor_namespace(),
-                trusted_inbound_binding.external_actor_id(),
-            )?,
-            external_conversation_ref: ExternalConversationRef::new(
-                None,
-                trusted_inbound_binding.external_conversation_id(),
-                Some(trusted_inbound_binding.route_thread_id()),
-                None,
-            )?,
-            external_event_id: ExternalEventId::new(trusted_inbound_binding.external_event_id())?,
-            route_kind: ConversationRouteKind::Direct,
-            requested_agent_id: None,
-            requested_project_id: None,
-        };
-        let resolution = conversations
-            .resolve_or_create_binding_with_trusted_scope(
-                resolve_request,
-                fire.agent_id.clone(),
-                fire.project_id.clone(),
-                Some(fire.creator_user_id.clone()),
+        let (materialized_prompt, turn_scope) =
+            ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test(
+                conversations.clone(),
+                thread_service,
+                default_agent_id,
+                fire.clone(),
             )
             .await?;
 
-        // Production materializer step 2 (`record_trigger_prompt`): ensure the
-        // trigger thread + record the prompt as a real inbound thread message
-        // in the harness's REAL thread service.
-        let thread_service = self.thread_harness.service_instance()?;
-        let agent_id = resolution
-            .turn_scope
-            .agent_id
-            .clone()
-            .ok_or("triggered binding resolution missing agent id")?;
-        let thread_scope = ThreadScope {
-            tenant_id: resolution.turn_scope.tenant_id.clone(),
-            agent_id,
-            project_id: resolution.turn_scope.project_id.clone(),
-            owner_user_id: Some(resolution.actor.user_id.clone()),
-            mission_id: None,
-        };
-        thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: thread_scope.clone(),
-                thread_id: Some(resolution.turn_scope.thread_id.clone()),
-                created_by_actor_id: resolution.actor.user_id.as_str().to_string(),
-                title: None,
-                metadata_json: Some(automation_trigger_thread_metadata_json(
-                    fire.identity.trigger_id(),
-                )),
-            })
-            .await?;
-        let accepted = thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: thread_scope,
-                thread_id: resolution.turn_scope.thread_id.clone(),
-                actor_id: resolution.actor.user_id.as_str().to_string(),
-                source_binding_id: Some(resolution.source_binding_ref.as_str().to_string()),
-                reply_target_binding_id: Some(
-                    resolution.reply_target_binding_ref.as_str().to_string(),
-                ),
-                external_event_id: Some(format!(
-                    "trigger:{}",
-                    trusted_inbound_binding.external_event_id()
-                )),
-                content: MessageContent::text(prompt.to_string()),
-            })
-            .await?;
-
-        // Production materializer step 3: the REAL content-ref shape.
-        let content_ref =
-            TriggerInboundContentRef::new(format!("thread-message:{}", accepted.message_id))?;
-        let materialized_prompt =
-            TriggerMaterializedPrompt::new(content_ref, trusted_inbound_binding);
-
-        // Step 4: scripted gateway for the EXACT resolved scope, registered
-        // before the submit so the scheduler can never race an unrouted scope.
+        // Scripted gateway for the EXACT resolved scope, registered before
+        // the submit so the scheduler can never race an unrouted scope.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(replies));
         let raw: Arc<dyn LlmProvider> = scripted_llm;
         // Distinct session path so the triggered gateway never clobbers the
@@ -326,7 +249,7 @@ impl RebornIntegrationHarness {
             Arc::new(LlmProviderModelGateway::new(provider, policy));
         self._shared
             .scope_gateway
-            .register(resolution.turn_scope.clone(), gateway);
+            .register(turn_scope.clone(), gateway);
 
         let request =
             TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
@@ -337,18 +260,22 @@ impl RebornIntegrationHarness {
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {
-                run_id, turn_scope, ..
+                run_id,
+                turn_scope: submitted_scope,
+                ..
             } => {
-                if turn_scope != resolution.turn_scope {
+                if submitted_scope != turn_scope {
                     return Err(format!(
                         "triggered submit resolved a different scope than the pre-submit \
                          materializer resolve (gateway registered for the wrong scope): \
-                         pre-submit={:?} submit={turn_scope:?}",
-                        resolution.turn_scope
+                         pre-submit={turn_scope:?} submit={submitted_scope:?}",
                     )
                     .into());
                 }
-                Ok(TriggeredSubmission { run_id, turn_scope })
+                Ok(TriggeredSubmission {
+                    run_id,
+                    turn_scope: submitted_scope,
+                })
             }
             TrustedTriggerFireSubmitOutcome::Replayed { .. } => {
                 Err("first triggered submit unexpectedly replayed".into())
