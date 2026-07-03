@@ -889,39 +889,38 @@ async fn wait_for_gate_route(
     .expect("driver records the delivered gate route within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
 }
 
-/// Poll `egress`'s recorded requests until at least one Slack
-/// `chat.postMessage` matching the approval-prompt shape (JSON `text` field
-/// containing `"approve"` and `gate_ref`) has been captured, then return every
-/// such match. Times out after 5 s.
+/// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
+/// matching `predicate` has been captured, then return every such match. Times
+/// out after 5 s with a panic message naming `description`.
 ///
-/// Filtering on the approval-prompt *shape* — not a raw `chat.postMessage`
-/// count — is deliberate: `on_trigger_submitted` spawns the delivery loop in
-/// the background and returns immediately, and `ScriptedTriggerCoordinator`
-/// (see its doc comment) auto-advances from `BlockedApproval` to `Completed`
-/// on the very next poll with no real user action in between — a test-double
-/// quirk production never exhibits. That means the background loop can also
-/// post a second, final-reply `chat.postMessage` before this test gets around
-/// to asserting, so a bare "at least one postMessage" / `prompts[0]` check
-/// races between 1 and 2 recorded calls. Waiting for (and counting only) the
-/// approval-prompt-shaped message keeps the assertion deterministic regardless
-/// of whether that second message has landed yet. Mirrors `wait_for_gate_route`'s
-/// retry/backoff/timeout shape above.
-async fn wait_for_approval_prompt_messages(
+/// Shared bounded-poll scaffold for `wait_for_approval_prompt_messages` and
+/// `wait_for_auth_prompt_messages` below, and the "any posted message" wait
+/// used by the OAuth-not-DM backstop test. Filtering on message *shape* — not a
+/// raw `chat.postMessage` count — is deliberate for the first two: their
+/// callers' delivery drivers spawn the delivery loop in the background and
+/// return immediately, and `ScriptedTriggerCoordinator` (see its doc comment)
+/// auto-advances the coordinator on the very next poll with no real user
+/// action in between — a test-double quirk production never exhibits. That
+/// means the background loop can also post a second, final-reply
+/// `chat.postMessage` before the test gets around to asserting, so a bare "at
+/// least one postMessage" / `prompts[0]` check races between 1 and 2 recorded
+/// calls. Waiting for (and counting only) the shape-matched message keeps the
+/// assertion deterministic regardless of whether that second message has
+/// landed yet. Mirrors `wait_for_gate_route`'s retry/backoff/timeout shape
+/// above.
+async fn wait_for_post_messages_matching(
     egress: &RecordingEgress,
-    gate_ref: &str,
+    description: &str,
+    predicate: impl Fn(&serde_json::Value) -> bool,
 ) -> Vec<serde_json::Value> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let matches: Vec<serde_json::Value> = egress
                 .requests()
                 .into_iter()
                 .filter(|request| request.path().as_str() == "/api/chat.postMessage")
                 .filter_map(|request| serde_json::from_slice(request.body()).ok())
-                .filter(|payload: &serde_json::Value| {
-                    payload["text"]
-                        .as_str()
-                        .is_some_and(|text| text.contains("approve") && text.contains(gate_ref))
-                })
+                .filter(|payload: &serde_json::Value| predicate(payload))
                 .collect();
             if !matches.is_empty() {
                 return matches;
@@ -929,8 +928,30 @@ async fn wait_for_approval_prompt_messages(
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
+    .await;
+    outcome.unwrap_or_else(|_| panic!("driver posts {description} within 5 s")) // safety: test-only timeout; panic message is the failure diagnostic
+}
+
+/// Poll `egress`'s recorded requests until at least one Slack
+/// `chat.postMessage` matching the approval-prompt shape (JSON `text` field
+/// containing `"approve"` and `gate_ref`) has been captured, then return every
+/// such match. See `wait_for_post_messages_matching` for the shared
+/// retry/backoff/timeout shape and why filtering by shape (not raw count) is
+/// deliberate.
+async fn wait_for_approval_prompt_messages(
+    egress: &RecordingEgress,
+    gate_ref: &str,
+) -> Vec<serde_json::Value> {
+    wait_for_post_messages_matching(
+        egress,
+        &format!("the approval-prompt chat.postMessage naming gate {gate_ref}"),
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("approve") && text.contains(gate_ref))
+        },
+    )
     .await
-    .expect("driver posts the approval-prompt chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
 }
 
 /// Full trigger→gate→approve twin of the live canary, at the crate tier.
@@ -1190,62 +1211,24 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
 /// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
 /// matching the auth-prompt shape (JSON `text` field containing "Authentication
 /// required" — the literal body `triggered_notification_for_state` sets for the
-/// `BlockedAuth` arm) has been captured, then return every such match. Times out
-/// after 5 s.
-///
-/// Mirrors `wait_for_approval_prompt_messages`'s "filter by shape, not raw
-/// count" rationale: `ScriptedTriggerCoordinator` auto-advances from
-/// `BlockedAuth` to `Completed` on the very next poll with no real user action in
-/// between, so the background delivery loop can post a second, final-reply
-/// `chat.postMessage` before this test gets around to asserting.
+/// `BlockedAuth` arm) has been captured, then return every such match. See
+/// `wait_for_post_messages_matching` for the shared retry/backoff/timeout shape
+/// and the "filter by shape, not raw count" rationale: `ScriptedTriggerCoordinator`
+/// auto-advances from `BlockedAuth` to `Completed` on the very next poll with no
+/// real user action in between, so the background delivery loop can post a
+/// second, final-reply `chat.postMessage` before this test gets around to
+/// asserting.
 async fn wait_for_auth_prompt_messages(egress: &RecordingEgress) -> Vec<serde_json::Value> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let matches: Vec<serde_json::Value> = egress
-                .requests()
-                .into_iter()
-                .filter(|request| request.path().as_str() == "/api/chat.postMessage")
-                .filter_map(|request| serde_json::from_slice(request.body()).ok())
-                .filter(|payload: &serde_json::Value| {
-                    payload["text"]
-                        .as_str()
-                        .is_some_and(|text| text.contains("Authentication required"))
-                })
-                .collect();
-            if !matches.is_empty() {
-                return matches;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
+    wait_for_post_messages_matching(
+        egress,
+        "the auth-prompt chat.postMessage (\"Authentication required\")",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Authentication required"))
+        },
+    )
     .await
-    .expect("driver posts the auth-prompt chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
-}
-
-/// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
-/// has been captured, then return every recorded `chat.postMessage` payload.
-/// Times out after 5 s. Used by the OAuth-not-DM backstop test, where the
-/// coordinator scripts exactly one `get_run_state` poll (the `OAuthTargetNotDm`
-/// arm cancels the run and returns without polling again), so — unlike
-/// `wait_for_auth_prompt_messages` / `wait_for_approval_prompt_messages` — there
-/// is no second, racing final-reply message to filter out.
-async fn wait_for_any_posted_messages(egress: &RecordingEgress) -> Vec<serde_json::Value> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let matches: Vec<serde_json::Value> = egress
-                .requests()
-                .into_iter()
-                .filter(|request| request.path().as_str() == "/api/chat.postMessage")
-                .filter_map(|request| serde_json::from_slice(request.body()).ok())
-                .collect();
-            if !matches.is_empty() {
-                return matches;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("driver posts at least one chat.postMessage within 5 s") // safety: test-only timeout; panic message is the failure diagnostic
 }
 
 /// Auth-gate twin of `triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope`:
@@ -1534,7 +1517,9 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     // `OAuthTargetNotDm` arm cancels the run and returns without polling again),
     // so there is no racing second message to filter out — bounded-poll for "at
     // least one" is sufficient and deterministic.
-    let messages = wait_for_any_posted_messages(&driver_egress).await;
+    let messages =
+        wait_for_post_messages_matching(&driver_egress, "at least one chat.postMessage", |_| true)
+            .await;
     assert_eq!(
         messages.len(),
         1,

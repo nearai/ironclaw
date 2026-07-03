@@ -161,7 +161,7 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
 /// `input_ref` on the retry attempt with `InvalidInvocation`/"capability
 /// input ref was not staged for this loop run", collapsing the documented
 /// "retry twice, then a model-visible `Failed`" contract into an immediate
-/// terminal `driver_unavailable`) — see the Lane C final report. `Denied`
+/// terminal `driver_unavailable`) — see issue #5608. `Denied`
 /// surfaces to the model on the FIRST attempt
 /// (`capability_error_is_model_visible_tool_failure`), so it exercises a
 /// genuine `project_service_outcome` arm without tripping that unrelated bug.

@@ -31,7 +31,7 @@
 //! through a different, staging-bypassing path — see
 //! `LocalDevCapabilityIo`'s own doc comment), collapsing the documented
 //! "retry twice, then a model-visible `Failed`" contract into an immediate
-//! terminal `driver_unavailable`. See the Lane C final report for the full
+//! terminal `driver_unavailable`. See issue #5608 for the full
 //! repro. `Denied` avoids that retry path entirely
 //! (`capability_error_is_model_visible_tool_failure` surfaces `PolicyDenied`
 //! straight to the model on the FIRST attempt), so this double still proves a
