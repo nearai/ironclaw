@@ -63,8 +63,7 @@ pub async fn run_approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     )
     .await?;
 
-    // Side-effect proof (mirrors the interactive approve arm): the approved
-    // write re-ran and persisted to the real workspace.
+    // Side-effect proof (mirrors the interactive approve arm).
     h.assert_workspace_file_contains("triggered-approved.txt", "triggered approved write")
         .await?;
     Ok(())
@@ -99,6 +98,9 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let gate_ref = state
         .gate_ref
         .ok_or("blocked triggered run missing gate ref")?;
+    if !gate_ref.as_str().starts_with("gate:approval-") {
+        return Err(format!("expected a local-dev approval gate, got {gate_ref:?}").into());
+    }
 
     h.deny_gate_in_scope(&submission.turn_scope, submission.run_id, &gate_ref)
         .await?;
@@ -109,7 +111,7 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     )
     .await?;
 
-    // Deny blocked the side effect: the file was never created.
+    // Side-effect proof (mirrors the interactive deny arm).
     h.assert_workspace_file_absent("triggered-denied.txt")
         .await?;
     Ok(())

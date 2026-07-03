@@ -87,17 +87,12 @@ async fn mcp_tool_call_reaches_mock_server() {
     assert_recorded_tools_call(&server, "search", "needle-xyz-42");
 }
 
-/// Format-matrix (C-WIREFMT): the mock MCP server answers every id-bearing leg
-/// (`initialize` → `tools/list` → `tools/call`) with SSE framing
-/// (`Content-Type: text/event-stream`, `data:`-wrapped, keepalive-ping
-/// prefixed). The client advertises `Accept: application/json, text/event-stream`
-/// (`crates/ironclaw_mcp/src/lib.rs`), so this is a legal framing the real
-/// `parse_mcp_response` dispatch must handle end-to-end — through a real reqwest
-/// response's headers reaching `response_is_sse`, not just the hand-built
-/// responses in the crate-tier `parse_mcp_response_accepts_both_advertised_framings`.
-/// Twin of `mcp_tool_call_reaches_mock_server`, which exercises the plain-JSON
-/// framing of the same Accept header (the second required fixture: 2 advertised
-/// content types → ≥2 response-format fixtures).
+/// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
+/// application/json, text/event-stream` header (`crates/ironclaw_mcp/src/lib.rs`),
+/// but here the mock server answers every leg with SSE framing instead of
+/// plain JSON. Exercises `parse_mcp_response`/`response_is_sse` against a
+/// real reqwest response's headers, not just the hand-built fixtures in the
+/// crate-tier `parse_mcp_response_accepts_both_advertised_framings`.
 #[tokio::test]
 async fn mcp_tool_call_over_sse_framed_responses() {
     let server = start_mock_mcp_server(vec![MockToolResponse {
@@ -129,10 +124,27 @@ async fn mcp_tool_call_over_sse_framed_responses() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool invoked despite SSE framing on every leg");
-    // Prove the SSE-framed handshake actually round-tripped over HTTP with the
-    // scripted arguments intact — the real client parsed the SSE `initialize`
-    // and `tools/list` legs and reached `tools/call`.
+    // Confirms the SSE-framed `initialize` leg round-tripped with the
+    // scripted arguments intact, not just that the recorder fired.
     assert_recorded_tools_call(&server, "search", "needle-sse-99");
+    // Distinct from the assert above: proves the tool result surfaced back to
+    // the model over the SSE-framed wire, not just that the call was recorded.
+    h.assert_tool_result_contains("mock result")
+        .await
+        .expect("scripted mock result surfaced through the SSE-framed response");
+    // `LoopbackMcpRuntimeHttpEgress` pre-declares the capability schema
+    // locally, so the client never sends a live `tools/list` (see
+    // `with_mock_mcp` docs). Pins that `enable_sse_framing` covered exactly
+    // this three-leg handshake, not a superset with an untested `tools/list`.
+    let methods: Vec<String> = server
+        .recorded_requests()
+        .into_iter()
+        .map(|r| r.method)
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["initialize", "notifications/initialized", "tools/call"]
+    );
 }
 
 /// Guards `assert_mcp_tool_called` against vacuous pass: when no MCP tool ran

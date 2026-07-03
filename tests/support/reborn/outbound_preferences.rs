@@ -28,9 +28,16 @@ use ironclaw_product_workflow::{
 };
 
 /// A fixed in-memory `OutboundPreferencesProductFacade` double.
+///
+/// Stateful: `set_outbound_preferences` accepting a known target updates
+/// `last_accepted`, and `get_outbound_preferences` reads it back — so a test
+/// can prove a `set` actually persisted (not just that the setter's own
+/// response echoed the request) by reading it back through a *different*
+/// facade method.
 pub(crate) struct FakeOutboundPreferencesFacade {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
     set_calls: Mutex<Vec<RebornOutboundDeliveryTargetId>>,
+    last_accepted: Mutex<Option<RebornOutboundDeliveryTargetSummary>>,
 }
 
 impl FakeOutboundPreferencesFacade {
@@ -43,6 +50,7 @@ impl FakeOutboundPreferencesFacade {
                 target_option("slack:channel:beta", "Slack Channel Beta"),
             ],
             set_calls: Mutex::new(Vec::new()),
+            last_accepted: Mutex::new(None),
         })
     }
 
@@ -75,7 +83,19 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(RebornOutboundPreferencesResponse::default())
+        let last_accepted = self
+            .last_accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match last_accepted {
+            Some(summary) => Ok(RebornOutboundPreferencesResponse {
+                final_reply_target: Some(summary),
+                final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+                default_modality: RebornOutboundDeliveryModality::Text,
+            }),
+            None => Ok(RebornOutboundPreferencesResponse::default()),
+        }
     }
 
     async fn set_outbound_preferences(
@@ -93,6 +113,10 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(target_id);
+        *self
+            .last_accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.clone());
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(summary),
             final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,

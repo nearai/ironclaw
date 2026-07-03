@@ -281,18 +281,15 @@ async fn tool_error_assertion_fails_without_matching_tool_error() {
 const ERR_A_URL: &str = "https://api.example.test/v1/err-a";
 const ERR_B_URL: &str = "https://api.example.test/v1/err-b";
 
-/// Demo + regression for the multi-turn (baseline-sliced) thread-history
-/// assertions: `history_len` / `assert_tool_error_since` /
-/// `assert_no_tool_error_since` / `assert_conversation_history_contains{,_since}`
-/// / `assert_conversation_history_role_contains`.
+/// Regression coverage for the multi-turn (baseline-sliced) thread-history
+/// assertions: `history_len`, `assert_tool_error_since`,
+/// `assert_no_tool_error_since`, `assert_conversation_history_contains{,_since}`,
+/// `assert_conversation_history_role_contains`.
 ///
-/// One harness runs TWO turns on the same thread. Turn 1 raises a `Denied`
-/// (`policy_denied`) tool error; turn 2 raises a `Failed` (`output_too_large`)
-/// one. Capturing `history_len` between the turns lets the `*_since` asserts
-/// scope to only the turn under test — the gap the full-history `assert_tool_error`
-/// (documented single-turn-only) cannot close. The negative branches double as
-/// the fail-checks: the slice must EXCLUDE turn 1's error and turn 1's prompt,
-/// and the role filter must not match a `User` prompt as an `Assistant` reply.
+/// Two turns on one thread: turn 1 raises `Denied{policy_denied}`, turn 2
+/// raises `Failed{output_too_large}`. `history_len` captured between turns is
+/// the baseline that scopes `*_since` asserts to turn 2 only — closing a gap
+/// the full-history `assert_tool_error` (single-turn-only) can't reach.
 #[tokio::test]
 async fn multi_turn_baseline_sliced_history_assertions() {
     use ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
@@ -328,16 +325,12 @@ async fn multi_turn_baseline_sliced_history_assertions() {
         .expect("turn 2 completes");
 
     // --- tool-error slicing ---
-    // Turn 2's Failed IS in the slice.
     h.assert_tool_error_since(after_turn_one, ToolErrorClass::Failed, "output_too_large")
         .await
         .expect("turn 2 Failed error is in the post-baseline slice");
-    // Turn 1's Denied is NOT in the slice (the whole point of the baseline).
     h.assert_no_tool_error_since(after_turn_one, ToolErrorClass::Denied, "policy_denied")
         .await
         .expect("turn 1 Denied error is excluded by the baseline slice");
-    // Fail-check: the sliced assert must REJECT turn 1's error (content absent
-    // from the slice) — proves the slice genuinely excludes prior turns.
     assert!(
         h.assert_tool_error_since(after_turn_one, ToolErrorClass::Denied, "policy_denied")
             .await
@@ -348,6 +341,28 @@ async fn multi_turn_baseline_sliced_history_assertions() {
     h.assert_tool_error_since(0, ToolErrorClass::Denied, "policy_denied")
         .await
         .expect("turn 1 Denied error is visible from baseline 0");
+    // Fail-check: turn 2's error is `Failed`, not `Denied`, so asking for
+    // `Denied{output_too_large}` since the baseline must reject even though
+    // the reason token and the slice are both correct — the class
+    // discriminator and the baseline slice must combine, not substitute for
+    // each other.
+    assert!(
+        h.assert_tool_error_since(after_turn_one, ToolErrorClass::Denied, "output_too_large")
+            .await
+            .is_err(),
+        "post-baseline slice must not match output_too_large under the wrong class (Denied)"
+    );
+    // assert_tool_error_summary_contains_since: raw safe_summary substring
+    // check, no class-prefix requirement.
+    h.assert_tool_error_summary_contains_since(after_turn_one, "output_too_large")
+        .await
+        .expect("turn 2 summary fragment is in the post-baseline slice");
+    assert!(
+        h.assert_tool_error_summary_contains_since(after_turn_one, "policy_denied")
+            .await
+            .is_err(),
+        "post-baseline slice must not see turn 1's policy_denied summary fragment"
+    );
     // Full-history (un-sliced) asserts still see BOTH turns' errors — backward compat.
     h.assert_tool_error(ToolErrorClass::Denied, "policy_denied")
         .await
@@ -366,29 +381,25 @@ async fn multi_turn_baseline_sliced_history_assertions() {
     h.assert_conversation_history_contains("done two")
         .await
         .expect("turn 2 assistant reply persisted");
-    // Multi-turn: only turn 2's prompt is in the post-baseline slice.
     h.assert_conversation_history_contains_since(after_turn_one, "second fetch")
         .await
         .expect("turn 2 prompt is in the post-baseline slice");
-    // Fail-check: turn 1's prompt is before the baseline → excluded.
     assert!(
         h.assert_conversation_history_contains_since(after_turn_one, "first fetch")
             .await
             .is_err(),
         "post-baseline slice must not see turn 1's user prompt"
     );
-    // Role filter: "second fetch" is a User message, matched under User…
+    // Role filter must discriminate User vs. Assistant, not just match on text.
     h.assert_conversation_history_role_contains(MessageKind::User, "second fetch")
         .await
         .expect("user-role filter matches the user prompt");
-    // …but NOT under Assistant (fail-check: role filter discriminates).
     assert!(
         h.assert_conversation_history_role_contains(MessageKind::Assistant, "second fetch")
             .await
             .is_err(),
         "assistant-role filter must not match a user prompt"
     );
-    // Fail-check: absent text is never found.
     assert!(
         h.assert_conversation_history_contains("never-said-this")
             .await

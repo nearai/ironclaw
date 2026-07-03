@@ -79,6 +79,15 @@ async fn golden_multi_turn_history() {
     h.submit_turn("second question")
         .await
         .expect("turn 2 completes");
+    // Structural pin alongside the golden snapshot (see assert messages below
+    // for the exact shape).
+    let requests = h.scripted_llm.captured_requests();
+    assert_eq!(requests.len(), 2, "one inference call per turn");
+    assert_eq!(
+        requests[1].len(),
+        4,
+        "second call carries system prompt + turn-1 user/assistant + turn-2 user"
+    );
     h.assert_golden_payload("multi_turn");
     h.assert_reply_eq("Second reply")
         .await

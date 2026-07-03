@@ -56,10 +56,31 @@ async fn no_communication_section_without_provider() {
         .await
         .expect("harness builds");
     h.submit_turn("hello").await.expect("turn completes");
+
+    // Baseline: a model request WAS captured at all (the turn actually
+    // reached the scripted provider), so the negative assertion below is
+    // proving absence of the communication section, not a vacuous pass
+    // against zero captured requests.
+    h.assert_model_request_contains("hello")
+        .await
+        .expect("the turn's own text must reach the captured model request");
+
+    // Specific error check (not generic `is_err()`): pin that the failure is
+    // the "not found" path over exactly the one captured request, so an
+    // infra-level failure (e.g. JSON serialization) can't masquerade as proof
+    // the communication section was absent, and a regression that silently
+    // captures zero requests can't slip through either.
+    let err = h
+        .assert_model_request_contains("Outbound delivery target:")
+        .await
+        .expect_err("no communication section must render when no provider is wired");
     assert!(
-        h.assert_model_request_contains("Outbound delivery target:")
-            .await
-            .is_err(),
-        "no communication section must render when no provider is wired"
+        err.to_string()
+            .starts_with("no model request contained \"Outbound delivery target:\""),
+        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+    );
+    assert!(
+        err.to_string().contains("captured 1 request(s)"),
+        "expected exactly one captured model request; got: {err}"
     );
 }

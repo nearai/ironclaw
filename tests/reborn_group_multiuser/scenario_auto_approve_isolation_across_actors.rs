@@ -43,6 +43,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .subject_user_id
         .clone()
         .ok_or("actor A binding missing subject user id")?;
+    // Prove the grant is load-bearing, not just present: `AUTO_APPROVE_DEFAULT_ENABLED`
+    // is `true`, so a genuinely no-op `enable_auto_approve_for_owner` would still let
+    // A's write through by default and mask a broken grant. Force A OFF first so "A
+    // completes without a gate" is only reachable if the enable call below genuinely
+    // flips A's owner scope back ON.
+    g.disable_auto_approve_for_owner(&a_owner)
+        .await
+        .map_err(|e| format!("[A pre-disable] {e}"))?;
     g.enable_auto_approve_for_owner(&a_owner)
         .await
         .map_err(|e| format!("[A grant] {e}"))?;
@@ -96,6 +104,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn_until_blocked("write the actor-b file")
         .await
         .map_err(|e| format!("[B must still gate — A's grant must not apply] {e}"))?;
+    // The gate blocked BEFORE the capability performed its write — no side effect.
+    b.assert_workspace_file_absent("actor_b.txt")
+        .await
+        .map_err(|e| format!("[B write must not have happened while blocked] {e}"))?;
 
     Ok(())
 }

@@ -55,6 +55,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .ok_or("blocked auth run missing gate ref")?;
     h.deny_auth_gate(run1, &auth_gate1).await?;
     h.wait_for_status(run1, TurnStatus::Completed).await?;
+    // Pin WHAT the deny path produced, not just that it reached a terminal
+    // status: the finalized reply must be turn 1's own scripted post-deny
+    // text (never turn 2's), and zero network egress must have escaped
+    // despite the model still being told about the (declined) capability —
+    // this also anchors the "turn 2's tool result can't be turn 1 residue"
+    // reasoning in the `assert_tool_result_contains` pin below.
+    h.assert_reply_contains("could not look up the repo without authorization")
+        .await?;
+    h.assert_egress_count(0).await?;
 
     // --- turn 2: SAME conversation, github call raises BOTH gates AGAIN
     //     (turn 1's deny did not seed a credential or leave a stale approval;
@@ -81,6 +90,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // discriminating — see `scenario_auth_then_approval_journey`; turn 1's
     // denied dispatch never produces a result, so the recorded result here can
     // only come from turn 2's credential-backed re-dispatch.)
+    //
+    // `assert_tool_result_contains` itself scans ALL captured results since
+    // thread baseline, so on its own it can't rule out turn-1 residue. There
+    // is no `*_since`-scoped variant for successful tool results (only
+    // `assert_tool_error_since` exists, for the error family — see
+    // `tests/support/reborn/assertions.rs`), so the discriminating power here
+    // comes from PAIRING with the turn-1 negative arm above: turn 1's deny
+    // path is now pinned to have produced zero egress
+    // (`assert_egress_count(0)`) and its own distinct scripted reply, so no
+    // successful "octocat/hello-world" result could have originated there —
+    // this assertion can only be satisfied by turn 2's own dispatch.
     h.assert_tool_result_contains("octocat/hello-world").await?;
     Ok(())
 }

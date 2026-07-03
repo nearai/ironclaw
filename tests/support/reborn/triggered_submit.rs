@@ -86,6 +86,51 @@ pub(crate) struct TriggeredSubmission {
 }
 
 impl RebornIntegrationHarness {
+    /// Synthetic `TriggerFire` for this harness's binding — the shared fire
+    /// construction both triggered-submit seams hand to the production
+    /// submitter.
+    fn triggered_fire(&self, prompt: &str, fire_slot: chrono::DateTime<Utc>) -> TriggerFire {
+        TriggerFire {
+            identity: TriggerFireIdentity::new(
+                self.binding.tenant_id.clone(),
+                TriggerId::new(),
+                fire_slot,
+            ),
+            creator_user_id: self.binding.actor_user_id.clone(),
+            agent_id: self.binding.agent_id.clone(),
+            project_id: self.binding.project_id.clone(),
+            prompt: prompt.to_string(),
+        }
+    }
+
+    /// Fresh `InMemoryConversationServices` for the trigger path with the
+    /// trigger's canonical external actor pre-paired — mirrors
+    /// `TriggerTrustedInboundBinding::for_fire`'s own derivation exactly and
+    /// mirrors production's pre-seed requirement (`resolve_actor` hard-fails
+    /// `BindingRequired` without it, on both trusted and untrusted resolve
+    /// paths). Uses `try_pair_external_actor` (not the infallible
+    /// `pair_external_actor` wrapper) so a pairing failure surfaces here, at
+    /// the seam boundary, instead of resurfacing later as an indirect
+    /// binding-resolution error.
+    async fn trigger_conversations_with_paired_actor(
+        &self,
+    ) -> HarnessResult<InMemoryConversationServices> {
+        let conversations = InMemoryConversationServices::default();
+        conversations
+            .try_pair_external_actor(
+                self.binding.tenant_id.clone(),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND)?,
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)?,
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    self.binding.actor_user_id.as_str(),
+                )?,
+                self.binding.actor_user_id.clone(),
+            )
+            .await?;
+        Ok(conversations)
+    }
+
     /// Submit a turn through the REAL `TrustedTriggerFireSubmitter` so it carries
     /// a genuine `TurnOriginKind::ScheduledTrigger` origin, end to end (E-TRIGGERED-SUBMIT).
     ///
@@ -112,16 +157,8 @@ impl RebornIntegrationHarness {
         &self,
         prompt: &str,
     ) -> HarnessResult<TriggeredSubmission> {
-        let tenant_id = self.binding.tenant_id.clone();
-        let creator_user_id = self.binding.actor_user_id.clone();
         let fire_slot = triggered_fire_slot();
-        let fire = TriggerFire {
-            identity: TriggerFireIdentity::new(tenant_id.clone(), TriggerId::new(), fire_slot),
-            creator_user_id: creator_user_id.clone(),
-            agent_id: self.binding.agent_id.clone(),
-            project_id: self.binding.project_id.clone(),
-            prompt: prompt.to_string(),
-        };
+        let fire = self.triggered_fire(prompt, fire_slot);
         let content_ref = TriggerInboundContentRef::new(format!(
             "content:triggered-submit:{}",
             fire.identity.external_event_id().as_str()
@@ -130,26 +167,7 @@ impl RebornIntegrationHarness {
         let request =
             TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
 
-        // Pre-pair the trigger's canonical external actor — mirrors
-        // `TriggerTrustedInboundBinding::for_fire`'s own derivation exactly and mirrors
-        // production's pre-seed requirement (`resolve_actor` hard-fails
-        // `BindingRequired` without it, on both trusted and untrusted resolve paths).
-        // Uses `try_pair_external_actor` (not the infallible `pair_external_actor`
-        // wrapper) so a pairing failure surfaces here, at the seam boundary, instead
-        // of resurfacing later as an indirect binding-resolution error.
-        let conversations = InMemoryConversationServices::default();
-        conversations
-            .try_pair_external_actor(
-                tenant_id,
-                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND)?,
-                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)?,
-                ExternalActorRef::new(
-                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
-                    creator_user_id.as_str(),
-                )?,
-                creator_user_id,
-            )
-            .await?;
+        let conversations = self.trigger_conversations_with_paired_actor().await?;
 
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
@@ -202,47 +220,21 @@ impl RebornIntegrationHarness {
     /// `authorize_trigger_fire` and `validate_trusted_trigger_prompt` — both
     /// are poller-side pre-flight already pinned by
     /// `trigger_poller_trusted_submit.rs`'s own crate-tier tests, and neither
-    /// affects the submit→run wire this seam exists to drive. The ~30 lines of
-    /// fire-construction/actor-pairing shared with `submit_triggered_turn` are
-    /// deliberately duplicated, not extracted: shared support files are under
-    /// an additive-only edit constraint while sibling coverage lanes are in
-    /// flight (consolidate once they land).
+    /// affects the submit→run wire this seam exists to drive.
     pub(crate) async fn submit_triggered_turn_scripted(
         &self,
         prompt: &str,
         replies: impl IntoIterator<Item = RebornScriptedReply>,
     ) -> HarnessResult<TriggeredSubmission> {
-        let tenant_id = self.binding.tenant_id.clone();
-        let creator_user_id = self.binding.actor_user_id.clone();
         let fire_slot = triggered_fire_slot();
-        let fire = TriggerFire {
-            identity: TriggerFireIdentity::new(tenant_id.clone(), TriggerId::new(), fire_slot),
-            creator_user_id: creator_user_id.clone(),
-            agent_id: self.binding.agent_id.clone(),
-            project_id: self.binding.project_id.clone(),
-            prompt: prompt.to_string(),
-        };
+        let fire = self.triggered_fire(prompt, fire_slot);
 
-        // Fresh conversation services for the trigger path + canonical actor
-        // pairing — identical to `submit_triggered_turn` (see its docs).
-        let conversations = InMemoryConversationServices::default();
-        conversations
-            .try_pair_external_actor(
-                tenant_id.clone(),
-                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND)?,
-                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)?,
-                ExternalActorRef::new(
-                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
-                    creator_user_id.as_str(),
-                )?,
-                creator_user_id.clone(),
-            )
-            .await?;
+        let conversations = self.trigger_conversations_with_paired_actor().await?;
 
         // Production materializer step 1: resolve the binding (mints the scope).
         let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
         let resolve_request = ResolveConversationRequest {
-            tenant_id: tenant_id.clone(),
+            tenant_id: self.binding.tenant_id.clone(),
             adapter_kind: AdapterKind::new(trusted_inbound_binding.adapter_kind())?,
             adapter_installation_id: AdapterInstallationId::new(
                 trusted_inbound_binding.adapter_installation_id(),

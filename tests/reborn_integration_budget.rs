@@ -51,8 +51,13 @@ async fn budget_assertion_requires_wiring() {
         .await
         .expect("harness builds");
     h.submit_turn("just talk").await.expect("turn completes");
-    assert!(
-        h.assert_budget_user_cap_seeded().await.is_err(),
-        "budget liveness assertion must fail when no accountant is wired"
+    let err = h
+        .assert_budget_user_cap_seeded()
+        .await
+        .expect_err("budget liveness assertion must fail when no accountant is wired");
+    assert_eq!(
+        err.to_string(),
+        "harness was not built with budget accounting wired (call with_budget_accounting)",
+        "expected the no-governor-wired failure, got a different harness error: {err}"
     );
 }

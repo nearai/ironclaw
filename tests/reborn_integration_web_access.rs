@@ -216,6 +216,10 @@ async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
         .await
         .expect("capability dispatched through the real executor over SSE-framed initialize");
     harness
+        .assert_egress_count(3)
+        .await
+        .expect("all three MCP handshake legs dispatched");
+    harness
         .assert_tool_result_contains(
             "Tokio is an async runtime for Rust providing IO, networking, and scheduling.",
         )
@@ -259,6 +263,10 @@ async fn web_access_handshake_over_sse_framed_both_legs() {
         .assert_tool_invoked("web-access.get_content")
         .await
         .expect("capability dispatched with both handshake legs SSE-framed");
+    harness
+        .assert_egress_count(3)
+        .await
+        .expect("all three MCP handshake legs dispatched");
     harness
         .assert_tool_result_contains("This domain is for illustrative examples in documents.")
         .await

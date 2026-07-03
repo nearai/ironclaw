@@ -5,14 +5,13 @@
 //! and B's turn does not inherit A's approval — B still blocks on its own gate
 //! and must be resolved independently under B's actor.
 //!
-//! TODO(reborn-multiuser-gate): this scenario is driven by an `#[ignore]`d test
-//! (`multi_actor_gate_isolation_blocked` in `main.rs`) because actor B's GATED
-//! dispatch dies with `driver_protocol_violation` on THIS base — the capability
-//! harness hardcodes one execution user, so B's gated write is scoped to A's
-//! user and the approval persistence mismatches B's run scope. The fix is the
-//! parallel C-MULTIUSER `scope_capability_by_run_owner` harness seam (unmerged);
-//! un-ignore the driving test once it lands. Production already isolates
-//! capability dispatch by run owner correctly.
+//! Runs on `RebornIntegrationGroup::multiuser_approvals()`, whose per-actor
+//! capability dispatch (the C-MULTIUSER `scope_capability_by_run_owner`
+//! harness seam) scopes each actor's gated write to ITS OWN run owner, so
+//! actor B's dispatch no longer dies with `driver_protocol_violation` under
+//! actor A's user. Production already isolates capability dispatch by run
+//! owner correctly; this seam makes that isolation observable at the harness
+//! level.
 //!
 //! Complementary to (not a duplicate of): `reborn_group_approvals`'s
 //! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
@@ -23,6 +22,8 @@
 use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use super::reborn_support::session_thread::RebornThreadHarnessError;
+use ironclaw_threads::SessionThreadError;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
@@ -125,6 +126,27 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Owner isolation: neither actor's owner scope may read the other's thread
     // history (each owner's records live under a separate
     // `/tenants/<tenant>/users/<user>/threads` subtree).
+    //
+    // Positive control FIRST: each actor must still be able to read its OWN
+    // thread's history under its OWN scope, so the negative checks below
+    // aren't vacuously true because `history()` never resolves anything on
+    // this harness.
+    let a_own_history = a
+        .thread_harness
+        .history(a.binding.thread_id.clone())
+        .await
+        .map_err(|e| format!("[A own history] {e}"))?;
+    if a_own_history.is_empty() {
+        return Err("positive control failed: actor A's own history is empty".into());
+    }
+    let b_own_history = b
+        .thread_harness
+        .history(b.binding.thread_id.clone())
+        .await
+        .map_err(|e| format!("[B own history] {e}"))?;
+    if b_own_history.is_empty() {
+        return Err("positive control failed: actor B's own history is empty".into());
+    }
     assert_history_isolated(&a, "A", &b, "B").await?;
     assert_history_isolated(&b, "B", &a, "A").await?;
     Ok(())
@@ -136,17 +158,27 @@ async fn assert_history_isolated(
     other: &RebornIntegrationHarness,
     other_name: &str,
 ) -> HarnessResult<()> {
-    if reader
+    match reader
         .thread_harness
         .history(other.binding.thread_id.clone())
         .await
-        .is_ok()
     {
-        return Err(format!(
+        Ok(_) => Err(format!(
             "isolation failure: actor {other_name}'s thread is readable under actor \
              {reader_name}'s owner scope"
         )
-        .into());
+        .into()),
+        // Pin the SPECIFIC failure reason (cross-owner lookup resolves to
+        // `SessionThreadError::UnknownThread` — scope-relative path
+        // resolution, not a separate ACL check) rather than accepting any
+        // `Err(_)` — an unrelated failure (e.g. a driver/backend error)
+        // would otherwise vacuously satisfy a bare `.is_ok()` check without
+        // proving isolation.
+        Err(RebornThreadHarnessError::Thread(SessionThreadError::UnknownThread { .. })) => Ok(()),
+        Err(other_err) => Err(format!(
+            "isolation check for actor {other_name} under actor {reader_name}'s scope failed \
+             for the WRONG reason (expected UnknownThread, got: {other_err})"
+        )
+        .into()),
     }
-    Ok(())
 }

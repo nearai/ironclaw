@@ -43,8 +43,11 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::hooks::{RecordingHookLog, denying_hook_factory, recording_hook_factory};
+use reborn_support::hooks::{
+    HOOK_TEST_DENY_REASON, RecordingHookLog, denying_hook_factory, recording_hook_factory,
+};
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
@@ -80,17 +83,21 @@ async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran through the real capability path");
-    // BeforeCapability fired for the dispatched capability.
-    assert!(
-        log.fired("before_capability:builtin.http"),
-        "BeforeCapability hook must fire for builtin.http; saw {:?}",
-        log.fires()
-    );
-    // AfterModel observer fired on the turn's model call(s).
-    assert!(
-        log.fired("observer:AfterModel"),
-        "AfterModel observer must fire on the model call; saw {:?}",
-        log.fires()
+    // Both lifecycle points fired, in the expected order: the AfterModel
+    // observer dispatches once per `finalize_assistant_message` call (see
+    // `HookedLoopTranscriptPort::finalize_assistant_message`), and the script
+    // has two assistant turns (the tool-call reply, then the final text
+    // reply) with the BeforeCapability gate hook firing between them, right
+    // before the dispatched `builtin.http` capability.
+    assert_eq!(
+        log.fires(),
+        vec![
+            "observer:AfterModel",
+            "before_capability:builtin.http",
+            "observer:AfterModel",
+        ],
+        "hook fires must occur in lifecycle order: AfterModel (tool-call reply) -> \
+         BeforeCapability (builtin.http dispatch) -> AfterModel (final text reply)"
     );
 }
 
@@ -121,7 +128,6 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
         .await
         .expect("turn completes despite the hook deny");
 
-    // The deny hook fired for the target capability.
     assert!(
         log.fired("before_capability_deny:builtin.http"),
         "deny hook must fire for builtin.http; saw {:?}",
@@ -132,4 +138,10 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
     h.assert_egress_count(0)
         .await
         .expect("a hook-denied capability must not reach egress");
+    // The model-visible tool-result envelope reports the hook's deny reason,
+    // not a generic/blank denial — pins that the deny reason token actually
+    // propagates to the persisted `ToolResultReference` the model sees.
+    h.assert_tool_error(ToolErrorClass::Denied, HOOK_TEST_DENY_REASON)
+        .await
+        .expect("hook deny reason must be reported in the persisted tool-error summary");
 }

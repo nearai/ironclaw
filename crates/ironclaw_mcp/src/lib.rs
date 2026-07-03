@@ -1755,6 +1755,7 @@ mod tests {
         )
         .expect("JSON error-object is a valid response, not a parse failure");
         assert!(json_err.error, "plain-JSON error object flags error");
+        assert_eq!(json_err.result, None, "error object carries no result");
 
         let sse_err = parse_mcp_response(
             &mcp_response(
@@ -1765,6 +1766,7 @@ mod tests {
         )
         .expect("SSE error-object is a valid response, not a parse failure");
         assert!(sse_err.error, "SSE-framed error object flags error");
+        assert_eq!(sse_err.result, None, "error object carries no result");
     }
 
     /// Empty / malformed bodies are rejected in both framings (mutation guard:
@@ -1774,16 +1776,18 @@ mod tests {
     #[test]
     fn parse_mcp_response_rejects_empty_bodies_in_both_framings() {
         let id = Some(9u64);
-        assert!(
-            parse_mcp_response(&mcp_response("application/json", b""), id).is_err(),
+        assert_eq!(
+            parse_mcp_response(&mcp_response("application/json", b""), id).unwrap_err(),
+            "response_error",
             "empty plain-JSON body must not parse as a success"
         );
-        assert!(
+        assert_eq!(
             parse_mcp_response(
                 &mcp_response("text/event-stream", b"event: ping\ndata:\n\n"),
                 id,
             )
-            .is_err(),
+            .unwrap_err(),
+            "response_error",
             "SSE body with only keepalives (no id-matching data) must not parse"
         );
     }

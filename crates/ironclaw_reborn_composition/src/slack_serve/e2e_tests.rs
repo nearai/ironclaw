@@ -841,6 +841,50 @@ async fn wait_for_gate_route(
     .expect("driver records the delivered gate route within 5 s")
 }
 
+/// Poll `egress`'s recorded requests until at least one Slack
+/// `chat.postMessage` matching the approval-prompt shape (JSON `text` field
+/// containing `"approve"` and `gate_ref`) has been captured, then return every
+/// such match. Times out after 5 s.
+///
+/// Filtering on the approval-prompt *shape* — not a raw `chat.postMessage`
+/// count — is deliberate: `on_trigger_submitted` spawns the delivery loop in
+/// the background and returns immediately, and `ScriptedTriggerCoordinator`
+/// (see its doc comment) auto-advances from `BlockedApproval` to `Completed`
+/// on the very next poll with no real user action in between — a test-double
+/// quirk production never exhibits. That means the background loop can also
+/// post a second, final-reply `chat.postMessage` before this test gets around
+/// to asserting, so a bare "at least one postMessage" / `prompts[0]` check
+/// races between 1 and 2 recorded calls. Waiting for (and counting only) the
+/// approval-prompt-shaped message keeps the assertion deterministic regardless
+/// of whether that second message has landed yet. Mirrors `wait_for_gate_route`'s
+/// retry/backoff/timeout shape above.
+async fn wait_for_approval_prompt_messages(
+    egress: &RecordingEgress,
+    gate_ref: &str,
+) -> Vec<serde_json::Value> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let matches: Vec<serde_json::Value> = egress
+                .requests()
+                .into_iter()
+                .filter(|request| request.path().as_str() == "/api/chat.postMessage")
+                .filter_map(|request| serde_json::from_slice(request.body()).ok())
+                .filter(|payload: &serde_json::Value| {
+                    payload["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("approve") && text.contains(gate_ref))
+                })
+                .collect();
+            if !matches.is_empty() {
+                return matches;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver posts the approval-prompt chat.postMessage within 5 s")
+}
+
 /// Full trigger→gate→approve twin of the live canary, at the crate tier.
 ///
 /// A triggered run (personal, foreign thread scope) blocks on approval. The
@@ -1020,19 +1064,25 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     );
 
     // The driver posted an approval prompt naming the gate to the Slack DM.
-    let prompts: Vec<_> = driver_egress
-        .requests()
-        .into_iter()
-        .filter(|r| r.path().as_str() == "/api/chat.postMessage")
-        .collect();
-    assert!(
-        !prompts.is_empty(),
-        "driver must post at least one chat.postMessage"
+    // Bounded-poll for the approval-prompt-shaped message specifically (see
+    // `wait_for_approval_prompt_messages` doc comment): the background
+    // delivery loop may already be racing ahead to post a second, final-reply
+    // message by the time this assertion runs, so a raw "any chat.postMessage"
+    // count would be non-deterministic between 1 and 2.
+    let approval_prompts = wait_for_approval_prompt_messages(&driver_egress, GATE).await;
+    assert_eq!(
+        approval_prompts.len(),
+        1,
+        "expected exactly one approval-prompt chat.postMessage; got {approval_prompts:?}"
     );
-    let first_body = std::str::from_utf8(prompts[0].body()).expect("utf8 body");
+    let prompt_payload = &approval_prompts[0];
+    assert_eq!(prompt_payload["channel"], CHANNEL);
+    let prompt_text = prompt_payload["text"]
+        .as_str()
+        .expect("approval prompt body carries a text field");
     assert!(
-        first_body.contains("approve") && first_body.contains(GATE),
-        "approval prompt body must name the gate: {first_body}"
+        prompt_text.contains("approve") && prompt_text.contains(GATE),
+        "approval prompt body must name the gate: {prompt_text}"
     );
 
     // Inbound bare `approve` in the DM resolves the gate on the run's FOREIGN

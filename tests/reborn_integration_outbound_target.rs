@@ -5,8 +5,7 @@
 //! over an injected `FakeOutboundPreferencesFacade` at the production-wired
 //! facade trait seam.
 //!
-//! Covers the reachable model-visible (kind-A) routes the C-SYNTH spike
-//! enumerated for these capabilities:
+//! Covers the reachable model-visible (kind-A) routes for these capabilities:
 //! - `targets_list` happy path (its only reachable route — every facade error is
 //!   kind-B `driver_unavailable`, so only the happy path is pinned).
 //! - `target_set` happy path (settings decision `Allow` via default-ON
@@ -67,6 +66,35 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
         .assert_tool_result_contains(KNOWN_TARGET_ID)
         .await
         .expect("targets_list returned the seeded target inventory");
+
+    let output = harness
+        .tool_result_output("builtin.outbound_delivery_targets_list")
+        .await
+        .expect("targets_list recorded a capability result");
+    let targets = output["targets"]
+        .as_array()
+        .expect("targets_list output carries a `targets` array");
+    assert_eq!(
+        targets.len(),
+        2,
+        "expected exactly the two seeded targets; saw {output}"
+    );
+    let target_ids: Vec<&str> = targets
+        .iter()
+        .map(|target| {
+            target["target"]["target_id"]
+                .as_str()
+                .expect("each target carries a string target_id")
+        })
+        .collect();
+    assert!(
+        target_ids.contains(&KNOWN_TARGET_ID),
+        "expected {KNOWN_TARGET_ID:?} in the returned targets; saw {target_ids:?}"
+    );
+    assert!(
+        target_ids.contains(&"slack:channel:beta"),
+        "expected the second seeded target in the returned targets; saw {target_ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -96,8 +124,23 @@ async fn target_set_capability_applies_preference_through_facade() {
         .assert_tool_invoked("builtin.outbound_delivery_target_set")
         .await
         .expect("target_set dispatched through the synthetic-capability port");
-    // Read-back through the SAME facade double: a no-op set that still fabricated
-    // a success payload would leave `recorded_set_target_ids` empty.
+    // Assert the model-visible payload itself, not just the facade double's
+    // log — proves the preference round-tripped through the capability's own
+    // serialized response, not merely that the facade was called.
+    let output = harness
+        .tool_result_output("builtin.outbound_delivery_target_set")
+        .await
+        .expect("target_set recorded a capability result");
+    assert_eq!(
+        output["final_reply_target"]["target_id"],
+        serde_json::json!(KNOWN_TARGET_ID),
+        "tool result must echo back the applied target id; saw {output}"
+    );
+    assert_eq!(
+        output["final_reply_target_status"],
+        serde_json::json!("available"),
+        "tool result must report the applied target as available; saw {output}"
+    );
     let facade = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
@@ -186,6 +229,18 @@ async fn target_set_disabled_by_settings_routes_to_policy_denied() {
         .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
         .await
         .expect("a disabled tool surfaces as Failed(PolicyDenied)");
+    // A policy-denied dispatch must short-circuit before ever reaching the
+    // facade set seam — proves the deny happened at the settings-decision gate,
+    // not merely that the model observed a policy_denied error string.
+    let facade = group
+        .capability_harness()
+        .expect("outbound_target_tools always uses HostRuntime")
+        .outbound_preferences_facade_for_test()
+        .expect("outbound_target_tools always wires a facade double");
+    assert!(
+        facade.recorded_set_target_ids().is_empty(),
+        "a policy-denied target_set must not reach the facade set seam"
+    );
 }
 
 #[tokio::test]
@@ -223,6 +278,14 @@ async fn target_set_approval_gate_approve_applies_preference() {
         .wait_for_status(run_id, ironclaw_turns::TurnStatus::Completed)
         .await
         .expect("run resumes to Completed after approval");
+
+    // Read the post-resume persisted tool result — proves the resumed dispatch
+    // actually reached the model, not merely that the run reached `Completed`
+    // (which a silently-dropped resume could also produce).
+    harness
+        .assert_tool_result_contains(KNOWN_TARGET_ID)
+        .await
+        .expect("post-resume tool result must reflect the approved target");
 
     let facade = group
         .capability_harness()
@@ -270,6 +333,24 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         .wait_for_status(run_id, ironclaw_turns::TurnStatus::Completed)
         .await
         .expect("run resumes to Completed after denial");
+
+    // A bare `Completed` status also matches a silent no-op/vanish bug (the
+    // resumed capability call could simply disappear rather than surface a
+    // model-visible denial). Pin the persisted gate-declined failure summary:
+    // `short_circuit_denied_resume` (capabilities.rs) surfaces this scenario as
+    // `CapabilityOutcome::Failed(GateDeclined)` with a fixed host-authored
+    // planner summary — `SanitizedStrategySummary::from_trusted_static(
+    // "approval gate denied by user")` — NOT the `capability_denied_summary`/
+    // `capability_failed_summary` prefix wrapper (those apply only when a
+    // capability itself returns Denied/Failed, not this executor-level
+    // gate-declined short-circuit). `assert_tool_error_summary_contains` reads
+    // that raw safe_summary without the class-prefix requirement, mirroring
+    // the analogous auth-gate-deny assertion in
+    // `reborn_integration_auth_gate.rs`.
+    harness
+        .assert_tool_error_summary_contains("approval gate denied by user")
+        .await
+        .expect("a denied approval gate surfaces a model-visible gate-declined failure");
 
     // A denied gate must short-circuit BEFORE the facade set — the preference is
     // never applied.
