@@ -34,3 +34,7 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = "test(=live_tests::zizmor_scan) | test(=live_tests::zizmor_scan_v2) | test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "binary(/reborn_.*/) | binary(=support_unit_tests)"
+slow-timeout = { period = "300s", terminate-after = 6 }

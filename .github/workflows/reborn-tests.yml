@@ -280,10 +280,128 @@ jobs:
           timeout --signal=INT --kill-after=30s 28m \
             cargo test -p "$PACKAGE" ${feature_flags} --all-targets -- --nocapture
 
+  reborn-nextest-archive:
+    name: Build Reborn nextest archive
+    needs: changes
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_reborn_tests == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, ovh, trusted-pr]
+    timeout-minutes: 45
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Verify mold linker is active
+        run: |
+          clang_output="$(
+            printf 'int main(void) { return 0; }\n' \
+              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
+          )"
+          printf '%s\n' "$clang_output"
+          grep -qi mold <<< "$clang_output"
+
+          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
+          rustc /tmp/mold-link-check.rs \
+            -C linker=clang \
+            -C link-arg=--ld-path=/usr/bin/mold \
+            -o /tmp/mold-link-check
+          test "$(/tmp/mold-link-check)" = "mold-link-ok"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-tests-root
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
+      - name: Build Reborn nextest archive
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          mapfile -t test_names < <(
+            {
+              find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
+              if [ -f tests/support_unit_tests.rs ]; then
+                printf '%s\n' tests/support_unit_tests.rs
+              fi
+              find tests -mindepth 1 -maxdepth 1 -type d -name 'reborn_group_*' \
+                -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print
+            } \
+              | sed -E 's#^tests/##; s#\.rs$##' \
+              | LC_ALL=C sort
+          )
+
+          if [ "${#test_names[@]}" -eq 0 ]; then
+            echo "No Reborn nextest archive targets discovered" >&2
+            exit 1
+          fi
+
+          archive_args=()
+          for test_name in "${test_names[@]}"; do
+            archive_args+=(--test "${test_name}")
+          done
+
+          mkdir -p target/nextest-archive
+          printf 'Archiving Reborn test target: %s\n' "${test_names[@]}"
+          cargo nextest archive \
+            --features libsql \
+            "${archive_args[@]}" \
+            --archive-file target/nextest-archive/reborn-nextest.tar.zst
+          ls -lh target/nextest-archive/reborn-nextest.tar.zst
+
+      - name: Upload Reborn nextest archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-nextest-archive
+          path: target/nextest-archive/reborn-nextest.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    needs: [changes, reborn-nextest-archive]
+    if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -301,6 +419,12 @@ jobs:
       matrix:
         partition: [0, 1, 2, 3]
     steps:
+      - name: Fail if trusted Reborn archive build failed
+        if: needs.reborn-nextest-archive.result != 'success' && needs.reborn-nextest-archive.result != 'skipped'
+        run: |
+          echo "Reborn nextest archive build did not succeed: ${{ needs.reborn-nextest-archive.result }}"
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -308,6 +432,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk space
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -315,14 +440,17 @@ jobs:
           df -h /
 
       - name: Install Rust
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install mold and clang
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Verify mold linker is active
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           clang_output="$(
             printf 'int main(void) { return 0; }\n' \
@@ -339,6 +467,7 @@ jobs:
           test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - name: Restore Rust cache
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # All 4 root partitions compile the *same* root-package build (they
@@ -352,6 +481,7 @@ jobs:
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Setup OVH sccache cache
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: ./.github/actions/setup-sccache-dist
         with:
           cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
@@ -362,12 +492,38 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: scripts/ci/run-reborn-root-partition.sh
+
+      - name: Install cargo-nextest
+        if: needs.reborn-nextest-archive.result == 'success'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download Reborn nextest archive
+        if: needs.reborn-nextest-archive.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reborn-nextest-archive
+          path: target/nextest-archive
+
+      - name: Run Reborn root tests from archive
+        if: needs.reborn-nextest-archive.result == 'success'
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          partition="$((REBORN_ROOT_TEST_PARTITION + 1))/${REBORN_ROOT_TEST_PARTITIONS}"
+          cargo-nextest nextest run \
+            --archive-file target/nextest-archive/reborn-nextest.tar.zst \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --partition "slice:${partition}" \
+            -E '(binary(/reborn_.*/) - binary(/reborn_group_.*/)) + binary(=support_unit_tests)'
 
   reborn-group-tests:
     name: Reborn group tests
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    needs: [changes, reborn-nextest-archive]
+    if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
     # Group tests run sequentially in ONE job (build once, reuse artifacts), so
     # the budget must cover N suites at REBORN_GROUP_TEST_TIMEOUT each plus setup
@@ -385,6 +541,12 @@ jobs:
       REBORN_GROUP_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
     steps:
+      - name: Fail if trusted Reborn archive build failed
+        if: needs.reborn-nextest-archive.result != 'success' && needs.reborn-nextest-archive.result != 'skipped'
+        run: |
+          echo "Reborn nextest archive build did not succeed: ${{ needs.reborn-nextest-archive.result }}"
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -392,6 +554,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk space
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -399,14 +562,17 @@ jobs:
           df -h /
 
       - name: Install Rust
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install mold and clang
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Verify mold linker is active
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: |
           clang_output="$(
             printf 'int main(void) { return 0; }\n' \
@@ -423,6 +589,7 @@ jobs:
           test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - name: Restore Rust cache
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # REUSE the root partitions' cache key: the group `[[test]]` binaries
@@ -436,6 +603,7 @@ jobs:
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Setup OVH sccache cache
+        if: needs.reborn-nextest-archive.result == 'skipped'
         uses: ./.github/actions/setup-sccache-dist
         with:
           cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
@@ -446,7 +614,33 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn group tests
+        if: needs.reborn-nextest-archive.result == 'skipped'
         run: scripts/ci/run-reborn-group-tests.sh
+
+      - name: Install cargo-nextest
+        if: needs.reborn-nextest-archive.result == 'success'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download Reborn nextest archive
+        if: needs.reborn-nextest-archive.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reborn-nextest-archive
+          path: target/nextest-archive
+
+      - name: Run Reborn group tests from archive
+        if: needs.reborn-nextest-archive.result == 'success'
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          timeout --signal=INT --kill-after=30s "${REBORN_GROUP_TEST_TIMEOUT}" \
+            cargo-nextest nextest run \
+              --archive-file target/nextest-archive/reborn-nextest.tar.zst \
+              --workspace-remap "$GITHUB_WORKSPACE" \
+              --test-threads 1 \
+              -E 'binary(/reborn_group_.*/)'
 
   webui-v2-js-tests:
     name: Reborn WebUI v2 JS tests
@@ -536,6 +730,7 @@ jobs:
       - changes
       - package-matrix
       - crate-tests
+      - reborn-nextest-archive
       - root-reborn-parity-tests
       - reborn-group-tests
       - webui-v2-js-tests
@@ -565,6 +760,11 @@ jobs:
 
           if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
             echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.reborn-nextest-archive.result }}" != "success" && "${{ needs.reborn-nextest-archive.result }}" != "skipped" ]]; then
+            echo "Reborn nextest archive build failed: ${{ needs.reborn-nextest-archive.result }}"
             exit 1
           fi
 
