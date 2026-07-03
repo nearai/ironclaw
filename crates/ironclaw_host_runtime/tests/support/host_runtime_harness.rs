@@ -6,7 +6,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    thread,
     time::Duration,
 };
 
@@ -943,7 +942,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         if !self.delay.is_zero() {
-            thread::sleep(self.delay);
+            tokio::time::sleep(self.delay).await;
         }
         self.requests.lock().unwrap().push(request.clone());
         Ok(RuntimeHttpEgressResponse {
