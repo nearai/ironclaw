@@ -89,8 +89,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProductWorkflowError,
-    ProjectService,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -685,7 +684,7 @@ impl RebornServices {
     pub fn publish_bundled_extension_for_test(
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
-    ) -> Option<Result<(), ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
         let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
         Some(
             extension_management
