@@ -827,11 +827,11 @@ async fn wait_for_gate_route(
 ) -> ironclaw_outbound::DeliveredGateRouteRecord {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(record) = route_store
+            let loaded = route_store
                 .load_delivered_gate_route(tenant, user, gate_ref)
                 .await
-                .expect("load gate route") // safety: test-only poll loop; a store error means a broken test double
-            {
+                .expect("load gate route"); // safety: test-only poll loop
+            if let Some(record) = loaded {
                 return record;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
