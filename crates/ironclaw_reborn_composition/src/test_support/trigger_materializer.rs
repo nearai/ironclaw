@@ -1,0 +1,48 @@
+//! Trusted-trigger prompt materialization test support (E-TRIGGERED-SUBMIT
+//! seam).
+//!
+//! Single production-owned entry point for driving a triggered run's
+//! materialization step in an integration-test harness — see
+//! [`materialize_trigger_prompt_for_test`]. Extracted per the PR #5584 review
+//! ("This helper now hand-mirrors most of `ConversationContentRefMaterializer::materialize_prompt`
+//! ... trusted-trigger materialization is an ownership boundary called out in
+//! `AGENTS.md:61`, and duplicating it here means future changes to trigger
+//! binding/thread recording can drift from the integration path"): the
+//! integration-test crate now calls ONE production-owned helper instead of
+//! hand-mirroring `trigger_resolve_request` + `record_trigger_prompt` + the
+//! content-ref shape field-by-field.
+
+/// Materialize a `TriggerFire`'s prompt through the REAL trusted-trigger
+/// pipeline (`ConversationContentRefMaterializer::materialize_prompt` —
+/// authorize, validate, resolve-or-create binding, record the prompt as a
+/// real inbound thread message, build the real `thread-message:<id>` content
+/// ref), and additionally return the resolved `TurnScope` the materializer
+/// mints internally but the production `TriggerPromptMaterializer` trait does
+/// not expose — the value an integration-test harness needs to register a
+/// scripted model gateway for the trigger's exact scope before submitting.
+///
+/// `binding_service`/`thread_service` are the caller's own (real, in-process)
+/// conversation/thread services — this does not fake or re-implement the
+/// materialization logic itself, only supplies the collaborators production
+/// wires from its own `RebornServices` assembly. Tests only.
+#[cfg(feature = "test-support")]
+pub async fn materialize_trigger_prompt_for_test(
+    binding_service: ironclaw_conversations::InMemoryConversationServices,
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    default_agent_id: ironclaw_host_api::AgentId,
+    fire: ironclaw_triggers::TriggerFire,
+) -> Result<
+    (
+        ironclaw_triggers::TriggerMaterializedPrompt,
+        ironclaw_turns::TurnScope,
+    ),
+    ironclaw_triggers::TriggerError,
+> {
+    crate::trigger_poller_trusted_submit::materialize_trigger_prompt_for_test(
+        binding_service,
+        thread_service,
+        default_agent_id,
+        fire,
+    )
+    .await
+}
