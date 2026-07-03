@@ -404,6 +404,7 @@ mod tests {
             access_secret: Some(SecretHandle::new("google_access").unwrap()),
             refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
             scopes: Vec::new(),
+            provider_identity: None,
             created_at: updated_at,
             updated_at,
         }

@@ -70,8 +70,8 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
   const rendered = context.globalThis.__testExports.OnboardingPairingCard({
     onboarding: {
-      extensionName: "slack",
-      errorMessage: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+      extensionName: "telegram",
+      errorMessage: "Invalid or expired Telegram pairing code. Message the bot to get a new one.",
     },
     onSubmit: async () => {
       throw new Error("raw backend path /secret/token");
@@ -84,7 +84,54 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
 
   assert.deepEqual(
     stateUpdates.filter((update) => update.index === 1).map((update) => update.value),
-    ["", "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."],
+    ["", "Invalid or expired Telegram pairing code. Message the bot to get a new one."],
+  );
+});
+
+test("OnboardingPairingCard shows connection-succeeded copy when the resume faults, not the invalid-code error", async () => {
+  const stateUpdates = [];
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        const initialValues = ["PAIRCODE", "", "idle"];
+        return [
+          initialValues[index] ?? initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+  };
+
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "slack" },
+    onSubmit: async () => {
+      // Mirrors submitChannelConnectionPairing throwing on resume_error: the
+      // binding is durable (connected), but the parked turn didn't resume.
+      const error = new Error("channel connection resume did not complete");
+      error.resumeFailed = true;
+      throw error;
+    },
+  });
+
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  await props.onClick();
+
+  const errorUpdates = stateUpdates.filter((update) => update.index === 1).map((u) => u.value);
+  // Cleared first, then the resume-specific message — never the invalid-code copy.
+  assert.equal(errorUpdates[0], "");
+  assert.match(errorUpdates[1], /connected, but this chat couldn't continue/i);
+  // And it drops back to idle (spinner off) rather than hanging on "resuming".
+  assert.deepEqual(
+    stateUpdates.filter((update) => update.index === 2).map((u) => u.value),
+    ["submitting", "idle"],
   );
 });
 
@@ -214,4 +261,72 @@ test("OnboardingPairingCard shows a spinner and disables submit while busy, not 
     assert.ok(JSON.stringify(busy.rendered).includes("animate-spin"), `${status} renders a spinner`);
     assert.ok(JSON.stringify(busy.rendered).includes("Connecting..."), `${status} shows connecting label`);
   }
+});
+
+test("OnboardingPairingCard shows a spinner while OAuth configuration is waiting", () => {
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [["", "", "idle", true][index] ?? initial, () => {}];
+      },
+    },
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: {
+      extensionName: "slack",
+      strategy: "oauth",
+      submitLabel: "Connect Slack",
+      submittingLabel: "Connecting...",
+    },
+    onConfigure: async () => {},
+  });
+
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  assert.equal(props.disabled, true);
+  assert.ok(JSON.stringify(rendered).includes("animate-spin"));
+  assert.ok(JSON.stringify(rendered).includes("Connecting..."));
+});
+
+test("OnboardingPairingCard keeps OAuth configuration loading after the popup opens", async () => {
+  const stateUpdates = [];
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          ["", "", "idle", false][index] ?? initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "slack", strategy: "oauth" },
+    onConfigure: async () => ({ flow_id: "flow-slack" }),
+  });
+
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  await props.onClick();
+
+  assert.deepEqual(
+    stateUpdates.filter((update) => update.index === 3).map((update) => update.value),
+    [true],
+  );
 });

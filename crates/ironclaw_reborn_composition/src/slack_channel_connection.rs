@@ -2,7 +2,7 @@
 //!
 //! Reports whether the calling WebUI user has connected their own Slack account
 //! (so the extensions surface can show a "setup needed" Configure affordance
-//! until they pair) and handles per-caller disconnect (identity + personal DM
+//! until they connect) and handles per-caller disconnect (identity + personal DM
 //! target cleanup). Split out of `slack_connectable_channel` so that file stays
 //! the connectable-channel descriptor/wiring layer.
 
@@ -24,7 +24,7 @@ use crate::{
 /// Per-user channel connection facade backed by the Slack personal-binding
 /// identity store. Reports whether the calling WebUI user has connected their
 /// own Slack account, so the extensions surface can show a "setup needed"
-/// Configure affordance until they pair.
+/// Configure affordance until they connect.
 struct SlackChannelConnectionFacade {
     tenant_id: TenantId,
     personal_connection_scope: Option<SlackPersonalConnectionScope>,
@@ -223,14 +223,14 @@ mod tests {
 
         // Retry convergence for extension removal: `remove_extension` runs the
         // caller disconnect before `ExtensionRemove`, so a failed removal
-        // retries the disconnect for a caller who is already unpaired. That
+        // retries the disconnect for a caller who is already disconnected. That
         // repeat disconnect must stay an idempotent no-op success (the scope
         // resolves from the installation, and deleting zero records is Ok),
         // not an error that would wedge the removal retry.
         facade
             .disconnect_channel_for_caller(caller.clone(), "slack")
             .await
-            .expect("repeat disconnect for an unpaired caller is an idempotent no-op");
+            .expect("repeat disconnect for a disconnected caller is an idempotent no-op");
         assert_eq!(
             facade
                 .caller_channel_connections(caller)

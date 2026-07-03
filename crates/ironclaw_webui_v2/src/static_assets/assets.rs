@@ -293,7 +293,6 @@ mod tests {
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackAdminManagedSection"));
-        assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
         assert!(channels_tab.contains("action=${action.action}"));
@@ -339,17 +338,6 @@ mod tests {
         assert!(!use_chat.contains("channelConnectionRequirementFromCard"));
         assert!(!use_chat.contains("pendingOnboarding"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
-
-        // chat.js renders the pairing card off a manual_token gate carrying a
-        // connection, on the same auth-gate switch as the token / oauth cards.
-        let chat = asset_text("js/pages/chat/chat.js");
-        assert!(chat.contains("OnboardingPairingCard"));
-        assert!(chat.contains("isChannelPairingGate"));
-        assert!(chat.contains("submitChannelConnectionPairing"));
-
-        let slack_pairing = asset_text("js/lib/slack-pairing-api.js");
-        assert!(slack_pairing.contains("notifyChannelConnected"));
-        assert!(slack_pairing.contains("sourceThreadId: options.threadId || null"));
 
         let generic_pairing = asset_text("js/pages/extensions/lib/pairing-api.js");
         assert!(generic_pairing.contains("notifyChannelConnected"));

@@ -19,6 +19,9 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
+const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
+const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
 function isHttpsAuthUrl(url) {
   try {
@@ -38,6 +41,41 @@ function openAuthUrl(url, popup = null) {
     ok: true,
     popup: window.open(url, "_blank", "noopener,noreferrer"),
   };
+}
+
+function parseOAuthCallbackStoragePayload(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function isOAuthCallbackCompletion(payload) {
+  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
+}
+
+function oauthCompletionMatchesFlow(payload, flowId) {
+  if (!isOAuthCallbackCompletion(payload)) return false;
+  if (!flowId) return true;
+  return payload.flowId === flowId || payload.flow_id === flowId;
+}
+
+function oauthResponseFlowId(response) {
+  return response?.flow_id || response?.flowId || null;
+}
+
+function extensionListItemIsConfigured(extension) {
+  if (!extension) return false;
+  if (extension.needs_setup === false && (extension.authenticated || extension.active)) {
+    return true;
+  }
+  const state =
+    extension.onboarding_state ||
+    extension.activation_status ||
+    (extension.active ? "active" : null);
+  return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
 
 function packageId(item) {
@@ -103,7 +141,7 @@ export function useExtensions() {
     onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         const message = isChannelExtensionKind(kind)
-          ? `${displayName || "Channel"} installed. Connect the account using the setup panel below.`
+          ? `${displayName || "Channel"} installed. Use Configure to connect the account.`
           : res.message ||
             res.instructions ||
             t("extensions.installedSuccess", {
@@ -326,15 +364,21 @@ export function useSetupSubmit(packageRef, onSuccess) {
   });
 }
 
-export function useOauthSetup(packageRef) {
+export function useOauthSetup(packageRef, { onConfigured } = {}) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
+  const configuredRef = React.useRef(false);
+  const [isAuthorizing, setIsAuthorizing] = React.useState(false);
 
   const clearWatcher = React.useCallback(() => {
-    if (watcherRef.current) {
-      window.clearInterval(watcherRef.current);
-      watcherRef.current = null;
+    const cleanup = watcherRef.current;
+    watcherRef.current = null;
+    if (typeof cleanup === "function") {
+      cleanup();
+    } else if (cleanup) {
+      window.clearInterval(cleanup);
+      setIsAuthorizing(false);
     }
   }, []);
 
@@ -344,42 +388,113 @@ export function useOauthSetup(packageRef) {
     queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
   }, [packageKey, queryClient]);
 
-  const setupIsConfigured = React.useCallback(() => {
+  const setupIsConfigured = React.useCallback(({ allowProvidedSecrets = true } = {}) => {
     const setup = queryClient.getQueryData(["extension-setup", packageKey]);
-    if (setup?.secrets?.length > 0 && setup.secrets.every((secret) => secret.provided)) {
+    if (
+      allowProvidedSecrets &&
+      setup?.secrets?.length > 0 &&
+      setup.secrets.every((secret) => secret.provided)
+    ) {
       return true;
     }
     const extensions = queryClient.getQueryData(["extensions"])?.extensions || [];
     const extension = extensions.find((item) => item.package_ref?.id === packageKey);
-    const state =
-      extension?.onboarding_state ||
-      extension?.activation_status ||
-      (extension?.active ? "active" : null);
-    return state === "active" || state === "ready";
+    return extensionListItemIsConfigured(extension);
   }, [packageKey, queryClient]);
 
   const watchOauthProgress = React.useCallback(
-    (popup) => {
+    (popup, { flowId = null, requireCallbackCompletion = false } = {}) => {
       clearWatcher();
+      configuredRef.current = false;
+      const browserWindow =
+        typeof window !== "undefined" ? window : globalThis?.window || null;
+      if (!browserWindow) return;
+      setIsAuthorizing(true);
       const startedAt = Date.now();
-      watcherRef.current = window.setInterval(() => {
+      let stopped = false;
+      let channel = null;
+      let timer = null;
+
+      function cleanup() {
+        if (stopped) return;
+        stopped = true;
+        if (timer) browserWindow.clearInterval(timer);
+        if (channel) channel.close();
+        browserWindow.removeEventListener?.("storage", onStorage);
+        setIsAuthorizing(false);
+      }
+
+      function stopWatcher() {
+        if (watcherRef.current === cleanup) watcherRef.current = null;
+        cleanup();
+      }
+
+      function complete() {
+        if (stopped) return;
+        if (!configuredRef.current) {
+          configuredRef.current = true;
+          Promise.resolve(onConfigured?.()).catch(() => {});
+        }
+        stopWatcher();
+        refreshSetupState();
+      }
+
+      function handleCompletion(payload) {
+        if (!oauthCompletionMatchesFlow(payload, flowId)) return false;
+        complete();
+        return true;
+      }
+
+      function onStorage(event) {
+        if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+        handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+      }
+
+      if (typeof browserWindow.BroadcastChannel === "function") {
+        channel = new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+        channel.onmessage = (event) => handleCompletion(event.data);
+      }
+      browserWindow.addEventListener?.("storage", onStorage);
+
+      timer = browserWindow.setInterval(() => {
         refreshSetupState();
         if (
-          setupIsConfigured() ||
+          handleCompletion(
+            parseOAuthCallbackStoragePayload(
+              browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+            ),
+          )
+        ) {
+          return;
+        }
+        const configured = setupIsConfigured({
+          allowProvidedSecrets: !requireCallbackCompletion,
+        });
+        if (configured) {
+          complete();
+          return;
+        }
+        if (
           (popup && popup.closed) ||
           Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS
         ) {
-          clearWatcher();
+          stopWatcher();
           refreshSetupState();
         }
       }, OAUTH_SETUP_REFRESH_MS);
+      watcherRef.current = cleanup;
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
     },
-    [clearWatcher, refreshSetupState, setupIsConfigured]
+    [clearWatcher, onConfigured, refreshSetupState, setupIsConfigured]
   );
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
 
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: ({ secret, popup }) =>
       startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
@@ -390,7 +505,7 @@ export function useOauthSetup(packageRef) {
         }
         return { res, popup };
       }),
-    onSuccess: ({ res, popup }) => {
+    onSuccess: ({ res, popup }, variables) => {
       let authPopup = popup;
       if (res.authorization_url) {
         authPopup = openAuthUrl(res.authorization_url, popup).popup;
@@ -398,7 +513,13 @@ export function useOauthSetup(packageRef) {
         popup.close();
       }
       refreshSetupState();
-      if (authPopup) watchOauthProgress(authPopup);
+      if (authPopup) {
+        const flowId = oauthResponseFlowId(res);
+        watchOauthProgress(authPopup, {
+          flowId,
+          requireCallbackCompletion: Boolean(flowId && variables?.secret?.provided),
+        });
+      }
     },
     onError: (_err, variables) => {
       clearWatcher();
@@ -406,6 +527,7 @@ export function useOauthSetup(packageRef) {
       if (popup && !popup.closed) popup.close();
     },
   });
+  return { ...mutation, isAuthorizing };
 }
 
 export function usePairing(channel, options = {}) {

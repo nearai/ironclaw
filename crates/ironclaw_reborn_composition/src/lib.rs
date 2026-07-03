@@ -32,8 +32,6 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
-#[cfg(feature = "slack-v2-host-beta")]
-mod channel_connection_resume;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
@@ -120,7 +118,6 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
-#[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_routes;
@@ -139,13 +136,7 @@ mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_pairing_notifier;
-#[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -242,6 +233,8 @@ pub use nearai_mcp::{
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use product_auth_serve::SlackPersonalOAuthBindingConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -324,19 +317,6 @@ pub use slack_personal_binding::{
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{

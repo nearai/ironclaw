@@ -1,3 +1,5 @@
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
@@ -71,6 +73,26 @@ const NEARAI_MCP_MANIFEST: &str =
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_EXTENSION_ID: &str = "slack";
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) const SLACK_USER_EXTENSION_ID: &str = "slack_user";
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
+    "search:read",
+    "channels:history",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "channels:read",
+    "groups:read",
+    "im:read",
+    "mpim:read",
+    "users:read",
+    "chat:write",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {
@@ -180,6 +202,13 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             None,
             "After authorization completes, activate Gmail to publish its tools.",
         )),
+        #[cfg(feature = "slack-v2-host-beta")]
+        "slack" => Some(onboarding_message(
+            "Slack needs OAuth authorization before the Slack bot can recognize your DMs.",
+            Some("Authorize the Slack account you will use to DM IronClaw."),
+            None,
+            "After authorization completes, DM the Slack bot directly.",
+        )),
         "google-calendar" => Some(onboarding_message(
             "Google Calendar needs Google OAuth authorization before calendar tools can run.",
             Some("Authorize the Google account that IronClaw should use for Google Calendar."),
@@ -236,6 +265,10 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if is_slack_extension_package(&package.package_ref) {
+        return slack_personal_oauth_credential_requirements();
+    }
 
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
@@ -281,6 +314,27 @@ fn credential_requirements(
             }
         })
         .collect()
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn is_slack_extension_package(package_ref: &LifecyclePackageRef) -> bool {
+    package_ref.kind == LifecyclePackageKind::Extension
+        && package_ref.id.as_str() == SLACK_EXTENSION_ID
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
+    vec![LifecycleExtensionCredentialRequirement {
+        name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
+        provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+        required: true,
+        setup: LifecycleExtensionCredentialSetup::OAuth {
+            scopes: SLACK_PERSONAL_OAUTH_SETUP_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect(),
+        },
+    }]
 }
 
 struct CredentialRequirementGroup {
@@ -372,6 +426,7 @@ impl AvailableExtensionCatalog {
         let normalized_query = query.trim().to_ascii_lowercase();
         self.packages
             .iter()
+            .filter(|package| !is_internal_extension_package_ref(&package.package_ref))
             .filter(move |package| package_matches_search(package, &normalized_query))
     }
 
@@ -518,7 +573,7 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_user_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
-        "slack_user",
+        SLACK_USER_EXTENSION_ID,
         "Slack (personal)",
         SLACK_USER_MANIFEST,
         slack_user_assets(),
@@ -549,6 +604,27 @@ pub(crate) fn google_sheets_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_user_manifest_digest() -> String {
     sha256_digest_token(SLACK_USER_MANIFEST.as_bytes())
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_user_package_ref() -> Result<LifecyclePackageRef, ProductWorkflowError> {
+    LifecyclePackageRef::new(LifecyclePackageKind::Extension, SLACK_USER_EXTENSION_ID)
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn is_public_slack_package_ref(package_ref: &LifecyclePackageRef) -> bool {
+    is_slack_extension_package(package_ref)
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn is_internal_extension_package_ref(package_ref: &LifecyclePackageRef) -> bool {
+    package_ref.kind == LifecyclePackageKind::Extension
+        && package_ref.id.as_str() == SLACK_USER_EXTENSION_ID
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+pub(crate) fn is_internal_extension_package_ref(_package_ref: &LifecyclePackageRef) -> bool {
+    false
 }
 
 pub(crate) fn google_slides_manifest_digest() -> String {
@@ -1882,6 +1958,8 @@ mod tests {
                 "google-calendar",
                 "Google Calendar needs Google OAuth authorization",
             ),
+            #[cfg(feature = "slack-v2-host-beta")]
+            ("slack", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
             #[cfg(feature = "root-llm-provider")]
             (
@@ -1928,6 +2006,32 @@ mod tests {
                                 && !step.contains("Install")
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
+                );
+            } else if extension_id == "slack" {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            instructions.starts_with("Authorize ")
+                                && instructions.contains("Slack account")
+                                && !instructions.contains("pair")
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should describe Slack OAuth-only copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After authorization completes")
+                                && step.contains("DM")
+                                && step.contains("Slack bot")
+                                && !step.contains("pair")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe DM after OAuth without pairing copy"
                 );
             } else if extension_id == "github" {
                 assert!(
@@ -2048,6 +2152,58 @@ mod tests {
         assert!(matches!(
             &requirement.setup,
             LifecycleExtensionCredentialSetup::OAuth { scopes } if scopes.is_empty()
+        ));
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn bundled_slack_search_exposes_one_public_slack_extension() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let slack_results = catalog
+            .search("slack")
+            .map(|package| package.package_ref.id.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            slack_results,
+            vec!["slack".to_string()],
+            "the Slack user-tool package is internal plumbing and must not be a second user-visible extension"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn bundled_slack_projects_personal_oauth_setup_for_entrypoint_identity_and_tools() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let summary = catalog.resolve(&package_ref).unwrap().summary();
+
+        assert_eq!(summary.credential_requirements.len(), 1);
+        let requirement = &summary.credential_requirements[0];
+        assert_eq!(requirement.name, "slack_personal_oauth");
+        assert_eq!(requirement.provider, "slack_personal");
+        assert!(requirement.required);
+        assert!(matches!(
+            &requirement.setup,
+            LifecycleExtensionCredentialSetup::OAuth { scopes }
+                if scopes.iter().cloned().collect::<BTreeSet<_>>()
+                    == [
+                        "channels:history",
+                        "channels:read",
+                        "chat:write",
+                        "groups:history",
+                        "groups:read",
+                        "im:history",
+                        "im:read",
+                        "mpim:history",
+                        "mpim:read",
+                        "search:read",
+                        "users:read",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<BTreeSet<_>>()
         ));
     }
 

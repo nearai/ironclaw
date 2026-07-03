@@ -1080,6 +1080,8 @@ mod tests {
                 shared_subject_user_id: None,
                 bot_token: Some(SecretString::from("xoxb-original")),
                 signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
             })
             .await
             .expect("save original");
@@ -1092,6 +1094,8 @@ mod tests {
                 shared_subject_user_id: None,
                 bot_token: Some(SecretString::from("xoxb-first-retry")),
                 signing_secret: Some(SecretString::from("slack-signing-first-retry")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
             })
             .await
             .expect("save first retry");
@@ -1104,6 +1108,8 @@ mod tests {
                 shared_subject_user_id: None,
                 bot_token: Some(SecretString::from("xoxb-second-retry")),
                 signing_secret: Some(SecretString::from("slack-signing-second-retry")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
             })
             .await
             .expect("save second retry");

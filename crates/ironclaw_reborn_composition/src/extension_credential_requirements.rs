@@ -51,11 +51,6 @@ pub(crate) fn lifecycle_credential_setup(
                 scopes: normalized_provider_scopes(scopes),
             }
         }
-        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
-            LifecycleExtensionCredentialSetup::ChannelPairing {
-                channel: channel.clone(),
-            }
-        }
     }
 }
 
@@ -86,12 +81,6 @@ pub(crate) fn can_merge_lifecycle_credential_setup(
             LifecycleExtensionCredentialSetup::OAuth { .. },
             LifecycleExtensionCredentialSetup::OAuth { .. },
         ) => true,
-        // Distinct channels are distinct requirements; only same-channel pairing
-        // requirements coalesce.
-        (
-            LifecycleExtensionCredentialSetup::ChannelPairing { channel: existing },
-            LifecycleExtensionCredentialSetup::ChannelPairing { channel: candidate },
-        ) => existing == candidate,
         _ => false,
     }
 }
@@ -131,10 +120,6 @@ fn can_merge_runtime_credential_setup(
             RuntimeCredentialAccountSetup::OAuth { .. },
             RuntimeCredentialAccountSetup::OAuth { .. },
         ) => true,
-        (
-            RuntimeCredentialAccountSetup::ChannelPairing { channel: existing },
-            RuntimeCredentialAccountSetup::ChannelPairing { channel: candidate },
-        ) => existing == candidate,
         _ => false,
     }
 }
@@ -174,9 +159,6 @@ fn normalized_runtime_credential_setup(
             scopes: normalized_provider_scopes(&scopes),
         },
         RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
-        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
-            RuntimeCredentialAccountSetup::ChannelPairing { channel }
-        }
     }
 }
 

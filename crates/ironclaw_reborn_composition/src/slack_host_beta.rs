@@ -46,6 +46,7 @@ use crate::RebornRuntime;
 use crate::outbound_preferences::{
     OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
 };
+use crate::product_auth_serve::SlackPersonalOAuthBindingConfig;
 use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
@@ -58,23 +59,19 @@ use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialPr
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
-    SlackOutboundTargetProviderConfig, SlackPersonalDmTargetProvisioner,
-    SlackPersonalDmTargetStore,
+    SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
+    SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
-use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
-    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
-use crate::slack_personal_binding_pairing::{
-    SlackPairingActorResolver, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
-};
-use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    SlackCommandsRouteState, SlackEventsRouteState, SlackIngressService, SlackInstallationRecord,
-    SlackInstallationResolver, SlackInstallationSelector, SlackTeamId,
-    StaticSlackInstallationResolver, slack_commands_route_mount, slack_events_route_mount,
+    SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
+    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
+    slack_events_route_mount,
 };
 use crate::webui_serve::PublicRouteMount;
 
@@ -340,6 +337,16 @@ fn hash_slack_installation_selector(hasher: &mut Sha256, selector: &SlackInstall
             hash_slack_mount_field(hasher, api_app_id.as_str());
             hash_slack_mount_field(hasher, team_id.as_str());
         }
+        SlackInstallationSelector::AppEnterpriseTeam {
+            api_app_id,
+            enterprise_id,
+            team_id,
+        } => {
+            hash_slack_mount_field(hasher, "app_enterprise_team");
+            hash_slack_mount_field(hasher, api_app_id.as_str());
+            hash_slack_mount_field(hasher, enterprise_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+        }
         SlackInstallationSelector::EnterpriseTeam {
             enterprise_id,
             team_id,
@@ -376,6 +383,18 @@ fn hash_slack_installation_selector(hasher: &mut Sha256, selector: &SlackInstall
             hash_slack_mount_field(hasher, team_id.as_str());
             hash_slack_mount_field(hasher, install_user_id.as_str());
         }
+        SlackInstallationSelector::AppEnterpriseInstallUser {
+            api_app_id,
+            enterprise_id,
+            team_id,
+            install_user_id,
+        } => {
+            hash_slack_mount_field(hasher, "app_enterprise_install_user");
+            hash_slack_mount_field(hasher, api_app_id.as_str());
+            hash_slack_mount_field(hasher, enterprise_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+            hash_slack_mount_field(hasher, install_user_id.as_str());
+        }
     }
 }
 
@@ -392,9 +411,7 @@ pub enum SlackHostBetaBuildError {
     DurableHostStateUnavailable,
     #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
     OutboundDeliveryTargetRegistration { reason: String },
-    #[error(
-        "Slack host-beta personal binding requires [slack].api_app_id for tenant app-scoped pairing"
-    )]
+    #[error("Slack host-beta personal OAuth binding requires [slack].api_app_id")]
     TenantAppSelectorRequired,
     #[error("invalid Slack host-beta config field {field}: {reason}")]
     InvalidConfig { field: &'static str, reason: String },
@@ -403,17 +420,13 @@ pub enum SlackHostBetaBuildError {
 #[non_exhaustive]
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
-    /// The signed `/pair` slash-command route. Shares the events installation
-    /// resolver so both verify against the same Slack signing identity; the
-    /// shared resolver's drain lives on `events`, so this mount carries none.
-    pub commands: PublicRouteMount,
-    pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
     pub(crate) tenant_id: TenantId,
     pub(crate) personal_connection_scope: Option<SlackPersonalConnectionScope>,
     pub(crate) personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+    pub(crate) personal_oauth_binder: Arc<dyn SlackPersonalUserBinder>,
     /// Reverse identity lookup: tells whether the calling WebUI user has
-    /// personally connected this channel (Slack personal pairing).
+    /// personally connected this channel through Slack personal OAuth.
     pub(crate) user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     /// Personal identity delete handle used when a caller uninstalls the
     /// Slack channel extension from the WebUI.
@@ -437,6 +450,15 @@ impl SlackHostBetaMounts {
         if let Some(service) = &self.setup_service {
             slot.fill(Arc::clone(service));
         }
+    }
+}
+
+impl SlackHostBetaMounts {
+    pub fn personal_oauth_binding_config(&self) -> SlackPersonalOAuthBindingConfig {
+        SlackPersonalOAuthBindingConfig::new(
+            Arc::clone(&self.personal_oauth_binder),
+            Arc::clone(&self.personal_connection_scope_resolver),
+        )
     }
 }
 
@@ -469,6 +491,89 @@ impl SlackPersonalConnectionScopeResolver for StaticSlackPersonalConnectionScope
         &self,
     ) -> Result<Option<SlackPersonalConnectionScope>, String> {
         Ok(self.scope.clone())
+    }
+}
+
+#[async_trait::async_trait]
+pub(super) trait SlackPersonalDmTargetProvisioning: Send + Sync + std::fmt::Debug {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalDmTargetProvisioning for SlackPersonalDmTargetProvisioner {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        SlackPersonalDmTargetProvisioner::provision_for_user(self, user_id, slack_user_id).await
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ProvisioningSlackPersonalUserBinder {
+    binding_service: Arc<dyn SlackPersonalUserBinder>,
+    dm_provisioner: Arc<dyn SlackPersonalDmTargetProvisioning>,
+}
+
+impl ProvisioningSlackPersonalUserBinder {
+    pub(super) fn new(
+        binding_service: Arc<dyn SlackPersonalUserBinder>,
+        dm_provisioner: Arc<dyn SlackPersonalDmTargetProvisioning>,
+    ) -> Self {
+        Self {
+            binding_service,
+            dm_provisioner,
+        }
+    }
+
+    fn spawn_dm_provisioning(&self, user_id: UserId, slack_user_id: SlackUserId) {
+        let provisioner = Arc::clone(&self.dm_provisioner);
+        tokio::spawn(async move {
+            match provisioner.provision_for_user(user_id, slack_user_id).await {
+                Ok(_) => {
+                    tracing::debug!("Slack personal DM target provisioned after OAuth binding");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Slack personal DM target provisioning failed after OAuth binding; \
+                         will retry on the next OAuth connection"
+                    );
+                }
+            }
+        });
+    }
+}
+
+impl std::fmt::Debug for ProvisioningSlackPersonalUserBinder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProvisioningSlackPersonalUserBinder")
+            .field("binding_service", &self.binding_service)
+            .field("dm_provisioner", &self.dm_provisioner)
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
+    async fn bind_personal_user(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        request: SlackPersonalUserBindingRequest,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        let slack_user_id = request.slack_user_id.clone();
+        let binding = self
+            .binding_service
+            .bind_personal_user(principal, request)
+            .await?;
+        self.spawn_dm_provisioning(binding.user_id.clone(), slack_user_id);
+        Ok(binding)
     }
 }
 
@@ -613,21 +718,16 @@ pub fn build_slack_host_beta_mounts(
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
-    let binding_service = SlackPersonalUserBindingService::new(
-        [SlackPersonalBindingInstallation {
-            tenant_id: config.tenant_id.clone(),
-            installation_id: config.installation_id.clone(),
-            selector: config.installation_selector.clone(),
-        }],
-        binding_store,
-    );
-    let token_handle = slack_bot_token_handle()?;
-    let notifier: Arc<dyn SlackPersonalBindingPairingNotifier> =
-        Arc::new(SlackPairingChallengeHttpNotifier::new(
-            slack_protocol_egress(runtime, &config, token_handle.clone())?,
-            token_handle.clone(),
+    let binding_service: Arc<dyn SlackPersonalUserBinder> =
+        Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: config.tenant_id.clone(),
+                installation_id: config.installation_id.clone(),
+                selector: config.installation_selector.clone(),
+            }],
+            binding_store,
         ));
-    let challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore> = state.clone();
+    let token_handle = slack_bot_token_handle()?;
     let dm_provisioner = Arc::new(SlackPersonalDmTargetProvisioner::new(
         config.tenant_id.clone(),
         config.installation_id.clone(),
@@ -636,18 +736,14 @@ pub fn build_slack_host_beta_mounts(
         token_handle,
         state.clone(),
     ));
-    let pairing =
-        SlackPersonalBindingPairingService::new(binding_service, challenge_store, notifier)
-            .with_dm_provisioner(dm_provisioner);
+    let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> = Arc::new(
+        ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
+    );
     let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(
         config.installation_id.clone(),
         config.slack_actor.clone(),
         config.user_id.clone(),
         Arc::new(SlackUserIdentityActorResolver::new(state.clone())),
-        Arc::new(SlackPairingActorResolver::new(
-            state.clone(),
-            pairing.clone(),
-        )),
     ));
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
@@ -657,9 +753,8 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
-    // Build the installation resolver once and share it across the events and
-    // `/pair` commands routes: a single source of truth for the Slack signing
-    // identity, and the events drain covers the shared resolver.
+    // Build the installation resolver once so the events route has a single
+    // source of truth for the Slack signing identity.
     let resolver: Arc<dyn SlackInstallationResolver> =
         build_slack_installation_resolver_with_resolvers(
             runtime,
@@ -669,11 +764,6 @@ pub fn build_slack_host_beta_mounts(
         )?;
     let events =
         slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
-    let commands = slack_commands_route_mount(SlackCommandsRouteState::new(
-        SlackIngressService::new(Arc::clone(&resolver)),
-        pairing.clone(),
-        state.clone(),
-    ));
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
         .chain(config.shared_subject_user_id.clone())
         .chain(
@@ -752,11 +842,6 @@ pub fn build_slack_host_beta_mounts(
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
         ));
-    let channel_connection_resume =
-        crate::channel_connection_resume::build_channel_connection_resume_service(
-            Arc::clone(&local_runtime.turn_state),
-            runtime.webui_turn_coordinator(),
-        );
     if outbound_delivery_provider_already_registered {
         let personal_connection_scope = SlackPersonalConnectionScope {
             installation_id: config.installation_id.clone(),
@@ -764,17 +849,13 @@ pub fn build_slack_host_beta_mounts(
         };
         return Ok(SlackHostBetaMounts {
             events,
-            commands,
-            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
-                pairing,
-                Arc::clone(&channel_connection_resume),
-            ),
             channel_routes,
             tenant_id: config.tenant_id.clone(),
             personal_connection_scope: Some(personal_connection_scope.clone()),
             personal_connection_scope_resolver: Arc::new(
                 StaticSlackPersonalConnectionScopeResolver::new(Some(personal_connection_scope)),
             ),
+            personal_oauth_binder,
             user_identity_lookup: user_identity_lookup.clone(),
             user_identity_delete_store: user_identity_delete_store.clone(),
             personal_dm_target_store: personal_dm_target_store.clone(),
@@ -806,17 +887,13 @@ pub fn build_slack_host_beta_mounts(
     };
     Ok(SlackHostBetaMounts {
         events,
-        commands,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
-            pairing,
-            channel_connection_resume,
-        ),
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: Some(personal_connection_scope.clone()),
         personal_connection_scope_resolver: Arc::new(
             StaticSlackPersonalConnectionScopeResolver::new(Some(personal_connection_scope)),
         ),
+        personal_oauth_binder,
         user_identity_lookup: user_identity_lookup.clone(),
         user_identity_delete_store,
         personal_dm_target_store,
@@ -858,9 +935,7 @@ fn build_slack_events_route_mount_with_resolvers(
     ))
 }
 
-/// Build the static installation resolver shared by the events and `/pair`
-/// commands routes. Both mounts verify against the same signing identity, so
-/// the resolver is constructed once and cloned into each route state.
+/// Build the static installation resolver used by the Slack Events route.
 fn build_slack_installation_resolver_with_resolvers(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
@@ -1083,7 +1158,6 @@ struct SlackHostBetaActorUserResolver {
     legacy_slack_actor: Option<ExternalActorRef>,
     legacy_user_id: UserId,
     cached_identity: Arc<dyn ProductActorUserResolver>,
-    pairing: Arc<dyn ProductActorUserResolver>,
 }
 
 impl SlackHostBetaActorUserResolver {
@@ -1092,14 +1166,12 @@ impl SlackHostBetaActorUserResolver {
         legacy_slack_actor: Option<ExternalActorRef>,
         legacy_user_id: UserId,
         cached_identity: Arc<dyn ProductActorUserResolver>,
-        pairing: Arc<dyn ProductActorUserResolver>,
     ) -> Self {
         Self {
             installation_id,
             legacy_slack_actor,
             legacy_user_id,
             cached_identity,
-            pairing,
         }
     }
 
@@ -1140,7 +1212,7 @@ impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
         {
             return Ok(Some(user_id));
         }
-        self.pairing.resolve_product_actor_user(request).await
+        Ok(None)
     }
 }
 
@@ -1205,10 +1277,7 @@ mod tests {
         SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
-    use crate::slack_personal_binding_pairing_serve::{
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
-    };
-    use crate::slack_serve::{SLACK_COMMANDS_PATH, SlackUserId};
+    use crate::slack_serve::{SlackApiAppId, SlackUserId};
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
         SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
@@ -1569,7 +1638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_exposes_events_pairing_and_command_routes() {
+    async fn build_slack_host_beta_mounts_exposes_events_and_oauth_binding_only() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_services(
@@ -1589,40 +1658,23 @@ mod tests {
         .expect("runtime builds");
 
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let _oauth_binding = mounts.personal_oauth_binding_config();
 
         assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
-            pairing_mount
-                .descriptors
-                .iter()
-                .any(|descriptor| descriptor.route_pattern().as_str()
-                    == WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-        );
-        assert_eq!(mounts.commands.descriptors.len(), 1);
-        assert!(
             mounts
-                .commands
+                .events
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_COMMANDS_PATH),
-            "static host-beta mounts must expose the /pair commands route"
-        );
-        assert!(
-            mounts.commands.drain.is_none(),
-            "the commands route shares the events resolver and carries no drain of its own"
+                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_EVENTS_PATH),
+            "static host-beta mounts should expose the Slack Events route"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_runtime_mounts_mounts_pair_command_route() {
-        // The dynamic builder is the production path `serve` uses
-        // (`build_slack_host_beta_runtime_mounts`). It must expose the `/pair`
-        // commands route alongside events so the slash command is reachable in
-        // production, not only in the legacy static composition.
+    async fn build_slack_host_beta_runtime_mounts_exposes_events_and_oauth_binding_only() {
         let (runtime, _root) = runtime().await;
 
         let mounts = build_slack_host_beta_runtime_mounts(
@@ -1631,26 +1683,23 @@ mod tests {
         )
         .await
         .expect("dynamic mounts build");
+        let _oauth_binding = mounts.personal_oauth_binding_config();
 
-        assert_eq!(mounts.commands.descriptors.len(), 1);
+        assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
             mounts
-                .commands
+                .events
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_COMMANDS_PATH),
-            "dynamic (production) host-beta mounts must expose the /pair commands route"
-        );
-        assert!(
-            mounts.commands.drain.is_none(),
-            "the commands route shares the events resolver and carries no drain of its own"
+                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_EVENTS_PATH),
+            "dynamic host-beta mounts should expose the Slack Events route"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_pairs_unknown_slack_actor_then_routes_bound_event() {
+    async fn build_slack_host_beta_mounts_routes_oauth_bound_dm_event() {
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
@@ -1659,42 +1708,11 @@ mod tests {
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
-        let first_body =
-            dm_event_body_with("Ev-host-beta-pairing-first", "pair me", "1710000000.000020");
-        post_signed_slack_event(&mounts.events, &first_body).await;
-        if let Some(drain) = mounts.events.drain.as_ref() {
-            drain.drain().await;
-        }
-        let pairing_code = wait_for_pairing_code(&egress).await;
-
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
-        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
-        let redeem_response = pairing_mount
-            .protected
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header("content-type", "application/json")
-                    .extension(WebUiAuthenticatedCaller {
-                        tenant_id: TenantId::new(TENANT).expect("tenant"),
-                        user_id: UserId::new(USER).expect("user"),
-                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
-                        operator_webui_config: false,
-                    })
-                    .body(Body::from(redeem_body))
-                    .expect("redeem request builds"),
-            )
-            .await
-            .expect("redeem route responds");
-
-        assert_eq!(redeem_response.status(), StatusCode::OK);
+        bind_slack_oauth_user(&mounts).await;
 
         let second_body = dm_event_body_with(
-            "Ev-host-beta-pairing-second",
-            "after pairing",
+            "Ev-host-beta-oauth-bound",
+            "after oauth",
             "1710000000.000030",
         );
         post_signed_slack_event(&mounts.events, &second_body).await;
@@ -1706,7 +1724,7 @@ mod tests {
         let accepted_message = history
             .messages
             .iter()
-            .find(|message| message.content.as_deref() == Some("after pairing"))
+            .find(|message| message.content.as_deref() == Some("after oauth"))
             .expect("accepted Slack message is present");
         let run_id = TurnRunId::parse(
             accepted_message
@@ -2055,8 +2073,8 @@ mod tests {
             "operator token should see Slack admin channel setup: {body}"
         );
         assert!(
-            strategies.contains(&"inbound_proof_code"),
-            "operator token should still see personal Slack pairing: {body}"
+            strategies.contains(&"oauth"),
+            "operator token should see personal Slack OAuth connection: {body}"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
@@ -2116,8 +2134,8 @@ mod tests {
             "SSO session token should not see Slack admin setup: {body}"
         );
         assert!(
-            session_strategies.contains(&"inbound_proof_code"),
-            "SSO session token should still see personal Slack pairing: {body}"
+            session_strategies.contains(&"oauth"),
+            "SSO session token should see personal Slack OAuth connection: {body}"
         );
 
         let response = app
@@ -2317,8 +2335,8 @@ mod tests {
             connectable
                 .channels
                 .iter()
-                .any(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode),
-            "non-operator WebUI should still advertise personal Slack pairing"
+                .any(|channel| channel.strategy == RebornChannelConnectStrategy::OAuth),
+            "non-operator WebUI should still advertise personal Slack OAuth"
         );
         assert!(
             connectable
@@ -3027,14 +3045,14 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
-    // ── provisioning-after-pairing: the production wiring ────────────────────
+    // ── provisioning-after-oauth: the production wiring ──────────────────────
 
     #[tokio::test]
-    async fn pairing_redeem_provisions_personal_dm_target_via_real_call_path() {
-        // After pairing-code redemption the provisioner must open the DM and
+    async fn oauth_binding_provisions_personal_dm_target_via_real_call_path() {
+        // After Slack OAuth binding the provisioner must open the DM and
         // register the personal DM target so it appears in the delivery-target
-        // list.  This is the caller-level test for the production seam:
-        // pairing-route → SlackPersonalBindingPairingService::redeem_challenge
+        // list. This drives the production seam:
+        // SlackPersonalOAuthBindingConfig → SlackPersonalUserBinder
         // → background provisioner → SlackPersonalDmTargetStore.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
@@ -3044,41 +3062,9 @@ mod tests {
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
-        // Step 1: unknown Slack actor sends a DM → pairing challenge issued.
-        let first_body =
-            dm_event_body_with("Ev-dm-provision-first", "pair me", "1710000001.000001");
-        post_signed_slack_event(&mounts.events, &first_body).await;
-        if let Some(drain) = mounts.events.drain.as_ref() {
-            drain.drain().await;
-        }
-        let pairing_code = wait_for_pairing_code(&egress).await;
+        bind_slack_oauth_user(&mounts).await;
 
-        // Step 2: authenticated WebUI user redeems the pairing code.
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
-        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
-        let redeem_response = pairing_mount
-            .protected
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header("content-type", "application/json")
-                    .extension(WebUiAuthenticatedCaller {
-                        tenant_id: TenantId::new(TENANT).expect("tenant"),
-                        user_id: UserId::new(USER).expect("user"),
-                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
-                        operator_webui_config: false,
-                    })
-                    .body(Body::from(redeem_body))
-                    .expect("redeem request builds"),
-            )
-            .await
-            .expect("redeem route responds");
-        assert_eq!(redeem_response.status(), StatusCode::OK);
-
-        // Step 3: wait for the personal DM target to appear (the provisioner
+        // Wait for the personal DM target to appear (the provisioner
         // runs in a background task; we poll until it lands in the store).
         let target_listed = {
             let config = config_without_legacy_actor();
@@ -3109,7 +3095,7 @@ mod tests {
         assert_eq!(
             target_listed.len(),
             1,
-            "personal DM target must appear after pairing-code redemption"
+            "personal DM target must appear after Slack OAuth binding"
         );
         assert!(
             target_listed[0]
@@ -3124,10 +3110,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dynamic_slack_setup_pairing_registers_runtime_personal_dm_target() {
+    async fn dynamic_slack_setup_oauth_binding_registers_runtime_personal_dm_target() {
         // Regression guard for PR #5152's WebUI Slack setup path: dynamic setup
-        // must register the same runtime outbound target provider and pairing
-        // DM provisioner that static Slack host-beta setup wires.
+        // must register the same runtime outbound target provider and OAuth DM
+        // provisioner that static Slack host-beta setup wires.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
@@ -3144,31 +3130,7 @@ mod tests {
             "dynamic Slack setup must register its target provider with the runtime"
         );
 
-        let first_body =
-            dm_event_body_with("Ev-dynamic-dm-provision", "pair me", "1710000003.000001");
-        post_signed_slack_event(&mounts.events, &first_body).await;
-        if let Some(drain) = mounts.events.drain.as_ref() {
-            drain.drain().await;
-        }
-        let pairing_code = wait_for_pairing_code(&egress).await;
-
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing.clone());
-        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
-        let redeem_response = pairing_mount
-            .protected
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header("content-type", "application/json")
-                    .extension(operator_caller())
-                    .body(Body::from(redeem_body))
-                    .expect("redeem request builds"),
-            )
-            .await
-            .expect("redeem route responds");
-        assert_eq!(redeem_response.status(), StatusCode::OK);
+        bind_slack_oauth_user(&mounts).await;
 
         let runtime_provider = runtime
             .outbound_delivery_target_provider()
@@ -3187,7 +3149,7 @@ mod tests {
         assert_eq!(
             runtime_targets.len(),
             1,
-            "dynamic pairing must provision a runtime-visible personal DM target"
+            "dynamic OAuth binding must provision a runtime-visible personal DM target"
         );
         assert_eq!(
             runtime_targets[0].summary.target_id.as_str(),
@@ -3220,8 +3182,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_redeem_is_idempotent_and_does_not_duplicate_dm_target() {
-        // Re-provisioning (pairing re-fires) must not create duplicate targets.
+    async fn oauth_binding_is_idempotent_and_does_not_duplicate_dm_target() {
+        // Re-provisioning must not create duplicate targets.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
@@ -3270,15 +3232,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_redeem_succeeds_even_when_dm_provisioning_fails() {
-        // Provisioning failure must be silent — the pairing itself must succeed
-        // and the caller must receive a successful response.
-        //
-        // The pairing notifier calls conversations.open once (for the DM used
-        // to send the challenge code) — that must succeed so pairing completes.
-        // The provisioner then calls conversations.open again; we fail that
-        // second call to simulate a Slack API error during provisioning.
-        let egress = Arc::new(RecordingRuntimeHttpEgress::conversations_open_fail_after(1));
+    async fn oauth_binding_succeeds_even_when_dm_provisioning_fails() {
+        // Provisioning failure must be silent: OAuth binding itself must succeed.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::conversations_open_response(
+            200,
+            br#"{"ok":false,"error":"not_allowed"}"#,
+        ));
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
@@ -3286,54 +3245,11 @@ mod tests {
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
-        // Trigger pairing challenge.
-        let first_body = dm_event_body_with(
-            "Ev-dm-provision-fail",
-            "pair me (fail)",
-            "1710000002.000001",
-        );
-        post_signed_slack_event(&mounts.events, &first_body).await;
-        if let Some(drain) = mounts.events.drain.as_ref() {
-            drain.drain().await;
-        }
-        let pairing_code = wait_for_pairing_code(&egress).await;
+        bind_slack_oauth_user(&mounts).await;
 
-        // Redeem the code — provisioning will fail in background but the HTTP
-        // response must still be 200.
-        let pairing_mount =
-            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
-        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
-        let redeem_response = pairing_mount
-            .protected
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header("content-type", "application/json")
-                    .extension(WebUiAuthenticatedCaller {
-                        tenant_id: TenantId::new(TENANT).expect("tenant"),
-                        user_id: UserId::new(USER).expect("user"),
-                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
-                        operator_webui_config: false,
-                    })
-                    .body(Body::from(redeem_body))
-                    .expect("redeem request builds"),
-            )
-            .await
-            .expect("redeem route responds");
-
-        // Pairing must succeed despite the provisioning failure.
-        assert_eq!(
-            redeem_response.status(),
-            StatusCode::OK,
-            "provisioning failure must not propagate to the pairing caller"
-        );
-
-        // Wait for the provisioner's conversations.open attempt (the second
-        // call) so we know the background task ran and failed before asserting
-        // that no target was persisted.
-        wait_for_nth_conversations_open(&egress, 2).await;
+        // Wait for the provisioner's conversations.open attempt so we know the
+        // background task ran and failed before asserting that no target was persisted.
+        wait_for_nth_conversations_open(&egress, 1).await;
         let mounts2 =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
@@ -3746,7 +3662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_pairing() {
+    async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_oauth_binding() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_services(
@@ -3781,7 +3697,7 @@ mod tests {
         .expect("team-only config still parses");
 
         let error = match build_slack_host_beta_mounts(&runtime, team_only_config) {
-            Ok(_) => panic!("pairing requires tenant app selector"),
+            Ok(_) => panic!("OAuth binding requires tenant app selector"),
             Err(error) => error,
         };
 
@@ -3862,7 +3778,6 @@ mod tests {
                     .expect("actor"),
             ),
             UserId::new(USER).expect("user"),
-            Arc::new(FailingProductActorUserResolver),
             Arc::new(FailingProductActorUserResolver),
         );
         let request = ProductActorUserResolutionRequest::new(
@@ -4370,14 +4285,26 @@ mod tests {
         resolver.calls()
     }
 
-    async fn wait_for_pairing_code(egress: &RecordingRuntimeHttpEgress) -> String {
-        for _ in 0..40 {
-            if let Some(code) = egress.pairing_code() {
-                return code;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("Slack pairing notifier did not post a pairing code");
+    async fn bind_slack_oauth_user(mounts: &SlackHostBetaMounts) {
+        mounts
+            .personal_oauth_binding_config()
+            .binding_service
+            .bind_personal_user(
+                SlackPersonalBindingPrincipal {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(USER).expect("user"),
+                },
+                SlackPersonalUserBindingRequest {
+                    installation_id: AdapterInstallationId::new(INSTALLATION)
+                        .expect("installation"),
+                    slack_user_id: SlackUserId::new(SLACK_USER),
+                    team_id: SlackTeamId::new(TEAM),
+                    enterprise_id: None,
+                    api_app_id: SlackApiAppId::new(API_APP),
+                },
+            )
+            .await
+            .expect("Slack OAuth binding succeeds");
     }
 
     async fn wait_for_nth_conversations_open(egress: &RecordingRuntimeHttpEgress, n: usize) {
@@ -4651,16 +4578,6 @@ mod tests {
             }
         }
 
-        /// Returns a successful conversations.open response for the first
-        /// `n` calls, then returns an error response for all subsequent calls.
-        fn conversations_open_fail_after(n: usize) -> Self {
-            Self {
-                requests: std::sync::Mutex::new(Vec::new()),
-                conversations_open_response: None,
-                conversations_open_fail_after: Some(n),
-            }
-        }
-
         fn requests(&self) -> Vec<NetworkHttpRequest> {
             self.requests
                 .lock()
@@ -4677,24 +4594,6 @@ mod tests {
                     serde_json::from_slice::<serde_json::Value>(&request.body).ok()
                 })
                 .collect()
-        }
-
-        fn pairing_code(&self) -> Option<String> {
-            self.requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-                .filter(|request| request.url.contains("/api/chat.postMessage"))
-                .filter_map(|request| {
-                    serde_json::from_slice::<serde_json::Value>(&request.body).ok()
-                })
-                .filter_map(|body| body["text"].as_str().map(str::to_string))
-                .find_map(|text| {
-                    text.split(" code ")
-                        .nth(1)
-                        .and_then(|suffix| suffix.split(" in WebChat").next())
-                        .map(str::to_string)
-                })
         }
 
         fn post_message_body_with_text(&self, expected_text: &str) -> Option<serde_json::Value> {
@@ -4799,8 +4698,8 @@ mod tests {
             TriggerSourceKind, TriggerState,
         };
 
-        // Pair the trigger actor so the trusted submitter can resolve the
-        // creator's user binding (fails closed for unpaired actors by design).
+        // Bind the trigger actor so the trusted submitter can resolve the
+        // creator's user binding (fails closed for unbound actors by design).
         let tenant_id = TenantId::new(TENANT).expect("tenant");
         let user_id = UserId::new(USER).expect("user");
         let pairing = runtime

@@ -49,7 +49,7 @@ function contextFor(mutationState, queryCalls) {
   };
 }
 
-test("useExtensions shows setup-panel copy after channel install succeeds", () => {
+test("useExtensions points channel install success at Configure", () => {
   const mutationConfigs = [];
   const actionResults = [];
   const context = {
@@ -90,7 +90,7 @@ test("useExtensions shows setup-panel copy after channel install succeeds", () =
 
   assert.deepEqual(JSON.parse(JSON.stringify(actionResults[0])), {
     type: "success",
-    message: "Slack installed. Connect the account using the setup panel below.",
+    message: "Slack installed. Use Configure to connect the account.",
   });
 });
 

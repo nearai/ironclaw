@@ -939,7 +939,7 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
-        // Create channel identity pairing: Slack authed_user_id → IronClaw user.
+        // Create channel identity binding: Slack authed_user_id → IronClaw user.
         // Fetch authed_user_id from the relay's connections API (server-side,
         // not from the redirect URL which could be tampered).
         if let Some(pairing_store) = ext_mgr.pairing_store() {

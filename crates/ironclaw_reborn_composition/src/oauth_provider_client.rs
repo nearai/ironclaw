@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_auth::OAuthProviderIdentity;
 use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProviderClient, CredentialAccountId, OAuthClientId,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
@@ -34,13 +36,12 @@ pub(crate) enum ExchangeScopePolicy {
 /// Shape of the provider's token-endpoint JSON response.
 ///
 /// Most providers (Google, Notion, DCR) return the access token at the top
-/// level (`access_token`). Slack's `oauth.v2.access` returns the workspace bot
-/// token at the top level but the **user** token nested under
-/// `authed_user.access_token`, and signals errors with `ok: false` at HTTP 200.
+/// level (`access_token`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum TokenResponseShape {
     #[default]
     Standard,
+    #[cfg(feature = "slack-v2-host-beta")]
     SlackAuthedUser,
 }
 
@@ -517,6 +518,7 @@ impl AuthProviderClient for HostOAuthProviderClient {
                 false,
             )
             .await?;
+        let provider_identity = token_response.provider_identity.clone();
         let scopes = scopes_for_exchange(&self.spec, &token_response, &request.scopes)?;
         let stored_tokens = self
             .store_tokens(callback_scope, context.flow_id, token_response)
@@ -536,6 +538,7 @@ impl AuthProviderClient for HostOAuthProviderClient {
             refresh_secret: stored_tokens.refresh_secret,
             scopes,
             account_id: None,
+            provider_identity,
         })
     }
 
@@ -627,16 +630,40 @@ struct TokenResponseBody {
 /// Slack `oauth.v2.access` response. Only the fields needed to extract the user
 /// token are modeled; the workspace bot token (top-level `access_token`) is
 /// intentionally ignored — this provider issues user-token credentials only.
+#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackTokenResponseBody {
     #[serde(default)]
     ok: bool,
     #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    team: Option<SlackTokenResponseTeam>,
+    #[serde(default)]
+    enterprise: Option<SlackTokenResponseEnterprise>,
+    #[serde(default)]
     authed_user: Option<SlackAuthedUser>,
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseTeam {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseEnterprise {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackAuthedUser {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     access_token: Option<SecretString>,
     #[serde(default)]
@@ -653,6 +680,7 @@ fn parse_token_response(
 ) -> Result<OAuthTokenResponse, AuthProductError> {
     match shape {
         TokenResponseShape::Standard => parse_standard_token_response(body),
+        #[cfg(feature = "slack-v2-host-beta")]
         TokenResponseShape::SlackAuthedUser => parse_slack_authed_user_token_response(body),
     }
 }
@@ -679,6 +707,7 @@ fn parse_standard_token_response(body: &[u8]) -> Result<OAuthTokenResponse, Auth
 /// `ok` flag is checked before trusting the payload. Token rotation (when the
 /// app enables it) adds `authed_user.{refresh_token,expires_in}`; both are
 /// carried through when present.
+#[cfg(feature = "slack-v2-host-beta")]
 fn parse_slack_authed_user_token_response(
     body: &[u8],
 ) -> Result<OAuthTokenResponse, AuthProductError> {
@@ -693,6 +722,20 @@ fn parse_slack_authed_user_token_response(
     let access_token = authed_user
         .access_token
         .ok_or(AuthProductError::TokenExchangeFailed)?;
+    let identity = OAuthProviderIdentity::new(
+        authed_user
+            .id
+            .ok_or(AuthProductError::TokenExchangeFailed)?,
+        Some(
+            parsed
+                .team
+                .and_then(|team| team.id)
+                .ok_or(AuthProductError::TokenExchangeFailed)?,
+        ),
+        parsed.enterprise.and_then(|enterprise| enterprise.id),
+        Some(parsed.app_id.ok_or(AuthProductError::TokenExchangeFailed)?),
+    )
+    .map_err(|_| AuthProductError::TokenExchangeFailed)?;
     // Slack returns granted user scopes as a COMMA-separated list, whereas
     // OAuthTokenResponse::new splits on whitespace. Normalize commas to spaces
     // so each scope is parsed individually (otherwise the whole list would be
@@ -708,6 +751,7 @@ fn parse_slack_authed_user_token_response(
         response_scope.as_deref(),
         authed_user.expires_in,
     )
+    .map(|response| response.with_provider_identity(identity))
     .map_err(|_| AuthProductError::TokenExchangeFailed)
 }
 

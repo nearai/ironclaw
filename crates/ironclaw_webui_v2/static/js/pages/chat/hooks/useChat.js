@@ -5,10 +5,22 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
-import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
-import { subscribeChannelConnected } from "../../../lib/channel-connection-events.js";
+import {
+  channelConnectionContinuationMessage,
+  connectionEventMatchesOnboarding,
+  forgetChannelConnectionWaiter,
+  normalizeConnectionChannel,
+  notifyChannelConnected,
+  rememberChannelConnectionWaiter,
+  subscribeChannelConnected,
+} from "../../../lib/channel-connection-events.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
+import {
+  fetchExtensionSetup,
+  fetchExtensions,
+  startExtensionOauth,
+} from "../../extensions/lib/extensions-api.js";
 import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import { touchThreadInCache } from "../lib/thread-cache.js";
@@ -34,6 +46,9 @@ const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
+const DISMISSED_ONBOARDING_STORAGE_PREFIX =
+  "ironclaw.chat.dismissedOnboarding.v1:";
+const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -60,6 +75,26 @@ function approvalGatePendingSendError() {
   return error;
 }
 
+function isHttpsAuthUrl(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function openAuthUrl(url, popup = null) {
+  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    return { ok: true, popup };
+  }
+  return {
+    ok: true,
+    popup: window.open(url, "_blank", "noopener,noreferrer"),
+  };
+}
+
 function threadNeedsSidebarRefresh(threadId) {
   const cached = queryClient.getQueryData?.(["threads"]);
   const threads = cached?.threads;
@@ -71,6 +106,157 @@ function threadNeedsSidebarRefresh(threadId) {
 function busyNoticeKey(threadId, gate) {
   if (!threadId || !gate?.runId || !gate?.gateRef) return null;
   return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
+}
+
+function onboardingBelongsToThread(onboarding, threadId) {
+  if (!onboarding) return false;
+  const onboardingThreadId = String(onboarding.threadId || "").trim();
+  // A pairing panel is per-thread. An onboarding with no thread id belongs to no
+  // thread, so it must not leak onto every chat the user opens — the live derive
+  // path always stamps the current thread, so this only guards a malformed writer.
+  if (!onboardingThreadId) return false;
+  const currentThreadId = String(threadId || "").trim();
+  return Boolean(currentThreadId) && onboardingThreadId === currentThreadId;
+}
+
+function dismissedOnboardingStorageKey(threadId) {
+  const normalized = String(threadId || "").trim();
+  return normalized ? `${DISMISSED_ONBOARDING_STORAGE_PREFIX}${normalized}` : null;
+}
+
+function onboardingStorage() {
+  try {
+    return globalThis?.localStorage || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function loadDismissedOnboardingIds(threadId) {
+  const key = dismissedOnboardingStorageKey(threadId);
+  const storage = key ? onboardingStorage() : null;
+  if (!storage) return new Set();
+  try {
+    const parsed = JSON.parse(storage.getItem(key) || "[]");
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value) => typeof value === "string"));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function persistDismissedOnboardingId(threadId, sourceMessageId) {
+  const key = dismissedOnboardingStorageKey(threadId);
+  const storage = key ? onboardingStorage() : null;
+  if (!storage || !sourceMessageId) return;
+  const dismissed = loadDismissedOnboardingIds(threadId);
+  dismissed.add(sourceMessageId);
+  const values = Array.from(dismissed).slice(-DISMISSED_ONBOARDING_STORAGE_LIMIT);
+  try {
+    storage.setItem(key, JSON.stringify(values));
+  } catch (_) {
+    // Best-effort UX preference; storage failures should not block chat.
+  }
+}
+
+// The backend marks an `extension_activate` result for a connectable channel
+// with this `output_kind`; the structured connect action rides on the card's
+// `toolResultPreview` JSON. This is the structured replacement for the deleted
+// prose regex — the panel is derived from typed fields, never from message text.
+const CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND = "channel_connection_required";
+
+function channelConnectionRequirementFromCard(card) {
+  if (!card || card.outputKind !== CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND) return null;
+  if (card.toolStatus && card.toolStatus !== "success") return null;
+  if (typeof card.toolResultPreview !== "string" || !card.toolResultPreview.trim()) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(card.toolResultPreview);
+  } catch (_) {
+    return null;
+  }
+  const channel = String(parsed?.channel || "").trim();
+  if (!channel) return null;
+  return {
+    sourceMessageId: card.id || null,
+    extensionName: channel,
+    strategy: typeof parsed.strategy === "string" ? parsed.strategy : null,
+    instructions: typeof parsed.instructions === "string" ? parsed.instructions : null,
+    inputPlaceholder:
+      typeof parsed.input_placeholder === "string" ? parsed.input_placeholder : null,
+    submitLabel: typeof parsed.submit_label === "string" ? parsed.submit_label : null,
+    errorMessage: typeof parsed.error_message === "string" ? parsed.error_message : null,
+  };
+}
+
+// The most recent channel-connection-required card in the timeline, unless the
+// user already dismissed it (the dismissal is keyed by the durable tool id, so a
+// closed panel does not re-derive from the still-present card on reload).
+function latestChannelConnectionRequirement(messages, dismissedIds) {
+  if (!Array.isArray(messages)) return null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const requirement = channelConnectionRequirementFromCard(messages[index]);
+    if (!requirement) continue;
+    if (requirement.sourceMessageId && dismissedIds?.has?.(requirement.sourceMessageId)) {
+      return null;
+    }
+    if (threadResumedAfterConnection(messages, index, requirement.extensionName)) {
+      return null;
+    }
+    return requirement;
+  }
+  return null;
+}
+
+// A connection card is consumed once the durable timeline already carries the
+// channel-connected continuation after it: pairing completed (here, in
+// another chat, or in another tab) and this thread was resumed. Unlike the
+// localStorage dismissal set — which only records panels dismissed or
+// submitted in *this* browser — the continuation is part of the thread's own
+// data, so the verdict holds across browsers and after the extension is
+// later removed. A fresh requirement on such a thread arrives as a new
+// backend card on the next send.
+function threadResumedAfterConnection(messages, cardIndex, channel) {
+  const expected = channelConnectionContinuationMessage(channel);
+  for (let index = cardIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const content = typeof message?.content === "string" ? message.content : "";
+    if (content.trim() === expected) return true;
+  }
+  return false;
+}
+
+// True when the caller's account for `channel` is already connected, per the
+// per-user extensions snapshot. The card is gated on this so a durable
+// activation card can never re-open the panel for an already-connected account.
+function channelConnectionIsSatisfied(extensions, channel) {
+  // Normalize both operands the same way the waiter bus does
+  // (lib/channel-connection-events.js) so a multi-word channel id (e.g.
+  // `telegram_bot`) can't satisfy the gate here while the bus keys on a different
+  // normalized string — which would re-open the panel for a connected account.
+  const expected = normalizeConnectionChannel(channel);
+  const extension = (extensions || []).find(
+    (item) =>
+      normalizeConnectionChannel(
+        item?.package_ref?.id || item?.packageRef?.id || item?.id || "",
+      ) === expected,
+  );
+  if (!extension) return false;
+  if (extension.authenticated === true && extension.needs_setup !== true) return true;
+  if (extension.authenticated === false || extension.needs_setup === true) return false;
+  const state =
+    extension.onboarding_state ||
+    extension.onboardingState ||
+    extension.activation_status ||
+    extension.activationStatus;
+  // Fail closed: an explicit backend connect card must not be suppressed by a
+  // missing or unrecognized onboarding state. Treat the account as connected only
+  // when it reports a state that is not a "needs connection" one.
+  if (typeof state !== "string" || !state) return false;
+  return !["setup_required", "pairing_required", "pairing"].includes(state);
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -162,6 +348,7 @@ export function useChat(threadId) {
 
   const {
     messages,
+    messagesThreadId,
     hasMore,
     nextCursor,
     isLoading: historyLoading,
@@ -181,6 +368,14 @@ export function useChat(threadId) {
   }, []);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
+  const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
+  const pendingOnboardingRef = React.useRef(pendingOnboarding);
+  const pendingOnboardingOauthFlowRef = React.useRef(null);
+  // Source tool-message ids whose pairing panel the user dismissed. Keyed by
+  // the durable `tool-<invocation_id>`, so a dismissal survives re-renders and
+  // timeline reloads and the still-present activation tool-result does not
+  // re-derive a panel the user already closed.
+  const dismissedOnboardingIdsRef = React.useRef(new Set());
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const setPendingGate = React.useCallback((next) => {
     const current = pendingGateRef.current;
@@ -189,6 +384,14 @@ export function useChat(threadId) {
     if (Object.is(value, current)) return;
     pendingGateRef.current = value;
     setPendingGateState(value);
+  }, []);
+  const setPendingOnboarding = React.useCallback((next) => {
+    const current = pendingOnboardingRef.current;
+    const value =
+      typeof next === "function" ? next(current) : next;
+    if (Object.is(value, current)) return;
+    pendingOnboardingRef.current = value;
+    setPendingOnboardingState(value);
   }, []);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
@@ -232,6 +435,7 @@ export function useChat(threadId) {
     setStateThreadId(threadId);
     setIsProcessingState(false);
     setPendingGateState(null);
+    setPendingOnboardingState(null);
     setBusyGateNotice(null);
     setActiveRunState(null);
   }
@@ -252,6 +456,9 @@ export function useChat(threadId) {
     pendingGateRef.current = pendingGate;
   }, [pendingGate]);
   React.useEffect(() => {
+    pendingOnboardingRef.current = pendingOnboarding;
+  }, [pendingOnboarding]);
+  React.useEffect(() => {
     isProcessingRef.current = isProcessing;
   }, [isProcessing]);
 
@@ -265,9 +472,16 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
+    dismissedOnboardingIdsRef.current = loadDismissedOnboardingIds(threadId);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const visiblePendingOnboarding = onboardingBelongsToThread(
+    pendingOnboarding,
+    threadId,
+  )
+    ? pendingOnboarding
+    : null;
   const pendingAuthGateKey =
     pendingGate?.runId && pendingGate?.gateRef
       ? `${pendingGate.runId}\n${pendingGate.gateRef}`
@@ -290,7 +504,104 @@ export function useChat(threadId) {
   }, [pendingAuthGateKey]);
 
   React.useEffect(() => {
+    if (pendingOnboarding?.threadId && pendingOnboarding?.extensionName) {
+      rememberChannelConnectionWaiter({
+        channel: pendingOnboarding.extensionName,
+        threadId: pendingOnboarding.threadId,
+        sourceMessageId: pendingOnboarding.sourceMessageId || null,
+      });
+    }
+  }, [
+    pendingOnboarding?.extensionName,
+    pendingOnboarding?.threadId,
+    pendingOnboarding?.sourceMessageId,
+  ]);
+
+  const clearOnboardingAfterChannelConnected = React.useCallback(
+    (onboarding) => {
+      const threadForResume = onboarding?.threadId || threadId || null;
+      if (!threadForResume || !onboarding?.extensionName) return;
+      if (onboarding.sourceMessageId) {
+        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+        persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
+      }
+      forgetChannelConnectionWaiter({
+        channel: onboarding.extensionName,
+        threadId: threadForResume,
+        sourceMessageId: onboarding.sourceMessageId || null,
+      });
+      setPendingOnboarding(null);
+    },
+    [threadId, setPendingOnboarding],
+  );
+
+  // Derive the in-chat pairing panel from the durable, structured
+  // channel-connection-required tool card the backend attaches to an
+  // `extension_activate` result for a connectable channel. The trigger is a
+  // concrete per-thread card (present only after the agent engaged the channel
+  // here), so — unlike the removed global poll — it never fires on an empty or
+  // unrelated chat and never races history loading. It is gated on the live
+  // per-user connection state so a card that outlived the user's connect can
+  // never re-open the panel for an already-connected account.
+  React.useEffect(() => {
+    if (!threadId || pendingGate || pendingOnboardingRef.current) return;
+    // Only derive from messages that belong to the active thread. On a thread
+    // switch `threadId` advances a render before useHistory swaps `messages` to
+    // the new thread's timeline; without this guard the previous thread's durable
+    // connection card would open — and be stamped onto — the newly-viewed chat.
+    if (messagesThreadId && messagesThreadId !== threadId) return;
+    const requirement = latestChannelConnectionRequirement(
+      messages,
+      dismissedOnboardingIdsRef.current,
+    );
+    if (!requirement) return;
+    let cancelled = false;
+    Promise.resolve(
+      typeof queryClient.fetchQuery === "function"
+        ? queryClient.fetchQuery({ queryKey: ["extensions"], queryFn: fetchExtensions })
+        : fetchExtensions(),
+    )
+      .then((data) => {
+        if (cancelled || pendingOnboardingRef.current) return;
+        if (channelConnectionIsSatisfied(data?.extensions || [], requirement.extensionName)) {
+          return;
+        }
+        setPendingOnboarding({
+          extensionName: requirement.extensionName,
+          state: "pairing_required",
+          threadId,
+          sourceMessageId: requirement.sourceMessageId,
+          strategy: requirement.strategy,
+          instructions: requirement.instructions,
+          inputPlaceholder: requirement.inputPlaceholder,
+          submitLabel: requirement.submitLabel,
+          errorMessage: requirement.errorMessage,
+        });
+      })
+      .catch(() => {
+        if (cancelled || pendingOnboardingRef.current) return;
+        setPendingOnboarding({
+          extensionName: requirement.extensionName,
+          state: "pairing_required",
+          threadId,
+          sourceMessageId: requirement.sourceMessageId,
+          strategy: requirement.strategy,
+          instructions: requirement.instructions,
+          inputPlaceholder: requirement.inputPlaceholder,
+          submitLabel: requirement.submitLabel,
+          errorMessage: requirement.errorMessage,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, messagesThreadId, threadId, pendingGate, setPendingOnboarding]);
+
+  React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
+    const browserWindow =
+      typeof window !== "undefined" ? window : globalThis?.window || null;
+    if (!browserWindow) return;
     const listeningSince = Date.now();
 
     const handleCompletion = (payload) => {
@@ -300,8 +611,8 @@ export function useChat(threadId) {
     };
 
     let channel = null;
-    if (typeof window.BroadcastChannel === "function") {
-      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+    if (typeof browserWindow.BroadcastChannel === "function") {
+      channel = new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
       channel.onmessage = (event) => handleCompletion(event.data);
     }
 
@@ -310,25 +621,72 @@ export function useChat(threadId) {
       handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
     };
 
-    window.addEventListener("storage", onStorage);
+    browserWindow.addEventListener?.("storage", onStorage);
     handleCompletion(
       parseOAuthCallbackStoragePayload(
-        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
       ),
     );
-    const timer = window.setInterval(() => {
+    const timer = browserWindow.setInterval(() => {
       handleCompletion(
         parseOAuthCallbackStoragePayload(
-          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+          browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
         ),
       );
     }, 500);
     return () => {
-      window.clearInterval(timer);
+      browserWindow.clearInterval(timer);
       if (channel) channel.close();
-      window.removeEventListener("storage", onStorage);
+      browserWindow.removeEventListener?.("storage", onStorage);
     };
   }, [pendingGate]);
+
+  React.useEffect(() => {
+    const browserWindow =
+      typeof window !== "undefined" ? window : globalThis?.window || null;
+    if (!browserWindow) return;
+    const handleCompletion = (payload) => {
+      const pending = pendingOnboardingOauthFlowRef.current;
+      if (!pending) return;
+      if (!payload || payload.flowId !== pending.flowId) return;
+      if (payload.status !== "completed") return;
+      pendingOnboardingOauthFlowRef.current = null;
+      const onboarding = pendingOnboardingRef.current;
+      if (connectionEventMatchesOnboarding({ channel: pending.channel }, onboarding)) {
+        clearOnboardingAfterChannelConnected(onboarding);
+      }
+      notifyChannelConnected({
+        channel: pending.channel,
+        sourceThreadId: pending.threadId || null,
+        source: "chat-oauth",
+      });
+    };
+
+    let channel = null;
+    if (typeof browserWindow.BroadcastChannel === "function") {
+      channel = new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    browserWindow.addEventListener?.("storage", onStorage);
+    const timer = browserWindow.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      browserWindow.clearInterval(timer);
+      if (channel) channel.close();
+      browserWindow.removeEventListener?.("storage", onStorage);
+    };
+  }, [clearOnboardingAfterChannelConnected]);
 
   const handleEvent = useChatEvents({
     threadId,
@@ -398,6 +756,7 @@ export function useChat(threadId) {
       const {
         threadId: targetThreadId,
         attachments: stagedAttachments = [],
+        bypassPendingOnboarding = false,
         displayContent,
       } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
@@ -405,7 +764,16 @@ export function useChat(threadId) {
       const renderContent =
         typeof displayContent === "string" ? displayContent : content;
 
-      if (pendingGate || pendingGateRef.current) {
+      if (
+        pendingGate ||
+        pendingGateRef.current ||
+        (!bypassPendingOnboarding &&
+          (onboardingBelongsToThread(pendingOnboarding, targetThreadId || threadId) ||
+            onboardingBelongsToThread(
+              pendingOnboardingRef.current,
+              targetThreadId || threadId,
+            )))
+      ) {
         throw approvalGatePendingSendError();
       }
       // Admission: block a send only when the *destination* thread is the one
@@ -682,6 +1050,7 @@ export function useChat(threadId) {
     [
       threadId,
       pendingGate,
+      pendingOnboarding,
       setMessages,
       seedThreadMessages,
       setIsProcessing,
@@ -690,17 +1059,29 @@ export function useChat(threadId) {
     ],
   );
 
+  const resumeOnboardingAfterChannelConnected = React.useCallback(
+    async (onboarding, event = {}) => {
+      clearOnboardingAfterChannelConnected(onboarding);
+    },
+    [clearOnboardingAfterChannelConnected],
+  );
+
   React.useEffect(() => {
-    return subscribeChannelConnected(() => {
+    return subscribeChannelConnected((event) => {
       // A channel connected — here, in another tab, or on the extensions page.
-      // The parked turn is resumed backend-side on redeem, and its projection
-      // clears the pairing gate. This subscription only refreshes the per-user
-      // connection snapshot so the extensions / connectable-channels UI on any
-      // open surface sees "connected" instead of the stale "needs setup" cache.
+      // Refresh the per-user connection snapshot so every chat's panel gate
+      // (and the extensions UI) sees "connected" instead of the stale
+      // "needs setup" cache; without this a freshly connected account can
+      // still surface a "Connect" panel for up to the query staleTime.
       queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
       queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
+      const onboarding = pendingOnboardingRef.current;
+      if (!connectionEventMatchesOnboarding(event, onboarding)) return;
+      resumeOnboardingAfterChannelConnected(onboarding, event).catch((error) => {
+        console.error("channel connection resume failed:", error);
+      });
     });
-  }, []);
+  }, [resumeOnboardingAfterChannelConnected]);
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
   // run_id and gate_ref come from the live `pendingGate` (set by the
@@ -827,31 +1208,22 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
-  // Channel-pairing gate submit. A `manual_token` gate that carries a
-  // `connection` is a per-user authorization to act on a connectable channel
-  // (Slack, Telegram, …). Redeeming the pair code binds the identity and — as
-  // of V2 — RESUMES the parked turn backend-side, so unlike `submitAuthToken`
-  // this deliberately does NOT call `resolveGate`: the run resumes on its own
-  // and the projection update clears the gate. Modeled on `submitAuthToken`
-  // minus the resolve step.
-  const submitChannelConnectionPairing = React.useCallback(
+  const submitOnboardingPairing = React.useCallback(
     async (code) => {
-      const gate = pendingGateRef.current || pendingGate;
-      const channel = String(gate?.connection?.channel || "").trim();
-      if (!gate || !channel) {
-        throw new Error("channel connection gate is no longer pending");
+      const onboarding = pendingOnboardingRef.current;
+      if (!onboarding) {
+        throw new Error("pairing is no longer pending");
       }
       const trimmed = String(code || "").trim();
       if (!trimmed) {
         throw new Error("pairing code is required");
       }
-      const options = { threadId };
-      // Every channel redeems through the same mounted v2 endpoint. The legacy
-      // /api/pairing/* approve route is not mounted in the reborn binary (404), so
-      // the in-chat and Settings paths must not diverge onto it.
-      const response = isSlackPersonalPairing(channel)
-        ? await redeemSlackPairingCode(trimmed, options)
-        : await redeemPairingCode(channel, trimmed, options);
+      const threadForResume = onboarding.threadId || threadId || null;
+      const options = {
+        threadId: threadForResume,
+        requestId: onboarding.requestId || null,
+      };
+      const response = await redeemPairingCode(onboarding.extensionName, trimmed, options);
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }
@@ -864,19 +1236,139 @@ export function useChat(threadId) {
         error.resumeFailed = true;
         throw error;
       }
-      // No resolveGate on success: the backend resumes the parked turn and the
-      // projection clears this gate (a pairing gate has no AuthFlowRecord, so
-      // routing a resolve through resolve_auth_gate would fail anyway).
+      const clearOnboarding = () => {
+        if (onboarding.sourceMessageId) {
+          dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+          persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
+        }
+        forgetChannelConnectionWaiter({
+          channel: onboarding.extensionName,
+          threadId: threadForResume,
+          sourceMessageId: onboarding.sourceMessageId || null,
+        });
+        setPendingOnboarding(null);
+      };
+      if (threadForResume && !onboarding.requestId) {
+        const continuation = await send(
+          channelConnectionContinuationMessage(onboarding.extensionName),
+          {
+            threadId: threadForResume,
+            bypassPendingOnboarding: true,
+          },
+        );
+        // `send` returns null (or a rejected_busy outcome) without posting a
+        // turn when thread admission blocks it — an in-flight submit or an
+        // active run on the resume thread. The account is connected either way,
+        // but the blocked request was NOT resumed: keep the waiter and panel
+        // so the channel-connected event path (or a manual retry) can still
+        // deliver the continuation instead of silently dropping it behind a
+        // success response.
+        if (continuation && continuation.outcome !== "rejected_busy") {
+          clearOnboarding();
+        }
+        return response;
+      }
+      clearOnboarding();
+      if (onboarding.requestId && threadForResume) {
+        setIsProcessing(true);
+      }
       return response;
     },
-    [pendingGate, threadId],
+    [threadId, send, setPendingOnboarding, setIsProcessing],
   );
+
+  const startOnboardingOAuth = React.useCallback(async () => {
+    const onboarding = pendingOnboardingRef.current;
+    if (!onboarding) {
+      throw new Error("connection is no longer pending");
+    }
+    if (onboarding.strategy !== "oauth") {
+      throw new Error("connection does not use OAuth");
+    }
+    const packageRef = { kind: "extension", id: onboarding.extensionName };
+    const packageKey = onboarding.extensionName;
+    const setup =
+      typeof queryClient.fetchQuery === "function"
+        ? await queryClient.fetchQuery({
+            queryKey: ["extension-setup", packageKey],
+            queryFn: () => fetchExtensionSetup(packageRef),
+          })
+        : await fetchExtensionSetup(packageRef);
+    const secret = (setup?.secrets || []).find(
+      (item) => (item?.setup?.kind || "manual_token") === "oauth",
+    );
+    if (!secret) {
+      throw new Error("OAuth setup is unavailable for this channel");
+    }
+    const popup = window.open("about:blank", "_blank", "width=600,height=600");
+    if (popup) popup.opener = null;
+    try {
+      const response = await startExtensionOauth(packageRef, secret);
+      if (response?.success === false) {
+        throw new Error(response.message || "OAuth setup failed");
+      }
+      if (!response?.authorization_url) {
+        throw new Error("OAuth setup did not return an authorization URL");
+      }
+      if (!response?.flow_id) {
+        throw new Error("OAuth setup did not return a flow id");
+      }
+      const opened = openAuthUrl(response.authorization_url, popup);
+      if (!opened.ok) {
+        throw new Error("Authorization URL must use HTTPS.");
+      }
+      pendingOnboardingOauthFlowRef.current = {
+        flowId: response.flow_id,
+        channel: onboarding.extensionName,
+        threadId: onboarding.threadId || threadId || null,
+      };
+      return response;
+    } catch (error) {
+      if (popup && !popup.closed) popup.close();
+      throw error;
+    }
+  }, [threadId]);
+
+  const dismissOnboardingPairing = React.useCallback(() => {
+    const onboarding = pendingOnboardingRef.current;
+    if (onboarding) {
+      const threadForDismiss = onboarding.threadId || threadId;
+      if (onboarding.sourceMessageId) {
+        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+        persistDismissedOnboardingId(threadForDismiss, onboarding.sourceMessageId);
+      }
+      forgetChannelConnectionWaiter({
+        channel: onboarding.extensionName,
+        threadId: threadForDismiss,
+        sourceMessageId: onboarding.sourceMessageId || null,
+      });
+    }
+    setPendingOnboarding(null);
+  }, [threadId, setPendingOnboarding]);
 
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
       setPendingGate(null);
+      // Cancelling abandons any pairing panel for this thread: forget its waiter
+      // and remember the dismissal so a later channel connect can't blast a
+      // "Continue the previous request" into a chat the user explicitly cancelled,
+      // and the durable activation card can't re-derive the panel.
+      const onboarding = pendingOnboardingRef.current;
+      if (onboarding) {
+        const threadForCancel = onboarding.threadId || threadId;
+        if (onboarding.sourceMessageId) {
+          dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+          persistDismissedOnboardingId(threadForCancel, onboarding.sourceMessageId);
+        }
+        forgetChannelConnectionWaiter({
+          channel: onboarding.extensionName,
+          threadId: threadForCancel,
+          sourceMessageId: onboarding.sourceMessageId || null,
+        });
+      }
+      setPendingOnboarding(null);
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
@@ -975,6 +1467,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    pendingOnboarding: visiblePendingOnboarding,
     busyGateNotice,
     activeRun,
     sseStatus,
@@ -985,7 +1478,9 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
-    submitChannelConnectionPairing,
+    submitOnboardingPairing,
+    startOnboardingOAuth,
+    dismissOnboardingPairing,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above
@@ -996,10 +1491,6 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
-}
-
-function isSlackPersonalPairing(extensionName) {
-  return String(extensionName || "").trim().toLowerCase() === "slack";
 }
 
 function isDeclinedGateResolution(resolution) {

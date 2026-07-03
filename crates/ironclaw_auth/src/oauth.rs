@@ -17,7 +17,7 @@ use url::Url;
 use crate::{
     AuthProductError, AuthProductScope, AuthSessionId, AuthSurface, AuthorizationCodeHash,
     CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope, ids::AuthFlowId,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, ids::AuthFlowId, validate_public_text,
 };
 
 /// Reborn auth provider id for Google OAuth accounts.
@@ -535,6 +535,53 @@ pub struct OAuthTokenResponse {
     pub refresh_token: Option<SecretString>,
     pub scopes: Vec<ProviderScope>,
     pub expires_in_seconds: Option<u64>,
+    pub provider_identity: Option<OAuthProviderIdentity>,
+}
+
+/// Non-secret provider identity fields returned by an OAuth token exchange.
+///
+/// Providers use different names for the same concept (`sub`, Slack
+/// `authed_user.id`, app/team context, etc.). This redacted shape intentionally
+/// carries only stable identifiers needed by host-owned binding logic; it never
+/// stores raw provider response bodies or token material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthProviderIdentity {
+    pub subject: OAuthProviderIdentitySubject,
+    pub team_id: Option<String>,
+    pub enterprise_id: Option<String>,
+    pub app_id: Option<String>,
+}
+
+impl OAuthProviderIdentity {
+    pub fn new(
+        subject: impl Into<String>,
+        team_id: Option<String>,
+        enterprise_id: Option<String>,
+        app_id: Option<String>,
+    ) -> Result<Self, AuthProductError> {
+        Ok(Self {
+            subject: OAuthProviderIdentitySubject::new(subject)?,
+            team_id: validate_optional_identity_field("oauth provider team id", team_id)?,
+            enterprise_id: validate_optional_identity_field(
+                "oauth provider enterprise id",
+                enterprise_id,
+            )?,
+            app_id: validate_optional_identity_field("oauth provider app id", app_id)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthProviderIdentitySubject(String);
+
+impl OAuthProviderIdentitySubject {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        validate_public_text(value, "oauth provider subject", 256).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Debug for OAuthTokenResponse {
@@ -548,6 +595,7 @@ impl fmt::Debug for OAuthTokenResponse {
             )
             .field("scopes", &self.scopes)
             .field("expires_in_seconds", &self.expires_in_seconds)
+            .field("provider_identity", &self.provider_identity)
             .finish()
     }
 }
@@ -582,8 +630,23 @@ impl OAuthTokenResponse {
             refresh_token,
             scopes,
             expires_in_seconds,
+            provider_identity: None,
         })
     }
+
+    pub fn with_provider_identity(mut self, identity: OAuthProviderIdentity) -> Self {
+        self.provider_identity = Some(identity);
+        self
+    }
+}
+
+fn validate_optional_identity_field(
+    label: &'static str,
+    value: Option<String>,
+) -> Result<Option<String>, AuthProductError> {
+    value
+        .map(|value| validate_public_text(value, label, 256))
+        .transpose()
 }
 
 pub fn opaque_state_hash(state: &str) -> Result<OpaqueStateHash, AuthProductError> {
