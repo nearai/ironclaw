@@ -83,14 +83,15 @@ use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
-    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec,
-    SubagentSpawnLimits,
+    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable,
+    SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
+use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::loop_exit_applier::{
     LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
 };
@@ -103,9 +104,16 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
+use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::{
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
+    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::run_profile::{
-    InMemoryLoopHostMilestoneSink, InstructionSafetyContext, ModelProfileId,
+    CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    ModelProfileId,
 };
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
@@ -210,6 +218,20 @@ pub(crate) struct GroupSharedStorage {
     /// Kept as the concrete `InMemoryTurnEventSink` (not `Arc<dyn TurnEventSink>`)
     /// so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// C-BUDGET: the in-memory `ResourceGovernor` wired behind the group's
+    /// `model_budget_accountant` (via the production `build_default_budget_accountant`
+    /// helper). Retained so a test can read back the account the accountant seeds
+    /// on the first model call of a turn — the liveness proof that the accountant
+    /// is wired through `DefaultPlannedRuntimeParts` and fires on the coordinator
+    /// path. `None` unless the group/harness was built with budget accounting
+    /// wired (`budget_accounting()` / `with_budget_accounting()`).
+    pub(crate) budget_governor: Option<Arc<InMemoryResourceGovernor>>,
+    /// C-BUDGET: the `(tenant, run-owner-user)` account the group's turns reserve
+    /// against — computed once from the canonical binding so a budget test reads
+    /// the SAME account the loop's accountant seeds (keyed on the run actor, i.e.
+    /// the binding subject user, per `GovernorBackedAccountant::resource_scope`).
+    /// `None` unless budget accounting is wired.
+    pub(crate) budget_account: Option<ResourceAccount>,
 }
 
 impl GroupSharedStorage {
@@ -324,6 +346,9 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
+            budget: false,
+            communication_context_provider: None,
+            hook_dispatcher_builder_factory: None,
         }
     }
 
@@ -475,6 +500,22 @@ pub struct RebornIntegrationGroupBuilder {
     safety_context: Option<InstructionSafetyContext>,
     /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
     turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// C-BUDGET: when `true`, `into_group` wires the production
+    /// `build_default_budget_accountant` (in-memory governor + gate store +
+    /// zero-cost table + compiled-default seeding) into the group's ONE planned
+    /// runtime and retains the governor for read-back. Default `false` (no
+    /// accountant — byte-identical to today's behavior).
+    budget: bool,
+    /// C-COMMCTX: an optional `CommunicationContextProvider` wired into the
+    /// group's ONE planned runtime, so the delivery-preference / connected-channel
+    /// slice it resolves lands in the model request. Default `None` (no comm
+    /// section, matching today's behavior).
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// C-HOOKS / E-HOOK-INFRA: an optional per-run hook dispatcher builder
+    /// factory wired into the group's ONE planned runtime, so hooks fire at the
+    /// lifecycle points on a coordinator-path turn. Default `None` (hook
+    /// framework dormant, matching today's behavior).
+    hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -508,6 +549,46 @@ impl RebornIntegrationGroupBuilder {
     /// one would bypass that slicing and reintroduce cross-thread bleed.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
+        self
+    }
+
+    /// Wire the production `build_default_budget_accountant` (over in-memory
+    /// governor, gate store, zero-cost table, and compiled-default seeding) into
+    /// the group's ONE shared planned runtime (`DefaultPlannedRuntimeParts::model_budget_accountant`),
+    /// and retain the governor for read-back. This is the C-BUDGET liveness seam:
+    /// on the first model call of any turn the accountant seeds the run owner's
+    /// daily USD cap into the governor, which
+    /// `RebornIntegrationHarness::assert_budget_user_cap_seeded` reads back.
+    /// Budget SEMANTICS (thresholds, gates, `BudgetEvent` cascade) are covered at
+    /// crate tier (`budget_e2e.rs`); this only proves the harness bypass path
+    /// (`build_default_planned_runtime`) wires the accountant live. Defaults off.
+    pub fn budget_accounting(mut self) -> Self {
+        self.budget = true;
+        self
+    }
+
+    /// Wire a `CommunicationContextProvider` into the group's ONE shared planned
+    /// runtime (`DefaultPlannedRuntimeParts::communication_context_provider`), so
+    /// the delivery-preference / connected-channel slice it resolves renders into
+    /// the model request. This is the C-COMMCTX seam — distinct from the outbound
+    /// delivery **sink** (E-OUTBOUND): this is prompt **context**. Defaults `None`.
+    pub fn communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Wire a per-run `HookDispatcherBuilderFactory` into the group's ONE shared
+    /// planned runtime (`DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory`),
+    /// so hooks fire at their lifecycle points on a coordinator-path turn. This is
+    /// the E-HOOK-INFRA / C-HOOKS seam. Defaults `None` (hook framework dormant).
+    pub fn hook_dispatcher_builder_factory(
+        mut self,
+        factory: HookDispatcherBuilderFactory,
+    ) -> Self {
+        self.hook_dispatcher_builder_factory = Some(factory);
         self
     }
 
@@ -638,6 +719,35 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
+
+        // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
+        // Build the SAME `GovernorBackedAccountant` production composes, via the
+        // shared `build_default_budget_accountant` helper, over in-memory leaf
+        // ports + compiled-default seeding. Retain the governor + the run-owner
+        // account so `assert_budget_user_cap_seeded` can read back the daily cap
+        // the accountant seeds on the turn's first model call. Built here (not
+        // per-thread) because the group's ONE planned runtime is assembled once.
+        // The governor/account are stashed independent of the struct field so a
+        // mutation that drops `model_budget_accountant` (setting it `None`) still
+        // has a governor to read — surfacing "never seeded" (RED), not a panic.
+        let (budget_accountant, budget_governor, budget_account) = if self.budget {
+            let governor: Arc<InMemoryResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+            let accountant = build_default_budget_accountant(
+                Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
+                Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
+                Arc::new(InMemoryBudgetGateStore::new()) as Arc<dyn BudgetGateStore>,
+                Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
+                &BudgetDefaults::compiled_defaults(),
+            );
+            let account = ResourceAccount::user(
+                base.canonical_binding.tenant_id.clone(),
+                base.canonical_subject_user()?,
+            );
+            (Some(accountant), Some(governor), Some(account))
+        } else {
+            (None, None, None)
+        };
+
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -696,10 +806,17 @@ impl RebornIntegrationGroupBuilder {
             // test to read from directly (see `user_profile_source` field docs).
             user_profile_source: Arc::clone(&user_profile_source),
             model_policy_guard: None,
-            model_budget_accountant: None,
+            // C-BUDGET: production `build_default_budget_accountant` (Some only
+            // for `budget_accounting()` groups; `None` otherwise, so all existing
+            // group/flat tests are behavior-identical).
+            model_budget_accountant: budget_accountant,
             safety_context: self.safety_context,
-            hook_dispatcher_builder_factory: None,
-            communication_context_provider: None,
+            // C-HOOKS / E-HOOK-INFRA: per-run hook dispatcher builder factory
+            // (Some only when `hook_dispatcher_builder_factory()` was set).
+            hook_dispatcher_builder_factory: self.hook_dispatcher_builder_factory,
+            // C-COMMCTX: delivery-preference / connected-channel provider (Some
+            // only when `communication_context_provider()` was set).
+            communication_context_provider: self.communication_context_provider,
             hook_security_audit_sink: None,
             turn_event_sink: self
                 .turn_event_sink
@@ -725,6 +842,8 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                budget_governor,
+                budget_account,
             }),
         })
     }
