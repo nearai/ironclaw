@@ -230,6 +230,25 @@ impl GroupSharedStorage {
             GroupCapability::Recording => None,
         }
     }
+
+    /// C-MULTIUSER: the auto-approve `(tenant, user)` scope for a SPECIFIC run
+    /// owner. Uses the group's real run tenant (`product_harness.scope`, e.g.
+    /// `tenant-itest`) with `owner`'s user id — the exact key the dispatch-time
+    /// auto-approve check reads for a run OWNED by `owner` once the capability
+    /// backend is built with `with_run_owner_scoped_capability_dispatch`. Unlike
+    /// [`auto_approve_scope`] (which keys on the fixed capability user, shared by
+    /// all actors), this keys per actor, so a grant seeded here applies to that
+    /// owner's runs only. `None` for the Echo backend (no approval stores).
+    pub(crate) fn auto_approve_scope_for_owner(&self, owner: &UserId) -> Option<ResourceScope> {
+        match &self.capability {
+            GroupCapability::HostRuntime(_) => {
+                let mut scope = self.product_harness.scope.clone();
+                scope.user_id = owner.clone();
+                Some(scope)
+            }
+            GroupCapability::Recording => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +366,41 @@ impl RebornIntegrationGroup {
             GroupCapability::HostRuntime(arc) => Some(arc),
             GroupCapability::Recording => None,
         }
+    }
+
+    /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
+    /// owner's `(tenant, user)` scope over the shared CAS-persisted
+    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
+    /// then dispatches its capability without raising an approval gate, while
+    /// any OTHER owner's identical call still gates — the per-actor isolation
+    /// proof. Errors for the Echo backend (no approval stores).
+    pub async fn enable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .enable_auto_approve_for(scope)
+            .await
+    }
+
+    /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
+    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
+    /// isolation test that needs owner B to still GATE must give B its own
+    /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
+    /// scope to make gates fire. Errors for the Echo backend.
+    pub async fn disable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .disable_auto_approve_for(scope)
+            .await
     }
 
     /// The exact `HostUserProfileSource` wired into this group's ONE planned

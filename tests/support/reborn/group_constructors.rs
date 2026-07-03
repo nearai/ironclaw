@@ -88,6 +88,30 @@ impl RebornIntegrationGroup {
         Self::builder().skill_activation_tools().await
     }
 
+    /// C-MULTIUSER: core built-in tools (memory/http/shell/…) with **per-actor
+    /// capability scoping** (`with_run_owner_scoped_capability_dispatch`). Each
+    /// thread dispatches its capabilities under its OWN run owner's
+    /// `(tenant, user)` scope, so `memory_write`/`read`/`search` resolve to that
+    /// owner's `/memory/tenants/<t>/users/<u>/…` subtree — actor A's memory is
+    /// invisible to actor B. Distinct from [`builtin_tools`], which collapses
+    /// every actor onto one fixed capability user (shared memory). Drives
+    /// `scenario_memory_isolation_across_actors`.
+    pub async fn multiuser_memory_tools() -> HarnessResult<Self> {
+        Self::builder().multiuser_memory_tools().await
+    }
+
+    /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
+    /// **per-actor capability scoping**. A grant via
+    /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
+    /// OFF via [`RebornIntegrationGroup::disable_auto_approve_for_owner`] each
+    /// apply to that owner ALONE. Drives
+    /// `scenario_auto_approve_isolation_across_actors`: actor A's always-allow
+    /// grant lets A's call complete gate-free while actor B (set OFF) still
+    /// raises a real `BlockedApproval` gate on the identical call.
+    pub async fn multiuser_approvals() -> HarnessResult<Self> {
+        Self::builder().multiuser_approvals().await
+    }
+
     /// Group surfacing the two synthetic `outbound_delivery_*` capabilities over
     /// an injected facade double (C-SYNTH outbound seam). `target_set` requires
     /// approval; global auto-approve defaults ON so the happy/`NotFound` arms
@@ -253,6 +277,40 @@ impl RebornIntegrationGroupBuilder {
             "greets the user warmly",
             "GREET_SKILL_PROMPT_SENTINEL",
         )?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a per-actor-scoped memory group.
+    /// See [`RebornIntegrationGroup::multiuser_memory_tools`]. Same capability
+    /// surface as [`builtin_tools`] but with per-actor capability dispatch, so
+    /// each actor's memory lands under its own owner subtree. Self-contained
+    /// (no shared helper) so it relocates trivially if the group constructors
+    /// are later split out.
+    pub async fn multiuser_memory_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a per-actor-scoped file-approval group.
+    /// See [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
+    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch. Auto-
+    /// approve defaults ON per owner (`AUTO_APPROVE_DEFAULT_ENABLED = true`), so
+    /// a scenario that needs an owner to GATE sets that owner OFF explicitly via
+    /// `disable_auto_approve_for_owner` (and grants another owner via
+    /// `enable_auto_approve_for_owner`) — the per-user setting is what the test
+    /// asserts isolates. Because the seam makes the dispatch user equal the turn
+    /// owner, a raised approval request persists under — and its gate-evidence
+    /// lookup resolves through — the SAME owner, so the gate is verified (not
+    /// masked to `Failed`). Self-contained for trivial relocation.
+    pub async fn multiuser_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = HostRuntimeCapabilityHarness::file_tools_requiring_approval()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
