@@ -60,6 +60,7 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    fail_transcript_with: Mutex<Option<AgentLoopHostErrorKind>>,
     compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
     prompt_requests: Mutex<Vec<LoopPromptBundleRequest>>,
@@ -134,6 +135,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    fail_transcript_with: Option<AgentLoopHostErrorKind>,
     compaction_result: Result<LoopCompactionOutcome, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
     cancel_after_capability_batch: Option<LoopCancellationSignal>,
@@ -152,6 +154,7 @@ impl MockAgentLoopDriverHostBuilder {
             prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
+            fail_transcript_with: None,
             compaction_result: Err(LoopCompactionError::InputTooLarge),
             cancellation: None,
             cancel_after_capability_batch: None,
@@ -203,6 +206,12 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Forces every transcript write to fail with the selected host error kind.
+    pub fn fail_transcript_with(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.fail_transcript_with = Some(kind);
+        self
+    }
+
     /// Sets the response returned by the host compaction port.
     pub fn compaction_result(
         mut self,
@@ -247,6 +256,7 @@ impl MockAgentLoopDriverHostBuilder {
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                fail_transcript_with: Mutex::new(self.fail_transcript_with),
                 compaction_result: Mutex::new(self.compaction_result),
                 progress_events: Mutex::new(Vec::new()),
                 prompt_requests: Mutex::new(Vec::new()),
@@ -858,8 +868,11 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost
         &self,
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
-        lock_or_panic(&self.finalized_assistant_messages).push(request.reply.content);
         self.record_call(MockHostCall::FinalizeAssistantMessage);
+        if let Some(kind) = *lock_or_panic(&self.fail_transcript_with) {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
+        lock_or_panic(&self.finalized_assistant_messages).push(request.reply.content);
         Ok(loop_message_ref("msg:assistant"))
     }
 
@@ -871,6 +884,9 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost
             result_ref: request.result_ref.clone(),
             provider_call: Box::new(request.provider_call.clone()),
         });
+        if let Some(kind) = *lock_or_panic(&self.fail_transcript_with) {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
         Ok(loop_message_ref("msg:tool-result"))
     }
 }
