@@ -58,7 +58,7 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
     React: {
       useState: (initial) => {
         const index = stateIndex++;
-        const initialValues = ["PAIRCODE", "", false];
+        const initialValues = ["PAIRCODE", "", "idle"];
         return [
           initialValues[index] ?? initial,
           (value) => stateUpdates.push({ index, value }),
@@ -86,4 +86,85 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
     stateUpdates.filter((update) => update.index === 1).map((update) => update.value),
     ["", "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."],
   );
+});
+
+test("OnboardingPairingCard holds a connecting state after a successful pair instead of resetting to idle", async () => {
+  const stateUpdates = [];
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        const initialValues = ["PAIRCODE", "", "idle"];
+        return [
+          initialValues[index] ?? initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+  };
+
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "slack" },
+    onSubmit: async () => ({ success: true }),
+  });
+
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  await props.onClick();
+
+  // The parked turn resumes asynchronously — the gate (and this card) clear a
+  // beat later via SSE. The status must move submitting → resuming and never
+  // snap back to idle, or a successful pair reads as "nothing happened".
+  assert.deepEqual(
+    stateUpdates.filter((update) => update.index === 2).map((update) => update.value),
+    ["submitting", "resuming"],
+  );
+  // The input clears on success.
+  assert.deepEqual(
+    stateUpdates.filter((update) => update.index === 0).map((update) => update.value),
+    [""],
+  );
+});
+
+test("OnboardingPairingCard shows a spinner and disables submit while busy, not while idle", () => {
+  const renderWithStatus = (status) => {
+    let stateIndex = 0;
+    const context = {
+      Button() {},
+      channelConnectionDisplayName,
+      globalThis: {},
+      html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+      React: {
+        useState: () => {
+          const index = stateIndex++;
+          return [["PAIRCODE", "", status][index], () => {}];
+        },
+      },
+    };
+    vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+    const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+      onboarding: { extensionName: "slack", submittingLabel: "Connecting..." },
+      onSubmit: async () => ({ success: true }),
+    });
+    const button = findComponent(rendered, context.Button);
+    return { rendered, props: componentProps(button, context.Button) };
+  };
+
+  const idle = renderWithStatus("idle");
+  assert.equal(idle.props.disabled, false);
+  assert.ok(!JSON.stringify(idle.rendered).includes("animate-spin"), "idle shows no spinner");
+  assert.ok(!JSON.stringify(idle.rendered).includes("Connecting..."), "idle shows submit label");
+
+  for (const status of ["submitting", "resuming"]) {
+    const busy = renderWithStatus(status);
+    assert.equal(busy.props.disabled, true, `${status} disables submit`);
+    assert.ok(JSON.stringify(busy.rendered).includes("animate-spin"), `${status} renders a spinner`);
+    assert.ok(JSON.stringify(busy.rendered).includes("Connecting..."), `${status} shows connecting label`);
+  }
 });

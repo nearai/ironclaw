@@ -15,21 +15,28 @@ function acceptsPastedCode(strategy) {
 export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState("");
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  // "idle" → "submitting" (redeem in flight) → "resuming" (redeem succeeded;
+  // hold the spinner while the parked turn resumes and this gate clears).
+  const [status, setStatus] = React.useState("idle");
   const copy = pairingCardCopy(onboarding);
+  const busy = status !== "idle";
 
   const submit = async () => {
     const trimmed = code.trim();
-    if (!trimmed || isSubmitting) return;
+    if (!trimmed || busy) return;
     setError("");
-    setIsSubmitting(true);
+    setStatus("submitting");
     try {
       await onSubmit(trimmed);
       setCode("");
+      // Success: don't snap back to idle. The redeem resolved, but the backend
+      // resumes the parked turn asynchronously and the projection clears this
+      // gate (unmounting the card) a beat later over SSE. Holding the spinner
+      // keeps a successful submit from looking like it did nothing.
+      setStatus("resuming");
     } catch {
       setError(copy.errorMessage);
-    } finally {
-      setIsSubmitting(false);
+      setStatus("idle");
     }
   };
 
@@ -76,15 +83,17 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
           onKeyDown=${(event) => event.key === "Enter" && submit()}
           placeholder=${copy.placeholder}
           aria-label=${copy.placeholder}
-          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          disabled=${busy}
+          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45 disabled:cursor-not-allowed disabled:opacity-60"
         />
         <${Button}
           variant="secondary"
-          className="h-9 shrink-0 px-3 text-xs"
+          className="h-9 shrink-0 gap-2 px-3 text-xs"
           onClick=${submit}
-          disabled=${isSubmitting || !code.trim()}
+          disabled=${busy || !code.trim()}
         >
-          ${isSubmitting ? copy.submittingLabel : copy.submitLabel}
+          ${busy && spinnerGlyph()}
+          ${busy ? copy.submittingLabel : copy.submitLabel}
         <//>
         ${onCancel &&
         html`
@@ -92,7 +101,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
             variant="ghost"
             className="h-9 shrink-0 px-3 text-xs"
             onClick=${onCancel}
-            disabled=${isSubmitting}
+            disabled=${busy}
           >
             Cancel
           <//>
@@ -102,6 +111,25 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
       ${error &&
       html`<p role="alert" className="mt-3 text-xs leading-5 text-red-300">${error}</p>`}
     </div>
+  `;
+}
+
+function spinnerGlyph() {
+  return html`
+    <svg
+      className="h-3.5 w-3.5 animate-spin text-current"
+      viewBox="0 0 24 24"
+      fill="none"
+      role="status"
+      aria-label="Connecting"
+    >
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"
+      />
+    </svg>
   `;
 }
 
