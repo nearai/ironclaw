@@ -108,8 +108,8 @@ use ironclaw_turns::run_profile::{
     InMemoryLoopHostMilestoneSink, InstructionSafetyContext, ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryCheckpointStateStore, LoopCheckpointStore, TurnCoordinator,
-    TurnScope, TurnStateStore,
+    FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
+    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
 };
 
 use super::builder::{
@@ -203,6 +203,13 @@ pub(crate) struct GroupSharedStorage {
     /// that breaks the `into_group` wiring (not just `build_user_profile_source_for_test`
     /// itself) is caught.
     pub(crate) user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// In-memory turn-lifecycle event sink wired into the group's ONE planned
+    /// runtime when `.with_turn_event_sink()` opted in (C-TRACECAP seam).
+    /// `None` for every group that did not opt in (`turn_event_sink` stays
+    /// `None` in `DefaultPlannedRuntimeParts`, matching prior behavior).
+    /// Kept as the concrete `InMemoryTurnEventSink` (not `Arc<dyn TurnEventSink>`)
+    /// so a test can read `.events()` back directly.
+    pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
 }
 
 impl GroupSharedStorage {
@@ -279,7 +286,7 @@ impl GroupCapability {
 /// The per-capability preset constructors themselves (`live_approvals`,
 /// `builtin_tools`, `extension_lifecycle`, `live_auth_gate`,
 /// `project_lifecycle`, `profile_tools`, `triggers`, `skill_activation_tools`,
-/// `skill_management_tools`, and their `RebornIntegrationGroupBuilder`
+/// `skill_management_tools`, `attachment_tools`, and their `RebornIntegrationGroupBuilder`
 /// counterparts) live in the child `group_constructors` module (file:
 /// `group_constructors.rs`, kept private to `group` — see the `mod
 /// group_constructors` declaration below) — a thin catalog of "which
@@ -297,6 +304,7 @@ impl RebornIntegrationGroup {
         RebornIntegrationGroupBuilder {
             storage: StorageMode::InMemory,
             safety_context: None,
+            turn_event_sink: None,
         }
     }
 
@@ -314,6 +322,7 @@ impl RebornIntegrationGroup {
             replies: Vec::new(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
+            model_override: None,
         }
     }
 
@@ -410,6 +419,8 @@ impl GroupBaseData {
 pub struct RebornIntegrationGroupBuilder {
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
+    /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
+    turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -429,6 +440,20 @@ impl RebornIntegrationGroupBuilder {
     /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
     pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Install an in-memory `TurnEventSink` (`ironclaw_turns::InMemoryTurnEventSink`,
+    /// a real, already-shipped production type with zero callers today — this is the
+    /// seam production wires via `subscribe_best_effort` in `build_default_planned_runtime_inner`,
+    /// `crates/ironclaw_reborn/src/runtime.rs:613-619`) into the group's ONE planned
+    /// runtime (C-TRACECAP). Read the recorded events back with
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read path;
+    /// it slices `[baseline_turn_event_count..]` so a group thread never sees a
+    /// sibling thread's events. Deliberately no raw group-level sink accessor:
+    /// one would bypass that slicing and reintroduce cross-thread bleed.
+    pub fn with_turn_event_sink(mut self) -> Self {
+        self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
         self
     }
 
@@ -622,8 +647,13 @@ impl RebornIntegrationGroupBuilder {
             hook_dispatcher_builder_factory: None,
             communication_context_provider: None,
             hook_security_audit_sink: None,
-            turn_event_sink: None,
-            attachment_read_port: None,
+            turn_event_sink: self
+                .turn_event_sink
+                .clone()
+                .map(|sink| sink as Arc<dyn TurnEventSink>),
+            attachment_read_port: capability_recorder
+                .attachment_test_support()
+                .map(|support| support.read_port),
             scheduler_wake_wiring: None,
         })?;
 
@@ -640,6 +670,7 @@ impl RebornIntegrationGroupBuilder {
                 turn_store,
                 capability_recorder,
                 user_profile_source,
+                turn_event_sink: self.turn_event_sink,
             }),
         })
     }
@@ -666,6 +697,12 @@ pub struct RebornThreadBuilder<'g> {
     replies: Vec<RebornScriptedReply>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
+    /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
+    /// production model-pin field, `model_gateway.rs:160-162`). `None` keeps the
+    /// prior behavior (scripted model id, not a vision pattern, so image parts
+    /// are dropped); `Some` routes through a vision-capable id so `convert_messages`
+    /// builds `ContentPart::ImageUrl` parts.
+    model_override: Option<String>,
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
@@ -747,6 +784,14 @@ impl<'g> RebornThreadBuilder<'g> {
         if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
             self.model_mode = ThreadModelMode::Failing;
         }
+        self
+    }
+
+    /// Route this thread at a specific provider model id (see
+    /// `ironclaw_llm::vision_models::VISION_PATTERNS` for vision-capable ids) —
+    /// C-ATTACH seam.
+    pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
+        self.model_override = Some(model.into());
         self
     }
 
@@ -836,7 +881,8 @@ impl<'g> RebornThreadBuilder<'g> {
         let provider = provider_chain_over(raw, &llm_config, session).await?;
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;
-        let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+        let policy = LlmModelProfilePolicy::new()
+            .allow_model_profile(model_profile_id, self.model_override.clone());
         let thread_gateway: Arc<dyn HostManagedModelGateway> =
             Arc::new(LlmProviderModelGateway::new(provider, policy));
 
@@ -857,15 +903,27 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_turn_event_count = shared
+            .turn_event_sink
+            .as_ref()
+            .map(|sink| sink.events().len())
+            .unwrap_or(0);
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(shared.product_harness.binding_service()?);
-        let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
+        let mut inbound_service = DefaultInboundTurnService::new(
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             Arc::clone(&shared.coordinator),
-        ));
+        );
+        // C-ATTACH: wire the real lander when the backend has one (`attachment_tools()`)
+        // so `submit_inbound_with_attachments` lands through it instead of
+        // failing closed. `None` for every other group (unchanged behavior).
+        if let Some(support) = capability_recorder.attachment_test_support() {
+            inbound_service = inbound_service.with_inbound_attachments(support.lander);
+        }
+        let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
         let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
@@ -904,6 +962,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_turn_event_count,
         })
     }
 }

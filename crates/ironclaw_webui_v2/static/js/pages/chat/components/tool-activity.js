@@ -11,7 +11,16 @@ const DOT_STYLE = {
   error: "bg-[var(--v2-danger-text)]",
 };
 
-const STATUS_WORD = { success: "ok", declined: "declined", error: "err", running: "run" };
+const STATUS_LABEL_KEY = {
+  success: "tool.statusOk",
+  declined: "tool.statusDeclined",
+  error: "tool.statusError",
+  running: "tool.statusRunning",
+};
+
+function statusLabelKey(status) {
+  return STATUS_LABEL_KEY[status] || STATUS_LABEL_KEY.running;
+}
 
 /* Runs longer than this collapse into a single summary line. Runs of this
    length or shorter render each call as its own row. */
@@ -27,7 +36,7 @@ export function ToolActivity({ activity }) {
 /* Categorise tool calls into files / searches / commands / other and build a
    compact human summary like "Explored 9 files, 5 searches, ran 2 commands".
    Best-effort keyword heuristic on the tool name. */
-function summarizeTools(t, tools) {
+function summarizeTools(tools, t) {
   let files = 0;
   let searches = 0;
   let commands = 0;
@@ -74,7 +83,7 @@ export function ToolRun({ tools }) {
     `;
   }
 
-  const summary = summarizeTools(t, tools);
+  const summary = summarizeTools(tools, t);
 
   return html`
     <div className="flex flex-col">
@@ -111,6 +120,7 @@ export function ToolRun({ tools }) {
 }
 
 function ToolActivityCard({ activity, nested = false }) {
+  const t = useT();
   const {
     toolName,
     toolStatus,
@@ -143,7 +153,7 @@ function ToolActivityCard({ activity, nested = false }) {
     >
       <span className=${["h-2 w-2 shrink-0 rounded-full", dotClass].join(" ")} />
       <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-iron-300"
-        >${STATUS_WORD[toolStatus] || "run"}</span
+        >${t(statusLabelKey(toolStatus))}</span
       >
       <span className="shrink-0 truncate font-mono text-[13px] font-medium text-iron-100"
         >${toolName}</span

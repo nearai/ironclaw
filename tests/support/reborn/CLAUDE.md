@@ -227,6 +227,40 @@ followed by a trailing `RebornScriptedReply::text(..)` turn.
 
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — see the "Richer assertions" list below; this is the assertion for this capability.
 
+### Turn lifecycle events
+
+`.with_turn_event_sink()` (harness or group builder) installs an in-memory
+`ironclaw_turns::InMemoryTurnEventSink` into the ONE planned runtime via the
+production `lifecycle_bus.subscribe_best_effort` seam — the entry point Trace
+Commons capture and skill learning hang off in production. Off by default
+(`turn_event_sink: None`, matching every pre-existing test).
+
+- `assert_turn_event_recorded(kind)` — at least one recorded `TurnLifecycleEvent`
+  of that `TurnEventKind` (e.g. `Completed`). The sink is group-shared, but the
+  harness records `baseline_turn_event_count` at construction and
+  `recorded_turn_events` slices `[baseline..]` (R2), so each thread only sees
+  events its own turns published — a sibling thread's earlier event can't make
+  this assertion pass.
+
+### Attachments (multimodal)
+
+`RebornIntegrationGroup::attachment_tools()` wires the real production
+attachment pair over the local-dev workspace filesystem:
+`ProjectScopedAttachmentLander` (lands inbound bytes) +
+`ProjectScopedAttachmentReader` (the `attachment_read_port` the loop model port
+reads bytes back through). Route the thread at a vision-capable model id with
+`.with_model_override(model_id)` (see `ironclaw_llm::vision_models`) — the
+scripted default id is not a vision pattern, so image parts are dropped for it.
+
+- `submit_turn_with_image_attachment(text, filename, mime, bytes)` — lands the
+  image through the real `submit_inbound_with_attachments` entry point and waits
+  for completion. Errors if the harness has no lander (i.e. not an
+  `attachment_tools()` group).
+- `assert_model_saw_image_attachment(mime, bytes)` — a captured model request
+  carried a `ContentPart::ImageUrl` part whose `data:` URL is exactly
+  `data:<mime>;base64,<encode(bytes)>` — byte-fidelity through lander →
+  filesystem → read port, not just the textual `<attachments>` pointer.
+
 ### OAuth / product-auth
 
 Available from crate `ironclaw_reborn_composition::test_support`, gated on
@@ -383,6 +417,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
+| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 
 ### Distinct actors per thread (E-MULTIUSER)

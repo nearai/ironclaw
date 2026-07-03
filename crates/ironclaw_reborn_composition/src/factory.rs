@@ -523,6 +523,29 @@ impl RebornServices {
         Arc::clone(&self.secret_store)
     }
 
+    /// Read-write project-scoped workspace filesystem, built over
+    /// `local_runtime.extension_filesystem` + `local_runtime.workspace_mounts`.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `local_runtime.workspace_filesystem`:
+    /// that handle is intentionally read-only (it backs setup-marker reads —
+    /// see `local_dev_setup_marker_workspace_filesystem_is_read_only`), so
+    /// writing through it fails closed with `PermissionDenied`.
+    ///
+    /// Single owner of this recipe — both `RebornRuntime::webui_workspace_filesystem`
+    /// (production attachment landing) and `local_dev_attachment_test_support_for_test`
+    /// (C-ATTACH test seam) call this rather than each rebuilding the view, so the
+    /// two can never drift apart.
+    pub(crate) fn read_write_workspace_filesystem(
+        &self,
+    ) -> Option<Arc<ScopedFilesystem<LocalDevRootFilesystem>>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::clone(&local_runtime.extension_filesystem),
+            local_runtime.workspace_mounts.clone(),
+        )))
+    }
+
     #[cfg(feature = "test-support")]
     pub fn local_dev_approval_test_parts(&self) -> Option<RebornLocalDevApprovalTestParts> {
         let local_runtime = self.local_runtime.as_ref()?;
@@ -586,6 +609,45 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::clone(&local_runtime.project_service))
     }
+
+    /// Test-support access to the attachment read port + inbound lander backing
+    /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
+    /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
+    /// that handle is intentionally read-only (it backs setup-marker reads), which
+    /// is fine for reading. The lander is built over the SAME read-write view
+    /// `RebornRuntime::webui_workspace_filesystem` uses in production, via the
+    /// shared [`Self::read_write_workspace_filesystem`] helper — landing through
+    /// the read-only `workspace_filesystem` handle fails closed with
+    /// `PermissionDenied`. Bundled into one accessor (rather than two, mirroring
+    /// `local_dev_profile_filesystem_for_test` / `local_dev_project_service_for_test`
+    /// above) because the two are always populated together. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
+        Some(AttachmentTestSupport {
+            read_port: Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+                    &local_runtime.workspace_filesystem,
+                )),
+            ),
+            lander: Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentLander::new(
+                    read_write_workspace_filesystem,
+                ),
+            ),
+        })
+    }
+}
+
+/// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]
+/// (C-ATTACH seam). Test-support only — zero bytes shipped in production builds.
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct AttachmentTestSupport {
+    pub read_port: Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>,
+    pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]
