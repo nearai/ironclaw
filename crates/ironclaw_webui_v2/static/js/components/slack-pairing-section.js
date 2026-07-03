@@ -3,12 +3,24 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../design-system/button.js";
 import { useT } from "../lib/i18n.js";
 import { redeemSlackPairingCode } from "../lib/slack-pairing-api.js";
+import { activateExtension } from "../pages/extensions/lib/extensions-api.js";
 
 export function SlackPairingSection({ action }) {
   const t = useT();
   const queryClient = useQueryClient();
   const redeemMutation = useMutation({
-    mutationFn: ({ code }) => redeemSlackPairingCode(code),
+    mutationFn: async ({ code }) => {
+      const result = await redeemSlackPairingCode(code);
+      // Redemption already connected the account; activation is best-effort so
+      // a post-redeem activation hiccup is not surfaced as a redemption
+      // failure. A stale "installed" status reconciles on the next refresh.
+      try {
+        await activateExtension({ id: "slack" });
+      } catch {
+        console.error("Slack activation after pairing failed.");
+      }
+      return result;
+    },
     onSuccess: () => {
       setManualCode("");
       queryClient.invalidateQueries({ queryKey: ["extensions"] });

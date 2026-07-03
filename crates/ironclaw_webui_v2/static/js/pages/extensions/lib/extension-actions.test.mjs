@@ -31,14 +31,14 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
   );
 });
 
-test("primaryExtensionAction activates manifest-backed channels and suppresses legacy wasm channels", () => {
+test("primaryExtensionAction suppresses activation for channel-surface extensions", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
       kind: "channel",
       activation_status: "installed",
     }),
-    "activate",
+    null,
   );
   assert.equal(
     primaryExtensionAction({
@@ -69,15 +69,14 @@ test("primaryExtensionAction suppresses Activate for channel kind in pairing sta
     null,
     "kind:channel + pairing should return null (pairing section owns it)",
   );
-  // Installed state must still return activate — this is the manifest-backed channel activation path.
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
       kind: "channel",
       activation_status: "installed",
     }),
-    "activate",
-    "kind:channel + installed should still return activate",
+    null,
+    "kind:channel + installed should hand off to channel setup/pairing UI",
   );
 });
 

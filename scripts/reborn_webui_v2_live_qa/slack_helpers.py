@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
 import sqlite3
 from pathlib import Path
+from datetime import datetime, timezone
 
 from scripts.live_canary.common import env_secret
 from scripts.reborn_webui_v2_live_qa.env_helpers import (
@@ -17,6 +20,8 @@ from scripts.reborn_webui_v2_live_qa.env_helpers import (
 from scripts.reborn_webui_v2_live_qa.errors import LiveQaError
 from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _decrypt_filesystem_secret,
+    _put_root_filesystem_json,
+    _root_filesystem_create_table,
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
@@ -87,46 +92,6 @@ def _disable_slack_in_config(config_path: Path) -> None:
         config_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 
 
-def _append_slack_channel_route(
-    config_path: Path,
-    *,
-    subject_user_id: str,
-    channel_id: str,
-) -> bool:
-    channel_id = channel_id.strip()
-    if not channel_id:
-        return False
-    route_subject_user_id = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID",
-        subject_user_id,
-    ).strip()
-    if not route_subject_user_id:
-        route_subject_user_id = subject_user_id
-    config = config_path.read_text(encoding="utf-8")
-    if _config_has_slack_channel_route(
-        config,
-        subject_user_id=route_subject_user_id,
-        channel_id=channel_id,
-    ):
-        return True
-    with config_path.open("a", encoding="utf-8") as fh:
-        fh.write(
-            "\n[[slack.channel_routes]]\n"
-            f"channel_id = {_toml_string(channel_id)}\n"
-            f"subject_user_id = {_toml_string(route_subject_user_id)}\n"
-        )
-    return True
-
-
-def _append_slack_channel_route_if_configured(config_path: Path, subject_user_id: str) -> bool:
-    channel_id = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID", "").strip()
-    return _append_slack_channel_route(
-        config_path,
-        subject_user_id=subject_user_id,
-        channel_id=channel_id,
-    )
-
-
 def _set_slack_section_key(config_path: Path, key: str, value: str) -> bool:
     if not value.strip():
         return False
@@ -170,10 +135,13 @@ def _configure_slack_legacy_actor_if_needed(
     }
     if not signed_slack_event_cases.intersection(selected_cases):
         return False, None
-    slack_user_id = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
-        "U0REBORNQA",
-    ).strip()
+    slack_user_id = (
+        _slack_dm_route_user_id()
+        or os.environ.get(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
+            "U0REBORNQA",
+        ).strip()
+    )
     if not slack_user_id:
         return False, None
     changed = _set_slack_section_key(config_path, "slack_user_id", slack_user_id)
@@ -192,17 +160,17 @@ def _discover_slack_dm_route_channel(
     token = _env_value(bot_env, extra_env)
     if not token:
         return {"checked": False, "ok": False, "error": "bot token env unavailable"}
-    configured_route_user_id = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
-        "",
-    ).strip()
-    inbound_user_id = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
-        "",
-    ).strip()
-    if inbound_user_id == "U0REBORNQA":
-        inbound_user_id = ""
-    dm_user_id = configured_route_user_id or inbound_user_id or "USLACKBOT"
+    dm_user_id = _slack_dm_route_user_id()
+    if not dm_user_id:
+        return {
+            "checked": False,
+            "ok": False,
+            "error": "missing_slack_route_user_id",
+            "required_env": [
+                "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+                "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
+            ],
+        }
     try:
         import httpx
 
@@ -224,7 +192,7 @@ def _discover_slack_dm_route_channel(
         "checked": True,
         "ok": bool(payload.get("ok")),
         "dm_user_id": dm_user_id,
-        "dm_user_source": "env" if dm_user_id != "USLACKBOT" else "fallback_slackbot",
+        "dm_user_source": "env",
     }
     channel = payload.get("channel")
     if isinstance(channel, dict):
@@ -232,10 +200,28 @@ def _discover_slack_dm_route_channel(
         if channel_id:
             result["channel_id"] = channel_id
         result["channel_is_im"] = channel.get("is_im")
+    channel_id = str(result.get("channel_id") or "")
+    if payload.get("ok") and not channel_id.startswith("D"):
+        result["ok"] = False
+        result["error"] = "slack_conversations_open_returned_non_dm_channel"
+    if payload.get("ok") and result.get("channel_is_im") is False:
+        result["ok"] = False
+        result["error"] = "slack_conversations_open_returned_non_im_channel"
     if not payload.get("ok"):
         result["error"] = payload.get("error")
         result["needed"] = payload.get("needed")
     return result
+
+
+def _slack_dm_route_user_id() -> str | None:
+    for name in (
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
+    ):
+        value = (env_secret(name) or "").strip()
+        if value and value != "U0REBORNQA":
+            return value
+    return None
 
 
 def _slack_channel_routes(config_text: str) -> list[dict[str, str]]:
@@ -264,6 +250,51 @@ def _slack_channel_routes(config_text: str) -> list[dict[str, str]]:
     return routes
 
 
+def _remove_dm_slack_channel_routes(config_path: Path) -> dict[str, object]:
+    """Remove stale DM routes from legacy shared-channel route config."""
+    if not config_path.exists():
+        return {"changed": False, "removed": 0}
+
+    lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    rewritten: list[str] = []
+    removed = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() != "[[slack.channel_routes]]":
+            rewritten.append(line)
+            index += 1
+            continue
+
+        block = [line]
+        index += 1
+        while index < len(lines):
+            next_line = lines[index]
+            stripped = next_line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                break
+            block.append(next_line)
+            index += 1
+
+        if _slack_channel_route_block_has_dm_channel(block):
+            removed += 1
+        else:
+            rewritten.extend(block)
+
+    if not removed:
+        return {"changed": False, "removed": 0}
+    config_path.write_text("".join(rewritten), encoding="utf-8")
+    return {"changed": True, "removed": removed}
+
+
+def _slack_channel_route_block_has_dm_channel(block: list[str]) -> bool:
+    for line in block:
+        match = re.match(r"\s*channel_id\s*=\s*['\"]([^'\"]*)['\"]", line)
+        if match and match.group(1).strip().startswith("D"):
+            return True
+    return False
+
+
 def _config_has_slack_channel_route(
     config_text: str,
     *,
@@ -279,30 +310,202 @@ def _config_has_slack_channel_route(
 
 def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> bool:
     return any(
-        route.get("subject_user_id") == user_id and bool(route.get("channel_id"))
+        route.get("subject_user_id") == user_id
+        and bool(route.get("channel_id"))
+        and not str(route.get("channel_id") or "").startswith("D")
         for route in _slack_channel_routes(config_text)
     )
 
 
 def _has_persisted_slack_personal_dm_target(reborn_home: Path, user_id: str) -> bool:
+    return _persisted_slack_personal_dm_payload(reborn_home, user_id) is not None
+
+
+def _persisted_slack_personal_dm_payload(reborn_home: Path, user_id: str) -> dict[str, object] | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
-        return False
+        return None
     with sqlite3.connect(db_path) as db:
-        row = db.execute(
-            "SELECT COUNT(*) FROM root_filesystem_entries "
-            "WHERE path LIKE '%slack-personal-binding/dm-targets%' "
-            "AND CAST(contents AS TEXT) LIKE ?",
-            (f"%{user_id}%",),
-        ).fetchone()
-    return bool(row and int(row[0]) > 0)
+        rows = db.execute(
+            "SELECT contents FROM root_filesystem_entries "
+            "WHERE path LIKE '%/slack-personal-binding/dm-targets/%' "
+            "ORDER BY path"
+        ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("user_id") == user_id:
+            return payload
+    return None
+
+
+def _persisted_slack_personal_dm_channel_id(reborn_home: Path, user_id: str) -> str | None:
+    payload = _persisted_slack_personal_dm_payload(reborn_home, user_id)
+    if payload is None:
+        return None
+    channel_id = str(payload.get("dm_channel_id") or "").strip()
+    return channel_id or None
+
+
+def _hash_scoped_part(hasher: "hashlib._Hash", value: str) -> None:
+    encoded = value.encode("utf-8")
+    hasher.update(len(encoded).to_bytes(8, "big"))
+    hasher.update(encoded)
+
+
+def _communication_preference_path(tenant_id: str, user_id: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(b"v2:")
+    for part in ("personal", tenant_id, user_id):
+        _hash_scoped_part(hasher, part)
+    return f"/tenants/{tenant_id}/users/{user_id}/outbound/communication-preferences/{hasher.hexdigest()}.json"
+
+
+def _binding_segment(name: str, value: str) -> str:
+    return f"{name}:{len(value.encode('utf-8'))}:{value};"
+
+
+def _slack_host_state_path_segment(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _slack_personal_dm_reply_target(
+    *,
+    installation_id: str,
+    team_id: str,
+    user_id: str,
+    slack_user_id: str,
+    dm_channel_id: str,
+) -> str:
+    return "reply:" + "".join(
+        [
+            _binding_segment("adapter", "slack_v2"),
+            _binding_segment("installation", installation_id),
+            _binding_segment("agent", "reborn-cli-agent"),
+            _binding_segment("project", ""),
+            _binding_segment("space", team_id),
+            _binding_segment("conversation", dm_channel_id),
+            _binding_segment("topic", ""),
+            _binding_segment("actor_kind", "slack_user"),
+            _binding_segment("actor", slack_user_id),
+        ]
+    )
+
+
+def _seed_slack_outbound_default_target(
+    db_path: Path,
+    *,
+    installation_id: str,
+    team_id: str,
+    user_id: str,
+    slack_user_id: str,
+    dm_channel_id: str,
+    now: str,
+) -> dict[str, object]:
+    tenant_id = "reborn-cli"
+    path = _communication_preference_path(tenant_id, user_id)
+    final_reply_target = _slack_personal_dm_reply_target(
+        installation_id=installation_id,
+        team_id=team_id,
+        user_id=user_id,
+        slack_user_id=slack_user_id,
+        dm_channel_id=dm_channel_id,
+    )
+    _put_root_filesystem_json(
+        db_path,
+        path,
+        {
+            "scope": {
+                "kind": "personal",
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            },
+            "final_reply_target": final_reply_target,
+            "progress_target": None,
+            "approval_prompt_target": None,
+            "auth_prompt_target": None,
+            "default_modality": None,
+            "updated_at": now,
+            "updated_by": user_id,
+        },
+    )
+    return {
+        "path": path,
+        "final_reply_target": final_reply_target,
+    }
+
+
+def _seed_slack_personal_dm_target(
+    reborn_home: Path,
+    config_text: str,
+    *,
+    auth_user_id: str,
+    slack_user_id: str,
+    dm_channel_id: str,
+) -> dict[str, object]:
+    installation_id = _slack_config_value(config_text, "installation_id")
+    team_id = _slack_config_value(config_text, "team_id")
+    if not installation_id or not team_id:
+        return {
+            "seeded": False,
+            "error": "missing_slack_installation_or_team_id",
+            "installation_id_present": bool(installation_id),
+            "team_id_present": bool(team_id),
+        }
+    if not dm_channel_id.startswith("D"):
+        return {
+            "seeded": False,
+            "error": "slack_dm_channel_id_must_start_with_d",
+            "dm_channel_id": dm_channel_id,
+        }
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    _root_filesystem_create_table(db_path)
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    path = (
+        "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
+        f"{_slack_host_state_path_segment(installation_id)}/"
+        f"{_slack_host_state_path_segment(team_id)}/"
+        f"{_slack_host_state_path_segment(auth_user_id)}.json"
+    )
+    _put_root_filesystem_json(
+        db_path,
+        path,
+        {
+            "tenant_id": "reborn-cli",
+            "installation_id": installation_id,
+            "team_id": team_id,
+            "user_id": auth_user_id,
+            "slack_user_id": slack_user_id,
+            "dm_channel_id": dm_channel_id,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    outbound_default = _seed_slack_outbound_default_target(
+        db_path,
+        installation_id=installation_id,
+        team_id=team_id,
+        user_id=auth_user_id,
+        slack_user_id=slack_user_id,
+        dm_channel_id=dm_channel_id,
+        now=now,
+    )
+    return {
+        "seeded": True,
+        "path": path,
+        "outbound_default": outbound_default,
+        "installation_id": installation_id,
+        "team_id": team_id,
+        "user_id": auth_user_id,
+        "slack_user_id": slack_user_id,
+        "dm_channel_id": dm_channel_id,
+    }
 
 
 def _has_slack_delivery_target(config_text: str, reborn_home: Path, user_id: str) -> bool:
-    return _config_has_slack_channel_route_for_user(
-        config_text,
-        user_id,
-    ) or _has_persisted_slack_personal_dm_target(reborn_home, user_id)
+    return _has_persisted_slack_personal_dm_target(reborn_home, user_id)
 
 
 def _materialize_slack_env_from_reborn_home(

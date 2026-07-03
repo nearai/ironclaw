@@ -1,18 +1,27 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CredentialStageError, EffectKind, HostApiError,
-    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    CapabilityId, CapabilityProfileSchemaRef, CredentialStageError, EffectKind, ExtensionId,
+    HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceScope, ResourceUsage,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+use ironclaw_product_workflow::{
+    ChannelConnectionFacade, ChannelConnectionRequirement, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
+    WebUiAuthenticatedCaller,
+};
 use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -42,10 +51,12 @@ pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        channel_connection,
     });
     for capability_id in EXTENSION_LIFECYCLE_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -57,7 +68,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results.",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results. If search returns an installed external channel, still call builtin.extension_activate so channel-specific pairing/setup instructions can be surfaced before claiming the channel is ready.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
@@ -69,7 +80,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true, the extension is ready for read and write-capable tools; ignore earlier search/install onboarding or credential hints from this turn unless a later tool call raises auth_required.",
+            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -123,6 +134,10 @@ fn lifecycle_manifest(
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    /// Late-bound per-caller channel-connection facade (filled by the Slack
+    /// host-beta composition after runtime build). Empty when no connectable
+    /// channel is wired.
+    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +158,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let started = Instant::now();
+        let caller_scope = request.scope.clone();
         let response = match request.capability_id.as_str() {
             EXTENSION_SEARCH_CAPABILITY_ID => {
                 let input: SearchInput = parse_input(request.input)?;
@@ -204,13 +220,114 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         }
         .map_err(lifecycle_error)?;
 
-        let output = serde_json::to_value(response)
+        // An inbound-channel activation carries a per-user connection
+        // requirement. Block the turn on the auth-gate rail (the same rail
+        // GitHub/Gmail credentials use) when THIS caller has not connected the
+        // channel yet, so redeeming the pairing code resumes the parked turn.
+        // When the caller is already connected, complete with no card.
+        if let Some(requirement) = activation_connection_requirement(&response)
+            && !self
+                .caller_has_channel_connection(&caller_scope, &requirement.channel)
+                .await
+        {
+            let credential_requirement = channel_pairing_requirement(&requirement.channel)?;
+            return Err(
+                FirstPartyCapabilityError::auth_required_for_credentials(vec![
+                    credential_requirement,
+                ])
+                .with_usage(resource_usage(started)),
+            );
+        }
+
+        let output = serde_json::to_value(without_model_visible_connection_chrome(response))
             .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
         Ok(FirstPartyCapabilityResult::new(
             output,
             resource_usage(started),
         ))
     }
+}
+
+impl ExtensionLifecycleToolHandler {
+    /// Whether the calling WebUI user has already connected `channel`. When no
+    /// connectable-channel facade is wired (deployment without Slack host-beta),
+    /// or the lookup errors, fail closed (treat as not connected) so the turn
+    /// parks on the connection gate rather than falsely claiming the channel is
+    /// ready.
+    async fn caller_has_channel_connection(&self, scope: &ResourceScope, channel: &str) -> bool {
+        let Some(facade) = self.channel_connection.get() else {
+            return false;
+        };
+        let caller = WebUiAuthenticatedCaller::new(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+        );
+        match facade.caller_channel_connections(caller).await {
+            Ok(connections) => connections.get(channel).copied().unwrap_or(false),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    channel,
+                    "channel connection lookup failed during activation; treating caller as not connected"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// The structured connect requirement attached to an inbound-channel activation,
+/// or `None` for a tool-extension activation / any other capability result.
+fn activation_connection_requirement(
+    response: &LifecycleProductResponse,
+) -> Option<&ChannelConnectionRequirement> {
+    match response.payload.as_ref() {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            connection_required: Some(requirement),
+            ..
+        }) => Some(requirement),
+        _ => None,
+    }
+}
+
+/// Build the single channel-pairing credential requirement that carries the
+/// connection through the auth gate. It rides the existing `credential_requirements`
+/// rail (the same one GitHub/Gmail use); the projection re-derives the render
+/// copy from the `channel` in `RuntimeCredentialAccountSetup::ChannelPairing`.
+fn channel_pairing_requirement(
+    channel: &str,
+) -> Result<RuntimeCredentialAuthRequirement, FirstPartyCapabilityError> {
+    let provider = RuntimeCredentialAccountProviderId::new(channel)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
+    let requester_extension = ExtensionId::new(channel)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
+    Ok(RuntimeCredentialAuthRequirement {
+        provider,
+        setup: RuntimeCredentialAccountSetup::ChannelPairing {
+            channel: channel.to_string(),
+        },
+        requester_extension,
+        provider_scopes: Vec::new(),
+    })
+}
+
+/// The structured connect requirement carries render chrome (input placeholder,
+/// button labels, error copy) for the pairing card. On the already-connected
+/// (completed) path, strip it from the model-visible tool output so the model
+/// sees just the activation prose, never the UI strings.
+fn without_model_visible_connection_chrome(
+    mut response: LifecycleProductResponse,
+) -> LifecycleProductResponse {
+    if let Some(LifecycleProductPayload::ExtensionActivate {
+        connection_required,
+        ..
+    }) = response.payload.as_mut()
+    {
+        *connection_required = None;
+    }
+    response
 }
 
 fn resource_usage(started: Instant) -> ResourceUsage {
@@ -277,6 +394,178 @@ mod tests {
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
+    use ironclaw_product_workflow::{
+        ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
+        RebornServicesError,
+    };
+    use std::collections::HashMap;
+
+    /// Fake per-caller channel-connection facade for the activation-gate tests.
+    struct FakeChannelConnectionFacade {
+        connected: bool,
+    }
+
+    #[async_trait]
+    impl ChannelConnectionFacade for FakeChannelConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<HashMap<String, bool>, RebornServicesError> {
+            Ok(HashMap::from([("slack".to_string(), self.connected)]))
+        }
+    }
+
+    fn slack_activation_response() -> LifecycleProductResponse {
+        let requirement = ChannelConnectionRequirement {
+            channel: "slack".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
+            instructions: "Message the IronClaw Reborn app in Slack to get a pairing code."
+                .to_string(),
+            input_placeholder: "Enter Slack pairing code".to_string(),
+            submit_label: "Connect".to_string(),
+            error_message: "Invalid or expired Slack pairing code.".to_string(),
+        };
+        LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: Some(requirement),
+            }),
+        }
+    }
+
+    #[test]
+    fn model_visible_output_omits_connect_chrome_on_completed_path() {
+        // On the connected (completed) path the render chrome is stripped from
+        // the model-visible tool output so the model sees just the activation
+        // prose, never the UI strings.
+        let model = without_model_visible_connection_chrome(slack_activation_response());
+        match &model.payload {
+            Some(LifecycleProductPayload::ExtensionActivate {
+                connection_required,
+                ..
+            }) => assert!(
+                connection_required.is_none(),
+                "connect chrome leaked into model-visible output",
+            ),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+        let serialized = serde_json::to_string(&model).unwrap();
+        assert!(!serialized.contains("Enter Slack pairing code"));
+        assert!(!serialized.contains("submit_label"));
+    }
+
+    #[test]
+    fn activation_connection_requirement_and_pairing_requirement_shape_the_gate() {
+        // An inbound-channel activation surfaces the connection requirement the
+        // gate keys on; a tool-extension activation does not.
+        let channel_activation = slack_activation_response();
+        let requirement = activation_connection_requirement(&channel_activation)
+            .expect("inbound-channel activation carries a connection requirement");
+        assert_eq!(requirement.channel, "slack");
+
+        let tool_activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: vec!["github.search_issues".to_string()],
+                connection_required: None,
+            }),
+        };
+        assert!(activation_connection_requirement(&tool_activation).is_none());
+
+        // The blocking auth gate carries the connection as a ChannelPairing
+        // credential requirement on the existing credential rail.
+        let credential = channel_pairing_requirement("slack").expect("pairing requirement builds");
+        assert_eq!(credential.provider.as_str(), "slack");
+        match credential.setup {
+            RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
+                assert_eq!(channel, "slack")
+            }
+            other => panic!("expected ChannelPairing setup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_connection_gate_predicate_blocks_unconnected_and_admits_connected() {
+        // Drive the handler's connection-gate predicate (the check that decides
+        // between a blocking auth_required and a completed activation) through a
+        // constructed handler with a real per-caller facade.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-connection-gate-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let scope = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]).resource_scope;
+
+        // Connected caller → predicate true (activation would complete).
+        let connected = lifecycle_handler_with_facade(
+            &services,
+            Some(Arc::new(FakeChannelConnectionFacade { connected: true })),
+        );
+        assert!(
+            connected
+                .caller_has_channel_connection(&scope, "slack")
+                .await,
+            "a connected caller must pass the connection gate"
+        );
+
+        // Unconnected caller → predicate false (activation would park on the gate).
+        let unconnected = lifecycle_handler_with_facade(
+            &services,
+            Some(Arc::new(FakeChannelConnectionFacade { connected: false })),
+        );
+        assert!(
+            !unconnected
+                .caller_has_channel_connection(&scope, "slack")
+                .await,
+            "an unconnected caller must be blocked by the connection gate"
+        );
+
+        // No facade wired → fail closed (blocked), never falsely "ready".
+        let unwired = lifecycle_handler_with_facade(&services, None);
+        assert!(
+            !unwired.caller_has_channel_connection(&scope, "slack").await,
+            "without a connectable-channel facade the gate must fail closed"
+        );
+    }
+
+    fn lifecycle_handler_with_facade(
+        services: &RebornServices,
+        facade: Option<Arc<dyn ChannelConnectionFacade>>,
+    ) -> ExtensionLifecycleToolHandler {
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let credential_accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .runtime_credential_account_selection_service();
+        let channel_connection = Arc::new(OnceLock::new());
+        if let Some(facade) = facade {
+            channel_connection.set(facade).ok();
+        }
+        ExtensionLifecycleToolHandler {
+            extension_management,
+            credential_accounts,
+            channel_connection,
+        }
+    }
 
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
@@ -314,6 +603,10 @@ mod tests {
                 && search.description.contains("connect")
                 && search.description.contains("service name")
                 && search.description.contains("discovery only")
+                && search.description.contains("external channel")
+                && search
+                    .description
+                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID)
                 && search.description.contains(EXTENSION_INSTALL_CAPABILITY_ID),
             "extension_search description should teach the model to discover bundled or inactive integrations from generic service names: {}",
             search.description
@@ -346,11 +639,14 @@ mod tests {
             activate.description.contains("credential/auth gate")
                 && activate.description.contains("do not ask the user")
                 && activate.description.contains("activated=true")
+                && activate.description.contains("visible_capability_ids")
+                && activate.description.contains("external channel")
+                && activate.description.contains("app/bot")
+                && activate.description.contains("WebChat connection panel")
                 && activate
                     .description
-                    .contains("ignore earlier search/install onboarding")
-                && activate.description.contains("write-capable tools"),
-            "extension_activate description should teach the model to raise auth through activation: {}",
+                    .contains("continue the original request"),
+            "extension_activate description should teach the model to raise auth through activation and route channel pairing through UI: {}",
             activate.description
         );
 

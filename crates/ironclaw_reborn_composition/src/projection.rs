@@ -188,6 +188,7 @@ pub(crate) fn build_reborn_projection_services(
     let projection: Arc<dyn EventProjectionService> =
         Arc::new(ReplayEventProjectionService::from_runtime_log(event_log));
     let live_updates = Arc::new(InMemoryProjectionUpdateSource::new(128));
+    let live_sequence = Arc::new(AtomicU64::new(0));
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -199,7 +200,7 @@ pub(crate) fn build_reborn_projection_services(
     RebornProjectionServices {
         event_stream_manager,
         live_updates,
-        live_sequence: Arc::new(AtomicU64::new(0)),
+        live_sequence,
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),

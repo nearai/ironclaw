@@ -56,11 +56,9 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
     let bundle = build_google_oauth_product_auth_for_test();
     let scope = test_scope();
 
-    // Step 1 — run the OAuth connect flow to create a Google credential account.
-    // After this, egress.captured_count() == 1 (initial token exchange).
-    // Capture the account id (Copy) and the connect-exchange access handle
-    // before `account` is moved into the sweep candidate list, so the post-sweep
-    // read-back can prove the handle was rewritten by the refresh.
+    // Capture the connect-exchange access handle before `account` moves into
+    // the sweep candidate list, so the post-sweep read-back can prove it was
+    // rewritten by the refresh.
     let account = connect_google_account(&bundle, &scope, 0xaa).await;
     let account_id = account.id;
     let connect_access_handle = account
@@ -68,12 +66,11 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
         .clone()
         .expect("connect flow must persist an access-token handle");
 
-    // Step 2 — freeze the clock 3 days ahead.  The account was just created
-    // (updated_at ≈ Utc::now()), so idle_cutoff = frozen_now − 2 days is
-    // still 1 day in the future relative to creation, making the account idle.
+    // Freeze the clock 3 days ahead: the account was just created (updated_at
+    // ≈ Utc::now()), so idle_cutoff = frozen_now − 2 days is still 1 day ahead
+    // of creation, making the account idle.
     let frozen_now = Utc::now() + Duration::days(3);
 
-    // Step 3 — run the sweep with the frozen clock and an enabled settings bundle.
     bundle
         .sweep_for_refresh(
             vec![account],
@@ -82,8 +79,6 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
         )
         .await;
 
-    // Step 4 — egress must now have captured 2 calls: the initial token exchange
-    // and the refresh call from the sweep.
     assert_eq!(
         bundle.egress.captured_count(),
         2,
@@ -91,8 +86,8 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
          (total egress count: initial exchange + refresh)"
     );
 
-    // The sweep's exchange must use the refresh_token grant (not a second
-    // authorization-code exchange) — proves the refresh path, not a re-connect.
+    // Must use the refresh_token grant, not a second authorization_code
+    // exchange — proves the refresh path, not a re-connect.
     let grant_types = bundle.egress.captured_grant_types();
     assert_eq!(
         grant_types.get(1).map(String::as_str),
@@ -100,10 +95,10 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
         "sweep token exchange must use the refresh_token grant; grant_types: {grant_types:?}"
     );
 
-    // Step 5 — re-read the account through the durable account service and prove
-    // the refresh COMMITTED the rotated credential (guards the "HTTP fired but
-    // the account write was dropped" failure mode).  This reads the REAL
-    // persisted record, not the in-test `account` variable.
+    // Re-read the account through the durable account service to prove the
+    // refresh COMMITTED the rotated credential (guards the "HTTP fired but the
+    // account write was dropped" failure mode) — this reads the REAL persisted
+    // record, not the in-test `account` variable.
     let refreshed = bundle
         .services
         .credential_account_service()
@@ -118,8 +113,6 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
         .access_secret
         .expect("refreshed account must still carry an access-token handle");
 
-    // The persisted handle must have been rewritten away from the connect
-    // handle …
     assert_ne!(
         refreshed_access_handle.as_str(),
         connect_access_handle.as_str(),
@@ -127,8 +120,6 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
          connect-exchange handle still being present means the account write was \
          dropped"
     );
-    // … and must be the refresh-path handle specifically, proving it was the
-    // refresh write-back (not some unrelated mutation) that committed it.
     assert!(
         refreshed_access_handle
             .as_str()
@@ -147,12 +138,11 @@ async fn credential_refresh_sweep_skips_fresh_google_account() {
     let bundle = build_google_oauth_product_auth_for_test();
     let scope = test_scope();
 
-    // Step 1 — create the account (egress count becomes 1).
     let account = connect_google_account(&bundle, &scope, 0xbb).await;
 
-    // Step 2 — sweep with Utc::now() as the clock.  The account was just
-    // created, so updated_at is effectively Utc::now(); idle_cutoff = now −
-    // 2 days is 2 days ago, which is BEFORE updated_at → account is NOT idle.
+    // Sweep with Utc::now() as the clock: the account was just created, so
+    // updated_at is effectively Utc::now(); idle_cutoff = now − 2 days is
+    // 2 days ago, which is BEFORE updated_at → account is NOT idle.
     bundle
         .sweep_for_refresh(
             vec![account],
@@ -161,7 +151,6 @@ async fn credential_refresh_sweep_skips_fresh_google_account() {
         )
         .await;
 
-    // Step 3 — no refresh call should have been made.
     assert_eq!(
         bundle.egress.captured_count(),
         1,

@@ -29,6 +29,8 @@ mod auth_prompt;
 mod automation;
 mod available_extensions;
 mod bundled_skills;
+#[cfg(feature = "slack-v2-host-beta")]
+mod channel_connection_resume;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
@@ -105,6 +107,9 @@ mod skill_learning;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
+#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]

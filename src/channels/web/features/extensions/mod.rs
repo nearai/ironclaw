@@ -28,7 +28,6 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
@@ -698,61 +697,11 @@ pub(crate) async fn extensions_setup_submit_handler(
             resp.auth_url = result.auth_url.clone();
             resp.onboarding_state = result.onboarding_state;
             resp.onboarding = result.onboarding.clone();
-            let outcome = crate::channels::web::onboarding::classify_configure_result(&result);
-            let mut onboarding_event =
-                crate::channels::web::onboarding::event_from_configure_result(
-                    name.clone(),
-                    &result,
-                    req.thread_id.clone(),
-                );
-            if let (Some(request_id), Some(thread_id)) =
-                (req.request_id.as_deref(), req.thread_id.as_deref())
-            {
-                match outcome {
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired => {}
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
-                        instructions,
-                        onboarding,
-                    } => {
-                        let request_id = Uuid::parse_str(request_id).map_err(|_| {
-                            (
-                                StatusCode::BAD_REQUEST,
-                                "Invalid request_id (expected UUID)".to_string(),
-                            )
-                        })?;
-                        if let Some(next_request_id) =
-                            crate::bridge::transition_engine_pending_auth_request_to_pairing(
-                                &user.user_id,
-                                request_id,
-                                Some(thread_id),
-                                name.as_str(),
-                            )
-                            .await
-                            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                        {
-                            onboarding_event =
-                                crate::channels::web::types::OnboardingStateDto::pairing_required(
-                                    name.clone(),
-                                    Some(next_request_id),
-                                    Some(thread_id.to_string()),
-                                    Some(result.message.clone()),
-                                    instructions,
-                                    onboarding,
-                                );
-                        }
-                    }
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {
-                        crate::channels::web::platform::engine_dispatch::dispatch_engine_external_callback(
-                            &state,
-                            &user.user_id,
-                            thread_id,
-                            request_id,
-                        )
-                        .await?;
-                    }
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {}
-                }
-            }
+            let onboarding_event = crate::channels::web::onboarding::event_from_configure_result(
+                name.clone(),
+                &result,
+                req.thread_id.clone(),
+            );
             // Broadcast the canonical onboarding state so the chat UI can
             // dismiss or advance any in-progress onboarding UI.
             state

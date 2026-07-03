@@ -901,6 +901,21 @@ pub(crate) fn wrap_skill_activation_capability_for_test(
     )
 }
 
+/// Test-support forwarder (C-SYNTH outbound seam) for the two
+/// `outbound_delivery_*` synthetic-capability wraps. Bridges the private
+/// `local_dev` module to `test_support`; mirrors the `project_create` /
+/// `skill_activate` forwarders above. Tests only.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(
@@ -1484,6 +1499,28 @@ impl RebornRuntime {
         self.post_submit_hook_slot
             .as_ref()
             .is_some_and(|slot| slot.get().is_some())
+    }
+
+    /// Wire the per-caller channel-connection facade into the already-built
+    /// extension-lifecycle capability handler. Must be called after
+    /// [`build_reborn_runtime`] returns and after the facade is constructed
+    /// (e.g. inside the Slack host-beta WebUI composition). Idempotent: a second
+    /// call is silently ignored. Returns `false` when the local-runtime slot is
+    /// unavailable or already occupied, `true` on first successful set. Shares
+    /// the same `OnceLock` the handler reads
+    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn set_channel_connection_facade(
+        &self,
+        facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
+    ) -> bool {
+        let Some(local_runtime) = self.services.local_runtime.as_ref() else {
+            return false;
+        };
+        local_runtime
+            .channel_connection_facade_slot
+            .set(facade)
+            .is_ok()
     }
 
     #[cfg(test)]
@@ -5057,32 +5094,50 @@ output_schema_ref = "schemas/write.output.json"
     }
 
     #[cfg(feature = "root-llm-provider")]
+    static RUNTIME_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(feature = "root-llm-provider")]
     struct RuntimeEnvGuard {
-        name: &'static str,
-        previous: Option<String>,
+        _async_lock: tokio::sync::MutexGuard<'static, ()>,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<String>)>,
     }
 
     #[cfg(feature = "root-llm-provider")]
     impl RuntimeEnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = ironclaw_common::env_helpers::env_or_override(name);
-            ironclaw_common::env_helpers::set_runtime_env(name, value);
-            Self { name, previous }
+        async fn set(name: &'static str, value: &str) -> Self {
+            Self::with([(name, Some(value))]).await
         }
 
-        fn unset(name: &'static str) -> Self {
-            let previous = ironclaw_common::env_helpers::env_or_override(name);
-            ironclaw_common::env_helpers::remove_runtime_env(name);
-            Self { name, previous }
+        async fn with<const N: usize>(vars: [(&'static str, Option<&str>); N]) -> Self {
+            let async_lock = RUNTIME_ENV_TEST_LOCK.lock().await;
+            let env_lock = ironclaw_common::env_helpers::lock_env();
+            let previous = vars
+                .iter()
+                .map(|(name, _)| (*name, ironclaw_common::env_helpers::env_or_override(name)))
+                .collect::<Vec<_>>();
+            for (name, value) in vars {
+                match value {
+                    Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
+                    None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                }
+            }
+            Self {
+                _async_lock: async_lock,
+                _env_lock: env_lock,
+                previous,
+            }
         }
     }
 
     #[cfg(feature = "root-llm-provider")]
     impl Drop for RuntimeEnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => ironclaw_common::env_helpers::set_runtime_env(self.name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(self.name),
+            for (name, previous) in self.previous.iter().rev() {
+                match previous {
+                    Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
+                    None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                }
             }
         }
     }
@@ -5344,7 +5399,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(feature = "root-llm-provider")]
     #[tokio::test]
     async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
-        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token");
+        let _token_guard =
+            RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token").await;
         let session_dir = tempfile::tempdir().expect("session tempdir");
         let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
@@ -5404,7 +5460,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(feature = "root-llm-provider")]
     #[tokio::test]
     async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
-        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token");
+        let _token_guard =
+            RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token").await;
         let root = tempfile::tempdir().expect("tempdir");
         let session_dir = tempfile::tempdir().expect("session tempdir");
         let local_dev_root = root.path().join("local-dev");
@@ -5493,8 +5550,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let _env_guard =
+            RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -5643,8 +5700,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let _env_guard =
+            RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -6009,8 +6066,8 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
-        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
-        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let _env_guard =
+            RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
         let root = tempfile::tempdir().expect("tempdir");
         let local_dev_root = root.path().join("local-dev");
         let session_dir = tempfile::tempdir().expect("session tempdir");

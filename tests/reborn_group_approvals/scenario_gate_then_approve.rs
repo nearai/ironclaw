@@ -39,5 +39,29 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // reply was emitted (`builtin.write_file`'s result does not echo content).
     h.assert_workspace_file_contains("approved.txt", "approved write")
         .await?;
+
+    // Double-resolve regression guard (C-DENYEDGE row 6): approving the SAME
+    // already-`Completed` gate a second time must fail loudly, not silently
+    // no-op or hang. The approval record is already `Approved` from the first
+    // `approve_gate` call above, so this second call's `approve_local_dev_gate`
+    // hits `ApprovalResolver::approve_capability_action`'s
+    // `record.status != Pending` check and returns
+    // `ApprovalResolutionError::NotPending { status: Approved }` before the
+    // resume/coordinator layer is even reached.
+    let err = h
+        .approve_gate(run_id, &gate_ref)
+        .await
+        .err()
+        .ok_or("expected err: re-approving an already-resolved gate must fail")?;
+    let err_text = err.to_string();
+    if !err_text.contains("approval request is not pending") {
+        return Err(format!("expected the NotPending resolver error text, got: {err_text}").into());
+    }
+    if !err_text.contains("Approved") {
+        return Err(format!(
+            "expected the resolved ApprovalStatus::Approved token in the error, got: {err_text}"
+        )
+        .into());
+    }
     Ok(())
 }

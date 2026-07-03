@@ -13,7 +13,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -71,7 +71,14 @@ async fn local_dev_runtime_auth_interactions_use_flow_record_source() {
     );
     let actor = TurnActor::new(runtime.actor_user_id.clone());
     let gate_ref = GateRef::new("gate:runtime-auth-read-model").expect("gate");
-    let run_id = submit_and_block_auth_run(&runtime, scope.clone(), actor.clone(), &gate_ref).await;
+    let run_id = submit_and_block_auth_run(
+        &runtime,
+        scope.clone(),
+        actor.clone(),
+        &gate_ref,
+        Vec::new(),
+    )
+    .await;
     create_auth_flow(&runtime, &scope, &actor, run_id, &gate_ref).await;
 
     let pending = runtime
@@ -177,6 +184,7 @@ async fn submit_and_block_auth_run(
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &GateRef,
+    credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 ) -> TurnRunId {
     let local_runtime = runtime
         .services
@@ -238,7 +246,7 @@ async fn submit_and_block_auth_run(
                 .expect("checkpoint ref"),
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
-                credential_requirements: Vec::new(),
+                credential_requirements,
             },
         })
         .await
@@ -329,5 +337,192 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::ScrubbedEnv,
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+/// Caller-level regression for the channel-connection gate resume (V2). A
+/// channel-pairing gate carries no `AuthFlowRecord`, so it never surfaces
+/// through the OAuth `list_pending` read model; the dedicated resume read model
+/// enumerates it from blocked turn state instead. This drives the real
+/// composition read model + product-workflow resume service against a live
+/// `LocalDevTurnStateStore`, exactly as the Slack pairing-redeem route wires
+/// them, and pins scope + channel isolation.
+#[cfg(feature = "slack-v2-host-beta")]
+mod channel_pairing_resume_tests {
+    use std::sync::Arc;
+
+    use ironclaw_host_api::{
+        ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAuthRequirement, ThreadId, UserId,
+    };
+    use ironclaw_product_workflow::{
+        ChannelConnectionResumeReadModel, ChannelConnectionResumeScope,
+        ChannelConnectionResumeService, DefaultChannelConnectionResumeService,
+        ResumeChannelConnectionRequest,
+    };
+    use ironclaw_turns::{
+        GateRef, GetRunStateRequest, TurnActor, TurnCoordinator, TurnScope, TurnStatus,
+    };
+
+    use super::{build_runtime, submit_and_block_auth_run};
+    use crate::channel_connection_resume::LocalDevChannelConnectionResumeReadModel;
+
+    fn channel_pairing_requirement(channel: &str) -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new(channel).expect("provider"),
+            setup: RuntimeCredentialAccountSetup::ChannelPairing {
+                channel: channel.to_string(),
+            },
+            requester_extension: ExtensionId::new(channel).expect("requester extension"),
+            provider_scopes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_pairing_resume_continues_only_the_callers_runs_for_the_paired_channel() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_runtime(
+            "channel-pairing-resume",
+            root.path().join("local-dev"),
+            None,
+        )
+        .await
+        .expect("runtime builds");
+
+        let tenant = runtime.thread_scope.tenant_id.clone();
+        let agent = Some(runtime.thread_scope.agent_id.clone());
+        let project = runtime.thread_scope.project_id.clone();
+        let alice = UserId::new("user:alice-pairing").expect("alice");
+        let bob = UserId::new("user:bob-pairing").expect("bob");
+
+        // Run A: alice parked on the Slack connection gate.
+        let scope_a = TurnScope::new_with_owner(
+            tenant.clone(),
+            agent.clone(),
+            project.clone(),
+            ThreadId::new("thread:pairing-a").expect("thread"),
+            Some(alice.clone()),
+        );
+        let run_a = submit_and_block_auth_run(
+            &runtime,
+            scope_a.clone(),
+            TurnActor::new(alice.clone()),
+            &GateRef::new("gate:pairing-alice-slack").expect("gate"),
+            vec![channel_pairing_requirement("slack")],
+        )
+        .await;
+
+        // Run B: a DIFFERENT caller (bob) parked on the Slack gate.
+        let scope_b = TurnScope::new_with_owner(
+            tenant.clone(),
+            agent.clone(),
+            project.clone(),
+            ThreadId::new("thread:pairing-b").expect("thread"),
+            Some(bob.clone()),
+        );
+        let run_b = submit_and_block_auth_run(
+            &runtime,
+            scope_b.clone(),
+            TurnActor::new(bob.clone()),
+            &GateRef::new("gate:pairing-bob-slack").expect("gate"),
+            vec![channel_pairing_requirement("slack")],
+        )
+        .await;
+
+        // Run C: alice parked on a DIFFERENT channel (telegram).
+        let scope_c = TurnScope::new_with_owner(
+            tenant.clone(),
+            agent.clone(),
+            project.clone(),
+            ThreadId::new("thread:pairing-c").expect("thread"),
+            Some(alice.clone()),
+        );
+        let run_c = submit_and_block_auth_run(
+            &runtime,
+            scope_c.clone(),
+            TurnActor::new(alice.clone()),
+            &GateRef::new("gate:pairing-alice-telegram").expect("gate"),
+            vec![channel_pairing_requirement("telegram")],
+        )
+        .await;
+
+        let turn_state = Arc::clone(
+            &runtime
+                .services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime")
+                .turn_state,
+        );
+        let read_model = Arc::new(LocalDevChannelConnectionResumeReadModel::new(turn_state));
+
+        // Enumeration reads the durable snapshot (runner-independent, race-free):
+        // exactly alice's Slack run — not bob's, not alice's telegram run.
+        let enumerated = read_model
+            .channel_pairing_blocked_runs(
+                &ChannelConnectionResumeScope {
+                    tenant_id: tenant.clone(),
+                    user_id: alice.clone(),
+                },
+                "slack",
+            )
+            .await
+            .expect("enumerate caller's parked slack runs");
+        assert_eq!(
+            enumerated.len(),
+            1,
+            "only alice's slack-pairing run is enumerable for the caller"
+        );
+        assert_eq!(enumerated[0].run_id, run_a);
+
+        let service = DefaultChannelConnectionResumeService::new(
+            read_model,
+            runtime.webui_turn_coordinator(),
+        );
+        let response = service
+            .resume_channel_connection(ResumeChannelConnectionRequest {
+                scope: ChannelConnectionResumeScope {
+                    tenant_id: tenant.clone(),
+                    user_id: alice.clone(),
+                },
+                channel: "slack".to_string(),
+            })
+            .await
+            .expect("resume alice's slack-pairing runs");
+
+        // A successful `BlockedAuthGate` resume proves run A left the gate. The
+        // resume re-queues the SAME run id (no new turn/run), so no synthetic
+        // "Slack is connected, continue" message is appended.
+        assert_eq!(response.resumed_runs, vec![run_a]);
+
+        // Scope + channel isolation: bob's run and alice's telegram run remain
+        // parked, untouched by the resume.
+        let coordinator = runtime.webui_turn_coordinator();
+        let state_b = coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope_b,
+                run_id: run_b,
+            })
+            .await
+            .expect("bob run state");
+        assert_eq!(
+            state_b.status,
+            TurnStatus::BlockedAuth,
+            "another caller's parked run must not be resumed"
+        );
+        let state_c = coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope_c,
+                run_id: run_c,
+            })
+            .await
+            .expect("telegram run state");
+        assert_eq!(
+            state_c.status,
+            TurnStatus::BlockedAuth,
+            "a run parked on a different channel must not be resumed"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 }

@@ -256,7 +256,6 @@ absent, it wasn't.
 
         let rig = TestRigBuilder::new()
             .with_skills_dir(skills_root.path().to_path_buf())
-            .with_engine_v2()
             .build()
             .await;
 

@@ -915,11 +915,12 @@ registerPack("ko", {
   "pairing.error": "페어링에 실패했습니다.",
   "pairing.none": "대기 중인 페어링 요청이 없습니다.",
   "pairing.slackTitle": "Slack 계정 연��",
-  "pairing.slackInstructions": "Slack 앱에 메시지를 보낸 후 여기에 코드를 입력하세요.",
+  "pairing.slackInstructions": "Slack에서 IronClaw Reborn 앱에 메시지를 보내 페어링 코드를 받은 후 여기에 붙여넣으세요. 코드는 10분 후에 만료됩니다. 코드가 유효하지 않거나 만료되면 Slack에서 /pair를 실행해 새 코드를 받으세요.",
   "pairing.slackPlaceholder": "Slack 페어링 코드를 입력하세요…",
   "pairing.connect": "연결",
+  "pairing.reconnectHint": "연결됨 — 다시 페어링하려면 새 코드를 붙여넣으세요.",
   "pairing.slackSuccess": "Slack 계정이 연결되었습니다.",
-  "pairing.slackError": "유효하지 않거나 만료된 Slack 페어링 코드입니다.",
+  "pairing.slackError": "유효하지 않거나 만료된 Slack 페어링 코드입니다. Slack에서 /pair를 실행하여 새 코드를 받으세요.",
 
   // Admin — tabs
   "admin.tab.dashboard": "대시보드",
@@ -1067,6 +1068,7 @@ registerPack("ko", {
   "job.followupPlaceholder": "실행 중인 작업에 후속 프롬프트 보내기",
   "common.noChatsMatch": "\"{query}\"과 일치하는 채팅 없음",
   "extensions.configure": "구성",
+  "extensions.connect": "연결",
   "extensions.reconfigure": "재구성",
   "extensions.configureName": "{name} 구성",
   "extensions.allInstalled": "설치된 모든 확장 프로그램",

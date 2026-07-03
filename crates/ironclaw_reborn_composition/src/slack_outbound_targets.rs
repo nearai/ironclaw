@@ -63,7 +63,7 @@ pub(crate) struct SlackOutboundTargetProviderConfig {
 pub(crate) struct SlackPersonalDmTargetKey {
     pub(crate) tenant_id: TenantId,
     pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) team_id: String,
+    pub(crate) team_id: SlackTeamId,
     pub(crate) user_id: UserId,
 }
 
@@ -71,10 +71,10 @@ impl SlackPersonalDmTargetKey {
     pub(crate) fn new(
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
-        team_id: String,
+        team_id: SlackTeamId,
         user_id: UserId,
     ) -> Result<Self, SlackPersonalDmTargetError> {
-        validate_slack_id("slack team", &team_id)?;
+        validate_slack_id("slack team", team_id.as_str())?;
         Ok(Self {
             tenant_id,
             installation_id,
@@ -129,6 +129,19 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         &self,
         target: SlackPersonalDmTarget,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError>;
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: &AdapterInstallationId,
+        team_id: &SlackTeamId,
+    ) -> Result<usize, SlackPersonalDmTargetError>;
 }
 
 #[cfg(test)]
@@ -168,6 +181,39 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
             .insert(target.key.clone(), target.clone());
         Ok(target)
+    }
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError> {
+        Ok(self
+            .targets
+            .write()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
+            .remove(key)
+            .is_some())
+    }
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: &AdapterInstallationId,
+        team_id: &SlackTeamId,
+    ) -> Result<usize, SlackPersonalDmTargetError> {
+        let mut targets = self
+            .targets
+            .write()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
+        let before = targets.len();
+        targets.retain(|key, _| {
+            !(&key.tenant_id == tenant_id
+                && &key.user_id == user_id
+                && &key.installation_id == installation_id
+                && &key.team_id == team_id)
+        });
+        Ok(before - targets.len())
     }
 }
 
@@ -221,7 +267,7 @@ impl SlackPersonalDmTargetProvisioner {
         let key = SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
+            self.team_id.clone(),
             user_id,
         )?;
         let dm_channel_id = self.open_dm_channel(slack_user_id.as_str()).await?;
@@ -517,7 +563,7 @@ impl SlackHostBetaOutboundTargetProvider {
         let key = SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
+            self.team_id.clone(),
             caller.user_id.clone(),
         )
         .map_err(map_slack_personal_dm_target_error)?;
@@ -544,7 +590,7 @@ impl SlackHostBetaOutboundTargetProvider {
         let key = SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
+            self.team_id.clone(),
             caller.user_id.clone(),
         )
         .map_err(map_slack_personal_dm_target_error)?;
@@ -575,7 +621,7 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         let personal_dm_key = SlackPersonalDmTargetKey::new(
             self.tenant_id.clone(),
             self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
+            self.team_id.clone(),
             caller.user_id.clone(),
         );
         let personal_dm_target = async {
@@ -1072,7 +1118,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            TEAM.to_string(),
+            SlackTeamId::new(TEAM),
             UserId::new(USER).expect("user"),
         )
         .expect("key");
@@ -1120,7 +1166,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             AdapterInstallationId::new("install-alpha").expect("installation"),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             UserId::new("user:alice").expect("user"),
         )
         .expect("personal target key");
@@ -1309,7 +1355,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
-            TEAM.to_string(),
+            SlackTeamId::new(TEAM),
             UserId::new(USER).expect("user"),
         )
         .expect("key");
