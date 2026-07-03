@@ -148,14 +148,10 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 /// error.
 ///
 /// An oversized system skill (prompt ≈ 10k tokens at the ~4-bytes-per-token
-/// estimate, over the `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000` budget) is
-/// seeded through the SAME `seed_system_skill_for_test` seam the group
-/// constructor uses for `greet` — no new harness wiring. Activating it drives
-/// the real selection path (`reserve_skill_budget` →
-/// `SkillActivationSelectionError::ContextBudgetExceeded` →
-/// `CapabilityOutcome::Failed`, skill_activation.rs `selection_outcome`), and
-/// the run completes with the model seeing the failure — the
-/// synthetic-capability Failed-routing proof for this cap.
+/// estimate, over `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) is seeded via
+/// `seed_system_skill_for_test`. Activating it drives the real selection path
+/// (`reserve_skill_budget` → `SkillActivationSelectionError::ContextBudgetExceeded`
+/// → `CapabilityOutcome::Failed`, skill_activation.rs `selection_outcome`).
 #[tokio::test]
 async fn skill_activate_over_budget_surfaces_recoverable_failed() {
     let group = RebornIntegrationGroup::skill_activation_tools()
@@ -184,8 +180,7 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
         .await
         .expect("turn completes despite the failed activation");
 
-    // The budget failure surfaced as a model-visible Failed tool error carrying
-    // the budget summary — not a terminal driver_unavailable.
+    // Model-visible Failed, not a terminal driver_unavailable.
     harness
         .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
         .await
@@ -194,7 +189,6 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
         .assert_reply_contains("could not activate")
         .await
         .expect("run recovered and finalized");
-    // The oversized skill's instructions must NOT have been injected.
     assert!(
         harness
             .assert_model_request_contains("BLOAT_SKILL_FILLER")

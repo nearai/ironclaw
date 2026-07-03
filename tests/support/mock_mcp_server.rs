@@ -98,14 +98,17 @@ impl MockMcpServer {
         *self.state.force_tool_call_error.lock().unwrap() = Some((code, message.into()));
     }
 
-    /// Switch every id-bearing JSON-RPC response (`initialize`, `tools/list`,
-    /// `tools/call`) to SSE framing: `Content-Type: text/event-stream` with the
-    /// JSON-RPC body wrapped in a `data:` event, preceded by an empty `ping`
-    /// keepalive event. This is a legal Streamable-HTTP MCP framing — the client
-    /// advertises `Accept: application/json, text/event-stream` — so a conformant
-    /// client must parse it identically to plain JSON. Notification acks (no id)
-    /// stay `202 Accepted` with no body regardless. Sticky; default off (plain
+    /// Switch every id-bearing JSON-RPC response to SSE framing:
+    /// `Content-Type: text/event-stream` with the JSON-RPC body wrapped in a
+    /// `data:` event, preceded by an empty `ping` keepalive event. This is a
+    /// legal Streamable-HTTP MCP framing — the client advertises
+    /// `Accept: application/json, text/event-stream` — so a conformant client
+    /// must parse it identically to plain JSON. Notification acks (no id) stay
+    /// `202 Accepted` with no body regardless. Sticky; default off (plain
     /// JSON), so existing tests are unaffected. Drives the SSE format-matrix case.
+    ///
+    /// Only `initialize` and `tools/call` are exercised by any caller today;
+    /// `tools/list` framing is dispatch-reachable but currently untested.
     pub fn enable_sse_framing(&self) {
         *self.state.sse_framing.lock().unwrap() = true;
     }
@@ -587,11 +590,7 @@ async fn handle_mcp(
         StatusCode::OK
     };
 
-    // SSE framing (sticky, default off): wrap the JSON-RPC body in a `data:`
-    // event behind a keepalive `ping`, under `Content-Type: text/event-stream`.
-    // A conformant client (advertising both content types in Accept) must parse
-    // this identically to the plain-JSON path. Session-id header, if any, still
-    // rides alongside.
+    // SSE framing — see `enable_sse_framing` doc comment.
     if *state.sse_framing.lock().unwrap() {
         let json = serde_json::to_string(&response)
             .expect("serializing serde_json::Value for SSE body should not fail");

@@ -46,25 +46,19 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 ### Script discipline — one script entry per model call
 
-The script is a FIFO of model calls, consumed across every turn on the harness
-(a harness can run multiple sequential `submit_turn`s; each consumes as many
-entries as the model is called). Count entries by model calls, not by "turns":
+The script is a FIFO of model calls, consumed across every turn on the harness.
+Count entries by model calls, not by "turns":
 
-- A plain reply turn = **1** entry (`text(..)`).
-- An ungated tool-call turn = **2** entries: the `tool_call(..)` + the
-  post-execution model call that reacts to the tool result (usually a
-  `text(..)`).
-- **A gated tool-call turn (approval OR auth) consumes exactly 2 entries** —
-  the `tool_call(..)` that raises the gate + **one** post-resume model call —
-  **regardless of whether the gate is approved or denied.** Approve and deny take
-  the SAME number of script entries: the resume re-enters the loop once and the
-  model is called once more (to react to the granted result, or to the
-  authorization-failure tool error). Do not add a second post-gate entry for the
-  deny path; scripting three entries for a single gated turn over-runs the FIFO
-  and the extra entry silently bleeds into the next turn.
+- Plain reply turn = **1** entry (`text(..)`).
+- Ungated tool-call turn = **2** entries: `tool_call(..)` + the post-execution
+  model call (usually `text(..)`).
+- Gated tool-call turn (approval OR auth) = **exactly 2 entries**, whether the
+  gate is approved or denied: `tool_call(..)` + one post-resume model call
+  (reacting to the granted result or the authorization-failure tool error). A
+  third entry over-runs the FIFO and silently bleeds into the next turn.
 
 So a two-turn thread where both turns raise and resolve a gate needs 4 entries
-(`tool_call, text, tool_call, text`), whether each gate is approved or denied.
+(`tool_call, text, tool_call, text`).
 
 ## Requirements & expectations (non-negotiable)
 
@@ -182,26 +176,26 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the (first) captured egress request whose URL contains the substring.
 - `assert_egress_body_contains_any(url_substr, body_substr)` — body of ANY (not just the first) captured egress request whose URL contains the substring; for a multi-request handshake where every leg shares one URL (e.g. web-access's Exa MCP `initialize`/`notifications/initialized`/`tools/call` sequence) and only one leg's body carries the substring under test. Prefer `assert_egress_body_contains` whenever `url_substr` matches exactly one request.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
-- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
-Multi-turn (baseline-sliced) thread-history assertions in `assertions.rs` — the
-`assert_tool_error*` and `assert_conversation_history_*` families above scan the
-FULL thread history, which is safe only on a single-turn harness (on a second
-turn they can't tell which turn produced a given message). These `*_since`
-variants close that gap with the same `[baseline..]` slice idiom the
-egress/invocation assertions use, but over thread-history message COUNT and
-caller-controlled so it can be re-taken per turn:
-
-- `history_len()` — the current persisted thread-history message count. Capture at the START of the turn under test, pass it as `baseline` to a `*_since` assert after the turn, and only that turn's appended messages are considered.
-- `assert_tool_error_since(baseline, class, reason)` / `assert_no_tool_error_since(baseline, class, reason)` / `assert_tool_error_summary_contains_since(baseline, text)` — the `[baseline..]`-sliced forms of the three tool-error asserts. Same class-discrimination + fail-loud decode contract as the full-history siblings.
-- `assert_conversation_history_contains(needle)` — general persisted-transcript containment: some message's `content` contains `needle`, ANY role, full history. The persisted-history analogue of `assert_system_prompt_contains` (which reads only System-role model *requests*, not stored history).
-- `assert_conversation_history_contains_since(baseline, needle)` — the multi-turn (baseline-sliced) form.
-- `assert_conversation_history_role_contains(kind, needle)` — restricts the containment check to a single `MessageKind` (role), e.g. assert a `User` prompt or `Assistant` reply landed without matching the same text in another role.
-- Demo + regression: `tests/reborn_integration_http_matcher.rs::multi_turn_baseline_sliced_history_assertions` runs two error-raising turns on one thread and asserts the slice excludes the prior turn (both tool-error and prompt) and that the role filter discriminates.
+Multi-turn (baseline-sliced) variants: the `assert_tool_error*` and
+`assert_conversation_history_*` families scan the FULL thread history — safe
+only on a single-turn harness. On multi-turn threads, capture
+`history_len()` at the START of the turn under test and pass it as `baseline`
+to the `*_since` forms (`assert_tool_error_since`, `assert_no_tool_error_since`,
+`assert_tool_error_summary_contains_since`,
+`assert_conversation_history_contains_since`) so only that turn's appended
+messages are considered. `assert_conversation_history_contains(needle)` checks
+persisted-transcript containment across ANY role (the stored-history analogue
+of `assert_system_prompt_contains`, which reads only System-role model
+requests); `assert_conversation_history_role_contains(kind, needle)` restricts
+it to one `MessageKind`. Contracts (class discrimination, fail-loud decode)
+match the full-history siblings — see their doc-comments. Demo + regression:
+`tests/reborn_integration_http_matcher.rs::multi_turn_baseline_sliced_history_assertions`.
 
 ### Keyed HTTP responses
 

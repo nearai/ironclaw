@@ -70,12 +70,9 @@ async fn triggered_submit_carries_scheduled_trigger_origin() {
 ///
 /// This is what makes the `triggered_submit_carries_scheduled_trigger_origin`
 /// assertion above *discriminating*: without a contrasting turn on the same wire,
-/// a `ScheduledTrigger` assertion could pass even if the origin were hardcoded to
-/// that value everywhere. Proving the interactive turn lands on a DIFFERENT origin
-/// pins that the origin is genuinely propagated from the submission path, not a
-/// constant. Both origins are read through the identical
-/// `coordinator.get_run_state(...).product_context.origin` boundary — the same
-/// accessor the roadmap's C-TRIGGERED-ORIGIN row specifies (no new seam).
+/// a `ScheduledTrigger` assertion could pass even if the origin were hardcoded
+/// everywhere. Both origins are read through the identical
+/// `coordinator.get_run_state(...).product_context.origin` boundary.
 ///
 /// (`TurnOriginKind` has no distinct "interactive" variant — the enum is
 /// `WebUi | Inbound | ScheduledTrigger`, `crates/ironclaw_turns/src/origin.rs`.
@@ -116,17 +113,15 @@ async fn interactive_submit_carries_inbound_origin_not_scheduled_trigger() {
 /// completion persists its final reply in the TRIGGER's own thread, readable
 /// through the same thread-history boundary interactive replies use.
 ///
-/// Probe finding this pins (Wave-3 item 1): at this tier a completed run's
-/// final reply does NOT route through `ProductAdapter::render_outbound` (and
-/// therefore never reaches an `OutboundDeliverySink`) — the only production
-/// constructor of `ProductOutboundDeliveryRequest` is the Slack delivery
-/// services-shell (`slack_delivery.rs`, feature-gated), which no harness
-/// composition wires. The int-tier-observable delivery contract of a triggered
-/// run is therefore: reply finalized + persisted in the trigger's own thread —
-/// the same persisted state production's `deliver_triggered_run` reads via its
-/// finalized-message lookup before pushing. That is what this test asserts;
-/// the push leg itself stays with the services-shell spike
-/// (C-TRIGGERED-DELIVERY defer).
+/// At this tier a completed run's final reply does NOT route through
+/// `ProductAdapter::render_outbound` (and therefore never reaches an
+/// `OutboundDeliverySink`) — the only production constructor of
+/// `ProductOutboundDeliveryRequest` is the Slack delivery services-shell
+/// (`slack_delivery.rs`, feature-gated), which no harness composition wires.
+/// The int-tier-observable delivery contract is therefore: reply finalized +
+/// persisted in the trigger's own thread — the same state production's
+/// `deliver_triggered_run` reads before pushing. The push leg itself stays
+/// with the services-shell spike (C-TRIGGERED-DELIVERY defer).
 #[tokio::test]
 async fn triggered_run_completes_and_persists_reply_in_trigger_thread() {
     let harness = RebornIntegrationHarness::test_default()

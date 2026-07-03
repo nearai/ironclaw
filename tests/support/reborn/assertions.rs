@@ -664,10 +664,6 @@ fn redact_data_url(url: &str) -> String {
 /// than a shared in-process recorder: capture [`history_len`] at the start of a
 /// turn, then assert `*_since(baseline, ..)` after it, and only the messages
 /// that turn appended are considered.
-///
-/// This block is appended (additive) rather than folded into the sibling impl
-/// so three parallel Wave-3 lanes union-merge without conflict; it deliberately
-/// does not touch or rename the existing full-history collectors above.
 impl RebornIntegrationHarness {
     /// Full persisted thread-history for this harness's thread, in sequence
     /// order. The baseline-sliced `*_since` assertions read this; kept private

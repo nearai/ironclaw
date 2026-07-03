@@ -46,32 +46,28 @@
 //! (`tests/support/reborn/harness.rs`) for the mechanism (active-registry
 //! publish + real asset-directory mount).
 //!
-//! ## Deferred / blocked permutations (findings — see the module doc of the
-//! ## enabler notes and the lane report)
+//! ## Deferred / blocked permutations
 //!
 //! - **Triggered-origin chained journey** (trigger fire → gate → resume →
-//!   follow-up): the scripted-gateway-for-trigger-scope seam this needs
-//!   (`RebornIntegrationHarness::submit_triggered_turn_scripted`) has since
-//!   landed from the sibling triggered lane — it mints the trigger's own scope
-//!   and registers a scripted gateway for it, so a triggered run can now be
-//!   driven to completion (see `reborn_integration_triggered_submit`). A CHAINED
-//!   triggered journey that additionally parks on a real approval/auth gate and
-//!   resumes is a documented FOLLOW-UP: resolving such a gate must reconcile the
-//!   trigger's minted owner scope with the journey approval helpers'
-//!   (`approve_gate`/`resolve_auth_gate`) binding scope, which is scenario-design
-//!   work deferred to the post-fold assertion-strengthening pass rather than
-//!   authored here. Single-turn triggered-origin coverage already exists.
-//! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): NOW ACTIVE in
-//!   the wave-3 fold. It runs on `RebornIntegrationGroup::multiuser_approvals()`,
-//!   whose per-actor capability dispatch (the C-MULTIUSER
-//!   `scope_capability_by_run_owner` harness seam, merged from the sibling lane)
-//!   scopes each actor's gated write to ITS OWN run owner — so actor B no longer
-//!   dies with `driver_protocol_violation` under actor A's user. The scenario
-//!   disables auto-approve for each owner (that group defaults auto-approve ON
-//!   per owner) so both actors raise a real `BlockedApproval`, then pins that
-//!   gate resolution + resume state stay bound to the raising actor. (Plain —
-//!   non-gated — distinct-actor isolation is covered by
-//!   `reborn_group_multiuser::two_actors_own_threads`.)
+//!   follow-up): the scripted-gateway seam this needs
+//!   (`RebornIntegrationHarness::submit_triggered_turn_scripted`) mints the
+//!   trigger's own scope and registers a scripted gateway for it, so a
+//!   triggered run can be driven to completion (see
+//!   `reborn_integration_triggered_submit`). A CHAINED triggered journey that
+//!   additionally parks on a real approval/auth gate is a FOLLOW-UP: resolving
+//!   such a gate must reconcile the trigger's minted owner scope with the
+//!   journey approval helpers' (`approve_gate`/`resolve_auth_gate`) binding
+//!   scope. Single-turn triggered-origin coverage already exists.
+//! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): runs on
+//!   `RebornIntegrationGroup::multiuser_approvals()`, whose per-actor
+//!   capability dispatch (the C-MULTIUSER `scope_capability_by_run_owner`
+//!   harness seam) scopes each actor's gated write to ITS OWN run owner — so
+//!   actor B no longer dies with `driver_protocol_violation` under actor A's
+//!   user. The scenario disables auto-approve for each owner (that group
+//!   defaults auto-approve ON per owner) so both actors raise a real
+//!   `BlockedApproval`, then pins that gate resolution + resume state stay
+//!   bound to the raising actor. (Plain — non-gated — distinct-actor isolation
+//!   is covered by `reborn_group_multiuser::two_actors_own_threads`.)
 
 #[allow(dead_code)]
 #[path = "../support/reborn/mod.rs"]
@@ -136,13 +132,8 @@ async fn journeys_group_auth_convergence_e2e() {
     report.assert_all_passed();
 }
 
-/// The multi-actor GATED journey (un-ignored in the wave-3 fold now the
-/// C-MULTIUSER `scope_capability_by_run_owner` harness seam has merged). Uses
-/// `multiuser_approvals()` — file-approval tools with per-actor capability
-/// dispatch — so a distinct actor's gated write is scoped to ITS OWN run owner
-/// (no more `driver_protocol_violation`); the scenario disables auto-approve for
-/// each owner so both actors raise a real `BlockedApproval` gate, then proves
-/// gate resolution + resume state stay bound to the RAISING actor.
+/// The multi-actor GATED journey — see the module doc's "Multi-actor GATED
+/// journey" note for the `scope_capability_by_run_owner` seam this requires.
 #[tokio::test]
 async fn multi_actor_gate_isolation() {
     let g = RebornIntegrationGroup::multiuser_approvals()

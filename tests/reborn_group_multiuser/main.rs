@@ -25,9 +25,9 @@ use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 async fn multiuser_group_e2e() {
     let mut report = ScenarioReport::new();
 
-    // Scenario 1: two distinct actors, each completing a turn on their own
-    // thread over the SAME shared coordinator/scheduler/thread_service — the
-    // thread-history isolation the E-MULTIUSER `with_actor_id` seam provides.
+    // Scenario 1 (E-MULTIUSER): two distinct actors complete turns on their
+    // own threads over the shared coordinator (see module doc for the
+    // `with_actor_id` seam).
     let g = RebornIntegrationGroup::builtin_tools()
         .await
         .expect("builtin group builds");
@@ -36,9 +36,8 @@ async fn multiuser_group_e2e() {
         scenario_two_actors_own_threads::run(&g).await,
     );
 
-    // Scenario 2 (C-MULTIUSER): per-actor MEMORY isolation. Uses the
-    // per-actor-scoped memory group so each actor's memory lands under its own
-    // owner subtree (production's `MemoryDocumentScope` behavior).
+    // Scenario 2 (C-MULTIUSER): per-actor memory isolation — see
+    // scenario_memory_isolation_across_actors for the seam.
     let memory_group = RebornIntegrationGroup::multiuser_memory_tools()
         .await
         .expect("multiuser memory group builds");
@@ -47,9 +46,8 @@ async fn multiuser_group_e2e() {
         scenario_memory_isolation_across_actors::run(&memory_group).await,
     );
 
-    // Scenario 3 (C-MULTIUSER): per-actor AUTO-APPROVE / approval-settings
-    // isolation. Uses the per-actor-scoped file-approval group so a grant for
-    // actor A does not skip actor B's gate.
+    // Scenario 3 (C-MULTIUSER): per-actor auto-approve isolation — see
+    // scenario_auto_approve_isolation_across_actors for the seam.
     let approvals_group = RebornIntegrationGroup::multiuser_approvals()
         .await
         .expect("multiuser approvals group builds");

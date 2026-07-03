@@ -58,8 +58,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let (run2, gate2) = h
         .submit_turn_until_blocked("JOURNEY_TURN2 write the denied file")
         .await?;
-    // Distinct run id: the second turn is a genuinely new run on the same thread,
-    // not a re-emission of turn 1.
     if run2 == run1 {
         return Err("turn 2 reused turn 1's run id — turns did not chain".into());
     }
