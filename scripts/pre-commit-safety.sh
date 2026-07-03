@@ -15,6 +15,8 @@
 #   8. CredentialName referenced in web-layer code (wrong identity at boundary)
 #   9. SSE broadcast emitted outside the engine→AppEvent projection bridge
 #  10. Newly-added pub fn/type/struct/enum/trait with zero callers (dead/speculative API)
+#  11. Architecture sprawl smoke alarms without arch-exempt tracking plan
+#  12. Unscoped SSE broadcast in multi-tenant-reachable code
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
@@ -24,6 +26,7 @@
 # For check #8, use "// web-identity-exempt: <reason>" instead.
 # For check #9, use "// projection-exempt: <category>, <detail>" instead.
 # For check #10, use "// pub-api-exempt: <reason>" instead.
+# For check #11, use "// arch-exempt: <category>, <reason>, plan #NNNN" instead.
 
 set -euo pipefail
 
@@ -238,6 +241,29 @@ warn() {
     fi
     WARNINGS=$((WARNINGS + 1))
     echo "  [$1] $2"
+}
+
+arch_exempt_re() {
+    local category="$1"
+    printf '//[[:space:]]*arch-exempt:[[:space:]]*%s,[[:space:]]*.+,[[:space:]]*plan #[0-9]+' "$category"
+}
+
+diff_for_file() {
+    local f="$1"
+    if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+        git diff --cached -U0 -- "$f" 2>/dev/null || true
+    else
+        git diff "$BASE_REF" -U0 -- "$f" 2>/dev/null || true
+    fi
+}
+
+file_content_for_file() {
+    local f="$1"
+    if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+        git show ":$f" 2>/dev/null || true
+    else
+        cat "$f" 2>/dev/null || true
+    fi
 }
 
 # 1. Unsafe UTF-8 byte slicing: &s[..N] or &s[..some_var] on strings
@@ -478,7 +504,152 @@ if [ -n "$PUB_API_HITS" ]; then
     printf '%s' "$PUB_API_HITS"
 fi
 
-# 10. Cross-tenant safety: an UNSCOPED `sse.broadcast(...)` call (i.e. not
+# 11. Architecture sprawl smoke alarms.
+#     See `.claude/rules/architecture.md`. These checks intentionally cover
+#     only grep-able review flags; semantic identity-copy review stays human.
+#     Suppress with: `// arch-exempt: <category>, <reason>, plan #NNNN`.
+TOO_MANY_ARGS_EXEMPT_RE=$(arch_exempt_re "too_many_args")
+TOO_MANY_ARGS_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$TOO_MANY_ARGS_EXEMPT_RE" '
+    /^(\+\+\+|---|@@)/ { prev = ""; next }
+    /^\+/ {
+        if ($0 ~ /#\[allow\(clippy::too_many_arguments\)\]/ && prev !~ exempt && $0 !~ exempt) {
+            print $0
+        }
+        prev = $0
+        next
+    }
+    /^ / { prev = $0; next }
+')
+if [ -n "$TOO_MANY_ARGS_HITS" ]; then
+    warn "ARCH-SPRAWL" "New #[allow(clippy::too_many_arguments)] requires '// arch-exempt: too_many_args, <reason>, plan #NNNN' on the line above."
+    printf '%s\n' "$TOO_MANY_ARGS_HITS" | head -5 | sed 's/^/    /'
+fi
+
+OPTIONAL_ARC_EXEMPT_RE=$(arch_exempt_re "optional_arc")
+OPTIONAL_ARC_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$OPTIONAL_ARC_EXEMPT_RE" '
+    function flush() {
+        if (file == "") return
+        for (name in fields) {
+            if (builders[name] && (field_added[name] || builder_added[name]) && !field_exempt[name] && !builder_exempt[name]) {
+                print file
+                break
+            }
+        }
+    }
+    function reset_file() {
+        delete fields
+        delete field_added
+        delete field_exempt
+        delete builders
+        delete builder_added
+        delete builder_exempt
+        pending_exempt = 0
+    }
+    function mark_field(name, added) {
+        fields[name] = 1
+        if (added) field_added[name] = 1
+        if (pending_exempt) field_exempt[name] = 1
+        pending_exempt = 0
+    }
+    function mark_builder(name, added) {
+        builders[name] = 1
+        if (added) builder_added[name] = 1
+        if (pending_exempt) builder_exempt[name] = 1
+        pending_exempt = 0
+    }
+    function option_field(line) {
+        sub(/^\+[[:space:]]*/, "", line)
+        sub(/^[[:space:]]*/, "", line)
+        sub(/^pub(\([^)]*\))?[[:space:]]+/, "", line)
+        sub(/[[:space:]]*:.*$/, "", line)
+        return line
+    }
+    function builder_name(line) {
+        sub(/^.*fn[[:space:]]+with_/, "", line)
+        sub(/[[:space:]]*\(.*/, "", line)
+        return line
+    }
+    /^\+\+\+ b\// {
+        flush()
+        file = substr($0, 7)
+        reset_file()
+        next
+    }
+    /^\+\+\+ / { flush(); file = ""; next }
+    /^@@ / { next }
+    /^[+ ].*arch-exempt:/ && $0 ~ exempt { pending_exempt = 1 }
+    /^[+ ].*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*Option<Arc/ {
+        line_exempt = ($0 ~ exempt)
+        field = option_field($0)
+        mark_field(field, $0 ~ /^\+/)
+        if (line_exempt) field_exempt[field] = 1
+    }
+    /^[+ ].*fn[[:space:]]+with_[A-Za-z0-9_]*[[:space:]]*\(/ {
+        line_exempt = ($0 ~ exempt)
+        builder = builder_name($0)
+        mark_builder(builder, $0 ~ /^\+/)
+        if (line_exempt) builder_exempt[builder] = 1
+    }
+    END { flush() }
+')
+if [ -n "$OPTIONAL_ARC_HITS" ]; then
+    warn "ARCH-SPRAWL" "New Option<Arc<...>> paired with a with_* builder requires '// arch-exempt: optional_arc, <reason>, plan #NNNN'."
+    printf '%s\n' "$OPTIONAL_ARC_HITS" | head -5 | sed 's/^/    /'
+fi
+
+PARALLEL_DISPATCH_EXEMPT_RE=$(arch_exempt_re "parallel_dispatch")
+PARALLEL_DISPATCH_HITS=$(printf '%s\n' "$DIFF_OUTPUT_NO_TESTS" | awk -v exempt="$PARALLEL_DISPATCH_EXEMPT_RE" '
+    function call_key(line) {
+        if (line ~ /dispatcher\.dispatch[[:space:]]*\(/) return "dispatcher.dispatch"
+        if (line ~ /effects\.execute_action[[:space:]]*\(/) return "effects.execute_action"
+        if (match(line, /safety_layer\.scan_[A-Za-z0-9_]*[[:space:]]*\(/)) return substr(line, RSTART, RLENGTH)
+        return ""
+    }
+    /^\+\+\+ b\// { prev = ""; file = substr($0, 7); next }
+    /^(---|@@)/ { prev = ""; next }
+    /^\+/ {
+        if ($0 ~ exempt) file_exempt[file] = 1
+        key = call_key($0)
+        if (key != "") {
+            seen[file SUBSEP key]++
+        }
+        if (key != "" && seen[file SUBSEP key] > 1 && !file_exempt[file] && prev !~ exempt && $0 !~ exempt) {
+            print $0
+        }
+        prev = $0
+        next
+    }
+    /^ / { prev = $0; next }
+')
+if [ -n "$PARALLEL_DISPATCH_HITS" ]; then
+    warn "ARCH-SPRAWL" "Repeated known dispatcher/executor/safety call sites in the same file require '// arch-exempt: parallel_dispatch, <reason>, plan #NNNN' or a single-gateway refactor."
+    printf '%s\n' "$PARALLEL_DISPATCH_HITS" | head -5 | sed 's/^/    /'
+fi
+
+LARGE_FILE_EXEMPT_RE=$(arch_exempt_re "large_file")
+LARGE_FILE_HITS=""
+for f in $CHANGED_FILES; do
+    case "$f" in
+        src/*.rs|crates/*.rs) ;;
+        *) continue ;;
+    esac
+    [ -f "$f" ] || continue
+    line_count=$(file_content_for_file "$f" | wc -l | tr -d ' ')
+    [ "${line_count:-0}" -gt 1500 ] || continue
+    file_diff=$(diff_for_file "$f")
+    added_count=$(printf '%s\n' "$file_diff" | awk '/^\+/ && !/^\+\+\+ / { count++ } END { print count + 0 }')
+    [ "${added_count:-0}" -gt 0 ] || continue
+    if ! file_content_for_file "$f" | grep -Eq "$LARGE_FILE_EXEMPT_RE"; then
+        LARGE_FILE_HITS="${LARGE_FILE_HITS}    ${f} (${line_count} lines, +${added_count})
+"
+    fi
+done
+if [ -n "$LARGE_FILE_HITS" ]; then
+    warn "ARCH-SPRAWL" "Adding to a .rs file over 1,500 lines requires '// arch-exempt: large_file, <reason>, plan #NNNN' or a decomposition follow-up."
+    printf '%s' "$LARGE_FILE_HITS" | head -5
+fi
+
+# 12. Cross-tenant safety: an UNSCOPED `sse.broadcast(...)` call (i.e. not
 #     `broadcast_for_user`) delivers the event to every connected
 #     subscriber, regardless of which user owns the underlying state.
 #     In multi-tenant deployments that pattern leaks tool calls, log
@@ -523,6 +694,7 @@ if [ "$WARNINGS" -gt 0 ]; then
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
     echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
     echo "(For PUBAPI warnings, use '// pub-api-exempt: <reason>' instead.)"
+    echo "(For ARCH-SPRAWL warnings, use '// arch-exempt: <category>, <reason>, plan #NNNN' instead.)"
     echo "(For MULTITENANT warnings, use '// multi-tenant-safe: <reason>' instead.)"
     echo ""
     exit 1

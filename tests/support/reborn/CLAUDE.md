@@ -90,6 +90,12 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
   in `harness_mcp.rs`. `harness.rs` remains large (a further `harness_auth.rs`
   split is tracked in the coverage roadmap).
+- `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
+  `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
+  `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
+  private child module of `group.rs` (same `harness_mcp.rs` split precedent)
+  so it can reach `group.rs`'s shared assembly internals at module-private
+  visibility. See [Group tests](#group-tests) below.
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
@@ -151,7 +157,8 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_count(n)` — exact count of captured egress requests.
 - `assert_egress_url_order(&[substrings])` — URLs in call order, each containing the matching substring; also checks count.
 - `assert_egress_method_order(&[methods])` — HTTP methods in call order (case-insensitive).
-- `assert_egress_body_contains(url_substr, body_substr)` — body of the captured egress request whose URL contains the substring.
+- `assert_egress_body_contains(url_substr, body_substr)` — body of the (first) captured egress request whose URL contains the substring.
+- `assert_egress_body_contains_any(url_substr, body_substr)` — body of ANY (not just the first) captured egress request whose URL contains the substring; for a multi-request handshake where every leg shares one URL (e.g. web-access's Exa MCP `initialize`/`notifications/initialized`/`tools/call` sequence) and only one leg's body carries the substring under test. Prefer `assert_egress_body_contains` whenever `url_substr` matches exactly one request.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
@@ -219,6 +226,40 @@ Script with `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": .
 followed by a trailing `RebornScriptedReply::text(..)` turn.
 
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — see the "Richer assertions" list below; this is the assertion for this capability.
+
+### Turn lifecycle events
+
+`.with_turn_event_sink()` (harness or group builder) installs an in-memory
+`ironclaw_turns::InMemoryTurnEventSink` into the ONE planned runtime via the
+production `lifecycle_bus.subscribe_best_effort` seam — the entry point Trace
+Commons capture and skill learning hang off in production. Off by default
+(`turn_event_sink: None`, matching every pre-existing test).
+
+- `assert_turn_event_recorded(kind)` — at least one recorded `TurnLifecycleEvent`
+  of that `TurnEventKind` (e.g. `Completed`). The sink is group-shared, but the
+  harness records `baseline_turn_event_count` at construction and
+  `recorded_turn_events` slices `[baseline..]` (R2), so each thread only sees
+  events its own turns published — a sibling thread's earlier event can't make
+  this assertion pass.
+
+### Attachments (multimodal)
+
+`RebornIntegrationGroup::attachment_tools()` wires the real production
+attachment pair over the local-dev workspace filesystem:
+`ProjectScopedAttachmentLander` (lands inbound bytes) +
+`ProjectScopedAttachmentReader` (the `attachment_read_port` the loop model port
+reads bytes back through). Route the thread at a vision-capable model id with
+`.with_model_override(model_id)` (see `ironclaw_llm::vision_models`) — the
+scripted default id is not a vision pattern, so image parts are dropped for it.
+
+- `submit_turn_with_image_attachment(text, filename, mime, bytes)` — lands the
+  image through the real `submit_inbound_with_attachments` entry point and waits
+  for completion. Errors if the harness has no lander (i.e. not an
+  `attachment_tools()` group).
+- `assert_model_saw_image_attachment(mime, bytes)` — a captured model request
+  carried a `ContentPart::ImageUrl` part whose `data:` URL is exactly
+  `data:<mime>;base64,<encode(bytes)>` — byte-fidelity through lander →
+  filesystem → read port, not just the textual `<attachments>` pointer.
 
 ### OAuth / product-auth
 
@@ -375,7 +416,22 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
+| `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
+| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+
+### Distinct actors per thread (E-MULTIUSER)
+
+`g.thread(conv).with_actor_id("some-actor")` resolves that thread's binding
+under a DISTINCT actor instead of the default `HARNESS_ACTOR_ID` — both at
+the build-time binding probe and at every `submit_turn` for that thread, so
+probe and submit always resolve the same binding/owner. The group's one
+shared runtime resolves each turn's thread by the run's own owner
+(production's `ThreadScopeResolver::resolve_for_turn` over the harness's
+per-op `/threads` mount), so two actors' threads coexist over one
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 

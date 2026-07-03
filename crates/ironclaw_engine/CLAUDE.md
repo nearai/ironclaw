@@ -1,5 +1,7 @@
 # IronClaw Engine Crate
 
+> **v1-only (legacy).** This is the *v1 monolith's* engine ("engine v2"), consumed only by the root `ironclaw` crate through legacy `src/` integration points, especially `src/bridge/`. Reborn crates are boundary-test-forbidden from importing it, and it retires with the monolith. Do not add new features, prompts, or consumers here — the Reborn loop is `ironclaw_agent_loop` + `ironclaw_reborn`.
+
 Unified thread-capability-CodeAct execution model. Replaces ~10 separate abstractions (Session, Job, Routine, Channel, Tool, Skill, Hook, Observer, Extension, LoopDelegate) with 5 primitives.
 
 ## Full Architecture Plan

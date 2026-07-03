@@ -258,6 +258,10 @@ impl PipelineError {
     fn into_inner(self) -> RuntimeHttpEgressError {
         self.error
     }
+
+    pub(super) fn stable_runtime_reason(&self) -> &'static str {
+        self.error.stable_runtime_reason()
+    }
 }
 
 pub(super) fn runtime_network_error(

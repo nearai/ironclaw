@@ -171,6 +171,45 @@ impl LlmProvider for ParkingLlm {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fixed-error model provider (E-GATEWAY seam) — provider-`Err` failure
+// category coverage (C-ERRORS).
+// ---------------------------------------------------------------------------
+
+/// A raw `LlmProvider` that always fails with a fixed, NON-retryable
+/// `LlmError::ContextLengthExceeded`. Deliberately NOT the `LlmError::RequestFailed`
+/// a naturally-exhausted `TraceLlm` returns (see `next_step` above) — `RequestFailed`
+/// IS retryable (`ironclaw_llm::retry::is_retryable`), so scripting it would drive
+/// several seconds of real exponential backoff (1s/2s/4s) before the run finally
+/// failed. `ContextLengthExceeded` is excluded from `is_retryable`, so the run
+/// fails on the first model call — fast and deterministic. Sits at the same
+/// vendor-SDK seam `scripted_trace_llm`/`ParkingLlm` fill; the real `ironclaw_llm`
+/// decorator chain still runs on top, so this proves the chain's non-retryable-error
+/// mapping through to a terminal `TurnStatus::Failed`, not just the seam itself.
+pub struct ErrLlm;
+
+#[async_trait]
+impl LlmProvider for ErrLlm {
+    fn model_name(&self) -> &str {
+        SCRIPTED_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::ContextLengthExceeded { used: 1, limit: 1 })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::ContextLengthExceeded { used: 1, limit: 1 })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

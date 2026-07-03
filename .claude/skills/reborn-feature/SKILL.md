@@ -38,8 +38,11 @@ grep -n "WEBUI_V2_PATTERN_\|fn .*_descriptor" crates/ironclaw_webui_v2/src/descr
 grep -rn "Swappable\|Reload\|UpdateSession\|FileExt\|SecretStore" crates/ironclaw_llm/src crates/ironclaw_reborn_config/src crates/ironclaw_secrets/src
 ```
 
-Read each module's `CLAUDE.md` (every crate has one; they list the seams and the
-guardrails). If a building block exists, the feature shrinks to *wiring*, not
+Read the crate-local `AGENTS.md`/`CLAUDE.md` for each crate you'll touch (most
+crates have one — they list the seams and the guardrails). When those are
+absent, check `CONTRACT.md` or `README.md`, then `Cargo.toml` plus the crate's
+primary `src/` entrypoint (`src/lib.rs` for libraries, `src/main.rs` for
+binaries). If a building block exists, the feature shrinks to *wiring*, not
 *building*.
 
 ## Pass 2 — Trace one full vertical (before the first edit)
@@ -58,13 +61,14 @@ browser (webui_v2_static JS)
 And the composition path that *supplies* that impl:
 
 ```
-ironclaw_reborn_cli serve.rs
-  → build_runtime_input_with_options(boot) → RebornRuntimeInput (+ with_* builders)
-  → build_reborn_runtime(input)            → RebornRuntime (factory.rs builds substrate)
+ironclaw_reborn_cli commands/serve.rs
+  → build_runtime_input_with_options(boot) → RebornRuntimeInput (+ with_* builders)  [runtime/mod.rs]
+  → build_reborn_runtime(input)            → RebornRuntime (defined in runtime.rs; factory.rs builds substrate)
   → build_webui_services(&runtime, ...)    → attaches facades (webui.rs)  ← attach your service here
 ```
 
-Open `factory.rs`, `runtime.rs`, `runtime_input.rs`, `webui.rs`, and `serve.rs`
+Open composition's `factory.rs`, `runtime.rs`, `runtime_input.rs`, `webui.rs`,
+and the CLI's `commands/serve.rs`
 and answer up front: **what does my impl need (boot config? a store? a runtime
 handle?), and is it already on `RebornRuntime` / `RebornServices`, or must I
 thread it through?** Thread inputs via `RebornRuntimeInput::with_*` builders;
@@ -82,7 +86,8 @@ For a feature with N endpoints, expect to touch (in dependency order):
 | Impl | `ironclaw_reborn_composition` | the adapter (`mod <feature>.rs`, gated on the right feature, e.g. `root-llm-provider`); register in `lib.rs` |
 | HTTP | `ironclaw_webui_v2` | route constants + pattern + `*_descriptor()` (use `read_policy`/`mutation_policy`) + add to `webui_v2_routes()`; thin handler over `state.services()`; mount in `router.rs`; **update `tests/webui_v2_descriptors_contract.rs`** (it locks the table) |
 | Wiring | `ironclaw_reborn_composition` + `ironclaw_reborn_cli` | thread inputs through `RebornRuntimeInput`/`RebornRuntime`; attach in `build_webui_services`; pass from `serve.rs` |
-| Frontend | `ironclaw_webui_v2_static` | call endpoints via `apiFetch` in `pages/*/lib/*-api.js`; consume in hooks. No build step — `node --check <file>.js` to syntax-check |
+| Frontend | `ironclaw_webui_v2_static` | call endpoints via `apiFetch` in `static/js/pages/*/lib/*-api.js`; consume in hooks. No build step — `node --check <file>.js` to syntax-check |
+| Tests | `tests/support/reborn/` + crate tests | for whole-turn behavior, add a scripted-model harness case (see `tests/support/reborn/CLAUDE.md` — mock only at the vendor-SDK seam); facade changes extend `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`, and handler changes extend `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` |
 
 ## Boundary rules (the guardrails that will reject your PR)
 
@@ -119,8 +124,17 @@ cargo clippy -p <crate> ... --tests          # gate per crate, not at the end
 node --check path/to/changed.js              # frontend syntax (no build step)
 ```
 
-## Reference implementation
+## Reference implementation (in-tree — read these files, one per layer)
 
-The WebChat v2 LLM-config feature is a complete worked example of this shape
-(branch `webui2-llm-config`, 5 commits — one per layer above). Read those diffs
-to see the exact ceremony per layer before starting a similar feature.
+The WebChat v2 LLM-config feature is a complete worked example of this shape,
+alive in the tree today:
+
+- Port: `crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs`
+- Facade: `LlmConfigService` field + `with_llm_config_service` + delegating
+  methods in `crates/ironclaw_product_workflow/src/reborn_services.rs`
+- Impl: `crates/ironclaw_reborn_composition/src/llm_config_service.rs`
+- HTTP: `get_llm_config_descriptor()` in
+  `crates/ironclaw_webui_v2/src/descriptors.rs` + handler in `handlers.rs`
+- Wiring: `build_llm_config_service` attach in
+  `crates/ironclaw_reborn_composition/src/webui.rs`
+- Frontend: `crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.js`

@@ -4,7 +4,7 @@
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server): ~464k nodes / ~2.5M edges spanning all of `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
 
 **Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
 
@@ -27,7 +27,7 @@ This repo is indexed into a **codebase knowledge graph** (the `codebase-memory` 
 
 ## Where to Build — Reborn-First
 
-**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (`reborn_cli`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
 
 `src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
 
@@ -74,7 +74,7 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/ironclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_support`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. (`crates/ironclaw_engine/prompts/` is the **v1 engine's** template dir — maintain existing v1 prompts there, but never add prompts for Reborn behavior to it.) Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -110,8 +110,8 @@ Current ownership:
 
 - `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
 - `src/bridge/router.rs`: auth gate display + submit routing
-- `src/channels/web/server.rs`: pending-gate/history rehydration
-- `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/ironclaw_gateway/src/assets.rs` for the concat order)
+- `src/channels/web/` (see its `CLAUDE.md`): pending-gate/history rehydration across `handlers/`, `platform/`, and `features/`
+- `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing; see `crates/ironclaw_gateway/src/assets.rs` for the concat order
 
 Temporary compatibility boundary:
 
@@ -205,7 +205,7 @@ src/
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
-├── safety/             # Re-export shim for crates/ironclaw_safety (see Extracted Crates)
+├── safety/             # Docs-only pointer module (no re-exports; import from ironclaw_safety directly)
 │
 ├── (llm/  was extracted to crates/ironclaw_llm/ — see Extracted Crates)
 │
@@ -349,9 +349,10 @@ and migration status. The dispatcher itself lives in
 
 ## Engine v2 Per-Project Sandbox
 
-When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
-(`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
-paths through a per-project Docker container instead of the host filesystem.
+When `SANDBOX_ENABLED=true`, engine v2 routes the sandbox-eligible
+filesystem/shell tools (`file_read`/`read_file`, `file_write`/`write_file`,
+`list_dir`, `apply_patch`, `shell`) for `/project/` paths through a per-project
+Docker container instead of the host filesystem.
 The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
 `/project/` inside the container, and a `sandbox_daemon` binary inside the
 container speaks NDJSON over `docker exec -i`.

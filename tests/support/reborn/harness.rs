@@ -41,6 +41,7 @@ use ironclaw_filesystem::{
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
     ScopedFilesystem, StorageClass,
 };
+use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
@@ -155,6 +156,7 @@ use super::{
         build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
         mcp_loopback_network_policy, mock_mcp_extension_package,
     },
+    harness_web_access,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
     session_thread::RebornThreadHarness,
@@ -299,6 +301,18 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.skill_context_source_for_test(),
+        }
+    }
+
+    /// C-ATTACH: the attachment read port + inbound lander for this backend, if
+    /// any. `None` for the Echo backend and for HostRuntime harnesses without a
+    /// local-dev workspace filesystem.
+    pub(crate) fn attachment_test_support(
+        &self,
+    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.attachment_test_support_for_test(),
         }
     }
 
@@ -1613,6 +1627,12 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `into_group`. Held as the opaque test-support handle so this crate never
     /// names the crate-private source type.
     skill_activation_source: Option<SkillActivationTestSource>,
+    /// Attachment read port + inbound lander backing the C-ATTACH seam. `Some`
+    /// only for `new_with_options`-built harnesses (which flow through
+    /// `RebornServices`, and thus have a local-dev workspace filesystem to build
+    /// both over); `None` for the lower-level constructors and the Echo backend.
+    /// Read back via `attachment_test_support_for_test`.
+    attachment_test_support: Option<ironclaw_reborn_composition::AttachmentTestSupport>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1842,6 +1862,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -1938,7 +1959,38 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
-    async fn skill_management_tools() -> HarnessResult<Self> {
+    /// Group with NO first-party capability dispatch — the test drives the
+    /// C-ATTACH seam purely through the attachment read port + inbound lander,
+    /// never a tool call. Uses `new_with_options` (mirrors `profile_tools()`),
+    /// so `attachment_test_support` is populated from
+    /// `services.local_dev_attachment_test_support_for_test()`. No mounts needed:
+    /// attachment landing/reading goes through `local_runtime.workspace_filesystem`
+    /// directly, not the capability-dispatch `MountView` (mirrors
+    /// `trigger_management_tools()`'s `MountView::default()`, which also has no
+    /// filesystem capability to gate).
+    pub(crate) async fn attachment_tools() -> HarnessResult<Self> {
+        Self::new_with_options(
+            "reborn-e2e-attachment-tools",
+            Vec::new(),
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-attachment-tools-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await
+    }
+
+    /// `pub(crate)`: also used by `RebornIntegrationGroupBuilder::skill_management_tools`
+    /// (`group_constructors.rs`, C-SKILL) to wire the SAME preset onto the
+    /// int-tier group, so the QA/trace-tier smoke test and the int-tier group
+    /// never drift on capability ids / mounts / policy.
+    pub(crate) async fn skill_management_tools() -> HarnessResult<Self> {
         let mut harness = Self::new_with_options(
             "reborn-e2e-skill-management-tools",
             vec![
@@ -2215,8 +2267,9 @@ impl HostRuntimeCapabilityHarness {
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
-        // Capture the profile filesystem + project service before
-        // `services.host_runtime` is moved out below (E-PROFILE / E-PROJ seams).
+        // Capture the profile filesystem + project service + attachment support
+        // before `services.host_runtime` is moved out below (E-PROFILE / E-PROJ /
+        // C-ATTACH seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
         let project_service = services.local_dev_project_service_for_test();
         // E-SKILL: build the local-dev skill context source only when this
@@ -2237,6 +2290,7 @@ impl HostRuntimeCapabilityHarness {
         } else {
             None
         };
+        let attachment_test_support = services.local_dev_attachment_test_support_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -2271,6 +2325,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem,
             project_service,
             skill_activation_source,
+            attachment_test_support,
         })
     }
 
@@ -2418,6 +2473,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2513,6 +2569,7 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2587,6 +2644,68 @@ impl HostRuntimeCapabilityHarness {
             profile_filesystem: None,
             project_service: None,
             skill_activation_source: None,
+            attachment_test_support: None,
+        })
+    }
+
+    /// C-WEBACCESS: wires the real first-party `web-access.search` /
+    /// `web-access.get_content` capabilities via the production
+    /// `register_bundled_web_access_first_party_handlers` registration
+    /// (`harness_web_access.rs`), which dispatches through the same
+    /// `WebAccessExecutor` production composition uses. Unlike
+    /// `github_issue_tools`, no credential-injecting authorizer is needed —
+    /// web-access declares zero `runtime_credentials` — so this wires the
+    /// plain default `GrantAuthorizer`.
+    ///
+    /// The three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`) all target the same URL, so script it via
+    /// `RecordingRuntimeHttpEgress::push_response_body` (FIFO), not the keyed
+    /// matcher — see [`install_web_access_responses`](Self::install_web_access_responses),
+    /// called from `RebornIntegrationHarnessBuilder::build` before the harness
+    /// is returned.
+    pub(crate) async fn web_access_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(harness_web_access::web_access_extension_package()?)?;
+        let runtime = harness_web_access::local_dev_host_runtime_with_web_access(
+            storage_root,
+            registry,
+            Arc::clone(&http_egress),
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![
+                CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            network_policy: harness_web_access::exa_mcp_test_network_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(harness_web_access::WEB_ACCESS_PROVIDER_ID)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-web-access-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: Some(http_egress),
+            network_egress: None,
+            process_port: None,
+            profile_filesystem: None,
+            project_service: None,
+            skill_activation_source: None,
+            attachment_test_support: None,
         })
     }
 
@@ -2620,6 +2739,30 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Install FIFO response bodies (C-WEBACCESS) onto the recording runtime
+    /// HTTP egress, consumed in call order ahead of the default body. Mirrors
+    /// [`install_http_responses`](Self::install_http_responses)'s shape but for
+    /// the web-access backend's `push_response_body` FIFO queue rather than the
+    /// keyed matcher — the three-leg Exa MCP handshake (`initialize` →
+    /// `notifications/initialized` → `tools/call`) all target the same
+    /// URL/method/capability, so only the FIFO queue can script them
+    /// independently. Errors if this harness wired no recording egress. Called
+    /// from `RebornIntegrationHarnessBuilder::build` (build-time only — no
+    /// post-build mutation).
+    pub(crate) fn install_web_access_responses(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let egress = self
+            .http_egress
+            .as_ref()
+            .ok_or("web-access host runtime has no recording egress wired")?;
+        for body in bodies {
+            egress.push_response_body(body);
+        }
+        Ok(())
     }
 
     /// Snapshot of every command string recorded by the inert process port
@@ -2810,6 +2953,28 @@ impl HostRuntimeCapabilityHarness {
         self.root.path().join("local-dev")
     }
 
+    /// C-DURABLE: resolve `gate_ref` (a `"gate:approval-<id>"` local-dev
+    /// approval gate) to the `(ApprovalRequestId, ResourceScope)` pair a fresh,
+    /// independently-reopened `ApprovalRequestStore::get`/`read_versioned` call
+    /// needs. Reuses the SAME private lookup `approve_local_dev_gate`/
+    /// `deny_local_dev_gate` already use (`approval_request_id_from_gate_ref` +
+    /// `pending_approval_scopes`) so a durability test's scope construction can
+    /// never drift from the live approve/deny path. Tests only.
+    pub(crate) fn approval_request_scope_for_test(
+        &self,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<(ApprovalRequestId, ResourceScope)> {
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let scope = self
+            .pending_approval_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&request_id)
+            .cloned()
+            .ok_or("approval gate was not recorded by the host runtime harness")?;
+        Ok((request_id, scope))
+    }
+
     /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill
     /// filesystem so the model can activate it (`skill_activate`/`$name`). Writes
     /// `<storage_root>/system/skills/<name>/SKILL.md` — the system bundle root is
@@ -2839,6 +3004,16 @@ impl HostRuntimeCapabilityHarness {
         );
         std::fs::write(dir.join("SKILL.md"), body)?;
         Ok(())
+    }
+
+    /// C-ATTACH: the attachment read port + inbound lander over this harness's
+    /// local-dev workspace filesystem, for wiring `DefaultPlannedRuntimeParts.attachment_read_port`
+    /// and `DefaultInboundTurnService::with_inbound_attachments` — mirrors
+    /// `profile_filesystem_for_test`'s role for E-PROFILE.
+    pub(crate) fn attachment_test_support_for_test(
+        &self,
+    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+        self.attachment_test_support.clone()
     }
 
     /// E-PROJ: wrap `port` with the local-dev synthetic capabilities this harness
@@ -3393,6 +3568,12 @@ pub(crate) fn local_dev_root_filesystem(
             HostPath::from_path_buf(github_support::asset_root()),
         )?;
     }
+    if mounts.web_access_assets {
+        local.mount_local(
+            VirtualPath::new("/system/extensions/web-access")?,
+            HostPath::from_path_buf(harness_web_access::asset_root()),
+        )?;
+    }
 
     let local = Arc::new(local);
     let mut root = CompositeRootFilesystem::new();
@@ -3413,6 +3594,20 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
+                BackendKind::LocalFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ExtensionPackage,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            Arc::clone(&local),
+        )?;
+    }
+    if mounts.web_access_assets {
+        root.mount(
+            local_dev_mount_descriptor(
+                "/system/extensions/web-access",
+                "local-dev-web-access-assets",
                 BackendKind::LocalFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
@@ -3443,6 +3638,7 @@ pub(crate) fn local_dev_root_filesystem(
 #[derive(Clone, Copy)]
 pub(crate) struct LocalDevRootMounts {
     github_assets: bool,
+    web_access_assets: bool,
     memory: bool,
 }
 
@@ -3450,6 +3646,7 @@ impl LocalDevRootMounts {
     pub(crate) fn core_builtins() -> Self {
         Self {
             github_assets: false,
+            web_access_assets: false,
             memory: true,
         }
     }
@@ -3457,6 +3654,15 @@ impl LocalDevRootMounts {
     fn github_assets() -> Self {
         Self {
             github_assets: true,
+            web_access_assets: false,
+            memory: false,
+        }
+    }
+
+    pub(crate) fn web_access_assets() -> Self {
+        Self {
+            github_assets: false,
+            web_access_assets: true,
             memory: false,
         }
     }
@@ -3781,6 +3987,16 @@ impl RecordingRuntimeHttpEgress {
         responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
     ) {
         self.scripted.lock().unwrap().extend(responses);
+    }
+
+    /// Enqueue one FIFO response body (C-WEBACCESS), consumed in call order
+    /// ahead of `default_body`. Mirrors `install_scripted`'s shape but for the
+    /// plain FIFO queue rather than keyed matchers — used to script the
+    /// three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
+    /// → `tools/call`), which all target the same URL/method/capability and so
+    /// cannot be told apart by the keyed matcher.
+    pub(crate) fn push_response_body(&self, body: Vec<u8>) {
+        self.response_bodies.lock().unwrap().push_back(body);
     }
 }
 
