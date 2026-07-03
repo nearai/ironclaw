@@ -820,6 +820,48 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result["dm_user_source"], "env")
         self.assertEqual(captured["data"]["users"], "UQAUSER")
 
+    def test_slack_dm_route_discovery_reads_path_materialized_user(self):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def json(self):
+                return {
+                    "ok": True,
+                    "channel": {
+                        "id": "DQAUSER",
+                        "is_im": True,
+                    },
+                }
+
+        def fake_post(_url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(post=fake_post)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_id_path = Path(tmpdir) / "route-user-id"
+            user_id_path.write_text("UQAUSER\n", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID_PATH": str(
+                            user_id_path
+                        )
+                    },
+                    clear=True,
+                ),
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+            ):
+                result = run_live_qa._discover_slack_dm_route_channel(
+                    "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
+                    {"SLACK_BOT_TOKEN": "xoxb-test"},
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dm_user_id"], "UQAUSER")
+        self.assertEqual(captured["data"]["users"], "UQAUSER")
+
     def test_slack_dm_route_discovery_rejects_missing_real_route_user(self):
         fake_httpx = types.SimpleNamespace(
             post=lambda *_args, **_kwargs: self.fail("Slack API should not be called")

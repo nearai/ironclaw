@@ -213,7 +213,7 @@ def _slack_dm_route_user_id() -> str | None:
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
     ):
-        value = os.environ.get(name, "").strip()
+        value = (env_secret(name) or "").strip()
         if value and value != "U0REBORNQA":
             return value
     return None
