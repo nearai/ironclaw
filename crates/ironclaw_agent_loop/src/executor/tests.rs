@@ -54,6 +54,7 @@ mod support;
 use support::*;
 
 mod cancellation;
+mod failure_matrix;
 
 #[tokio::test]
 async fn reply_only_completes_with_final_checkpoint() {
