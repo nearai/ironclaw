@@ -78,6 +78,36 @@ async def test_reborn_v2_notification_popover_opens_automation_thread(
         await context.close()
 
 
+async def test_reborn_v2_notification_open_marks_read_without_hiding_pending_message(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await _route_notification_threads(page)
+        await _open_v2(page, reborn_v2_server)
+
+        await expect(page.locator(SEL_V2["notification_unread_dot"])).to_be_visible(
+            timeout=5000
+        )
+        await page.locator(SEL_V2["notification_bell"]).click()
+        await page.locator(SEL_V2["notification_row"]).first.click()
+        await expect(page).to_have_url(
+            re.compile(rf".*/v2/chat/{THREAD_ID}(?:\?.*)?$"),
+            timeout=5000,
+        )
+
+        await expect(page.locator(SEL_V2["notification_unread_dot"])).to_have_count(0)
+        await page.locator(SEL_V2["notification_bell"]).click()
+        panel = page.locator(SEL_V2["notification_panel"])
+        await expect(panel).to_be_visible(timeout=5000)
+        await expect(panel).to_contain_text("E2E scheduled report")
+        await expect(panel.locator(SEL_V2["notification_row"])).to_have_count(1)
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_notification_drawer_and_header_actions_fit_mobile(
     reborn_v2_server,
     reborn_v2_browser,

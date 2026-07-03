@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from playwright.async_api import expect
 
 from helpers import SEL_V2
@@ -9,6 +10,13 @@ from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture dependency
     reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture dependency
+)
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "Current main routes channel setup through Extensions instead of chat; "
+        "reactivate with nearai/ironclaw#5362."
+    )
 )
 
 
