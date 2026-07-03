@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod assertions;
 pub mod builder;
+pub mod capability_backend;
 pub mod config;
 pub mod delivery;
 pub mod extension_surface;
@@ -9,6 +10,7 @@ pub mod github;
 pub mod group;
 pub mod harness;
 pub mod harness_mcp;
+pub mod harness_web_access;
 pub mod http_matcher;
 pub mod model_replay;
 pub mod network;

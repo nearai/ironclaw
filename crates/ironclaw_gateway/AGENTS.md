@@ -1,5 +1,7 @@
 # Agent Map — ironclaw_gateway
 
+> **v1-only (legacy).** These are the *v1* gateway's frontend assets. WebChat v2 assets live in `ironclaw_webui_v2_static`; v2 routes in `ironclaw_webui_v2`. Don't add Reborn UI work here.
+
 ## Start Here
 
 - No crate-local `CLAUDE.md` exists yet; use this map plus the web gateway docs below.

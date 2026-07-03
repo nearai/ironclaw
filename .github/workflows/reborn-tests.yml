@@ -215,7 +215,7 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
 
       - name: Install mold and clang
         run: |
@@ -421,7 +421,7 @@ jobs:
       - name: Run Reborn settings JS tests
         run: |
           mapfile -t tests < <(
-            find crates/ironclaw_webui_v2_static/static/js/pages/settings \
+            find crates/ironclaw_webui_v2/static/js/pages/settings \
               -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
               | sort
           )

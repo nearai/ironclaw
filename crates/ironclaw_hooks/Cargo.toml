@@ -13,19 +13,32 @@ default = []
 # on-trusted-path invariant. Intended exclusively as a `dev-dependency` feature
 # for hook authors writing predicate tests outside `ironclaw_reborn`.
 test-support = []
-# Exposes the `predicate_state::contract` trait-level test harness so
-# out-of-crate durable backends (durable-backend PRs 2/3 — Postgres,
-# libSQL) can run the same `PredicateStateBackend` contract suite against
-# their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature. The
-# libSQL backend lives in the sibling `ironclaw_hooks_libsql` crate and
-# the Postgres backend in `ironclaw_hooks_postgres`; both depend on this
-# crate with `contract-tests` enabled to run the shared suite.
+# Exposes the `predicate_state::contract` trait-level test harness so the
+# durable backends (`libsql_backend` / `postgres_backend`, folded in from the
+# former `ironclaw_hooks_{libsql,postgres}` crates) can run the same
+# `PredicateStateBackend` contract suite from this crate's own `tests/`. Mirrors
+# `ironclaw_memory`'s `contract-tests` feature.
 contract-tests = []
+# Durable PostgreSQL-backed PredicateStateBackend (module `postgres_backend`).
+# Off by default so the framework carries no DB dependency; folded in from the
+# former `ironclaw_hooks_postgres` crate.
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "rust_decimal/db-tokio-postgres"]
+# Durable libSQL-backed PredicateStateBackend (module `libsql_backend`). Off by
+# default; folded in from the former `ironclaw_hooks_libsql` crate.
+libsql = ["dep:libsql"]
+# Gates the heavy multi-host adversarial suite (folded in from the former
+# `ironclaw_hooks_parity` crate) so a bare `cargo test` stays fast and only the
+# deterministic parity matrix / per-backend contract suites run. Mirrors the
+# workspace-wide `integration` gate used for DB-backed tests.
+integration = []
 
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = { version = "0.14", optional = true }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-chrono-0_4"] }
 futures = "0.3"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -44,8 +57,48 @@ wasmtime = { version = "46.0.1", features = ["component-model"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = "3"
 toml = "1.1"
 wat = "1"
+
+# Durable-backend test suites folded in from the former
+# `ironclaw_hooks_{postgres,libsql}` / `ironclaw_hooks_parity` crates. Each is
+# gated with `required-features` so a bare `cargo test -p ironclaw_hooks` (no
+# DB features) does not try to build the DB-backed targets. The Postgres legs
+# additionally skip at runtime when no DB URL is reachable.
+[[test]]
+name = "predicate_state_postgres_contract"
+path = "tests/predicate_state_postgres_contract.rs"
+required-features = ["postgres", "contract-tests"]
+
+[[test]]
+name = "predicate_state_postgres_adversarial"
+path = "tests/predicate_state_postgres_adversarial.rs"
+required-features = ["postgres"]
+
+# libSQL contract suite keeps its hand-rolled serial runner (see the file's
+# `harness = false` rationale): each heavy case fills a key to the sample cap,
+# and running those concurrently on independent libSQL handles trips
+# SQLITE_MISUSE.
+[[test]]
+name = "predicate_state_libsql_contract"
+path = "tests/predicate_state_libsql_contract.rs"
+harness = false
+required-features = ["libsql", "contract-tests"]
+
+# Cross-backend parity matrix: the libSQL leg always runs; the Postgres leg is
+# additionally `#[cfg(feature = "postgres")]`-gated inside the file. Drives only
+# public backend types + the in-memory reference, so it needs no
+# `contract-tests`.
+[[test]]
+name = "parity_matrix"
+path = "tests/parity_matrix.rs"
+required-features = ["libsql"]
+
+[[test]]
+name = "multi_host_adversarial"
+path = "tests/multi_host_adversarial.rs"
+required-features = ["libsql", "integration"]
 
 [lints]
 workspace = true

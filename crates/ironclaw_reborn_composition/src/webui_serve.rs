@@ -787,7 +787,7 @@ pub fn webui_v2_app_with_lifecycle(
         // is unavailable or misconfigured.
         .route(REBORN_HEALTH_PATH, get(reborn_health_handler))
         // SPA static assets served from the embedded
-        // `ironclaw_webui_v2_static` bundle. Routed AFTER the
+        // `ironclaw_webui_v2` bundle. Routed AFTER the
         // route_layer stack above so the SPA does not require bearer
         // auth or burn rate-limit slots — anonymous fetches of
         // HTML/JS/CSS/images are expected. Outer security headers,
@@ -801,7 +801,7 @@ pub fn webui_v2_app_with_lifecycle(
         // used because the factory already returns fully prefixed
         // routes — `nest` in axum 0.8 has quirky dispatch for the
         // exact prefix with/without trailing slash.
-        .merge(ironclaw_webui_v2_static::mount_at_prefix("/v2"))
+        .merge(ironclaw_webui_v2::mount_at_prefix("/v2"))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

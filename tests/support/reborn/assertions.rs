@@ -146,6 +146,49 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that ANY captured egress request whose URL contains `url_substr`
+    /// carried a body containing `body_substr` — checks every matching request,
+    /// not just the first. Needed for a multi-request handshake where every leg
+    /// shares the same URL (e.g. web-access's Exa MCP `initialize` /
+    /// `notifications/initialized` / `tools/call` sequence, C-WEBACCESS) and
+    /// only one leg's body carries the substring under test. Prefer
+    /// [`assert_egress_body_contains`] when `url_substr` is expected to match
+    /// exactly one request — its first-match semantics catch a false pass that
+    /// this looser check would miss if a later, unrelated same-URL request also
+    /// happened to satisfy `body_substr`.
+    pub async fn assert_egress_body_contains_any(
+        &self,
+        url_substr: &str,
+        body_substr: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.captured_egress_requests();
+        let matching: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.contains(url_substr))
+            .collect();
+        if matching.is_empty() {
+            let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+            return Err(format!(
+                "no captured egress request matching url {url_substr:?}; saw {seen:?}"
+            )
+            .into());
+        }
+        if matching
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains(body_substr))
+        {
+            return Ok(());
+        }
+        let bodies: Vec<String> = matching
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .collect();
+        Err(format!(
+            "no egress request to {url_substr:?} had a body containing {body_substr:?}; saw {bodies:?}"
+        )
+        .into())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -237,6 +280,55 @@ impl RebornIntegrationHarness {
                     })
             })
             .collect()
+    }
+
+    /// Assert the in-memory `TurnEventSink` installed via `.with_turn_event_sink()`
+    /// (C-TRACECAP) recorded at least one event of `kind`. Proves
+    /// `subscribe_best_effort` actually fired the sink for a real turn, not just
+    /// that the harness wired the field.
+    pub async fn assert_turn_event_recorded(
+        &self,
+        kind: ironclaw_turns::TurnEventKind,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_turn_events();
+        if events.iter().any(|event| event.kind == kind) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert a captured model request carried a multimodal `data:` image part
+    /// holding exactly `bytes` under `mime_type` (C-ATTACH) — proves the landed
+    /// attachment round-tripped intact (lander → project filesystem →
+    /// `attachment_read_port` → base64) and reached the model as
+    /// `ContentPart::ImageUrl`, not just the textual `<attachments>` pointer.
+    pub async fn assert_model_saw_image_attachment(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> HarnessResult<()> {
+        use base64::Engine;
+        let urls = self.captured_image_data_urls();
+        let expected = format!(
+            "data:{mime_type};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        if urls.iter().any(|url| url == &expected) {
+            return Ok(());
+        }
+        // Redacted: the full base64-encoded attachment bytes must never land in
+        // CI logs on assertion failure (a future test using a sensitive/screenshot
+        // fixture would otherwise leak its contents). Report mime type, byte
+        // length, and a short digest instead — enough to distinguish "wrong bytes"
+        // from "no image part at all" without reproducing the content.
+        let seen: Vec<String> = urls.iter().map(|url| redact_data_url(url)).collect();
+        Err(format!(
+            "no captured image data: URL matching {}; saw {} image part(s): {seen:?}",
+            redact_data_url(&expected),
+            seen.len()
+        )
+        .into())
     }
 
     /// Assert a model-visible tool error of `class` carrying `reason` was
@@ -448,5 +540,38 @@ impl RebornIntegrationHarness {
             "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
         )
         .into())
+    }
+}
+
+/// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
+/// failure message — never prints the base64 payload itself (which is the raw
+/// attachment content) or even a prefix of it. Reports the mime type, decoded
+/// byte length, and a short SHA-256 prefix, which is enough to tell "wrong
+/// bytes" apart from "no image part at all" without reconstructing the content.
+fn redact_data_url(url: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let Some(rest) = url.strip_prefix("data:") else {
+        return "<non-data: URL>".to_string();
+    };
+    let Some((mime, b64)) = rest.split_once(";base64,") else {
+        return format!(
+            "data:{}...<unparseable, redacted>",
+            rest.chars().take(40).collect::<String>()
+        );
+    };
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => {
+            let digest_hex: String = Sha256::digest(&bytes)
+                .iter()
+                .take(4)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                "data:{mime};base64=<redacted, {} byte(s), sha256={digest_hex}>",
+                bytes.len(),
+            )
+        }
+        Err(_) => format!("data:{mime};base64=<redacted, undecodable>"),
     }
 }
