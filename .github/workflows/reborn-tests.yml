@@ -244,7 +244,7 @@ jobs:
           PACKAGE: ${{ matrix.package }}
         run: |
           case "${PACKAGE}" in
-            ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_reborn|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+            ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
               echo "enabled=false" >> "${GITHUB_OUTPUT}"
               echo "::notice title=Distributed sccache skipped::${PACKAGE} compiles wasmtime-wasi proc macros that read registry source files unavailable on the remote builder."
               ;;
@@ -346,12 +346,6 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Setup distributed sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-
       - name: Run Reborn root tests
         run: scripts/ci/run-reborn-root-partition.sh
 
@@ -426,12 +420,6 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Setup distributed sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-
       - name: Run Reborn group tests
         run: scripts/ci/run-reborn-group-tests.sh
 
@@ -498,12 +486,6 @@ jobs:
         with:
           key: reborn-qa-recorded-fixtures
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-
-      - name: Setup distributed sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
 
       - name: Scrub Reborn QA fixtures
         run: scripts/ci/check-reborn-qa-fixtures.sh
