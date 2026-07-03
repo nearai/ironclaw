@@ -6,6 +6,7 @@
 //! or legacy pairing store.
 
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,7 +18,9 @@ use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
+    CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
+    DeliveryDefaultScope, InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
+    OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -34,18 +37,20 @@ use ironclaw_product_workflow::{
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView, ProductActorUserResolver,
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, StaticProductActorUserResolver,
-    StaticProductInstallationResolver,
+    ConversationBindingService, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
+    StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
     slack_request_signature_auth_requirement,
 };
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, InMemorySessionThreadService, MessageContent,
+    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
 };
+use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
@@ -60,8 +65,8 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
+    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::{
     AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
@@ -693,6 +698,366 @@ async fn bare_approve_in_dm_resolves_gate_recorded_by_observer() {
         requests[0].run_id_hint,
         Some(blocked_run_id),
         "run_id_hint must come from the observer-recorded route"
+    );
+    assert_eq!(
+        requests[0].decision,
+        ApprovalInteractionDecision::ApproveOnce
+    );
+}
+
+/// No-op [`ConversationBindingService`] mirroring the one the production
+/// triggered-delivery factory (`build_triggered_run_delivery_hook_from_parts`)
+/// hardcodes: the triggered path receives the `TurnScope` directly from the
+/// poller and never resolves a binding. Using it here keeps the composite on the
+/// same seam the production triggered assembly fills.
+struct NoopTriggeredBindingService;
+
+#[async_trait]
+impl ConversationBindingService for NoopTriggeredBindingService {
+    async fn resolve_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
+        })
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
+        })
+    }
+}
+
+/// Poll-only [`TurnCoordinator`] for driving a [`TriggeredRunDeliveryDriver`].
+///
+/// The triggered-delivery path only calls `get_run_state`. This scripts the
+/// first poll as `BlockedApproval` (with the gate) so the driver posts the
+/// approval prompt and records the delivered gate route, then `Completed` so the
+/// driver delivers the seeded final reply and records a terminal outcome. The
+/// other `TurnCoordinator` methods are never reached on this path.
+struct ScriptedTriggerCoordinator {
+    template: TurnRunState,
+    polls: AtomicUsize,
+}
+
+impl ScriptedTriggerCoordinator {
+    fn new(template: TurnRunState) -> Self {
+        Self {
+            template,
+            polls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for ScriptedTriggerCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        unreachable!("triggered delivery driver never prepares turns")
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        unreachable!("triggered delivery driver never submits turns")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        unreachable!("triggered delivery driver never resumes turns")
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        unreachable!("approval-only triggered scenario never cancels the run")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        let poll = self.polls.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.template.clone();
+        if poll == 0 {
+            state.status = TurnStatus::BlockedApproval;
+            state.gate_ref = Some(GateRef::new(GATE).expect("gate ref")); // safety: static test gate ref is valid.
+        } else {
+            state.status = TurnStatus::Completed;
+            state.gate_ref = None;
+        }
+        Ok(state)
+    }
+}
+
+/// Build a Slack personal-DM reply-target binding ref for team `T-A` /
+/// channel `D123`, so the triggered run's approval prompt is delivered to the
+/// same DM the inbound `approve` arrives on. The `space` segment (`T-A`) is what
+/// the driver captures as `resolved_space_id`; combined with the posted channel
+/// (`D123`, echoed by `RecordingEgress`) it yields `dm_conversation_fingerprint()`.
+fn dm_reply_target_binding_ref() -> ReplyTargetBindingRef {
+    fn seg(name: &str, value: &str) -> String {
+        format!("{}:{}:{};", name, value.len(), value)
+    }
+    let raw = format!(
+        "{}{}{}{}{}{}{}{}{}",
+        seg("adapter", ADAPTER),
+        seg("installation", INSTALLATION),
+        seg("agent", AGENT),
+        seg("project", ""),
+        seg("space", TEAM),
+        seg("conversation", CHANNEL),
+        seg("topic", ""),
+        seg("actor_kind", SLACK_USER_ACTOR_KIND),
+        seg("actor", SLACK_USER),
+    );
+    crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+        .expect("DM reply target binding ref") // safety: static test binding ref is valid.
+}
+
+/// Poll the shared delivered-gate-route store until the driver records a route
+/// for `(tenant, user, gate_ref)`, then return it. Times out after 5 s.
+async fn wait_for_gate_route(
+    route_store: &dyn DeliveredGateRouteStore,
+    tenant: &TenantId,
+    user: &UserId,
+    gate_ref: &str,
+) -> ironclaw_outbound::DeliveredGateRouteRecord {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(record) = route_store
+                .load_delivered_gate_route(tenant, user, gate_ref)
+                .await
+                .expect("load gate route")
+            {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver records the delivered gate route within 5 s")
+}
+
+/// Full trigger→gate→approve twin of the live canary, at the crate tier.
+///
+/// A triggered run (personal, foreign thread scope) blocks on approval. The
+/// `TriggeredRunDeliveryDriver` — the production triggered-delivery hook — posts
+/// the approval prompt to the creator's Slack DM through a fake protocol egress
+/// and auto-records a delivered gate route into the store the inbound workflow
+/// reads. When the human replies with bare `approve` in that DM, the events
+/// route resolves the gate on the run's foreign scope via the DRIVER-recorded
+/// route (not a hand-seeded one). This welds two production assemblies that are
+/// otherwise pinned only in isolation: the triggered-delivery route recording
+/// (`slack_delivery` cfg(test)) and the inbound delivered-route resolution
+/// (`bare_approve_in_dm_resolves_gate_recorded_by_observer`).
+///
+/// Doubles substitute only at seams the production triggered factory
+/// (`build_triggered_run_delivery_hook_from_parts`) fills: `egress` real, and a
+/// no-op `binding_service`. The final-reply tail after `approve` is pinned
+/// separately by `slack_approval_reply_resumes_and_delivers_final_reply`;
+/// stitching it here would race the triggered driver's own delivery loop against
+/// the live observer's (two independent `active_delivery_run_ids` sets), a
+/// cross-assembly dedup question outside this test's scope.
+#[tokio::test]
+async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() {
+    // Non-shared harness: the inbound observer's own route writes go to a separate
+    // store, so `harness.route_store` (the store the workflow reads) is written
+    // ONLY by the triggered driver under test — mirroring the manual-seed variant
+    // `bare_approve_in_dm_resolves_gate_on_foreign_scope_via_delivered_route`, but
+    // with the route produced by a real `TriggeredRunDeliveryDriver`.
+    let (harness, inner_approvals) = build_harness_for_delivered_route_tests().await;
+
+    // Establish the DM conversation binding and a blocked run whose id the driver
+    // will route. (In production the triggered run id comes from the trigger
+    // submit; here we reuse the harness's blocked run so the inbound approve has a
+    // concrete run to target.)
+    let block_response = harness.post_event(DM_BLOCK).await;
+    assert_eq!(block_response.status(), StatusCode::OK);
+    harness.drain().await;
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after DM_BLOCK"); // safety: E2E test assertion.
+
+    let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
+    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
+    let foreign_scope = foreign_run_scope();
+
+    // Seed the creator's personal DM preference so the triggered approval prompt
+    // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
+    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let dm_target = dm_reply_target_binding_ref();
+    outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                final_reply_target: Some(dm_target.clone()),
+                progress_target: None,
+                approval_prompt_target: Some(dm_target.clone()),
+                auth_prompt_target: None,
+                default_modality: None,
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: None,
+        })
+        .await
+        .expect("seed personal preference"); // safety: in-memory store should not fail.
+
+    // Seed the finalized assistant message the driver delivers once the scripted
+    // coordinator reports Completed. The triggered thread never went through
+    // submit_turn (the run is delivered by trigger, not inbound message), so the
+    // thread must be ensured before appending — mirroring the production
+    // trigger-prompt materializer.
+    let threads = InMemorySessionThreadService::default();
+    threads
+        .ensure_thread(EnsureThreadRequest {
+            scope: ThreadScope {
+                tenant_id: tenant.clone(),
+                agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+                project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+                owner_user_id: Some(user.clone()),
+                mission_id: None,
+            },
+            thread_id: Some(foreign_scope.thread_id.clone()),
+            created_by_actor_id: "test-actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("ensure foreign triggered thread");
+    append_final_assistant_message(
+        &threads,
+        &foreign_scope,
+        blocked_run_id,
+        "Triggered run complete after approval.",
+    )
+    .await
+    .expect("seed final assistant message");
+
+    let template = turn_state(
+        foreign_scope.clone(),
+        TurnActor::new(user.clone()),
+        blocked_run_id,
+        TurnStatus::BlockedApproval,
+        Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
+        dm_target,
+        AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
+    );
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(ScriptedTriggerCoordinator::new(template));
+
+    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
+        adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
+        installation_id: AdapterInstallationId::new(INSTALLATION).expect("installation id"), // safety: static test installation id is valid.
+        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
+        auth_requirement: slack_request_signature_auth_requirement(),
+    }));
+
+    let driver_egress = RecordingEgress::default();
+    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let services = SlackFinalReplyDeliveryServices {
+        binding_service: Arc::new(NoopTriggeredBindingService),
+        thread_service: Arc::new(threads),
+        turn_coordinator: coordinator,
+        outbound_store,
+        // Shared with the workflow's delivered-route index so the driver-recorded
+        // route is what the inbound approve resolves against.
+        route_store: harness.route_store.clone(),
+        communication_preferences: preferences,
+        adapter,
+        egress: Arc::new(driver_egress.clone()),
+        delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        auth_challenges: None,
+        auth_flow_canceller: None,
+        approval_requests: None,
+    };
+    let driver = TriggeredRunDeliveryDriver::with_settings(
+        services,
+        SlackFinalReplyDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(2),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+            max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+        },
+        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        harness.route_store.clone(),
+        AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+    );
+
+    // Fire the trigger. creator == USER so the recorded route keys to the same
+    // user the inbound DM resolves to; project None => personal (not denied).
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
+        creator_user_id: user.clone(),
+        agent_id: None,
+        project_id: None,
+        prompt: "triggered approval prompt".to_string(),
+    };
+    driver
+        .on_trigger_submitted(fire, blocked_run_id, foreign_scope)
+        .await;
+
+    // The driver recorded a delivered gate route into the shared store, keyed by
+    // the creator, on the triggered run's foreign scope, and carrying the DM
+    // conversation fingerprint the inbound approve keys on.
+    let route = wait_for_gate_route(harness.route_store.as_ref(), &tenant, &user, GATE).await;
+    assert_eq!(route.run_id, blocked_run_id);
+    assert_eq!(
+        route.scope.thread_id,
+        foreign_run_scope().thread_id,
+        "route carries the triggered run's foreign thread scope"
+    );
+    assert!(
+        route
+            .delivered_conversation_fingerprints
+            .contains(&dm_conversation_fingerprint()),
+        "driver route must carry the DM conversation fingerprint the inbound approve keys on; got {:?}",
+        route.delivered_conversation_fingerprints
+    );
+
+    // The driver posted an approval prompt naming the gate to the Slack DM.
+    let prompts: Vec<_> = driver_egress
+        .requests()
+        .into_iter()
+        .filter(|r| r.path().as_str() == "/api/chat.postMessage")
+        .collect();
+    assert!(
+        !prompts.is_empty(),
+        "driver must post at least one chat.postMessage"
+    );
+    let first_body = std::str::from_utf8(prompts[0].body()).expect("utf8 body");
+    assert!(
+        first_body.contains("approve") && first_body.contains(GATE),
+        "approval prompt body must name the gate: {first_body}"
+    );
+
+    // Inbound bare `approve` in the DM resolves the gate on the run's FOREIGN
+    // scope via the DRIVER-recorded route: list_pending on the DM returns []
+    // (ForeignScopeApprovalService), the workflow falls back to the conversation
+    // fingerprint index and finds the driver route.
+    let approve_response = harness.post_event(DM_APPROVE).await;
+    assert_eq!(approve_response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let requests = inner_approvals.requests();
+    assert_eq!(requests.len(), 1, "exactly one approval resolve request");
+    assert_eq!(
+        requests[0].scope.thread_id,
+        foreign_run_scope().thread_id,
+        "scope rewritten to the triggered run's foreign thread via the driver route"
+    );
+    assert_eq!(
+        requests[0].run_id_hint,
+        Some(blocked_run_id),
+        "run_id_hint carries the driver-recorded route's run_id"
     );
     assert_eq!(
         requests[0].decision,
