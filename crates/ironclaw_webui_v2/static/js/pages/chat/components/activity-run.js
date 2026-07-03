@@ -1,11 +1,13 @@
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { summarizeActivity } from "../lib/activity-summary.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
 
 export function ActivityRun({ activity }) {
-  const summary = summarizeActivity(activity);
+  const t = useT();
+  const summary = React.useMemo(() => summarizeActivity(activity, t), [activity, t]);
   const shouldAutoExpand = shouldExpandActivityRun(activity);
   const [expanded, setExpanded] = React.useState(shouldAutoExpand);
 

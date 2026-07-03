@@ -149,7 +149,10 @@ fn read_file_continuation_notice(
     next_offset: usize,
 ) -> String {
     format!(
-        "[Showing lines {}-{} of {} ({} limit). Use offset={} to continue.]",
+        "[Showing lines {}-{} of {} ({} limit). This file is large: to analyze, summarize, or \
+         count over it, run ONE shell command or script (grep/awk/python) over the whole file and \
+         read only the computed result — do NOT page through it (offset={}) and reason over it in \
+         context, which is slow and costly.]",
         start_line + 1,
         last_line_shown,
         total_lines,
