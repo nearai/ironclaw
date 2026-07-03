@@ -13,7 +13,7 @@ use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
     local_dev_one_shot_lease_approval,
 };
-use crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
+use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
 use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 

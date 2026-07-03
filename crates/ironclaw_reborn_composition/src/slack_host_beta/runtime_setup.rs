@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::outbound_preferences::{
+use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
 };

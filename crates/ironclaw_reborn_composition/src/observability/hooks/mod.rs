@@ -122,7 +122,7 @@ pub struct HooksActivationConfig {
     ///    documented gating follow-up.
     /// 2. **Durable quarantine surfacing:** `hook.quarantined` security-audit
     ///    events are emitted only via `tracing` at the `security_audit` target
-    ///    and at `debug!` level (see [`crate::hooks::audit`]). Production
+    ///    and at `debug!` level (see [`crate::observability::hooks::audit`]). Production
     ///    typically disables debug logging, so operators would have no
     ///    visibility into active quarantine activity (e.g. an extension
     ///    attempting a scope escalation) unless `RUST_LOG=security_audit=debug`

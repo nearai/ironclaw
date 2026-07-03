@@ -43,9 +43,7 @@ use thiserror::Error;
 mod runtime_setup;
 
 use crate::RebornRuntime;
-use crate::outbound_preferences::{
-    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
-};
+use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
