@@ -575,3 +575,245 @@ fn redact_data_url(url: &str) -> String {
         Err(_) => format!("data:{mime};base64=<redacted, undecodable>"),
     }
 }
+
+/// Multi-turn baseline-sliced variants of the thread-history assertions
+/// (`assert_tool_error*`, conversation-history containment) + the conversation
+/// history assert.
+///
+/// The `assert_tool_error*` family above scans the FULL thread history and is
+/// documented (`assert_tool_error` doc) as safe only for single-turn harnesses:
+/// on a thread with more than one turn it cannot tell which turn produced a
+/// given `ToolResultReference`. The `*_since` methods here close that gap using
+/// the same `[baseline..]` slice idiom the egress/invocation assertions use
+/// (`assert_egress_count` etc.), but over thread-history message COUNT rather
+/// than a shared in-process recorder: capture [`history_len`] at the start of a
+/// turn, then assert `*_since(baseline, ..)` after it, and only the messages
+/// that turn appended are considered.
+///
+/// This block is appended (additive) rather than folded into the sibling impl
+/// so three parallel Wave-3 lanes union-merge without conflict; it deliberately
+/// does not touch or rename the existing full-history collectors above.
+impl RebornIntegrationHarness {
+    /// Full persisted thread-history for this harness's thread, in sequence
+    /// order. The baseline-sliced `*_since` assertions read this; kept private
+    /// so tests assert through the typed helpers rather than raw records.
+    async fn persisted_history(&self) -> HarnessResult<Vec<ironclaw_threads::ThreadMessageRecord>> {
+        Ok(self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?)
+    }
+
+    /// Number of persisted thread-history messages right now. Capture this at
+    /// the START of a turn to scope a subsequent `*_since` assertion to only the
+    /// messages that turn appends — the thread-history analogue of the
+    /// `baseline_egress_count` snapshot the egress assertions take at
+    /// construction, but caller-controlled so it can be re-taken per turn on a
+    /// multi-turn harness.
+    pub async fn history_len(&self) -> HarnessResult<usize> {
+        Ok(self.persisted_history().await?.len())
+    }
+
+    /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —
+    /// a baseline greater than the current history length is always a caller bug
+    /// (a stale or foreign-thread value; history never shrinks). Degrading it to
+    /// an empty slice would turn that bug into a misleading "not found" (or a
+    /// vacuous `assert_no_*` pass), violating the support tree's fail-loud
+    /// contract.
+    fn history_slice(
+        history: &[ironclaw_threads::ThreadMessageRecord],
+        baseline: usize,
+    ) -> HarnessResult<&[ironclaw_threads::ThreadMessageRecord]> {
+        history.get(baseline..).ok_or_else(|| {
+            format!(
+                "history baseline {baseline} exceeds current history length {} — stale or \
+                 foreign-thread baseline",
+                history.len()
+            )
+            .into()
+        })
+    }
+
+    /// `persisted_tool_error_summaries`, but over only the `[baseline..]` slice
+    /// of thread history — the multi-turn-safe collector shared by the `*_since`
+    /// tool-error assertions. Mirrors the full-history collector's fail-loud
+    /// decode contract: a `ToolResultReference` with missing `content` or an
+    /// undecodable envelope is an `Err`, never silently skipped.
+    async fn persisted_tool_error_summaries_since(
+        &self,
+        baseline: usize,
+    ) -> HarnessResult<Vec<String>> {
+        let history = self.persisted_history().await?;
+        Self::history_slice(&history, baseline)?
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| envelope.safe_summary.as_str().to_string())
+                    .map_err(|err| {
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// [`assert_tool_error`], scoped to the thread-history messages appended
+    /// SINCE `baseline` (a value from [`history_len`] captured at the start of
+    /// the turn under test). Use on a multi-turn harness where the full-history
+    /// `assert_tool_error` would also see prior turns' tool errors.
+    pub async fn assert_tool_error_since(
+        &self,
+        baseline: usize,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        let prefix = class.summary_prefix();
+        if summaries
+            .iter()
+            .any(|summary| summary.starts_with(prefix) && summary.contains(reason))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no tool-error summary of class {class:?} with reason {reason:?} since baseline {baseline}; saw {summaries:?}"
+        )
+        .into())
+    }
+
+    /// [`assert_no_tool_error`], scoped to the `[baseline..]` slice — passes when
+    /// NO tool error of `class` carrying `reason` was persisted since `baseline`.
+    /// The multi-turn proof that a prior turn's error does NOT leak into the turn
+    /// under test.
+    pub async fn assert_no_tool_error_since(
+        &self,
+        baseline: usize,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        let prefix = class.summary_prefix();
+        let matching: Vec<&String> = summaries
+            .iter()
+            .filter(|summary| summary.starts_with(prefix) && summary.contains(reason))
+            .collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no tool-error summary of class {class:?} with reason {reason:?} since baseline {baseline}; found {matching:?}"
+        )
+        .into())
+    }
+
+    /// [`assert_tool_error_summary_contains`], scoped to the `[baseline..]`
+    /// slice — a raw `safe_summary` substring check with no class-prefix
+    /// requirement, for the executor-synthesized literals documented on the
+    /// full-history sibling, usable across turns.
+    pub async fn assert_tool_error_summary_contains_since(
+        &self,
+        baseline: usize,
+        text: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        if summaries.iter().any(|summary| summary.contains(text)) {
+            return Ok(());
+        }
+        Err(format!(
+            "no tool-error summary containing {text:?} since baseline {baseline}; saw {summaries:?}"
+        )
+        .into())
+    }
+
+    /// Shared implementation for the conversation-history containment asserts:
+    /// scans the `[baseline..]` slice of thread history for a message whose
+    /// `content` contains `needle`, optionally restricted to a single
+    /// [`MessageKind`](ironclaw_threads::MessageKind) (role).
+    async fn conversation_history_contains_impl(
+        &self,
+        baseline: usize,
+        kind: Option<ironclaw_threads::MessageKind>,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let slice = Self::history_slice(&history, baseline)?;
+        let matched = slice
+            .iter()
+            .filter(|message| kind.is_none_or(|k| message.kind == k))
+            .any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(needle))
+            });
+        if matched {
+            return Ok(());
+        }
+        let seen: Vec<String> = slice
+            .iter()
+            .filter(|message| kind.is_none_or(|k| message.kind == k))
+            .map(|message| {
+                let body = message.content.as_deref().unwrap_or("<no-content>");
+                let body = match body.char_indices().nth(80) {
+                    Some((cutoff, _)) => format!("{}...", &body[..cutoff]),
+                    None => body.to_string(),
+                };
+                format!("{:?}:{body:?}", message.kind)
+            })
+            .collect();
+        let scope = match kind {
+            Some(k) => format!("{k:?}-role message"),
+            None => "message".to_string(),
+        };
+        Err(format!(
+            "no conversation-history {scope} containing {needle:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
+    }
+
+    /// Assert some persisted thread-history message's `content` contains
+    /// `needle`, across the FULL history and ANY role. The general
+    /// conversation-history containment check — the persisted-transcript
+    /// analogue of [`assert_system_prompt_contains`] (which only reads
+    /// System-role model REQUESTS, not persisted history). Reads user prompts,
+    /// assistant replies, summaries, etc.
+    pub async fn assert_conversation_history_contains(&self, needle: &str) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(0, None, needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_contains`], scoped to the `[baseline..]`
+    /// slice (a [`history_len`] value from the start of the turn under test) —
+    /// the multi-turn variant.
+    pub async fn assert_conversation_history_contains_since(
+        &self,
+        baseline: usize,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, None, needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_contains`], restricted to messages of a
+    /// single [`MessageKind`](ironclaw_threads::MessageKind) (role) across the
+    /// full history — e.g. assert a `User` prompt or an `Assistant` reply landed
+    /// in the transcript without matching the same text in another role.
+    pub async fn assert_conversation_history_role_contains(
+        &self,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
+    }
+}

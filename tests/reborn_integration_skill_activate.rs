@@ -40,6 +40,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -139,5 +140,66 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
             .await
             .is_err(),
         "builtin.skill_activate must NOT have been invoked without an explicit call"
+    );
+}
+
+/// C-SYNTH failure route — `skill_activate` `ContextBudgetExceeded` is a
+/// MODEL-VISIBLE `Failed` tool error (recoverable), not a terminal driver
+/// error.
+///
+/// An oversized system skill (prompt ≈ 10k tokens at the ~4-bytes-per-token
+/// estimate, over the `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000` budget) is
+/// seeded through the SAME `seed_system_skill_for_test` seam the group
+/// constructor uses for `greet` — no new harness wiring. Activating it drives
+/// the real selection path (`reserve_skill_budget` →
+/// `SkillActivationSelectionError::ContextBudgetExceeded` →
+/// `CapabilityOutcome::Failed`, skill_activation.rs `selection_outcome`), and
+/// the run completes with the model seeing the failure — the
+/// synthetic-capability Failed-routing proof for this cap.
+#[tokio::test]
+async fn skill_activate_over_budget_surfaces_recoverable_failed() {
+    let group = RebornIntegrationGroup::skill_activation_tools()
+        .await
+        .expect("skill-activation group builds");
+    let capability_harness = group
+        .capability_harness()
+        .expect("skill-activation group has a host-runtime capability harness");
+    let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
+    capability_harness
+        .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
+        .expect("oversized system skill seeds");
+
+    let harness = group
+        .thread("conv-skill-activate-over-budget")
+        .script([
+            RebornScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["bloat"]})),
+            RebornScriptedReply::text("could not activate"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn("activate the big one")
+        .await
+        .expect("turn completes despite the failed activation");
+
+    // The budget failure surfaced as a model-visible Failed tool error carrying
+    // the budget summary — not a terminal driver_unavailable.
+    harness
+        .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
+        .await
+        .expect("over-budget activation surfaced as a recoverable Failed tool error");
+    harness
+        .assert_reply_contains("could not activate")
+        .await
+        .expect("run recovered and finalized");
+    // The oversized skill's instructions must NOT have been injected.
+    assert!(
+        harness
+            .assert_model_request_contains("BLOAT_SKILL_FILLER")
+            .await
+            .is_err(),
+        "a failed activation must not inject the skill's instructions"
     );
 }
