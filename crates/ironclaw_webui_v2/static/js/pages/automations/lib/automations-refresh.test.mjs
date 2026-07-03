@@ -82,14 +82,7 @@ test("nextAutomationsRefetchDelay follows recent runs waiting for thread attachm
       [
         {
           state: "paused",
-          has_unattached_run_thread: true,
-          recent_runs: [
-            {
-              run_id: "run-needs-thread",
-              thread_id: null,
-              timestamp: 9_000,
-            },
-          ],
+          latest_unattached_run_thread_timestamp: 9_000,
         },
       ],
       10_000,
@@ -104,13 +97,8 @@ test("nextAutomationsRefetchDelay stops following old unattached run threads", (
       [
         {
           state: "paused",
-          has_unattached_run_thread: true,
-          recent_runs: [
-            {
-              run_id: "run-old-pre-submit-failure",
-              timestamp: 10_000 - AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS - 1,
-            },
-          ],
+          latest_unattached_run_thread_timestamp:
+            10_000 - AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS - 1,
         },
       ],
       10_000,
@@ -125,13 +113,8 @@ test("nextAutomationsRefetchDelay stops following far-future unattached run thre
       [
         {
           state: "paused",
-          has_unattached_run_thread: true,
-          recent_runs: [
-            {
-              run_id: "run-far-future-clock-skew",
-              timestamp: 10_000 + AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS + 1,
-            },
-          ],
+          latest_unattached_run_thread_timestamp:
+            10_000 + AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS + 1,
         },
       ],
       10_000,

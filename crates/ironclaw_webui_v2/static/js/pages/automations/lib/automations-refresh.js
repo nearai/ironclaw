@@ -14,16 +14,11 @@ function finiteTimestamp(value) {
 }
 
 function hasRecentUnattachedRunThread(automation, nowMs) {
-  if (!automation?.has_unattached_run_thread) return false;
-  const runs = Array.isArray(automation.recent_runs) ? automation.recent_runs : [];
-  return runs.some((run) => {
-    if (!run?.run_id || run.thread_id) return false;
-    const timestamp = finiteTimestamp(run.timestamp);
-    return (
-      timestamp != null &&
-      Math.abs(nowMs - timestamp) <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS
-    );
-  });
+  const timestamp = finiteTimestamp(automation?.latest_unattached_run_thread_timestamp);
+  return (
+    timestamp != null &&
+    Math.abs(nowMs - timestamp) <= AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS
+  );
 }
 
 export function nextAutomationsRefetchDelay(automations, nowMs = Date.now()) {
