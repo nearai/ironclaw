@@ -1,6 +1,6 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives five scenarios over a shared
+//! One sequential `#[tokio::test]` drives six scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
 //! shared across threads). See `tests/support/reborn/CLAUDE.md` §"Group tests".
@@ -30,7 +30,11 @@
 //!    `"driver_protocol_violation"` sentinel. Independent of the auto-approve
 //!    toggle (no gate involved); ordered alongside the other independent
 //!    scenarios, before the toggle is flipped.
-//! 5. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
+//! 5. `approval_request_persists_after_reopen` (C-DURABLE) — reopens a FRESH
+//!    `ApprovalRequestStore` at the same on-disk root and confirms the
+//!    `Pending` request survives, independent of the auto-approve toggle
+//!    (its own gate, resolved before returning).
+//! 6. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
 //!    setting persists across thread boundaries. MUST run last (it flips the
 //!    toggle ON for the whole group), so the gate scenarios above are the control
@@ -43,6 +47,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_concurrent_dual_gate_resume;
 mod scenario_failure_category_demasked;
@@ -73,6 +78,14 @@ async fn approvals_group_e2e() {
     report.record(
         "failure_category_demasked",
         scenario_failure_category_demasked::run(&g).await,
+    );
+    // C-DURABLE: independent of the auto-approve toggle (its own gate, resolved
+    // before returning) — the approval-request store is always on-disk
+    // regardless of the group's `StorageMode` (a separate capability-harness
+    // filesystem), so this needs no `StorageMode::LibSql` variant.
+    report.record(
+        "approval_request_persists_after_reopen",
+        scenario_approval_request_persists_after_reopen::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)

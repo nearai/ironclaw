@@ -146,6 +146,49 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that ANY captured egress request whose URL contains `url_substr`
+    /// carried a body containing `body_substr` — checks every matching request,
+    /// not just the first. Needed for a multi-request handshake where every leg
+    /// shares the same URL (e.g. web-access's Exa MCP `initialize` /
+    /// `notifications/initialized` / `tools/call` sequence, C-WEBACCESS) and
+    /// only one leg's body carries the substring under test. Prefer
+    /// [`assert_egress_body_contains`] when `url_substr` is expected to match
+    /// exactly one request — its first-match semantics catch a false pass that
+    /// this looser check would miss if a later, unrelated same-URL request also
+    /// happened to satisfy `body_substr`.
+    pub async fn assert_egress_body_contains_any(
+        &self,
+        url_substr: &str,
+        body_substr: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.captured_egress_requests();
+        let matching: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.contains(url_substr))
+            .collect();
+        if matching.is_empty() {
+            let seen: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+            return Err(format!(
+                "no captured egress request matching url {url_substr:?}; saw {seen:?}"
+            )
+            .into());
+        }
+        if matching
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains(body_substr))
+        {
+            return Ok(());
+        }
+        let bodies: Vec<String> = matching
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .collect();
+        Err(format!(
+            "no egress request to {url_substr:?} had a body containing {body_substr:?}; saw {bodies:?}"
+        )
+        .into())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -191,6 +234,103 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Collects the persisted `safe_summary` field of every `ToolResultReference`
+    /// message on this thread's FULL history (not baseline-sliced — same caveat
+    /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for
+    /// single-turn harnesses today). Shared collector for [`assert_tool_error`],
+    /// [`assert_no_tool_error`], and [`assert_tool_error_summary_contains`].
+    ///
+    /// A `ToolResultReference` message with `content: None`, or with `content`
+    /// that fails to decode as a `ToolResultReferenceEnvelope`, is an `Err` —
+    /// never silently skipped. Both would otherwise vanish from `summaries`
+    /// and degrade into a misleading "not found; saw [...]" for the caller.
+    async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                // Fail loud on a missing `content` field, and on a decode
+                // error, rather than silently dropping the message
+                // (.claude/rules/error-handling.md) — a malformed or
+                // content-less envelope must surface as its own diagnosis,
+                // not degrade into a misleading "not found" from the caller.
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| envelope.safe_summary.as_str().to_string())
+                    .map_err(|err| {
+                        // Truncate the raw payload before interpolating it into
+                        // the error: `content` can carry a `model_observation`
+                        // field with large/unbounded text, which is bad for
+                        // test-output size and potentially sensitive. Mirrors
+                        // the truncation shape in `assert_system_prompt_contains`.
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// Assert the in-memory `TurnEventSink` installed via `.with_turn_event_sink()`
+    /// (C-TRACECAP) recorded at least one event of `kind`. Proves
+    /// `subscribe_best_effort` actually fired the sink for a real turn, not just
+    /// that the harness wired the field.
+    pub async fn assert_turn_event_recorded(
+        &self,
+        kind: ironclaw_turns::TurnEventKind,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_turn_events();
+        if events.iter().any(|event| event.kind == kind) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert a captured model request carried a multimodal `data:` image part
+    /// holding exactly `bytes` under `mime_type` (C-ATTACH) — proves the landed
+    /// attachment round-tripped intact (lander → project filesystem →
+    /// `attachment_read_port` → base64) and reached the model as
+    /// `ContentPart::ImageUrl`, not just the textual `<attachments>` pointer.
+    pub async fn assert_model_saw_image_attachment(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> HarnessResult<()> {
+        use base64::Engine;
+        let urls = self.captured_image_data_urls();
+        let expected = format!(
+            "data:{mime_type};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        if urls.iter().any(|url| url == &expected) {
+            return Ok(());
+        }
+        // Redacted: the full base64-encoded attachment bytes must never land in
+        // CI logs on assertion failure (a future test using a sensitive/screenshot
+        // fixture would otherwise leak its contents). Report mime type, byte
+        // length, and a short digest instead — enough to distinguish "wrong bytes"
+        // from "no image part at all" without reproducing the content.
+        let seen: Vec<String> = urls.iter().map(|url| redact_data_url(url)).collect();
+        Err(format!(
+            "no captured image data: URL matching {}; saw {} image part(s): {seen:?}",
+            redact_data_url(&expected),
+            seen.len()
+        )
+        .into())
+    }
+
     /// Assert a model-visible tool error of `class` carrying `reason` was
     /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
     /// reads the in-process recorder, populated only on the *Completed* write
@@ -226,19 +366,7 @@ impl RebornIntegrationHarness {
         class: ToolErrorClass,
         reason: &str,
     ) -> HarnessResult<()> {
-        let history = self
-            .thread_harness
-            .history(self.binding.thread_id.clone())
-            .await?;
-        let summaries: Vec<String> = history
-            .iter()
-            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
-            .filter_map(|message| message.content.as_deref())
-            .filter_map(|content| {
-                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
-            })
-            .map(|envelope| envelope.safe_summary.as_str().to_string())
-            .collect();
+        let summaries = self.persisted_tool_error_summaries().await?;
         let prefix = class.summary_prefix();
         if summaries
             .iter()
@@ -250,6 +378,53 @@ impl RebornIntegrationHarness {
             "no persisted tool-error summary of class {class:?} with reason {reason:?}; saw {summaries:?}"
         )
         .into())
+    }
+
+    /// Assert NO persisted `ToolResultReference` summary matches `class`'s
+    /// prefix and contains `reason` — the inverse predicate of
+    /// [`assert_tool_error`], built on the same `persisted_tool_error_summaries`
+    /// collector. Use to prove a specific tool-error was NOT recorded (e.g. no
+    /// leaked re-dispatch after a gate-declined short-circuit) without coupling
+    /// the test to `assert_tool_error`'s own diagnostic wording.
+    pub async fn assert_no_tool_error(
+        &self,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
+        let prefix = class.summary_prefix();
+        let matching: Vec<&String> = summaries
+            .iter()
+            .filter(|summary| summary.starts_with(prefix) && summary.contains(reason))
+            .collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no persisted tool-error summary of class {class:?} with reason {reason:?}; found {matching:?}"
+        )
+        .into())
+    }
+
+    /// Assert some persisted `ToolResultReference`'s raw `safe_summary` text
+    /// contains `text` — NO class-prefix requirement. Complements
+    /// [`assert_tool_error`] for `CapabilityErrorSummary`s the executor builds
+    /// via `SanitizedStrategySummary::from_trusted_static` in
+    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs` (filtered-surface
+    /// denial, stale-surface retry, auth/approval gate-declined short-circuit) —
+    /// those are fixed host-authored literals with no host-returned text to
+    /// prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary`
+    /// prefix match can never succeed for them. Use only for known
+    /// executor-synthesized literals.
+    pub async fn assert_tool_error_summary_contains(&self, text: &str) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries().await?;
+        if summaries.iter().any(|summary| summary.contains(text)) {
+            return Ok(());
+        }
+        Err(
+            format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
+                .into(),
+        )
     }
 
     /// Assert that any captured **network** egress request whose URL
@@ -365,5 +540,38 @@ impl RebornIntegrationHarness {
             "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
         )
         .into())
+    }
+}
+
+/// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
+/// failure message — never prints the base64 payload itself (which is the raw
+/// attachment content) or even a prefix of it. Reports the mime type, decoded
+/// byte length, and a short SHA-256 prefix, which is enough to tell "wrong
+/// bytes" apart from "no image part at all" without reconstructing the content.
+fn redact_data_url(url: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let Some(rest) = url.strip_prefix("data:") else {
+        return "<non-data: URL>".to_string();
+    };
+    let Some((mime, b64)) = rest.split_once(";base64,") else {
+        return format!(
+            "data:{}...<unparseable, redacted>",
+            rest.chars().take(40).collect::<String>()
+        );
+    };
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => {
+            let digest_hex: String = Sha256::digest(&bytes)
+                .iter()
+                .take(4)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                "data:{mime};base64=<redacted, {} byte(s), sha256={digest_hex}>",
+                bytes.len(),
+            )
+        }
+        Err(_) => format!("data:{mime};base64=<redacted, undecodable>"),
     }
 }

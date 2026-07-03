@@ -850,6 +850,61 @@ mod tests {
     }
 
     #[test]
+    fn query_evicts_oldest_entries_when_capacity_is_reached() {
+        let buffer = OperatorLogBuffer::new(3);
+        for index in 0..5 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 4", "message 3", "message 2"]
+        );
+        assert!(response.next_cursor.is_none());
+    }
+
+    #[test]
+    fn invalid_page_cursor_behaves_like_no_cursor() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..3 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(2),
+            cursor: Some("before:not-a-number".to_string()),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 2", "message 1"]
+        );
+        assert_eq!(response.next_cursor.as_deref(), Some("before:2"));
+    }
+
+    #[test]
     fn query_filters_by_level_and_target() {
         let buffer = OperatorLogBuffer::new(10);
         buffer.record(RebornLogLevel::Info, "ironclaw::alpha", "alpha".to_string());
@@ -865,6 +920,36 @@ mod tests {
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "beta");
+    }
+
+    #[test]
+    fn query_target_filter_is_case_insensitive_contains() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Info,
+            "IronClaw::OperatorLogs",
+            "mixed target".to_string(),
+        );
+        buffer.record(
+            RebornLogLevel::Info,
+            "other::target",
+            "other target".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            target: Some("operatorlogs".to_string()),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mixed target"]
+        );
     }
 
     #[test]
@@ -1368,6 +1453,29 @@ mod tests {
             vec!["message 3", "message 4"]
         );
         assert_eq!(response.next_cursor.as_deref(), Some("after:5"));
+    }
+
+    #[test]
+    fn follow_without_cursor_starts_after_current_end() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..3 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert!(response.entries.is_empty());
+        assert!(response.tail_supported);
+        assert!(response.follow_supported);
+        assert_eq!(response.next_cursor.as_deref(), Some("after:3"));
     }
 
     #[test]

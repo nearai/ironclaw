@@ -32,6 +32,11 @@ mod models_catalog;
 #[cfg(feature = "openai-compat-beta")]
 mod projection_helpers;
 mod refs;
+// Durable filesystem-backed ref store (folded in from the former
+// `ironclaw_reborn_openai_compat_storage` crate). Gated behind `storage` so the
+// contract-only surface stays free of the `ironclaw_filesystem` dependency.
+#[cfg(feature = "storage")]
+mod refs_storage;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]
 mod responses_workflow;
@@ -98,6 +103,12 @@ pub use refs::{
     OpenAiCompatResourceKind, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
     OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
 };
+#[cfg(feature = "storage")]
+pub use refs_storage::FilesystemOpenAiCompatRefStore;
+#[cfg(feature = "libsql")]
+pub use refs_storage::RebornLibSqlOpenAiCompatRefStore;
+#[cfg(feature = "postgres")]
+pub use refs_storage::RebornPostgresOpenAiCompatRefStore;
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
     OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,

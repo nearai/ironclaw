@@ -3920,6 +3920,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
@@ -4347,6 +4348,7 @@ dependencies = [
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
  "regex",
@@ -4378,75 +4380,27 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "deadpool-postgres",
  "futures",
  "ironclaw_events",
  "ironclaw_host_api",
  "ironclaw_prompt_envelope",
  "ironclaw_turns",
  "ironclaw_wasm_limiter",
+ "libsql",
  "lru 0.18.0",
  "rust_decimal",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
  "wasmtime",
  "wat",
-]
-
-[[package]]
-name = "ironclaw_hooks_libsql"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "chrono",
- "ironclaw_hooks",
- "ironclaw_host_api",
- "libsql",
- "rust_decimal",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_hooks_parity"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "deadpool-postgres",
- "ironclaw_hooks",
- "ironclaw_hooks_libsql",
- "ironclaw_hooks_postgres",
- "ironclaw_host_api",
- "libsql",
- "rust_decimal",
- "tempfile",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
-name = "ironclaw_hooks_postgres"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "chrono",
- "deadpool-postgres",
- "ironclaw_hooks",
- "ironclaw_host_api",
- "rust_decimal",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -4693,6 +4647,7 @@ dependencies = [
 name = "ironclaw_observability"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tracing",
 ]
 
@@ -4801,6 +4756,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "deadpool-postgres",
  "futures",
  "ironclaw_approvals",
  "ironclaw_attachments",
@@ -4826,6 +4782,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "libsql",
  "secrecy",
  "serde",
  "serde_json",
@@ -4833,30 +4790,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tokio-util",
  "tracing",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_product_workflow_storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "deadpool-postgres",
- "futures-util",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "libsql",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-postgres",
- "tracing",
 ]
 
 [[package]]
@@ -5001,7 +4939,6 @@ dependencies = [
  "ironclaw_product_adapters",
  "ironclaw_product_context",
  "ironclaw_product_workflow",
- "ironclaw_product_workflow_storage",
  "ironclaw_projects",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
@@ -5009,7 +4946,6 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
- "ironclaw_reborn_openai_compat_storage",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -5025,7 +4961,6 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
- "ironclaw_webui_v2_static",
  "libc",
  "libsql",
  "lru 0.18.0",
@@ -5124,8 +5059,10 @@ dependencies = [
  "http 1.4.2",
  "http-body-util",
  "ironclaw_attachments",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_turns",
  "serde",
  "serde_json",
@@ -5135,25 +5072,6 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_reborn_openai_compat_storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_product_adapters",
- "ironclaw_reborn_openai_compat",
- "ironclaw_turns",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5583,6 +5501,7 @@ dependencies = [
 name = "ironclaw_wasm_sandbox_core"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_wasm_limiter",
  "thiserror 2.0.18",
  "tracing",
  "wasmtime",
@@ -5606,24 +5525,11 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_turns",
  "ironclaw_webui_v2",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.29.0",
- "tower 0.5.3",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_webui_v2_static"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.9",
- "http 1.4.2",
- "http-body-util",
- "ironclaw_webui_v2_static",
- "rand 0.10.1",
- "tokio",
  "tower 0.5.3",
  "tracing",
 ]

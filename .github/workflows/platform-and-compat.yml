@@ -201,7 +201,14 @@ jobs:
       - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
         run: |
           timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_hooks_parity --features postgres,integration -- --nocapture
+            cargo test -p ironclaw_hooks \
+              --features postgres,libsql,integration,contract-tests \
+              --test parity_matrix \
+              --test multi_host_adversarial \
+              --test predicate_state_postgres_contract \
+              --test predicate_state_postgres_adversarial \
+              --test predicate_state_libsql_contract \
+              -- --nocapture
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
@@ -259,7 +266,7 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
@@ -297,7 +304,7 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2_static/frontend/package-lock.json
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench
