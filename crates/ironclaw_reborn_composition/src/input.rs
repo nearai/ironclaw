@@ -32,7 +32,8 @@ use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
 use crate::oauth_dcr::OAuthDcrProviderConfig;
 use crate::oauth_provider_client::HostOAuthProviderSpec;
-use crate::slack_personal_oauth::slack_personal_provider_spec;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
@@ -190,6 +191,8 @@ pub struct RebornBuildInput {
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
@@ -653,11 +656,12 @@ impl RebornBuildInput {
         self
     }
 
-    /// Record product/bootstrap-provided Slack personal (user-token) OAuth
-    /// metadata on the build input. Uses the same shared Slack app as the bot
-    /// token; issues a `slack_personal` user-token credential.
-    pub fn with_slack_personal_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(slack_personal_provider_spec(), config);
+    /// Register the lazy Slack personal OAuth slot so the provider client
+    /// fetches credentials from the setup service at request time rather than
+    /// from env vars at startup.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_oauth_lazy(mut self, slot: SlackPersonalSetupServiceSlot) -> Self {
+        self.slack_personal_oauth_lazy_slot = Some(slot);
         self
     }
 
@@ -749,6 +753,8 @@ impl RebornBuildInput {
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth_lazy_slot: None,
             nearai_mcp_bootstrap_config: None,
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }

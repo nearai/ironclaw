@@ -14,10 +14,11 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
-    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+    CredentialRefreshSettings, OAuthClientConfig, OAuthRedirectUri, OperatorLogLayer, PollSettings,
+    RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
+    RebornRuntimeIdentity, RebornRuntimeInput, SlackPersonalSetupServiceSlot, TurnRunnerSettings,
+    build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
@@ -180,7 +181,8 @@ pub(crate) fn execute(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<()> {
     let runtime_input =
-        build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
+        build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?
+            .inner;
     seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
         .map_err(anyhow::Error::from)?;
     let boot_config = context.boot_config().clone();
@@ -486,6 +488,7 @@ pub(crate) fn build_runtime_input(
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornRuntimeInput> {
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
+        .map(|b| b.inner)
 }
 
 /// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
@@ -536,8 +539,9 @@ pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
-) -> anyhow::Result<RebornRuntimeInput> {
+) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
+    let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
@@ -581,12 +585,21 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
-    Ok(runtime_input)
+    Ok(BuiltRuntimeInput {
+        inner: runtime_input,
+        slack_personal_lazy_slot,
+    })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
+    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+}
+
+pub(crate) struct BuiltRuntimeInput {
+    pub(crate) inner: RebornRuntimeInput,
+    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
 #[derive(Clone, Debug)]
@@ -636,9 +649,14 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
-    if let Some(client) = resolve_slack_personal_oauth_config_from_env()? {
-        services_input = services_input.with_slack_personal_oauth_backend(client);
-    }
+    let slack_personal_lazy_slot =
+        if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
+            let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
+            services_input = services_input.with_slack_personal_oauth_lazy(slot.clone());
+            Some(slot)
+        } else {
+            None
+        };
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -646,6 +664,7 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
+        slack_personal_lazy_slot,
         config_file,
     })
 }
@@ -750,48 +769,20 @@ pub(crate) fn resolve_google_oauth_config_from_env()
     resolve_google_oauth_config(optional_nonempty_env)
 }
 
-/// Resolve the Slack personal (user-token) OAuth client config from env.
-///
-/// Single shared Slack app: point these at the same app that issues the
-/// workspace bot token. Returns `None` when no Slack-personal OAuth vars are
-/// set (the provider is simply not registered). Slack requires a client
-/// secret for token exchange, so a missing secret is warned about loudly.
-pub(crate) fn resolve_slack_personal_oauth_config_from_env()
--> anyhow::Result<Option<OAuthClientConfig>> {
-    resolve_slack_personal_oauth_config(optional_nonempty_env)
+pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
+-> anyhow::Result<Option<OAuthRedirectUri>> {
+    resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
 }
 
-fn resolve_slack_personal_oauth_config(
+fn resolve_slack_personal_oauth_redirect_uri(
     mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<OAuthClientConfig>> {
-    let client_id = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID");
-    let redirect_uri = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI");
-    let client_secret = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET");
-
-    if client_id.is_none() && redirect_uri.is_none() && client_secret.is_none() {
+) -> anyhow::Result<Option<OAuthRedirectUri>> {
+    let Some(raw) = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI") else {
         return Ok(None);
-    }
-
-    let client_id = client_id.ok_or_else(|| {
-        anyhow::anyhow!(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID is required for Slack personal OAuth setup"
-        )
-    })?;
-    let redirect_uri = redirect_uri.ok_or_else(|| {
-        anyhow::anyhow!(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI is required for Slack personal OAuth setup"
-        )
-    })?;
-    let client_secret = client_secret.map(SecretString::from);
-    if client_secret.is_none() {
-        tracing::warn!(
-            target = "ironclaw::reborn::cli::slack_personal_oauth",
-            "Slack personal OAuth config has no client secret; Slack requires one for token exchange",
-        );
-    }
-    let client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
-        .context("invalid Slack personal OAuth client configuration")?;
-    Ok(Some(client))
+    };
+    let uri = OAuthRedirectUri::new(raw)
+        .context("invalid IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI")?;
+    Ok(Some(uri))
 }
 
 fn resolve_google_oauth_config(
@@ -1239,7 +1230,7 @@ mod tests {
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
         protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_slack_personal_oauth_config, runner_settings,
+        resolve_slack_personal_oauth_redirect_uri, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -1885,7 +1876,8 @@ regex_activation_enabled = false
                 confirm_host_access: true,
             },
         )
-        .expect("runtime input");
+        .expect("runtime input")
+        .inner;
         assert!(runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
@@ -3223,46 +3215,25 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_slack_personal_oauth_config_returns_none_when_unset() {
-        let config =
-            resolve_slack_personal_oauth_config(|_| None).expect("empty env should not fail setup");
-        assert!(config.is_none());
+    fn resolve_slack_personal_oauth_redirect_uri_returns_none_when_unset() {
+        let uri = resolve_slack_personal_oauth_redirect_uri(|_| None)
+            .expect("empty env should not fail setup");
+        assert!(uri.is_none());
     }
 
     #[test]
-    fn resolve_slack_personal_oauth_config_errors_when_client_id_missing() {
+    fn resolve_slack_personal_oauth_redirect_uri_returns_uri_when_set() {
+        const REDIRECT_URI: &str =
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback";
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            REDIRECT_URI,
         )]);
-        let error = resolve_slack_personal_oauth_config(|name| {
-            vars.get(name).map(|value| value.to_string())
-        })
-        .expect_err("redirect-only Slack personal OAuth config must fail closed");
-        assert!(error.to_string().contains("SLACK_PERSONAL_CLIENT_ID"));
-    }
-
-    #[test]
-    fn resolve_slack_personal_oauth_config_builds_client_when_all_vars_set() {
-        let vars = HashMap::from([
-            (
-                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID",
-                "slack-client-id",
-            ),
-            (
-                "IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_SECRET",
-                "slack-client-secret",
-            ),
-            (
-                "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
-            ),
-        ]);
-        let config = resolve_slack_personal_oauth_config(|name| {
-            vars.get(name).map(|value| value.to_string())
-        })
-        .expect("valid Slack personal OAuth config resolves");
-        assert!(config.is_some());
+        let uri =
+            resolve_slack_personal_oauth_redirect_uri(|name| vars.get(name).map(|v| v.to_string()))
+                .expect("valid redirect URI resolves")
+                .expect("URI present when var is set");
+        assert_eq!(uri.as_str(), REDIRECT_URI);
     }
 
     #[test]

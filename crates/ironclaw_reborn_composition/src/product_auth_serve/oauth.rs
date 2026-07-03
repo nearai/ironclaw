@@ -186,7 +186,7 @@ async fn start_slack_personal_oauth_flow(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
-    let config = state.slack_personal_oauth_config()?;
+    let (client_id, redirect_uri) = state.slack_personal_oauth_credentials().await?;
     let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let account_label = CredentialAccountLabel::new(request.account_label)
@@ -227,8 +227,8 @@ async fn start_slack_personal_oauth_flow(
         .map_err(ProductAuthRouteFailure::from)?;
     let pkce_challenge = pkce_s256_challenge(&pkce_secret);
     let authorization_url = build_slack_personal_authorization_url(
-        config.client_id.as_str(),
-        config.redirect_uri.as_str(),
+        client_id.as_str(),
+        redirect_uri.as_str(),
         opaque_state.as_str(),
         &pkce_challenge,
         &requested_scopes,

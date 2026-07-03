@@ -198,8 +198,6 @@ pub struct SlackHostBetaLegacySetup {
     pub user_id: UserId,
     pub shared_subject_user_id: Option<UserId>,
     pub channel_routes: Vec<SlackHostBetaChannelRoute>,
-    pub signing_secret: SecretString,
-    pub bot_token: SecretString,
 }
 
 impl SlackHostBetaRuntimeConfig {
@@ -426,6 +424,20 @@ pub struct SlackHostBetaMounts {
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
     pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
     pub(crate) outbound_delivery_target_provider_registered: bool,
+    setup_service: Option<Arc<crate::slack_setup::SlackSetupService>>,
+}
+
+impl SlackHostBetaMounts {
+    /// Fill a lazy OAuth slot with this mount's setup service so OAuth providers
+    /// can lazily resolve credentials at request time.
+    pub fn fill_slack_personal_oauth_slot(
+        &self,
+        slot: &crate::slack_setup::SlackPersonalSetupServiceSlot,
+    ) {
+        if let Some(service) = &self.setup_service {
+            slot.fill(Arc::clone(service));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -768,6 +780,7 @@ pub fn build_slack_host_beta_mounts(
             personal_dm_target_store: personal_dm_target_store.clone(),
             outbound_delivery_target_provider,
             outbound_delivery_target_provider_registered: true,
+            setup_service: None,
         });
     }
     match runtime
@@ -809,6 +822,7 @@ pub fn build_slack_host_beta_mounts(
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
+        setup_service: None,
     })
 }
 
@@ -3920,8 +3934,6 @@ mod tests {
             user_id: UserId::new(USER).expect("user"),
             shared_subject_user_id: None,
             channel_routes: Vec::new(),
-            signing_secret: SecretString::from(SECRET),
-            bot_token: SecretString::from("xoxb-host-token"),
         })
     }
 

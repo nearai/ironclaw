@@ -3,10 +3,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_auth::{
     AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, OAuthProviderCallbackRequest,
     OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, SLACK_PERSONAL_PROVIDER_ID,
+    OAuthProviderRefreshRequest,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_host_api::RuntimeHttpEgress;
@@ -18,15 +20,20 @@ use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
 use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
 use crate::oauth_provider_client::HostOAuthProviderClient;
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_oauth::{
     SlackPersonalOAuthGateProvider, SlackPersonalOAuthGateProviderRegistry,
+    slack_personal_provider_spec,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_setup::SlackPersonalSetupServiceSlot;
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {
     pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
     pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     pub(crate) gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_gate_registry: Option<Arc<SlackPersonalOAuthGateProviderRegistry>>,
 }
 
@@ -35,12 +42,18 @@ pub(crate) fn compose_provider_client(
     dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
+    #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
+        SlackPersonalSetupServiceSlot,
+    >,
+    #[cfg(not(feature = "slack-v2-host-beta"))] _slack_personal_oauth_slot: Option<()>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     compose_provider_client_with_runtime(
         configs,
         dcr_configs,
         secret_store,
         OAuthProviderRuntimePorts::from_product_auth_ports(runtime_ports),
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_slot,
     )
 }
 
@@ -49,20 +62,18 @@ fn compose_provider_client_with_runtime(
     dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: OAuthProviderRuntimePorts,
+    #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
+        SlackPersonalSetupServiceSlot,
+    >,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let mut clients = Vec::new();
     let mut gate_providers = Vec::new();
+    #[cfg(feature = "slack-v2-host-beta")]
     let mut slack_gate_providers = Vec::new();
     for config in configs {
         let provider_id = config.spec.provider_id;
         if provider_id == GOOGLE_PROVIDER_ID {
             gate_providers.push(Arc::new(GoogleOAuthGateProvider::new(
-                config.client.clone(),
-                Arc::clone(&secret_store),
-            )));
-        }
-        if provider_id == SLACK_PERSONAL_PROVIDER_ID {
-            slack_gate_providers.push(Arc::new(SlackPersonalOAuthGateProvider::new(
                 config.client.clone(),
                 Arc::clone(&secret_store),
             )));
@@ -84,6 +95,23 @@ fn compose_provider_client_with_runtime(
             client = client.with_client_secret(client_secret);
         }
         clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(slot) = slack_personal_oauth_slot {
+        slack_gate_providers.push(Arc::new(SlackPersonalOAuthGateProvider::new(
+            slot.clone(),
+            Arc::clone(&secret_store),
+        )));
+        clients.push((
+            SLACK_PERSONAL_PROVIDER_ID,
+            Arc::new(LazySlackPersonalExchangeClient {
+                slot,
+                spec: slack_personal_provider_spec(),
+                egress: runtime_ports.runtime_http_egress(),
+                secret_store: Arc::clone(&secret_store),
+                obligation_handler: runtime_ports.obligation_handler(),
+            }) as Arc<dyn AuthProviderClient>,
+        ));
     }
     let mut dcr_providers = Vec::new();
     for config in dcr_configs {
@@ -127,6 +155,7 @@ fn compose_provider_client_with_runtime(
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
     let gate_registry = (!gate_providers.is_empty())
         .then(|| Arc::new(GoogleOAuthGateProviderRegistry::new(gate_providers)));
+    #[cfg(feature = "slack-v2-host-beta")]
     let slack_gate_registry = (!slack_gate_providers.is_empty()).then(|| {
         Arc::new(SlackPersonalOAuthGateProviderRegistry::new(
             slack_gate_providers,
@@ -136,8 +165,89 @@ fn compose_provider_client_with_runtime(
         client: compose_provider_clients(clients),
         dcr_registry,
         gate_registry,
+        #[cfg(feature = "slack-v2-host-beta")]
         slack_gate_registry,
     })
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+struct LazySlackPersonalExchangeClient {
+    slot: SlackPersonalSetupServiceSlot,
+    spec: crate::oauth_provider_client::HostOAuthProviderSpec,
+    egress: Arc<dyn RuntimeHttpEgress>,
+    secret_store: Arc<dyn SecretStore>,
+    obligation_handler: Arc<dyn CapabilityObligationHandler>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+impl LazySlackPersonalExchangeClient {
+    async fn build_client(
+        &self,
+    ) -> Result<crate::oauth_provider_client::HostOAuthProviderClient, AuthProductError> {
+        let service = self.slot.get().ok_or_else(|| {
+            tracing::warn!("Slack personal OAuth exchange: setup service not yet initialized");
+            AuthProductError::BackendUnavailable
+        })?;
+        let (client_id, client_secret) = service.oauth_credentials().await.map_err(|e| {
+            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+            AuthProductError::MalformedConfig
+        })?;
+        HostOAuthProviderClient::new(
+            self.spec.clone(),
+            Arc::clone(&self.egress),
+            Arc::clone(&self.secret_store),
+            Arc::clone(&self.obligation_handler),
+            client_id,
+            self.slot.redirect_uri().clone(),
+        )
+        .map(|client| client.with_client_secret(client_secret))
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build Slack personal OAuth exchange client");
+            AuthProductError::BackendUnavailable
+        })
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+impl fmt::Debug for LazySlackPersonalExchangeClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LazySlackPersonalExchangeClient")
+            .finish()
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[async_trait]
+impl AuthProviderClient for LazySlackPersonalExchangeClient {
+    async fn exchange_callback(
+        &self,
+        context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.build_client()
+            .await?
+            .exchange_callback(context, request)
+            .await
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.build_client().await?.refresh_token(request).await
+    }
+
+    async fn cleanup_exchange(
+        &self,
+        context: OAuthProviderExchangeContext,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        self.build_client()
+            .await?
+            .cleanup_exchange(context, exchange)
+            .await
+    }
 }
 
 #[derive(Clone)]
@@ -320,6 +430,7 @@ mod tests {
             Vec::new(),
             Arc::new(InMemorySecretStore::new()),
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            None,
         )
         .expect("provider client composition")
         .client
@@ -364,6 +475,7 @@ mod tests {
                 Arc::new(RecordingEgress::ok(Vec::new())),
                 Arc::new(NoopObligationHandler),
             ),
+            None,
         )
         .expect("provider composition");
         let registry = composition.gate_registry.expect("google gate registry");
@@ -455,6 +567,7 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            None,
         )
         .expect("provider composition")
         .client
@@ -562,6 +675,7 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            None,
         )
         .expect("provider composition")
         .client
