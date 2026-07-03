@@ -1,0 +1,14 @@
+version: 1
+agents:
+  - id: general-reviewer
+    role: reviewer
+    display_name: ironloop/general-reviewer
+    instructions: .ironloop/agents/general-reviewer/AGENTS.md
+    aliases: ["general"]
+    auto_on_open: false
+
+  - id: small-fix-implementer
+    role: developer
+    display_name: ironloop/small-fix-implementer
+    instructions: .ironloop/agents/small-fix-implementer/AGENTS.md
+    aliases: ["small-fix"]
