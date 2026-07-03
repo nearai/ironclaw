@@ -245,6 +245,51 @@ def _slack_channel_routes(config_text: str) -> list[dict[str, str]]:
     return routes
 
 
+def _remove_dm_slack_channel_routes(config_path: Path) -> dict[str, object]:
+    """Remove stale DM routes from legacy shared-channel route config."""
+    if not config_path.exists():
+        return {"changed": False, "removed": 0}
+
+    lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    rewritten: list[str] = []
+    removed = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() != "[[slack.channel_routes]]":
+            rewritten.append(line)
+            index += 1
+            continue
+
+        block = [line]
+        index += 1
+        while index < len(lines):
+            next_line = lines[index]
+            stripped = next_line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                break
+            block.append(next_line)
+            index += 1
+
+        if _slack_channel_route_block_has_dm_channel(block):
+            removed += 1
+        else:
+            rewritten.extend(block)
+
+    if not removed:
+        return {"changed": False, "removed": 0}
+    config_path.write_text("".join(rewritten), encoding="utf-8")
+    return {"changed": True, "removed": removed}
+
+
+def _slack_channel_route_block_has_dm_channel(block: list[str]) -> bool:
+    for line in block:
+        match = re.match(r"\s*channel_id\s*=\s*['\"]([^'\"]*)['\"]", line)
+        if match and match.group(1).strip().startswith("D"):
+            return True
+    return False
+
+
 def _config_has_slack_channel_route(
     config_text: str,
     *,

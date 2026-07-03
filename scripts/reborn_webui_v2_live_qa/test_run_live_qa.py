@@ -1550,6 +1550,88 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa._has_slack_delivery_target(config, home, "user:web")
             )
 
+    def test_remove_dm_slack_channel_routes_preserves_shared_routes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[slack]",
+                        'enabled = true',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "D0STALE"',
+                        'subject_user_id = "user:web"',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "C0SHARED"',
+                        'subject_user_id = "user:web"',
+                        "",
+                        "[telegram]",
+                        'enabled = false',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            cleanup = run_live_qa._remove_dm_slack_channel_routes(config_path)
+            config = config_path.read_text(encoding="utf-8")
+
+            self.assertEqual(cleanup, {"changed": True, "removed": 1})
+            self.assertNotIn("D0STALE", config)
+            self.assertIn("C0SHARED", config)
+            self.assertIn("[telegram]", config)
+
+    def test_prepare_reborn_home_removes_copied_stale_dm_channel_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source_home = tmp / "source"
+            source_home.mkdir()
+            (source_home / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'provider_id = "nearai"',
+                        'model = "deepseek-ai/DeepSeek-V4-Flash"',
+                        'api_key_env = "NEARAI_API_KEY"',
+                        "",
+                        "[slack]",
+                        'enabled = true',
+                        'signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"',
+                        'bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "D0STALE"',
+                        'subject_user_id = "user:web"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                output_dir=tmp / "out",
+                require_slack_live=False,
+                reborn_home=source_home,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3a_slack_connect"],
+                )
+            config = (prepared.path / "config.toml").read_text(encoding="utf-8")
+
+            self.assertNotIn("D0STALE", config)
+            self.assertEqual(
+                prepared.preflight["slack"]["stale_dm_route_cleanup"],
+                {"changed": True, "removed": 1},
+            )
+
     def test_with_page_writes_browser_diagnostics_on_failure(self):
         class FakeTracing:
             async def start(self, **_kwargs):

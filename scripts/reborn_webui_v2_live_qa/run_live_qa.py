@@ -109,6 +109,7 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _has_slack_delivery_target,
     _materialize_slack_env_from_reborn_home,
     _persisted_slack_personal_dm_channel_id,
+    _remove_dm_slack_channel_routes,
     _seed_slack_personal_dm_target,
     _set_slack_section_key,
     _slack_auth_test,
@@ -517,6 +518,7 @@ def prepare_reborn_home(
     config_path = prepared_home / "config.toml"
     if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
         _write_minimal_reborn_config(config_path, include_slack=needs_slack)
+    stale_dm_route_cleanup = _remove_dm_slack_channel_routes(config_path)
     route_configured_from_env = False
     legacy_actor_configured, legacy_actor_user_id = _configure_slack_legacy_actor_if_needed(
         config_path,
@@ -642,6 +644,7 @@ def prepare_reborn_home(
                 "delivery_target_present": slack_target_present,
                 "route_configured_from_env": route_configured_from_env,
                 "route_discovery": slack_route_discovery,
+                "stale_dm_route_cleanup": stale_dm_route_cleanup,
                 "legacy_actor_configured": legacy_actor_configured,
                 "legacy_actor_user_id": legacy_actor_user_id,
                 "auth_user_id": auth_user_id,
