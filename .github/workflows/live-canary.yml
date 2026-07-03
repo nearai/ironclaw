@@ -61,6 +61,11 @@ on:
         type: string
         required: false
         default: ""
+      use_target_harness:
+        description: "Use target_ref's Reborn WebUI v2 live QA harness instead of restoring the canonical main harness."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -546,7 +551,6 @@ jobs:
       REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
-      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
       LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
@@ -658,7 +662,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         with:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
@@ -667,7 +672,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         run: |
           set -euo pipefail
           harness_ref="$(git -C .canonical-live-qa-harness rev-parse HEAD)"
