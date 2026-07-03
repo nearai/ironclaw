@@ -35,6 +35,10 @@ jobs:
               "files": "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py tests/e2e/scenarios/test_reborn_v2_file_download.py"
             },
             {
+              "group": "served-api-routes",
+              "files": "tests/e2e/scenarios/test_reborn_webui_v2_automation_trace_outbound_api.py tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py tests/e2e/scenarios/test_reborn_webui_v2_filesystem_api.py tests/e2e/scenarios/test_reborn_webui_v2_operator_api.py tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py tests/e2e/scenarios/test_reborn_webui_v2_session_api.py tests/e2e/scenarios/test_reborn_webui_v2_skills_api.py tests/e2e/scenarios/test_reborn_webui_v2_streaming_run_control_api.py"
+            },
+            {
               "group": "legacy-core-ui",
               "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_dom_resource_limits.py"
             },

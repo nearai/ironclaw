@@ -44,7 +44,6 @@ mod webhook_server;
 pub use self::tui::TuiChannel;
 pub(crate) use attachments::{
     MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
-    attachment_extension_for_mime,
 };
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,
