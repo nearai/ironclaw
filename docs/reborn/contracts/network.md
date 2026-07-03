@@ -15,7 +15,7 @@ It turns a host API `NetworkPolicy` plus a scoped target request into a metadata
 
 ```text
 NetworkRequest { ResourceScope, NetworkTarget, NetworkMethod, estimated_bytes }
-  -> NetworkPolicyEnforcer::authorize(...)
+  -> StaticNetworkPolicyEnforcer::authorize(...)
   -> NetworkPermit or NetworkPolicyError
 ```
 
@@ -24,7 +24,7 @@ For host-mediated runtime HTTP, the crate also turns a `NetworkHttpRequest` into
 ```text
 NetworkHttpRequest { scope, method, url, headers, body, policy, response_body_limit }
   -> URL parse + target normalization
-  -> NetworkPolicyEnforcer with a conservative method + URL + header + body byte estimate
+  -> StaticNetworkPolicyEnforcer with a conservative method + URL + header + body byte estimate
   -> DNS resolution + private/reserved IP denial
   -> pinned outbound HTTP transport with redirects disabled and a bounded client cache
   -> NetworkHttpResponse { body, NetworkUsage { request_bytes, response_bytes, resolved_ip } }
@@ -42,7 +42,6 @@ The public contract is intentionally small:
 NetworkRequest
 NetworkPermit
 NetworkPolicyError
-NetworkPolicyEnforcer
 StaticNetworkPolicyEnforcer
 NetworkHttpEgress
 PolicyNetworkHttpEgress
