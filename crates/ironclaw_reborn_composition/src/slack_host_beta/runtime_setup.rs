@@ -7,6 +7,7 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgress, ProtocolHttpEgressError, RedactedString,
 };
 use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     ProductConversationSubjectRouteResolver, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
@@ -16,6 +17,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
+use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
 use crate::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
@@ -26,7 +28,8 @@ use crate::slack_actor_identity::{
 };
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
-    SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+    SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
+    SlackChannelSetupActivationError,
 };
 use crate::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack_host_state::FilesystemSlackHostState;
@@ -37,9 +40,9 @@ use crate::slack_outbound_targets::{
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingService,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingService,
 };
 use crate::slack_personal_binding_pairing::{
     IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
@@ -50,8 +53,9 @@ use crate::slack_personal_binding_pairing::{
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
-    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
+    ResolvedSlackCommand, ResolvedSlackIngress, SlackCommandsRouteState, SlackEventsRouteState,
+    SlackIngressError, SlackIngressService, SlackInstallationResolver, SlackInstallationSelector,
+    SlackTeamId, SlackUserId, StaticSlackInstallationResolver, slack_commands_route_mount,
     slack_events_route_mount,
 };
 use crate::slack_setup::{
@@ -62,9 +66,9 @@ use crate::slack_setup::{
 use super::{
     SlackHostBetaActorUserResolver, SlackHostBetaBuildError, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    SlackHostBetaRuntimeParts, build_slack_installation_record_with_resolvers,
-    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
-    slack_protocol_egress_from_parts,
+    SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
+    build_slack_installation_record_with_resolvers, build_triggered_run_delivery_hook_from_parts,
+    slack_bot_token_handle, slack_protocol_egress_from_parts,
 };
 
 pub(super) async fn build_runtime_mounts(
@@ -90,6 +94,8 @@ pub(super) async fn build_runtime_mounts(
     ));
     let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+    let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
+    let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
@@ -136,10 +142,15 @@ pub(super) async fn build_runtime_mounts(
         pairing.clone(),
         Arc::clone(&channel_route_store),
     );
-    let channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
+    let mut channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
     );
+    if let Some(extension_management) = &parts.local_runtime.extension_management {
+        channel_routes = channel_routes.with_setup_activation(Arc::new(
+            DynamicSlackChannelSetupActivation::new(Arc::clone(extension_management)),
+        ));
+    }
 
     let outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
         Arc::new(SlackDynamicOutboundTargetProvider::new(
@@ -150,7 +161,7 @@ pub(super) async fn build_runtime_mounts(
             },
             Arc::clone(&setup_service),
             channel_route_store,
-            personal_dm_target_store,
+            Arc::clone(&personal_dm_target_store),
         ));
     let provider_key = slack_dynamic_outbound_delivery_target_provider_key(&config);
     let provider_already_registered = runtime
@@ -194,13 +205,108 @@ pub(super) async fn build_runtime_mounts(
         });
     }
 
+    // Share one installation resolver across the events and `/pair` commands
+    // routes: a single source of truth for the Slack signing identity, and the
+    // events drain covers the shared resolver.
+    let resolver: Arc<dyn SlackInstallationResolver> = Arc::new(resolver);
+    let commands = slack_commands_route_mount(SlackCommandsRouteState::new(
+        SlackIngressService::new(Arc::clone(&resolver)),
+        pairing.clone(),
+        state.clone(),
+    ));
+    let personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver> =
+        Arc::new(DynamicSlackPersonalConnectionScopeResolver {
+            setup_service: Arc::clone(&setup_service),
+        });
+
+    let channel_connection_resume =
+        crate::channel_connection_resume::build_channel_connection_resume_service(
+            Arc::clone(&parts.local_runtime.turn_state),
+            Arc::clone(&parts.turn_coordinator),
+        );
+
     Ok(SlackHostBetaMounts {
-        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
+        commands,
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+            channel_connection_resume,
+        ),
         channel_routes,
+        tenant_id: config.tenant_id.clone(),
+        personal_connection_scope: None,
+        personal_connection_scope_resolver,
+        user_identity_lookup,
+        user_identity_delete_store,
+        personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })
+}
+
+struct DynamicSlackChannelSetupActivation {
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
+}
+
+impl DynamicSlackChannelSetupActivation {
+    fn new(extension_management: Arc<RebornLocalExtensionManagementPort>) -> Self {
+        Self {
+            extension_management,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
+    async fn activate_slack_channel_after_setup_save(
+        &self,
+    ) -> Result<(), SlackChannelSetupActivationError> {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .map_err(slack_setup_activation_error)?;
+        let projection = self
+            .extension_management
+            .project(package_ref.clone())
+            .await
+            .map_err(slack_setup_activation_error)?;
+        if projection.phase == LifecyclePhase::Discovered {
+            return Ok(());
+        }
+        self.extension_management
+            .activate(package_ref, ExtensionActivationMode::Static)
+            .await
+            .map_err(slack_setup_activation_error)?;
+        Ok(())
+    }
+}
+
+fn slack_setup_activation_error(error: impl std::fmt::Display) -> SlackChannelSetupActivationError {
+    SlackChannelSetupActivationError::new(error.to_string())
+}
+
+struct DynamicSlackPersonalConnectionScopeResolver {
+    setup_service: Arc<SlackSetupService>,
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalConnectionScopeResolver for DynamicSlackPersonalConnectionScopeResolver {
+    async fn resolve_personal_connection_scope(
+        &self,
+    ) -> Result<Option<SlackPersonalConnectionScope>, String> {
+        let Some(setup) = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let installation_id =
+            AdapterInstallationId::new(setup.installation_id).map_err(|error| error.to_string())?;
+        Ok(Some(SlackPersonalConnectionScope {
+            installation_id,
+            team_id: SlackTeamId::new(setup.team_id),
+        }))
+    }
 }
 
 fn slack_dynamic_outbound_delivery_target_provider_key(
@@ -718,6 +824,25 @@ impl SlackInstallationResolver for DynamicSlackInstallationResolver {
         Box::pin(async move { self.resolver().await?.resolve_ingress(headers, body).await })
     }
 
+    fn resolve_command_ingress<'a>(
+        &'a self,
+        headers: &'a axum::http::HeaderMap,
+        body: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ResolvedSlackCommand, SlackIngressError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.resolver()
+                .await?
+                .resolve_command_ingress(headers, body)
+                .await
+        })
+    }
+
     fn drain_installations<'a>(
         &'a self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -816,6 +941,19 @@ impl SlackPersonalBindingPairingChallengeStore for DynamicSlackPairingChallengeS
     ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
         let challenge = self.bind_to_current_setup(challenge).await?;
         self.store.issue_challenge(challenge).await
+    }
+
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        // `/pair` force-mint must reach the inner store's `reissue_challenge`.
+        // The trait default delegates to `issue_challenge`, which reuses an
+        // active code — that would silently defeat the force-fresh semantic for
+        // the production serve path. Bind to the current setup revision exactly
+        // like `issue_challenge`, then force-mint through the inner store.
+        let challenge = self.bind_to_current_setup(challenge).await?;
+        self.store.reissue_challenge(challenge).await
     }
 
     async fn get_challenge(
@@ -1176,6 +1314,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_pairing_challenge_store_reissue_forwards_to_inner_force_mint() {
+        // The `/pair` force-mint must reach the inner store's `reissue_challenge`.
+        // Without the wrapper override it would inherit the trait default, which
+        // delegates to `issue_challenge` (code reuse) — silently defeating the
+        // force-fresh semantic on the production serve path. Drive the wrapper
+        // (the caller) and assert the inner force-mint path actually ran.
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::new(setup_record(1))),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let inner = Arc::new(StaticChallengeStore::default());
+        let store = DynamicSlackPairingChallengeStore::new(setup_service, inner.clone());
+        let challenge = SlackPersonalBindingPairingChallenge {
+            installation_id: AdapterInstallationId::new("install-a").unwrap(),
+            slack_user_id: SlackUserId::new("U123"),
+            setup_revision: None,
+        };
+
+        let issued = store
+            .reissue_challenge(challenge)
+            .await
+            .expect("reissue mints via inner force-mint");
+
+        // Inner force-mint ran exactly once (not the reuse path).
+        assert_eq!(*inner.reissued.lock().unwrap(), 1);
+        // The distinct force-mint code came back, not the `issue_challenge` reuse code.
+        assert_eq!(issued.code.as_str(), "RAW99999");
+        // `bind_to_current_setup` still ran: the challenge carries the live revision.
+        assert_eq!(issued.challenge.setup_revision, Some(1));
+    }
+
+    #[tokio::test]
     async fn seed_legacy_slack_setup_persists_setup_routes_and_identity_binding() {
         let setup_store = Arc::new(InMemorySetupStore::empty());
         let secret_store = Arc::new(InMemorySecretStore::default());
@@ -1312,6 +1486,49 @@ mod tests {
         assert!(route_store.routes.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn dynamic_personal_connection_scope_resolver_reads_current_setup() {
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::new(setup_record(7))),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+
+        let scope = resolver
+            .resolve_personal_connection_scope()
+            .await
+            .expect("scope resolves")
+            .expect("setup exists");
+
+        assert_eq!(scope.installation_id.as_str(), "install-a");
+        assert_eq!(scope.team_id.as_str(), "T123");
+    }
+
+    #[tokio::test]
+    async fn dynamic_personal_connection_scope_resolver_returns_none_without_setup() {
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::empty()),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+
+        assert!(
+            resolver
+                .resolve_personal_connection_scope()
+                .await
+                .expect("scope resolves")
+                .is_none()
+        );
+    }
+
     fn setup_record(revision: u64) -> SlackInstallationSetup {
         SlackInstallationSetup {
             installation_id: "install-a".to_string(),
@@ -1364,11 +1581,19 @@ mod tests {
             self.put(setup.clone()).await;
             Ok(())
         }
+
+        async fn delete_slack_installation_setup(
+            &self,
+        ) -> Result<(), crate::slack_setup::SlackSetupError> {
+            *self.setup.write().await = None;
+            Ok(())
+        }
     }
 
     #[derive(Debug, Default)]
     struct StaticChallengeStore {
         challenge: StdMutex<Option<SlackPersonalBindingPairingChallenge>>,
+        reissued: StdMutex<usize>,
     }
 
     #[derive(Debug, Default)]
@@ -1465,6 +1690,22 @@ mod tests {
             *self.challenge.lock().unwrap() = Some(challenge.clone());
             Ok(IssuedSlackPersonalBindingPairingChallenge {
                 code: SlackPersonalBindingPairingCode::new("ABC12345").unwrap(),
+                challenge,
+            })
+        }
+
+        async fn reissue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            // Distinct code + counter so a caller test can prove the dynamic
+            // wrapper forwarded to this force-mint path rather than falling
+            // through to `issue_challenge` (which would reuse "ABC12345").
+            *self.reissued.lock().unwrap() += 1;
+            *self.challenge.lock().unwrap() = Some(challenge.clone());
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: SlackPersonalBindingPairingCode::new("RAW99999").unwrap(),
                 challenge,
             })
         }

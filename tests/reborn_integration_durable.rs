@@ -38,14 +38,11 @@ async fn extension_install_survives_independent_reopen() {
         .submit_turn("install github")
         .await
         .expect("turn completes");
-    // Live install succeeded this run.
     harness
         .assert_tool_result_contains("\"installed\":true")
         .await
         .expect("install reported success");
 
-    // Reopen an independent store at the same on-disk path; the install must
-    // still be there.
     harness
         .assert_extension_install_persists_after_reopen("github")
         .await

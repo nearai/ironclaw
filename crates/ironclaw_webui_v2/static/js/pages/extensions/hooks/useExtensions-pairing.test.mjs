@@ -18,7 +18,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, usePairing };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
 }
 
 function contextFor(mutationState, queryCalls) {
@@ -49,35 +49,96 @@ function contextFor(mutationState, queryCalls) {
   };
 }
 
-test("usePairing only exposes result on success and error on failure", () => {
-  for (const [name, mutationState, expected] of [
-    ["idle", { mutate: () => {}, isPending: false, isSuccess: false, isError: false }, { result: null, error: null }],
-    ["success", { mutate: () => {}, isPending: false, isSuccess: true, isError: false, data: { success: true } }, { result: { success: true }, error: null }],
-    ["error", { mutate: () => {}, isPending: false, isSuccess: false, isError: true, error: new Error("bad") }, { result: null, errorMessage: "bad" }],
-  ]) {
-    const queryCalls = [];
-    const context = contextFor(mutationState, queryCalls);
-    vm.runInNewContext(useExtensionsSourceForTest(), context);
-
-    const pairing = context.globalThis.__testExports.usePairing("slack");
-
-    assert.deepEqual(pairing.result, expected.result, name);
-    assert.equal(pairing.error?.message || null, expected.errorMessage || null, name);
-  }
-});
-
-test("usePairing can disable the legacy pairing request query for custom redeemers", () => {
-  const queryCalls = [];
-  const context = contextFor(
-    { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
-    queryCalls
-  );
+test("useExtensions shows setup-panel copy after channel install succeeds", () => {
+  const mutationConfigs = [];
+  const actionResults = [];
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, (value) => actionResults.push(value)],
+    },
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { mutate: () => {}, isPending: false, isSuccess: false, isError: false };
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") {
+        return { data: { extensions: [] }, isLoading: false };
+      }
+      if (queryKey[0] === "extension-registry") {
+        return { data: { entries: [] }, isLoading: false };
+      }
+      if (queryKey[0] === "connectable-channels") {
+        return { data: { channels: [] }, isLoading: false };
+      }
+      return { data: {}, isLoading: false };
+    },
+  };
   vm.runInNewContext(useExtensionsSourceForTest(), context);
 
-  context.globalThis.__testExports.usePairing("slack", { enabled: false });
+  context.globalThis.__testExports.useExtensions();
+  mutationConfigs[0].onSuccess(
+    { success: true, message: "Slack is installed. Activate it to make its tools available." },
+    { displayName: "Slack", kind: "channel" }
+  );
 
-  assert.equal(queryCalls.length, 1);
-  assert.equal(queryCalls[0].enabled, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(actionResults[0])), {
+    type: "success",
+    message: "Slack installed. Connect the account using the setup panel below.",
+  });
+});
+
+test("useExtensions install→configure hands the modal the channel kind (so it shows Connect, not 'no config')", () => {
+  const mutationConfigs = [];
+  const needsSetupPayloads = [];
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, () => {}],
+    },
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { mutate: () => {}, isPending: false, isSuccess: false, isError: false };
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") return { data: { extensions: [] }, isLoading: false };
+      if (queryKey[0] === "extension-registry") return { data: { entries: [] }, isLoading: false };
+      if (queryKey[0] === "connectable-channels") return { data: { channels: [] }, isLoading: false };
+      return { data: {}, isLoading: false };
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  context.globalThis.__testExports.useExtensions();
+  // Install a connectable channel with auto-configure — the modal is opened via
+  // onNeedsSetup. Its payload MUST carry `kind` or the modal cannot tell it is a
+  // channel and wrongly renders "No configuration required".
+  mutationConfigs[0].onSuccess(
+    { success: true },
+    {
+      displayName: "Slack",
+      kind: "channel",
+      packageRef: { kind: "extension", id: "slack" },
+      configureAfterInstall: true,
+      onNeedsSetup: (payload) => needsSetupPayloads.push(payload),
+    }
+  );
+
+  assert.equal(needsSetupPayloads.length, 1, "install-configure must open the modal");
+  assert.equal(needsSetupPayloads[0].kind, "channel");
+  assert.equal(needsSetupPayloads[0].authenticated, false);
 });
 
 test("useExtensions places uninstalled wasm_channel registry entry in channelRegistry not toolRegistry", () => {

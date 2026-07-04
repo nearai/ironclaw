@@ -18,6 +18,11 @@
 //! explicit `skill_activate` call — not from keyword auto-activation. If either
 //! the capability wrap or the `into_group` `skill_context_source` wiring
 //! regresses, the sentinel never reaches a captured request and the assert fails.
+//!
+//! The second test below pins the OTHER half of E-SKILL: criteria-based
+//! (keyword) auto-activation stays OFF on the coordinator path (product
+//! decision, closed issue #5530) — see the mechanism note on that test for
+//! why.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -25,6 +30,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -66,4 +72,122 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
         .await
         .expect("activated skill instructions must inject into a model request");
+}
+
+// INTENTIONAL: `SkillActivationMode::ActivationCriteria` (keyword/regex
+// auto-activation) does not fire on the modern `TurnCoordinator`/agent-loop
+// path — disabled on purpose (product decision, closed issue #5530). The
+// explicit `builtin.skill_activate` capability path (proven above) is the
+// supported mechanism. Mechanically: criteria selection only runs when
+// `take_message_for_run` returns `Some`, populated by `record_user_message`,
+// whose sole production caller is the legacy `RebornRuntime::submit_user_turn`
+// — the coordinator stack never records the message, so criteria selection
+// stays inert here by design.
+#[tokio::test]
+async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
+    let group = RebornIntegrationGroup::skill_activation_tools()
+        .await
+        .expect("skill-activation group builds");
+    let harness = group
+        .thread("conv-skill-criteria")
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    // The message CONTAINS the seeded skill's activation keyword ("greet") and
+    // no `skill_activate` tool call is scripted — if criteria auto-activation
+    // ever silently turned on for the coordinator path, the sentinel would
+    // reach the model and this test would go RED.
+    harness
+        .submit_turn("please greet the visitor")
+        .await
+        .expect("turn completes");
+
+    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+    // has a second, unrelated `Err` path (JSON serialization failure of the
+    // captured request) — asserting the exact "not found" message text rules
+    // that out, so an infra-level failure can't masquerade as proof the
+    // sentinel was absent.
+    let err = harness
+        .assert_model_request_contains("GREET_SKILL_PROMPT_SENTINEL")
+        .await
+        .expect_err(
+            "criteria auto-activation is intentionally OFF on the coordinator path — \
+             a keyword-matching message alone must not inject the skill prompt (#5530)",
+        );
+    assert!(
+        err.to_string().starts_with("no model request contained"),
+        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+    );
+
+    // And the explicit capability was never dispatched either.
+    assert!(
+        harness
+            .assert_tool_invoked("builtin.skill_activate")
+            .await
+            .is_err(),
+        "builtin.skill_activate must NOT have been invoked without an explicit call"
+    );
+}
+
+/// C-SYNTH failure route — `skill_activate` `ContextBudgetExceeded` is a
+/// MODEL-VISIBLE `Failed` tool error (recoverable), not a terminal driver
+/// error.
+///
+/// An oversized system skill (prompt ≈ 10k tokens at the ~4-bytes-per-token
+/// estimate, over `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) is seeded via
+/// `seed_system_skill_for_test`. Activating it drives the real selection path
+/// (`reserve_skill_budget` → `SkillActivationSelectionError::ContextBudgetExceeded`
+/// → `CapabilityOutcome::Failed`, skill_activation.rs `selection_outcome`).
+#[tokio::test]
+async fn skill_activate_over_budget_surfaces_recoverable_failed() {
+    let group = RebornIntegrationGroup::skill_activation_tools()
+        .await
+        .expect("skill-activation group builds");
+    let capability_harness = group
+        .capability_harness()
+        .expect("skill-activation group has a host-runtime capability harness");
+    let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
+    capability_harness
+        .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
+        .expect("oversized system skill seeds");
+
+    let harness = group
+        .thread("conv-skill-activate-over-budget")
+        .script([
+            RebornScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["bloat"]})),
+            RebornScriptedReply::text("could not activate"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn("activate the big one")
+        .await
+        .expect("turn completes despite the failed activation");
+
+    // Model-visible Failed, not a terminal driver_unavailable.
+    harness
+        .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
+        .await
+        .expect("over-budget activation surfaced as a recoverable Failed tool error");
+    harness
+        .assert_reply_contains("could not activate")
+        .await
+        .expect("run recovered and finalized");
+    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+    // has a second, unrelated `Err` path (JSON serialization failure of the
+    // captured request) — asserting the exact "not found" message text rules
+    // that out, so an infra-level failure can't masquerade as proof the
+    // skill's instructions were absent.
+    let err = harness
+        .assert_model_request_contains("BLOAT_SKILL_FILLER")
+        .await
+        .expect_err("a failed activation must not inject the skill's instructions");
+    assert!(
+        err.to_string().starts_with("no model request contained"),
+        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+    );
 }

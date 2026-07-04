@@ -1,6 +1,6 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives five scenarios over a shared
+//! One sequential `#[tokio::test]` drives eight scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
 //! shared across threads). See `tests/support/reborn/CLAUDE.md` §"Group tests".
@@ -30,7 +30,22 @@
 //!    `"driver_protocol_violation"` sentinel. Independent of the auto-approve
 //!    toggle (no gate involved); ordered alongside the other independent
 //!    scenarios, before the toggle is flipped.
-//! 5. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
+//! 5. `gate_ref_edge_cases::stale_gate_ref_resume` (C-DENYEDGE row 7) — the
+//!    local-dev approval resolve succeeds with the run's REAL gate_ref, but
+//!    the coordinator resume is issued with a different, STALE gate_ref,
+//!    reaching the `TurnError::InvalidRequest { reason: "gate resolution
+//!    reference mismatch" }` path `approve_gate` alone cannot reach; then a
+//!    non-vacuity resume with the real ref completes the run.
+//! 6. `gate_ref_edge_cases::missing_gate_bare_resolve` (C-DENYEDGE row 10) — a
+//!    syntactically well-formed but never-issued gate_ref is resolved on a
+//!    thread that never raised any gate; pins the harness's own
+//!    request-not-found rejection. Independent of the auto-approve toggle (no
+//!    real gate involved).
+//! 7. `approval_request_persists_after_reopen` (C-DURABLE) — reopens a FRESH
+//!    `ApprovalRequestStore` at the same on-disk root and confirms the
+//!    `Pending` request survives, independent of the auto-approve toggle
+//!    (its own gate, resolved before returning).
+//! 8. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
 //!    setting persists across thread boundaries. MUST run last (it flips the
 //!    toggle ON for the whole group), so the gate scenarios above are the control
@@ -43,9 +58,11 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_concurrent_dual_gate_resume;
 mod scenario_failure_category_demasked;
+mod scenario_gate_ref_edge_cases;
 mod scenario_gate_then_approve;
 mod scenario_gate_then_deny;
 
@@ -73,6 +90,22 @@ async fn approvals_group_e2e() {
     report.record(
         "failure_category_demasked",
         scenario_failure_category_demasked::run(&g).await,
+    );
+    report.record(
+        "stale_gate_ref_resume",
+        scenario_gate_ref_edge_cases::stale_gate_ref_resume(&g).await,
+    );
+    report.record(
+        "missing_gate_bare_resolve",
+        scenario_gate_ref_edge_cases::missing_gate_bare_resolve(&g).await,
+    );
+    // C-DURABLE: independent of the auto-approve toggle (its own gate, resolved
+    // before returning) — the approval-request store is always on-disk
+    // regardless of the group's `StorageMode` (a separate capability-harness
+    // filesystem), so this needs no `StorageMode::LibSql` variant.
+    report.record(
+        "approval_request_persists_after_reopen",
+        scenario_approval_request_persists_after_reopen::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)
@@ -104,6 +137,14 @@ async fn approvals_group_libsql_e2e() {
     report.record(
         "failure_category_demasked",
         scenario_failure_category_demasked::run(&g).await,
+    );
+    report.record(
+        "stale_gate_ref_resume",
+        scenario_gate_ref_edge_cases::stale_gate_ref_resume(&g).await,
+    );
+    report.record(
+        "missing_gate_bare_resolve",
+        scenario_gate_ref_edge_cases::missing_gate_bare_resolve(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)

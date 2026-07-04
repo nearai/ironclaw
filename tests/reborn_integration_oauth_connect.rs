@@ -51,7 +51,6 @@ async fn oauth_connect_flow_persists_credential_account() {
     let code_hash = AuthorizationCodeHash::new(hex64(0xcc)).unwrap();
     let expires_at = Utc::now() + Duration::minutes(5);
 
-    // Step 1 — create an OAuth flow in the real durable store.
     let flow = bundle
         .services
         .flow_manager()
@@ -76,9 +75,8 @@ async fn oauth_connect_flow_persists_credential_account() {
         .await
         .expect("create_flow must succeed");
 
-    // Step 2 — drive the OAuth callback: claim → token exchange → complete.
-    // The scripted egress returns a fixed access-token JSON body; no real
-    // network call is made.
+    // Drives claim → token exchange → complete. The scripted egress returns a
+    // fixed access-token JSON body; no real network call is made.
     let response = bundle
         .services
         .handle_oauth_callback(RebornOAuthCallbackRequest {
@@ -106,12 +104,10 @@ async fn oauth_connect_flow_persists_credential_account() {
         .await
         .expect("handle_oauth_callback must succeed");
 
-    // Step 3 — assert the callback produced a credential account id.
     let account_id = response
         .credential_account_id
         .expect("completed callback must carry a credential_account_id");
 
-    // Step 4 — read back the persisted account from the real store.
     let account = bundle
         .services
         .credential_account_service()
@@ -129,15 +125,14 @@ async fn oauth_connect_flow_persists_credential_account() {
         "account provider matches the flow provider"
     );
 
-    // Step 5 — verify exactly one token-exchange HTTP call was captured.
     assert_eq!(
         bundle.egress.captured_count(),
         1,
         "exactly one token-exchange HTTP call must be captured by the scripted egress"
     );
 
-    // Step 6 — verify the connect exchange used the authorization_code grant
-    // (not the refresh grant) — proves the right OAuth flow crossed the egress.
+    // Must use authorization_code, not the refresh grant — proves the right
+    // OAuth flow crossed the egress.
     let grant_types = bundle.egress.captured_grant_types();
     assert_eq!(
         grant_types.first().map(String::as_str),
@@ -204,7 +199,6 @@ async fn oauth_callback_without_prior_flow_fails() {
         "no token-exchange call should be made when the flow is missing"
     );
 
-    // The failed claim step must not have created any credential account.
     let page = bundle
         .services
         .credential_account_service()

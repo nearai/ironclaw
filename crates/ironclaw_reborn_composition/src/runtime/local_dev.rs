@@ -77,6 +77,8 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 /// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
 /// each wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
+pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
+#[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use skill_activation::wrap_skill_activation_capability_for_test;

@@ -3,7 +3,6 @@
 //! Each module groups related endpoint handlers by domain.
 
 pub mod auth;
-pub mod engine;
 pub mod llm;
 pub mod memory;
 pub mod secrets;

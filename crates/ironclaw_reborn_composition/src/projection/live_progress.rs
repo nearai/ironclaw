@@ -49,7 +49,7 @@ pub(super) struct LiveSkillActivationObserver {
 pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
-    next_sequence: AtomicU64,
+    next_sequence: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -80,11 +80,12 @@ impl LiveProjectionPublisher {
     pub(super) fn new(
         update_source: Arc<InMemoryProjectionUpdateSource>,
         actor_user_id: UserId,
+        next_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             update_source,
             actor_user_id,
-            next_sequence: AtomicU64::new(0),
+            next_sequence,
         }
     }
 

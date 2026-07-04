@@ -16,6 +16,7 @@ mod reborn_support;
 #[allow(dead_code)]
 mod support;
 
+use ironclaw_threads::MessageKind;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::http_matcher::ScriptedHttpResponse;
@@ -274,5 +275,145 @@ async fn tool_error_assertion_fails_without_matching_tool_error() {
             .await
             .is_err(),
         "assertion must discriminate the outcome class, not just the reason token"
+    );
+}
+
+const ERR_A_URL: &str = "https://api.example.test/v1/err-a";
+const ERR_B_URL: &str = "https://api.example.test/v1/err-b";
+
+/// Regression coverage for the multi-turn (baseline-sliced) thread-history
+/// assertions: `history_len`, `assert_tool_error_since`,
+/// `assert_no_tool_error_since`, `assert_conversation_history_contains{,_since}`,
+/// `assert_conversation_history_role_contains`.
+///
+/// Two turns on one thread: turn 1 raises `Denied{policy_denied}`, turn 2
+/// raises `Failed{output_too_large}`. `history_len` captured between turns is
+/// the baseline that scopes `*_since` asserts to turn 2 only — closing a gap
+/// the full-history `assert_tool_error` (single-turn-only) can't reach.
+#[tokio::test]
+async fn multi_turn_baseline_sliced_history_assertions() {
+    use ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([
+            ScriptedHttpResponse::network_error(ERR_A_URL, "policy_denied"),
+            ScriptedHttpResponse::response_error(
+                ERR_B_URL,
+                RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
+            ),
+        ])
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_A_URL})),
+            RebornScriptedReply::text("done one"),
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": ERR_B_URL})),
+            RebornScriptedReply::text("done two"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    // Turn 1: Denied{policy_denied}.
+    h.submit_turn("first fetch")
+        .await
+        .expect("turn 1 completes");
+
+    // Baseline captured BETWEEN turns — everything before this is turn 1.
+    let after_turn_one = h.history_len().await.expect("history len readable");
+
+    // Turn 2: Failed{output_too_large}.
+    h.submit_turn("second fetch")
+        .await
+        .expect("turn 2 completes");
+
+    // --- tool-error slicing ---
+    h.assert_tool_error_since(after_turn_one, ToolErrorClass::Failed, "output_too_large")
+        .await
+        .expect("turn 2 Failed error is in the post-baseline slice");
+    h.assert_no_tool_error_since(after_turn_one, ToolErrorClass::Denied, "policy_denied")
+        .await
+        .expect("turn 1 Denied error is excluded by the baseline slice");
+    assert!(
+        h.assert_tool_error_since(after_turn_one, ToolErrorClass::Denied, "policy_denied")
+            .await
+            .is_err(),
+        "post-baseline slice must not see turn 1's Denied error"
+    );
+    // From baseline 0 the whole history is in scope, so turn 1's Denied IS seen.
+    h.assert_tool_error_since(0, ToolErrorClass::Denied, "policy_denied")
+        .await
+        .expect("turn 1 Denied error is visible from baseline 0");
+    // Fail-check: turn 2's error is `Failed`, not `Denied`, so asking for
+    // `Denied{output_too_large}` since the baseline must reject even though
+    // the reason token and the slice are both correct — the class
+    // discriminator and the baseline slice must combine, not substitute for
+    // each other.
+    assert!(
+        h.assert_tool_error_since(after_turn_one, ToolErrorClass::Denied, "output_too_large")
+            .await
+            .is_err(),
+        "post-baseline slice must not match output_too_large under the wrong class (Denied)"
+    );
+    // assert_tool_error_summary_contains_since: raw safe_summary substring
+    // check, no class-prefix requirement.
+    h.assert_tool_error_summary_contains_since(after_turn_one, "output_too_large")
+        .await
+        .expect("turn 2 summary fragment is in the post-baseline slice");
+    assert!(
+        h.assert_tool_error_summary_contains_since(after_turn_one, "policy_denied")
+            .await
+            .is_err(),
+        "post-baseline slice must not see turn 1's policy_denied summary fragment"
+    );
+    // Full-history (un-sliced) asserts still see BOTH turns' errors — backward compat.
+    h.assert_tool_error(ToolErrorClass::Denied, "policy_denied")
+        .await
+        .expect("full-history sees turn 1 Denied");
+    h.assert_tool_error(ToolErrorClass::Failed, "output_too_large")
+        .await
+        .expect("full-history sees turn 2 Failed");
+
+    // --- conversation-history containment ---
+    h.assert_conversation_history_contains("first fetch")
+        .await
+        .expect("turn 1 user prompt persisted");
+    h.assert_conversation_history_contains("second fetch")
+        .await
+        .expect("turn 2 user prompt persisted");
+    h.assert_conversation_history_contains("done two")
+        .await
+        .expect("turn 2 assistant reply persisted");
+    h.assert_conversation_history_contains_since(after_turn_one, "second fetch")
+        .await
+        .expect("turn 2 prompt is in the post-baseline slice");
+    assert!(
+        h.assert_conversation_history_contains_since(after_turn_one, "first fetch")
+            .await
+            .is_err(),
+        "post-baseline slice must not see turn 1's user prompt"
+    );
+    // Role filter must discriminate User vs. Assistant, not just match on text.
+    h.assert_conversation_history_role_contains(MessageKind::User, "second fetch")
+        .await
+        .expect("user-role filter matches the user prompt");
+    assert!(
+        h.assert_conversation_history_role_contains(MessageKind::Assistant, "second fetch")
+            .await
+            .is_err(),
+        "assistant-role filter must not match a user prompt"
+    );
+    assert!(
+        h.assert_conversation_history_contains("never-said-this")
+            .await
+            .is_err(),
+        "containment assert must reject text absent from the whole transcript"
+    );
+    // Fail-check: an out-of-range baseline (stale/foreign-thread value) is a
+    // loud error, not an empty slice — otherwise `assert_no_tool_error_since`
+    // would pass vacuously on a caller bug.
+    let past_end = h.history_len().await.expect("history len readable") + 1;
+    assert!(
+        h.assert_no_tool_error_since(past_end, ToolErrorClass::Denied, "policy_denied")
+            .await
+            .is_err(),
+        "out-of-range baseline must fail loud, not vacuously pass"
     );
 }
