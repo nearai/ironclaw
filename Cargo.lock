@@ -5455,6 +5455,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_resources",
  "ironclaw_wasm_limiter",
+ "ironclaw_wasm_sandbox_core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

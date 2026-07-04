@@ -19,9 +19,7 @@ use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
     TriggerTrustedInboundBinding,
 };
-#[cfg(any(test, feature = "test-support"))]
-use ironclaw_turns::TurnScope;
-use ironclaw_turns::{AdmissionRejectionReason, TurnError};
+use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnScope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TriggerFireAuthRequest {
@@ -163,17 +161,11 @@ where
             authorizer,
         }
     }
-}
 
-#[async_trait]
-impl<B> TriggerPromptMaterializer for ConversationContentRefMaterializer<B>
-where
-    B: ConversationBindingService,
-{
-    async fn materialize_prompt(
+    async fn materialize_prompt_with_scope(
         &self,
         fire: TriggerFire,
-    ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+    ) -> Result<(TriggerMaterializedPrompt, TurnScope), TriggerError> {
         let auth_request = TriggerFireAuthRequest::for_fire(&fire);
         self.authorizer
             .authorize_trigger_fire(&auth_request)
@@ -208,10 +200,25 @@ where
             "thread-message:{}",
             accepted.message_id
         ))?;
-        Ok(TriggerMaterializedPrompt::new(
-            content_ref,
-            trusted_inbound_binding,
+        let turn_scope = resolution.turn_scope;
+        Ok((
+            TriggerMaterializedPrompt::new(content_ref, trusted_inbound_binding),
+            turn_scope,
         ))
+    }
+}
+
+#[async_trait]
+impl<B> TriggerPromptMaterializer for ConversationContentRefMaterializer<B>
+where
+    B: ConversationBindingService,
+{
+    async fn materialize_prompt(
+        &self,
+        fire: TriggerFire,
+    ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+        let (materialized_prompt, _turn_scope) = self.materialize_prompt_with_scope(fire).await?;
+        Ok(materialized_prompt)
     }
 }
 
@@ -438,18 +445,13 @@ fn conversation_id<T>(result: Result<T, InboundTurnError>) -> Result<T, TriggerE
 /// Exists so integration-test support
 /// (`tests/support/reborn/triggered_submit.rs`) calls ONE production-owned
 /// helper instead of hand-mirroring `trigger_resolve_request` +
-/// `record_trigger_prompt` + the content-ref shape field-by-field — flagged
-/// as a drift trap on PR #5584 (trusted-trigger materialization is an
-/// ownership boundary, `AGENTS.md:61`: future trigger-binding/thread-recording
-/// changes could break production while a hand-rolled test mirror kept
-/// passing, or vice versa).
+/// `record_trigger_prompt` + the content-ref shape field-by-field. Keeping
+/// this seam owned by the materializer prevents test support from drifting
+/// when trusted-trigger binding or thread-recording behavior changes (the
+/// PR #5584 ownership-boundary concern).
 ///
-/// The second `resolve_or_create_binding_with_trusted_scope` call (to recover
-/// the `TurnScope`, which `materialize_prompt` computes internally but never
-/// returns) is NOT a second binding creation: the binding service's own
-/// contract is idempotent — a call with the IDENTICAL resolve request (same
-/// fire, same `TriggerTrustedInboundBinding` derivation) returns the SAME
-/// binding `materialize_prompt` already resolved-or-created moments earlier.
+/// The helper calls the materializer's private tuple-returning path so the
+/// returned `TurnScope` is the exact scope resolved during materialization.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn materialize_trigger_prompt_for_test<B>(
     binding_service: B,
@@ -458,34 +460,19 @@ pub(crate) async fn materialize_trigger_prompt_for_test<B>(
     fire: TriggerFire,
 ) -> Result<(TriggerMaterializedPrompt, TurnScope), TriggerError>
 where
-    B: ConversationBindingService + Clone,
+    B: ConversationBindingService,
 {
     let authorizer: Arc<dyn TriggerFireAuthorizer> = Arc::new(
         TenantScopedTrustedTriggerFireAuthorizer::new(fire.identity.tenant_id().clone()),
     );
     let materializer = ConversationContentRefMaterializer::new(
-        binding_service.clone(),
+        binding_service,
         Arc::clone(&thread_service),
         default_agent_id,
         authorizer,
     );
-    let materialized_prompt = materializer.materialize_prompt(fire.clone()).await?;
-
-    let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
-    let resolve_request = trigger_resolve_request(&fire, &trusted_inbound_binding)?;
-    let resolution = binding_service
-        .resolve_or_create_binding_with_trusted_scope(
-            resolve_request,
-            fire.agent_id.clone(),
-            fire.project_id.clone(),
-            Some(fire.creator_user_id.clone()),
-        )
-        .await
-        .map_err(classify_materializer_inbound_error)?;
-
-    Ok((materialized_prompt, resolution.turn_scope))
+    materializer.materialize_prompt_with_scope(fire).await
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

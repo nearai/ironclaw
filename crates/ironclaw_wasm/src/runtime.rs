@@ -3,8 +3,10 @@ use std::time::Instant;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
 
+use ironclaw_wasm_sandbox_core::SandboxLimits;
+
 use crate::bindings;
-use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolLimits, WitToolRuntimeConfig};
+use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolRuntimeConfig};
 use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
@@ -115,7 +117,7 @@ impl WitToolRuntime {
     fn extract_metadata(
         &self,
         component: &wasmtime::component::Component,
-        limits: &WitToolLimits,
+        limits: &SandboxLimits,
     ) -> Result<(String, serde_json::Value), WasmError> {
         let (mut store, instance) = self.instantiate(component, WitToolHost::deny_all(), limits)?;
         let tool = instance.near_agent_tool();
@@ -139,7 +141,7 @@ impl WitToolRuntime {
         &self,
         component: &wasmtime::component::Component,
         host: WitToolHost,
-        limits: &WitToolLimits,
+        limits: &SandboxLimits,
     ) -> Result<(Store<StoreData>, bindings::SandboxedTool), WasmError> {
         let mut store = Store::new(
             &self.engine,
@@ -192,7 +194,7 @@ fn execution_failed_with_usage(
     }
 }
 
-fn configure_store(store: &mut Store<StoreData>, limits: &WitToolLimits) -> Result<(), WasmError> {
+fn configure_store(store: &mut Store<StoreData>, limits: &SandboxLimits) -> Result<(), WasmError> {
     store
         .set_fuel(limits.fuel)
         .map_err(|error| WasmError::StoreConfiguration(error.to_string()))?;

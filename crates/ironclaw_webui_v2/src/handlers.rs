@@ -51,11 +51,11 @@ use ironclaw_product_workflow::{
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    SettingsToolPermissionState, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1414,15 +1414,6 @@ pub async fn set_settings_tools_auto_approve(
 #[derive(Debug, Deserialize)]
 pub struct SettingsToolPermissionPath {
     pub capability_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsToolPermissionState {
-    Default,
-    AlwaysAllow,
-    AskEachTime,
-    Disabled,
 }
 
 #[derive(Debug, Deserialize)]

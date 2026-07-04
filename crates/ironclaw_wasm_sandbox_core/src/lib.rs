@@ -178,9 +178,10 @@ pub fn elapsed_millis(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_wasm_limiter::WasmResourceLimiter;
     use wasmtime::ResourceLimiter;
 
-    use super::{SandboxStoreCore, WasmResourceLimiter};
+    use super::SandboxStoreCore;
 
     #[test]
     fn minimal_wasi_store_starts_without_deadline_exceeded() {

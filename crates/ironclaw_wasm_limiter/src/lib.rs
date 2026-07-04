@@ -1,12 +1,15 @@
-//! Shared `wasmtime::ResourceLimiter` used by both the tool-WASM runtime
-//! (`ironclaw_wasm`) and the hook-WASM runtime (`ironclaw_hooks`).
+//! Shared `wasmtime::ResourceLimiter` used by the tool-WASM runtime
+//! (`ironclaw_wasm`), the hook-WASM runtime (`ironclaw_hooks`), and the v1-style
+//! sandbox core (`ironclaw_wasm_sandbox_core`).
 //!
 //! Extracted from `ironclaw_wasm`'s private `limiter.rs` so the hook crate
 //! can depend on it through Cargo rather than a `#[path = ...]` file
-//! import (henrypark133 must-fix #1 on PR #3634). The two consumers
+//! import (henrypark133 must-fix #1 on PR #3634). The consumers
 //! enforce identical limits; centralizing the impl prevents drift and
 //! makes the dependency edge visible to `cargo check`, `cargo doc`, and
-//! architecture-linting tests.
+//! architecture-linting tests. `ironclaw_wasm_sandbox_core` previously kept a
+//! verbatim copy (plus the `memory_used`/`memory_limit` accessors, now folded
+//! in here); it imports this one instead.
 
 use wasmtime::ResourceLimiter;
 
@@ -69,6 +72,14 @@ impl ResourceLimiter for WasmResourceLimiter {
 
         self.memory_used = total_memory;
         self.pending_memory_growth = growth;
+        tracing::trace!(
+            current,
+            desired,
+            growth,
+            used = self.memory_used,
+            limit = self.memory_limit,
+            "WASM memory growth allowed"
+        );
         Ok(true)
     }
 

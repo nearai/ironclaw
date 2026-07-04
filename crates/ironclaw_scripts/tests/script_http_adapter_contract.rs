@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ProjectId, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, UserId,
+    CapabilityHostHttpRequest, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTargetPattern, ProjectId, ResourceScope, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    UserId,
 };
-use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
+use ironclaw_scripts::ScriptRuntimeHttpAdapter;
 
 #[tokio::test]
 async fn script_host_http_adapter_uses_shared_runtime_egress() {
@@ -23,7 +24,7 @@ async fn script_host_http_adapter_uses_shared_runtime_egress() {
     let scope = sample_scope();
 
     let response = adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
@@ -81,7 +82,7 @@ async fn script_host_http_adapter_forwards_host_supplied_policy_credentials_time
     }];
 
     adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
@@ -118,7 +119,7 @@ async fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     )));
 
     let error = adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
@@ -144,7 +145,7 @@ async fn script_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_err
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
 
     let error = adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Get,

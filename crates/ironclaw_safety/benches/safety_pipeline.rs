@@ -1,4 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use ironclaw_safety::{SafetyConfig, SafetyLayer, Validator};
 
 fn bench_safety_layer_pipeline(c: &mut Criterion) {

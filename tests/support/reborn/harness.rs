@@ -3778,13 +3778,15 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_else(|| self.mounts.clone());
         LeaseApproval {
             issued_by: Principal::HostRuntime,
-            allowed_effects: self.effect_kinds.clone(),
-            mounts,
-            network: self.network_policy.clone(),
-            secrets: self.secrets.clone(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: Some(1),
+            constraints: GrantConstraints {
+                allowed_effects: self.effect_kinds.clone(),
+                mounts,
+                network: self.network_policy.clone(),
+                secrets: self.secrets.clone(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
         }
     }
 }
