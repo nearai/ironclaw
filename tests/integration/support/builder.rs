@@ -52,6 +52,7 @@ use super::capability_backend::{MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, S
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
+use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
 use super::scripted_provider::ParkingModelGate;
@@ -478,6 +479,14 @@ impl RebornIntegrationHarness {
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
         }
+    }
+
+    /// W5-WIRING-PARITY: the Some/None shape of the `DefaultPlannedRuntimeParts`
+    /// literal this (degenerate one-thread group's) planned runtime was
+    /// actually built from, captured at `into_group` construction time. See
+    /// `tests/integration/wiring_parity.rs`.
+    pub fn planned_runtime_parts_shape(&self) -> DefaultPlannedRuntimePartsShape {
+        self._shared.planned_runtime_parts_shape
     }
 
     /// Submit a user turn and wait for it to complete.
