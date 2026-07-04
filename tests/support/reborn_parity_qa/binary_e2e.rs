@@ -73,10 +73,10 @@ use super::model_replay::RebornTraceReplayModelGateway;
 use crate::reborn_support::config::WaitConfig;
 use crate::reborn_support::doubles::{EmptyIdentityContextSource, RecordingTestCapabilityPort};
 use crate::reborn_support::filesystem::{BlockingTurnStatePutFilesystem, local_filesystem};
+use crate::reborn_support::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use crate::reborn_support::harness::{
     HarnessCapabilityMode, HarnessCapabilityRecorder, HarnessResult, HarnessTurnBackend,
-    HarnessTurnStorageBackend, HostRuntimeCapabilityHarness, RecordedCapabilityResult,
-    product_scope, scoped_turns_fs,
+    HarnessTurnStorageBackend, RecordedCapabilityResult, product_scope, scoped_turns_fs,
 };
 use crate::reborn_support::product_workflow::RebornProductWorkflowHarness;
 use crate::reborn_support::session_thread::RebornThreadHarness;
@@ -294,7 +294,8 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::file_tools().await?);
+        let host_runtime =
+            Arc::new(crate::reborn_support::harness::profiles::file::file_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -308,8 +309,9 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime =
-            Arc::new(HostRuntimeCapabilityHarness::file_tools_requiring_approval().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -323,7 +325,8 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::write_only().await?);
+        let host_runtime =
+            Arc::new(crate::reborn_support::harness::profiles::file::write_only().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -337,7 +340,9 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::coding_read_tools().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::coding_read::coding_read_tools().await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -351,7 +356,7 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?);
+        let host_runtime = Arc::new(core_builtin::core_builtin_tools_default().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -365,7 +370,8 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        let host_runtime =
+            Arc::new(crate::reborn_support::harness::profiles::process::process_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -379,7 +385,8 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::qa_smoke_tools().await?);
+        let host_runtime =
+            Arc::new(crate::reborn_support::harness::profiles::qa_smoke::qa_smoke_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -393,8 +400,10 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime =
-            Arc::new(HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools()
+                .await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -408,7 +417,9 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::skill_management_tools().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::skill::skill_management_tools().await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -422,8 +433,9 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime =
-            Arc::new(HostRuntimeCapabilityHarness::trigger_management_tools().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::trigger::trigger_management_tools().await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -437,7 +449,9 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::trace_commons_tools().await?);
+        let host_runtime = Arc::new(
+            crate::reborn_support::harness::profiles::trace_commons::trace_commons_tools().await?,
+        );
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -453,8 +467,10 @@ impl RebornBinaryE2EHarness {
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(
-            HostRuntimeCapabilityHarness::core_builtin_tools_with_network_policy(network_policy)
-                .await?,
+            core_builtin::core_builtin_tools(
+                CoreBuiltinOptions::default().with_network_policy(network_policy),
+            )
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -471,8 +487,12 @@ impl RebornBinaryE2EHarness {
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(
-            HostRuntimeCapabilityHarness::core_builtin_tools_with_live_http_egress(network_policy)
-                .await?,
+            core_builtin::core_builtin_tools(
+                CoreBuiltinOptions::default()
+                    .with_live_http_egress()
+                    .with_network_policy(network_policy),
+            )
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -487,7 +507,8 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::github_issue_tools().await?);
+        let host_runtime =
+            Arc::new(crate::reborn_support::harness::profiles::github::github_issue_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,

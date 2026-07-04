@@ -148,6 +148,16 @@ use crate::support::trace_llm::TraceLlm;
 #[path = "group_constructors.rs"]
 mod group_constructors;
 
+/// Optional-runtime-wiring setters (`storage`, `safety_context`,
+/// `with_turn_event_sink`, `budget_accounting`,
+/// `communication_context_provider`, `hook_dispatcher_builder_factory`) on
+/// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
+/// from `mod.rs`), same precedent as `group_constructors` above — it reaches
+/// the builder's private fields at plain module-private visibility instead
+/// of widening them to `pub(crate)` for the whole test-support crate.
+#[path = "group_options.rs"]
+mod group_options;
+
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -448,14 +458,17 @@ impl RebornIntegrationGroup {
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
-/// Private (not `pub(crate)`): `group_constructors.rs` is a private child
-/// module of `group` (see the `mod group_constructors` declaration above), so
-/// module-private visibility already reaches it without widening these
-/// internals to the whole test-support crate. The per-capability preset
-/// constructors there take/return this type as the opaque handoff between
-/// `build_base` and `into_group` — they never read its fields except
-/// `canonical_binding`.
-struct GroupBaseData {
+/// `pub(crate)` (not module-private): `group_constructors.rs` reaches this at
+/// plain module-private visibility as a descendant of `group` (see the `mod
+/// group_constructors` declaration above), so the fields stay private and the
+/// per-capability preset constructors there still take/return this type as the
+/// opaque handoff between `build_base` and `into_group`, reading only
+/// `canonical_binding` directly. The struct name and `canonical_subject_user`
+/// are bumped to `pub(crate)` ONLY so `harness/options.rs`'s
+/// `ToolsProfile::build_group_capability_with_base` — a sibling of `group`,
+/// not a descendant — can name the type and call the one accessor it needs;
+/// `build_base`/`into_group` themselves stay module-private.
+pub(crate) struct GroupBaseData {
     product_harness: RebornProductWorkflowHarness,
     composite: Arc<CompositeRootFilesystem>,
     libsql_db_path: Option<PathBuf>,
@@ -483,7 +496,7 @@ impl GroupBaseData {
     /// dispatch shares the run's `(tenant, user)` with the turn-store /
     /// evidence scope resolved from the SAME `canonical_binding` (see the
     /// `canonical_binding` field docs above).
-    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+    pub(crate) fn canonical_subject_user(&self) -> HarnessResult<UserId> {
         Ok(self
             .canonical_binding
             .subject_user_id
@@ -519,79 +532,6 @@ pub struct RebornIntegrationGroupBuilder {
 }
 
 impl RebornIntegrationGroupBuilder {
-    /// Select the durable storage backend (default: `StorageMode::InMemory`).
-    /// Use `StorageMode::LibSql` to exercise on-disk durability across
-    /// `assert_reply_persists_after_reopen`.
-    pub fn storage(mut self, mode: StorageMode) -> Self {
-        self.storage = mode;
-        self
-    }
-
-    /// Wire a model-visible instruction-safety banner into the group's ONE
-    /// shared planned runtime (`DefaultPlannedRuntimeParts::safety_context`).
-    /// Rendered verbatim as a `system`-role prompt message ahead of any
-    /// per-turn instructions (`push_safety_context`); the only model-visible
-    /// artifact of instruction-safety scanning on this tier (T0-SYSPROMPT /
-    /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
-    pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
-        self.safety_context = Some(ctx);
-        self
-    }
-
-    /// Install an in-memory `TurnEventSink` (`ironclaw_turns::InMemoryTurnEventSink`,
-    /// a real, already-shipped production type with zero callers today — this is the
-    /// seam production wires via `subscribe_best_effort` in `build_default_planned_runtime_inner`,
-    /// `crates/ironclaw_reborn/src/runtime.rs:613-619`) into the group's ONE planned
-    /// runtime (C-TRACECAP). Read the recorded events back with
-    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read path;
-    /// it slices `[baseline_turn_event_count..]` so a group thread never sees a
-    /// sibling thread's events. Deliberately no raw group-level sink accessor:
-    /// one would bypass that slicing and reintroduce cross-thread bleed.
-    pub fn with_turn_event_sink(mut self) -> Self {
-        self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
-        self
-    }
-
-    /// Wire the production `build_default_budget_accountant` (over in-memory
-    /// governor, gate store, zero-cost table, and compiled-default seeding) into
-    /// the group's ONE shared planned runtime (`DefaultPlannedRuntimeParts::model_budget_accountant`),
-    /// and retain the governor for read-back. This is the C-BUDGET liveness seam:
-    /// on the first model call of any turn the accountant seeds the run owner's
-    /// daily USD cap into the governor, which
-    /// `RebornIntegrationHarness::assert_budget_user_cap_seeded` reads back.
-    /// Budget SEMANTICS (thresholds, gates, `BudgetEvent` cascade) are covered at
-    /// crate tier (`budget_e2e.rs`); this only proves the harness bypass path
-    /// (`build_default_planned_runtime`) wires the accountant live. Defaults off.
-    pub fn budget_accounting(mut self) -> Self {
-        self.budget = true;
-        self
-    }
-
-    /// Wire a `CommunicationContextProvider` into the group's ONE shared planned
-    /// runtime (`DefaultPlannedRuntimeParts::communication_context_provider`), so
-    /// the delivery-preference / connected-channel slice it resolves renders into
-    /// the model request. This is the C-COMMCTX seam — distinct from the outbound
-    /// delivery **sink** (E-OUTBOUND): this is prompt **context**. Defaults `None`.
-    pub fn communication_context_provider(
-        mut self,
-        provider: Arc<dyn CommunicationContextProvider>,
-    ) -> Self {
-        self.communication_context_provider = Some(provider);
-        self
-    }
-
-    /// Wire a per-run `HookDispatcherBuilderFactory` into the group's ONE shared
-    /// planned runtime (`DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory`),
-    /// so hooks fire at their lifecycle points on a coordinator-path turn. This is
-    /// the E-HOOK-INFRA / C-HOOKS seam. Defaults `None` (hook framework dormant).
-    pub fn hook_dispatcher_builder_factory(
-        mut self,
-        factory: HookDispatcherBuilderFactory,
-    ) -> Self {
-        self.hook_dispatcher_builder_factory = Some(factory);
-        self
-    }
-
     /// Shared setup for every group constructor: hermetic env, the product
     /// workflow harness over the fixed itest scope, the per-group `TempDir`, and
     /// the thread/turn composite. Returns [`GroupBaseData`] so each constructor

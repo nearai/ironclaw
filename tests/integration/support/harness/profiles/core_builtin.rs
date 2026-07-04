@@ -1,0 +1,238 @@
+//! core_builtin domain tools profile (`core_builtin_tools`).
+//!
+//! Unlike the other `profiles/*` domains, this harness does NOT flow through
+//! `new_with_options`/`RebornServices` — it builds the `HostRuntime` directly
+//! via `local_dev_host_runtime_with_http_egress` /
+//! `local_dev_host_runtime_with_live_http_egress` and assembles
+//! `HostRuntimeCapabilityHarness` by hand (`core_builtin_tools_from_runtime`),
+//! so it does not go through `ToolsProfile`/`.build()`.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, ExtensionId, MountPermissions, NetworkPolicy, RuntimeKind, UserId,
+};
+use ironclaw_host_runtime::{
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
+    HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    TIME_CAPABILITY_ID,
+};
+use ironclaw_reborn_composition::ProductLiveCapabilityIo;
+
+use super::super::{
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
+    host_runtime_storage_roots, http_test_policy, local_dev_host_runtime_with_http_egress,
+    local_dev_host_runtime_with_live_http_egress, memory_mounts, workspace_mounts,
+};
+
+/// Axes threaded through the pre-collapse `core_builtin_tools*` constructor
+/// chain (today: `core_builtin_tools`, `core_builtin_tools_with_network_policy`,
+/// `core_builtin_tools_with_live_shell`,
+/// `core_builtin_tools_with_network_policy_and_process_port`,
+/// `core_builtin_tools_with_live_http_egress`). `Default` matches today's
+/// zero-arg `core_builtin_tools()`.
+pub(crate) struct CoreBuiltinOptions {
+    /// Network policy the built harness dispatches capabilities under.
+    /// Defaults to `http_test_policy()`, mirroring `core_builtin_tools()`;
+    /// override via `.with_network_policy(..)`, mirroring
+    /// `core_builtin_tools_with_network_policy(..)` /
+    /// `core_builtin_tools_with_live_http_egress(..)`.
+    pub(crate) network_policy: NetworkPolicy,
+    /// Slice 5: `true` (default) injects the inert `RecordingProcessPort` so
+    /// `builtin.shell` invocations in tests never spawn a real OS process.
+    /// `.with_live_shell()` sets this `false`, which skips injection and lets
+    /// `HostRuntimeServices` default to the real `LocalHostProcessPort`. Only
+    /// consulted when `live_http_egress` is `false` — the live-http-egress
+    /// path never wires a process port either way.
+    pub(crate) recording_process: bool,
+    /// `true` selects `local_dev_host_runtime_with_live_http_egress` (a real
+    /// HTTP egress; no recording `RuntimeHttpEgress`/process port captured on
+    /// the harness) instead of the default recording-egress runtime
+    /// construction (`local_dev_host_runtime_with_http_egress`). Was
+    /// `core_builtin_tools_with_live_http_egress()`. Set via
+    /// `.with_live_http_egress()`.
+    pub(crate) live_http_egress: bool,
+}
+
+impl Default for CoreBuiltinOptions {
+    fn default() -> Self {
+        Self {
+            network_policy: http_test_policy(),
+            recording_process: true,
+            live_http_egress: false,
+        }
+    }
+}
+
+impl CoreBuiltinOptions {
+    pub(crate) fn with_network_policy(mut self, network_policy: NetworkPolicy) -> Self {
+        self.network_policy = network_policy;
+        self
+    }
+
+    /// Was `core_builtin_tools_with_live_shell()`: opts out of the recording
+    /// process port so the real `LocalHostProcessPort` executes shell
+    /// commands on the host.
+    pub(crate) fn with_live_shell(mut self) -> Self {
+        self.recording_process = false;
+        self
+    }
+
+    /// Was `core_builtin_tools_with_live_http_egress(network_policy)`.
+    pub(crate) fn with_live_http_egress(mut self) -> Self {
+        self.live_http_egress = true;
+        self
+    }
+}
+
+/// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
+/// `read_file`/`apply_patch`/`shell`). See [`CoreBuiltinOptions`] for the axes
+/// this collapses; `core_builtin_tools(CoreBuiltinOptions::default())` is
+/// byte-identical to the pre-collapse zero-arg `core_builtin_tools()`.
+pub(crate) async fn core_builtin_tools(
+    options: CoreBuiltinOptions,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let CoreBuiltinOptions {
+        network_policy,
+        recording_process,
+        live_http_egress,
+    } = options;
+    if live_http_egress {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+        core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-live-http-user")?,
+        )
+    } else {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        // Slice 5: inject the inert recording port by default so `builtin.shell`
+        // invocations in tests never spawn a real OS process. `.with_live_shell()`
+        // sets `recording_process = false`, which skips injection and lets
+        // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+        let recording_process_port = if recording_process {
+            Some(Arc::new(
+                super::super::super::process::RecordingProcessPort::new(),
+            ))
+        } else {
+            None
+        };
+        let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
+            .as_ref()
+            .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root.clone(),
+            Arc::clone(&runtime_http_egress),
+            process_port_dyn,
+        )?;
+        let mut harness = core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-user")?,
+        )?;
+        harness.http_egress = Some(runtime_http_egress);
+        harness.process_port = recording_process_port;
+        Ok(harness)
+    }
+}
+
+/// Zero-arg convenience matching the pre-collapse `core_builtin_tools()`
+/// default; most callers want this and never touch `CoreBuiltinOptions`.
+pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    core_builtin_tools(CoreBuiltinOptions::default()).await
+}
+
+fn core_builtin_tools_from_runtime(
+    root: Arc<tempfile::TempDir>,
+    workspace_root: PathBuf,
+    runtime: Arc<dyn HostRuntime>,
+    network_policy: NetworkPolicy,
+    user_id: UserId,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+    let memory_capability_ids = [
+        CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        // profile_set writes to the memory mount (context/profile.json under
+        // the user-scoped scope), so it needs the memory mount override just
+        // like the four memory_* capabilities above.
+        CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
+    ];
+    Ok(HostRuntimeCapabilityHarness {
+        runtime,
+        approval_parts: None,
+        auto_approve_settings: None,
+        pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+        io: Arc::new(ProductLiveCapabilityIo::default()),
+        root,
+        workspace_root,
+        mounts,
+        capability_mount_overrides: memory_capability_ids
+            .iter()
+            .cloned()
+            .map(|capability_id| (capability_id, memory_mounts.clone()))
+            .collect(),
+        capability_ids: vec![
+            CapabilityId::new(TIME_CAPABILITY_ID)?,
+            CapabilityId::new(JSON_CAPABILITY_ID)?,
+            CapabilityId::new(HTTP_CAPABILITY_ID)?,
+            CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+            CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
+            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+            // slice 5: `builtin.shell` on the surface so scripted shell calls
+            // route through the process port (recording by default, live via
+            // `.with_live_shell()`).
+            CapabilityId::new(SHELL_CAPABILITY_ID)?,
+        ],
+        runtime_kind: RuntimeKind::FirstParty,
+        effect_kinds: vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+            EffectKind::SpawnProcess,
+            // slice 5: `builtin.shell` declares ExecuteCode; the grant's
+            // allowed_effects must include it or the authorizer denies the
+            // capability before it reaches the process port.
+            EffectKind::ExecuteCode,
+        ],
+        network_policy,
+        secrets: Vec::new(),
+        provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+        additional_provider_trust: Vec::new(),
+        user_id,
+        invocations: Arc::new(Mutex::new(Vec::new())),
+        results: Arc::new(Mutex::new(Vec::new())),
+        http_egress: None,
+        network_egress: None,
+        process_port: None,
+        profile_filesystem: None,
+        project_service: None,
+        skill_activation_source: None,
+        attachment_test_support: None,
+        outbound_target_tools: None,
+        scope_capability_by_run_owner: false,
+        product_auth: None,
+        tool_permission_overrides: None,
+    })
+}

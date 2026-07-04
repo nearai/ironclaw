@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::group::GroupCapability;
-use super::harness::HostRuntimeCapabilityHarness;
+use super::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use super::http_matcher::ScriptedHttpResponse;
 use super::process::ScriptedProcessResult;
 
@@ -80,10 +80,13 @@ impl RebornCapabilityBackend {
                 // latter with a canned result installed below).
                 let host_runtime = match shell_mode {
                     ShellMode::Live => {
-                        HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
+                        core_builtin::core_builtin_tools(
+                            CoreBuiltinOptions::default().with_live_shell(),
+                        )
+                        .await?
                     }
                     ShellMode::Inert | ShellMode::Scripted(_) => {
-                        HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                        core_builtin::core_builtin_tools_default().await?
                     }
                 };
                 host_runtime.install_http_responses(keyed_http_responses)?;
@@ -93,7 +96,7 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
-                let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
+                let host_runtime = super::harness::profiles::mock_mcp::mock_mcp_tools(
                     &mcp_url,
                     MOCK_MCP_PROVIDER_ID,
                     &format!("{MOCK_MCP_PROVIDER_ID}.search"),
@@ -105,7 +108,7 @@ impl RebornCapabilityBackend {
                 // T0-SECRET-INJECT (see the `GithubIssueTools` variant docs above):
                 // no approval gate / user alignment — the authorizer allows every
                 // dispatch outright.
-                let host_runtime = HostRuntimeCapabilityHarness::github_issue_tools().await?;
+                let host_runtime = super::harness::profiles::github::github_issue_tools().await?;
                 // W4-AUTHGATE-WIRE: wire keyed HTTP responses onto this backend too
                 // (previously only `BuiltinHttpTools` installed them). A no-op for
                 // existing callers that never populate `keyed_http_responses` for
@@ -124,7 +127,7 @@ impl RebornCapabilityBackend {
             }
             RebornCapabilityBackend::WebAccessTools => {
                 // C-WEBACCESS — see the `WebAccessTools` variant docs above.
-                let host_runtime = HostRuntimeCapabilityHarness::web_access_tools().await?;
+                let host_runtime = super::harness::profiles::web_access::web_access_tools().await?;
                 host_runtime.install_web_access_responses(web_access_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
