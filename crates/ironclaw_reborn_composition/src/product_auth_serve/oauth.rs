@@ -1,4 +1,5 @@
 //! OAuth start and callback handlers.
+// arch-exempt: large_file, product-auth OAuth start/callback serve surface; Slack-OAuth audit MJ4 will unify Slack personal-OAuth start here and shrink this file, plan #5604
 
 use super::*;
 #[cfg(feature = "slack-v2-host-beta")]

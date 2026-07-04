@@ -35,16 +35,32 @@ The compiled component is embedded into the Reborn binary via
 
 ## Configuring
 
-Provide a Slack **User OAuth Token** (`xoxp-`) under the `slack_user_token`
-credential handle. Create a private app at https://api.slack.com/apps and, under
-**OAuth & Permissions**, add **User Token Scopes** (not Bot Token Scopes):
-`search:read`, `channels:history`, `groups:history`, `im:history`,
-`mpim:history`, `channels:read`, `groups:read`, `im:read`, `mpim:read`,
-`users:read`, and `chat:write` (for posting). Install to your workspace and copy
-the User OAuth Token.
+**The shipped setup is OAuth.** In the packaged product this component ships as
+the `slack_user` first-party extension ("Slack (personal)"), and users connect
+it through the in-product Slack OAuth flow — the `slack_personal` product-auth
+provider declared in
+`crates/ironclaw_first_party_extensions/assets/slack_user/manifest.toml`, which
+is the single source of truth for the shipped setup. Clicking **Connect** in the
+WebUI redirects through Slack's consent screen and IronClaw obtains and stores
+the user token automatically; **there is no token to create or paste.** The
+OAuth flow requests the same **User Token Scopes** the tool needs: `search:read`,
+`channels:history`, `groups:history`, `im:history`, `mpim:history`,
+`channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`, and
+`chat:write` (the last only for posting).
 
-The token is injected as a bearer credential at the host boundary; the WASM
-component never sees it.
+### Manual token — dev / source builds only
+
+When you build and run this component straight from `tools-src/` (outside the
+packaged product) there is no OAuth flow, so you supply a Slack **User OAuth
+Token** (`xoxp-`) directly under the `slack_user_token` credential handle:
+create a private app at https://api.slack.com/apps, add the **User Token
+Scopes** listed above under **OAuth & Permissions**, install it to your
+workspace, and copy the User OAuth Token. This manual path is a
+developer/source-tree convenience only — end users always get the OAuth flow
+above.
+
+Either way, the token is injected as a bearer credential at the host boundary;
+the WASM component never sees it.
 
 ## Security
 

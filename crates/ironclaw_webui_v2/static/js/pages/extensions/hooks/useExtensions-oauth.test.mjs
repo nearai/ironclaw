@@ -201,6 +201,19 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
   intervals[0]();
   assert.equal(configuredCount, 0);
 
+  // A completion from a DIFFERENT extension's flow (e.g. another tab) must not
+  // satisfy this modal while it is still waiting on its own callback.
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "completed",
+      flowId: "flow-other",
+    }),
+  );
+  intervals[0]();
+  assert.equal(configuredCount, 0);
+
   storage.set(
     "ironclaw:product-auth:oauth-complete",
     JSON.stringify({
@@ -485,4 +498,123 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     { index: 0, value: true },
     { index: 0, value: false },
   ]);
+});
+
+test("useOauthSetup ignores a stale OAuth callback when the flow response carried no flow id", () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    // Nothing is configured server-side, so the callback fast-path is the only
+    // possible completion signal — and it must reject a foreign/absent flow id.
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  // Another tab already wrote a completion for a DIFFERENT flow before this flow
+  // even starts. The backend omitted `flow_id` on this flow's start response, so
+  // the watcher's `flowId` is null — the exact case the old code treated as a
+  // wildcard match.
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "completed",
+      flowId: "flow-from-another-tab",
+    }),
+  );
+
+  mutationConfig.onSuccess(
+    {
+      res: { authorization_url: "https://slack.com/oauth/v2/authorize" },
+      popup,
+    },
+    {},
+  );
+
+  // The initial storage read on watcher start must NOT treat the stale cross-tab
+  // completion as this flow's completion.
+  assert.equal(configuredCount, 0);
+
+  // Neither must a subsequent poll — nor a completion carrying no flow id at all.
+  intervals[0]();
+  assert.equal(configuredCount, 0);
+
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "completed",
+    }),
+  );
+  intervals[0]();
+  assert.equal(configuredCount, 0);
+
+  // The watcher is still authorizing — it never falsely completed.
+  assert.deepEqual(stateUpdates, [{ index: 0, value: true }]);
 });

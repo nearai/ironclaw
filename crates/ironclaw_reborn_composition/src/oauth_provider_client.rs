@@ -765,7 +765,21 @@ fn scopes_for_exchange(
     }
     match spec.exchange_scope_policy {
         ExchangeScopePolicy::RequireProviderScope => Err(AuthProductError::TokenExchangeFailed),
-        ExchangeScopePolicy::FallbackToRequested => Ok(requested_scopes.to_vec()),
+        ExchangeScopePolicy::FallbackToRequested => {
+            // The provider (e.g. Slack `oauth.v2.access`) returned a successful
+            // exchange but echoed no granted scopes, so the stored grant falls
+            // back to the requested (manifest) scope set. If the provider
+            // actually granted a NARROWER set, this widens the stored grant to
+            // the full requested set — surface it so a narrower-than-requested
+            // grant is never silently widened. Guard log only: the fallback
+            // value is unchanged, and the count (not the values) is logged.
+            tracing::warn!(
+                provider = spec.provider_id,
+                requested_scope_count = requested_scopes.len(),
+                "oauth exchange returned no granted scopes; falling back to requested scopes (stored grant may be wider than the provider actually granted)"
+            );
+            Ok(requested_scopes.to_vec())
+        }
     }
 }
 

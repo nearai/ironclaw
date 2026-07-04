@@ -299,21 +299,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_channel_preserves_hyphens_for_custom_relay() {
+    fn parse_channel_preserves_hyphens_for_slack_relay() {
         // Regression for the PR #2665 Copilot review: a previous revision of
         // `parse_channel` returned `ExtensionName::new(...)` directly, which
         // canonicalizes `-` into `_`. Pairing rows are keyed by the raw
-        // channel segment, so folding `custom-relay` to `custom_relay` would
-        // silently miss every matching row. This test pins the un-folded form
-        // so the regression can't reoccur without a visible signal.
-        let parsed = parse_channel("custom-relay".to_string())
-            .expect("custom-relay must validate and retain hyphens");
-        assert_eq!(parsed, "custom-relay");
+        // channel segment, so folding `slack-relay` to `slack_relay` would
+        // silently miss every matching row. `slack-relay` is a live channel
+        // name — `DEFAULT_RELAY_NAME` in `src/channels/relay/channel.rs`,
+        // wired through `features/oauth/mod.rs` — so this test pins the
+        // un-folded form of a *real* channel and the regression can't reoccur
+        // without a visible signal.
+        let parsed = parse_channel("slack-relay".to_string())
+            .expect("slack-relay must validate and retain hyphens");
+        assert_eq!(parsed, "slack-relay");
 
         // Case-sensitivity still folds through `to_ascii_lowercase()`.
-        let parsed = parse_channel("CUSTOM-RELAY".to_string())
-            .expect("uppercase custom-relay must validate and retain hyphens");
-        assert_eq!(parsed, "custom-relay");
+        let parsed = parse_channel("SLACK-RELAY".to_string())
+            .expect("uppercase slack-relay must validate and retain hyphens");
+        assert_eq!(parsed, "slack-relay");
     }
 
     #[test]

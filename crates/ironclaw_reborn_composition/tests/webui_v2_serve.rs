@@ -2236,15 +2236,15 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must listen for the OAuth callback completion signal"
     );
     assert!(
-        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        body.contains("new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
         "chat hook must consume same-origin OAuth callback broadcasts"
     );
     assert!(
-        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        body.contains("browserWindow.addEventListener?.(\"storage\", onStorage)"),
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        body.contains("browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(

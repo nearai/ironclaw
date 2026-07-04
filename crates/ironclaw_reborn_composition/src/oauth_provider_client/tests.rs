@@ -115,6 +115,44 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
 }
 
 #[tokio::test]
+async fn fallback_to_requested_stores_requested_scopes_when_provider_omits_scope() {
+    // Complements `google_exchange_fails_closed_when_response_omits_scope`
+    // (RequireProviderScope). Under `ExchangeScopePolicy::FallbackToRequested`
+    // (notion/Slack), a successful exchange whose body omits `scope` stores the
+    // REQUESTED (manifest) scope set — which can be wider than the provider
+    // actually granted, so `scopes_for_exchange` now emits a guard `warn!`.
+    // Behavior is preserved: the stored grant equals the requested set. Driven
+    // through `exchange_callback` (the caller), not the private helper.
+    let egress = Arc::new(RecordingEgress::ok(
+        br#"{"access_token":"access-token","expires_in":3600}"#.to_vec(),
+    ));
+    let client = HostOAuthProviderClient::new(
+        notion_spec(),
+        egress,
+        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("notion-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let exchange = client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("notion", "notion", &["notion.read", "notion.insert"]),
+        )
+        .await
+        .expect("fallback-to-requested exchange succeeds");
+
+    let scopes: Vec<&str> = exchange.scopes.iter().map(|scope| scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        vec!["notion.read", "notion.insert"],
+        "empty provider scope must fall back to the exact requested scope set"
+    );
+}
+
+#[tokio::test]
 async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
     let egress = Arc::new(RecordingEgress::with_status(
         503,

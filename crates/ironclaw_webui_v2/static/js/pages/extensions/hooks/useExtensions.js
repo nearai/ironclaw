@@ -60,7 +60,14 @@ function isOAuthCallbackCompletion(payload) {
 
 function oauthCompletionMatchesFlow(payload, flowId) {
   if (!isOAuthCallbackCompletion(payload)) return false;
-  if (!flowId) return true;
+  // Require a matching flow id. A completion carrying no flow id — or one from a
+  // DIFFERENT extension's flow in another tab — must NOT satisfy this modal;
+  // treating a missing flow id as a match let a stale cross-tab callback
+  // prematurely activate/close the modal. When the OAuth response carried no
+  // flow id, this callback fast-path stays disabled and the polling path
+  // (`setupIsConfigured`) is the sole completion signal. Mirrors the stricter
+  // in-chat gate in useChat.js, which also keys on the flow id.
+  if (!flowId) return false;
   return payload.flowId === flowId || payload.flow_id === flowId;
 }
 

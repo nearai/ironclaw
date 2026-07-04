@@ -372,6 +372,15 @@ export function useChat(threadId) {
   const pendingGateRef = React.useRef(pendingGate);
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
+  // Known limitation: single in-flight onboarding-OAuth flow per useChat
+  // instance. This hook is one non-remounted instance across thread switches
+  // (chat.js keys nothing on threadId), so starting OAuth in thread A and then
+  // thread B (same channel) before A completes overwrites this ref with B's
+  // flow — A's later callback no longer matches `pending.flowId` and its
+  // resume is dropped. Keying the pending flow by flow_id (a Map) would fix it
+  // but also has to make `pollServerState` (channel-keyed) fan out over every
+  // in-flight flow — out of scope here. Practically bounded: an OAuth popup is
+  // near-modal, so two concurrent pending flows on one channel is rare.
   const pendingOnboardingOauthFlowRef = React.useRef(null);
   const sendRef = React.useRef(null);
   // Source tool-message ids whose pairing panel the user dismissed. Keyed by

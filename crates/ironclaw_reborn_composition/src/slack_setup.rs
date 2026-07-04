@@ -105,6 +105,16 @@ pub(crate) struct SlackInstallationSetupStatus {
     pub(crate) oauth_client_id: Option<String>,
     pub(crate) oauth_client_id_configured: bool,
     pub(crate) oauth_client_secret_configured: bool,
+    /// True only when BOTH the personal-OAuth client id and client secret are
+    /// configured — i.e. the Slack personal-OAuth *start* can actually run.
+    /// Distinct from [`configured`](Self::configured), which reports only
+    /// bot-token + signing-secret (the event-ingestion / entrypoint readiness
+    /// the WebUI already depends on). Additive signal: a setup with bot creds
+    /// but no OAuth client id/secret reports `configured = true` yet
+    /// `personal_oauth_ready = false`, so the UI can distinguish "Slack
+    /// receiving events" from "personal OAuth ready" instead of showing Slack
+    /// fully configured while OAuth start cannot work.
+    pub(crate) personal_oauth_ready: bool,
     pub(crate) revision: Option<u64>,
 }
 
@@ -203,6 +213,7 @@ impl SlackSetupService {
                 oauth_client_id: None,
                 oauth_client_id_configured: false,
                 oauth_client_secret_configured: false,
+                personal_oauth_ready: false,
                 revision: None,
             });
         };
@@ -241,6 +252,7 @@ impl SlackSetupService {
             oauth_client_id: setup.oauth_client_id,
             oauth_client_id_configured,
             oauth_client_secret_configured,
+            personal_oauth_ready: oauth_client_id_configured && oauth_client_secret_configured,
             revision: Some(setup.revision),
         })
     }
@@ -837,6 +849,79 @@ mod tests {
 
         let bot_token = service.bot_token(&setup).await.expect("bot token");
         assert_eq!(bot_token.expose_secret(), "xoxb-secret");
+    }
+
+    #[tokio::test]
+    async fn status_reports_entrypoint_ready_but_personal_oauth_not_ready_without_client_creds() {
+        // F-008: bot token + signing secret make Slack event ingestion (the
+        // "entrypoint") ready, but Slack personal-OAuth *start* additionally
+        // needs the OAuth client id + secret. `configured` (event readiness the
+        // WebUI depends on) must stay true while `personal_oauth_ready` stays
+        // false, so the UI cannot show Slack fully configured while OAuth start
+        // cannot run. Driven through `status()` (the caller the route handler
+        // serializes), exercising the real secret-store metadata reads.
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            Arc::new(InMemorySecretStore::new()),
+        );
+
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-secret")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save bot creds only");
+
+        let status = service.status().await.expect("status without oauth creds");
+        assert!(
+            status.configured,
+            "bot token + signing secret must report entrypoint-ready"
+        );
+        assert!(!status.oauth_client_id_configured);
+        assert!(!status.oauth_client_secret_configured);
+        assert!(
+            !status.personal_oauth_ready,
+            "personal OAuth must not be ready without client id + secret"
+        );
+
+        // Adding the personal-OAuth client credentials flips
+        // `personal_oauth_ready` to true while `configured` stays true
+        // (additive, non-regressing).
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: Some("slack-oauth-client-id".to_string()),
+                oauth_client_secret: Some(SecretString::from("slack-oauth-client-secret")),
+            })
+            .await
+            .expect("save oauth client creds");
+
+        let status = service.status().await.expect("status after oauth creds");
+        assert!(status.configured);
+        assert!(status.oauth_client_id_configured);
+        assert!(status.oauth_client_secret_configured);
+        assert!(
+            status.personal_oauth_ready,
+            "personal OAuth must be ready once client id + secret are configured"
+        );
     }
 
     #[tokio::test]
