@@ -1,5 +1,5 @@
 ---
-source: tests/support/reborn/golden.rs
+source: tests/integration/support/golden.rs
 ---
 ===== inference call 0 =====
 {

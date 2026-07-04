@@ -1,0 +1,89 @@
+//! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
+//! `safety_context`, `with_turn_event_sink`, `budget_accounting`,
+//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! Private child module of `group.rs` (owns the struct + `build_base`/
+//! `into_group`), so it reaches the builder's private fields at module-
+//! private visibility instead of widening them to `pub(crate)`. New builder
+//! setters belong HERE.
+
+// Shared by all group test binaries; symbols read as dead when a binary does
+// not exercise every setter (mirrors the same attribute on `group.rs`/
+// `group_constructors.rs`).
+#![allow(dead_code)]
+
+use std::sync::Arc;
+
+use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_turns::InMemoryTurnEventSink;
+use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
+
+use super::super::builder::StorageMode;
+use super::RebornIntegrationGroupBuilder;
+
+impl RebornIntegrationGroupBuilder {
+    /// Select the durable storage backend (default: `StorageMode::InMemory`).
+    /// Use `StorageMode::LibSql` to exercise on-disk durability across
+    /// `assert_reply_persists_after_reopen`.
+    pub fn storage(mut self, mode: StorageMode) -> Self {
+        self.storage = mode;
+        self
+    }
+
+    /// Wire a model-visible instruction-safety banner into the group's ONE
+    /// shared planned runtime (`DefaultPlannedRuntimeParts::safety_context`).
+    /// Rendered verbatim as a `system`-role prompt message ahead of any
+    /// per-turn instructions (`push_safety_context`); the only model-visible
+    /// artifact of instruction-safety scanning on this tier (T0-SYSPROMPT /
+    /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
+    pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
+        self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
+    /// planned runtime via production's `subscribe_best_effort` seam
+    /// (C-TRACECAP). Read back via
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read
+    /// path; it slices `[baseline_turn_event_count..]` so threads don't see
+    /// siblings' events. No raw sink accessor, deliberately.
+    pub fn with_turn_event_sink(mut self) -> Self {
+        self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
+        self
+    }
+
+    /// Wire the production `build_default_budget_accountant` into the group's
+    /// ONE planned runtime and retain the governor for read-back (C-BUDGET
+    /// liveness seam: the accountant seeds the run owner's daily cap on the
+    /// first model call; read back via `assert_budget_user_cap_seeded`).
+    /// Budget semantics are covered at crate tier (`budget_e2e.rs`); this only
+    /// proves the harness wires the accountant live. Defaults off.
+    pub fn budget_accounting(mut self) -> Self {
+        self.budget = true;
+        self
+    }
+
+    /// Wire a `CommunicationContextProvider` into the group's ONE shared planned
+    /// runtime (`DefaultPlannedRuntimeParts::communication_context_provider`), so
+    /// the delivery-preference / connected-channel slice it resolves renders into
+    /// the model request. This is the C-COMMCTX seam — distinct from the outbound
+    /// delivery **sink** (E-OUTBOUND): this is prompt **context**. Defaults `None`.
+    pub fn communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Wire a per-run `HookDispatcherBuilderFactory` into the group's ONE shared
+    /// planned runtime (`DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory`),
+    /// so hooks fire at their lifecycle points on a coordinator-path turn. This is
+    /// the E-HOOK-INFRA / C-HOOKS seam. Defaults `None` (hook framework dormant).
+    pub fn hook_dispatcher_builder_factory(
+        mut self,
+        factory: HookDispatcherBuilderFactory,
+    ) -> Self {
+        self.hook_dispatcher_builder_factory = Some(factory);
+        self
+    }
+}
