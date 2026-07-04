@@ -598,6 +598,7 @@ impl OAuthProviderIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct OAuthProviderIdentitySubject(String);
 
 impl OAuthProviderIdentitySubject {
@@ -607,6 +608,14 @@ impl OAuthProviderIdentitySubject {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for OAuthProviderIdentitySubject {
+    type Error = AuthProductError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 

@@ -807,6 +807,7 @@ fn slack_personal_identity_hook(
                     provider_identity.as_ref(),
                 )
                 .await
+                .map(Some)
             }) as OAuthProviderIdentityCheckFuture
         },
     ))
@@ -817,7 +818,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     state: &ProductAuthRouteState,
     callback_scope: &AuthProductScope,
     provider_identity: Option<&OAuthProviderIdentity>,
-) -> Result<(), AuthProductError> {
+) -> Result<crate::auth::OAuthProviderIdentityBindingRollback, AuthProductError> {
     // Fail closed: the Slack callback descriptor is only mounted when Slack
     // personal OAuth is wired, so a missing binding config here is a
     // composition bug. Silently skipping would store a live xoxp token with no
@@ -858,6 +859,12 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         .as_ref()
         .map(|value| SlackEnterpriseId::new(value.clone()));
 
+    // Computed before the request takes ownership of the installation id so
+    // the rollback can target exactly the binding this callback writes.
+    let bound_provider_user_id = crate::slack_actor_identity::slack_user_identity_provider_user_id(
+        &connection_scope.installation_id,
+        identity.subject.as_str(),
+    );
     config
         .binding_service
         .bind_personal_user(
@@ -874,8 +881,29 @@ async fn bind_slack_personal_oauth_identity_for_callback(
             },
         )
         .await
-        .map(|_| ())
-        .map_err(slack_personal_user_binding_auth_error)
+        .map_err(slack_personal_user_binding_auth_error)?;
+
+    let rollback_store = Arc::clone(&config.binding_rollback_store);
+    let rollback_user_id = callback_scope.resource.user_id.clone();
+    Ok(Box::pin(async move {
+        // Passing the full provider_user_id as the prefix confines the delete
+        // to the binding this exact callback wrote. Best-effort by contract:
+        // a rollback failure only errs toward "shows connected without a
+        // credential", which Disconnect already repairs.
+        if let Err(error) = rollback_store
+            .delete_user_identity_bindings_for_user(
+                crate::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                &rollback_user_id,
+                Some(bound_provider_user_id.as_str()),
+            )
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "failed to roll back Slack identity binding after OAuth completion failure"
+            );
+        }
+    }))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -1817,6 +1845,7 @@ mod tests {
                     team_id: SlackTeamId::new("T123"),
                 },
             ))),
+            binding_store.clone(),
         ));
 
         let invocation_id = InvocationId::new();
@@ -1941,6 +1970,7 @@ mod tests {
                     team_id: SlackTeamId::new("T123"),
                 },
             ))),
+            binding_store.clone(),
         ));
 
         let invocation_id = InvocationId::new();
@@ -2056,6 +2086,7 @@ mod tests {
                     team_id: SlackTeamId::new("T123"),
                 },
             ))),
+            binding_store.clone(),
         ));
 
         let invocation_id = InvocationId::new();
@@ -2231,5 +2262,231 @@ mod tests {
                 .push(binding);
             Ok(())
         }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl crate::slack_personal_binding::RebornUserIdentityBindingDeleteStore for RecordingBindingStore {
+        async fn delete_user_identity_bindings_for_user(
+            &self,
+            provider: &str,
+            user_id: &ironclaw_host_api::UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<usize, RebornUserIdentityBindingError> {
+            let mut bindings = self.bindings.lock().expect("binding store lock");
+            let before = bindings.len();
+            bindings.retain(|binding| {
+                !(binding.provider.as_str() == provider
+                    && binding.user_id == *user_id
+                    && provider_user_id_prefix
+                        .is_none_or(|prefix| binding.provider_user_id.as_str().starts_with(prefix)))
+            });
+            Ok(before - bindings.len())
+        }
+    }
+
+    /// Delegates every flow operation to the in-memory fake but fails
+    /// `complete_oauth_callback`, modeling a completion failure (flow-store
+    /// IO, CAS mismatch) that lands after the identity hook already bound.
+    #[cfg(feature = "slack-v2-host-beta")]
+    struct FailingCompletionFlowManager {
+        inner: Arc<InMemoryAuthProductServices>,
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl ironclaw_auth::AuthFlowManager for FailingCompletionFlowManager {
+        async fn create_flow(
+            &self,
+            request: ironclaw_auth::NewAuthFlow,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.create_flow(request).await
+        }
+
+        async fn get_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+        ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+            self.inner.get_flow(scope, flow_id).await
+        }
+
+        async fn claim_oauth_callback(
+            &self,
+            scope: &AuthProductScope,
+            request: ironclaw_auth::OAuthCallbackClaimRequest,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.claim_oauth_callback(scope, request).await
+        }
+
+        async fn complete_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _input: ironclaw_auth::OAuthCallbackInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            Err(AuthProductError::BackendUnavailable)
+        }
+
+        async fn complete_credential_selection(
+            &self,
+            scope: &AuthProductScope,
+            input: ironclaw_auth::CredentialSelectionInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.complete_credential_selection(scope, input).await
+        }
+
+        async fn complete_manual_token(
+            &self,
+            scope: &AuthProductScope,
+            input: ironclaw_auth::ManualTokenCompletionInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.complete_manual_token(scope, input).await
+        }
+
+        async fn cancel_manual_token(
+            &self,
+            scope: &AuthProductScope,
+            interaction_id: ironclaw_auth::AuthInteractionId,
+        ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+            self.inner.cancel_manual_token(scope, interaction_id).await
+        }
+
+        async fn fail_oauth_callback(
+            &self,
+            scope: &AuthProductScope,
+            input: ironclaw_auth::OAuthCallbackFailureInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.fail_oauth_callback(scope, input).await
+        }
+
+        async fn mark_continuation_dispatched(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            emitted_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .mark_continuation_dispatched(scope, flow_id, emitted_at)
+                .await
+        }
+
+        async fn cancel_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.cancel_flow(scope, flow_id).await
+        }
+    }
+
+    /// Completion failure after the identity hook bound must roll the binding
+    /// back: the binding is the user-visible "connected" signal, and the
+    /// completed-flow replay path never re-runs the hook, so a surviving
+    /// binding would show Slack connected with no usable credential.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_callback_rolls_back_binding_when_completion_fails() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            Some("E123".to_string()),
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let failing_flows = Arc::new(FailingCompletionFlowManager {
+            inner: shared.clone(),
+        });
+        let product_auth = Arc::new(RebornProductAuthServices::new(
+            failing_flows,
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared.clone(),
+            dispatcher,
+        ));
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+        .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                SlackPersonalConnectionScope {
+                    installation_id,
+                    team_id: SlackTeamId::new("T123"),
+                },
+            ))),
+            binding_store.clone(),
+        ));
+
+        let invocation_id = InvocationId::new();
+        let Json(start_response) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(WebUiAuthenticatedCaller::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("user-alpha").expect("user"),
+                None,
+                None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: vec!["search:read".to_string()],
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(invocation_id.to_string()),
+            }),
+        )
+        .await
+        .expect("start slack oauth flow");
+        let state_value = Url::parse(start_response.authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{SLACK_PERSONAL_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=slack-auth-code"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        slack_personal_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("completion failure must surface as a callback error");
+
+        assert_eq!(provider_client.calls(), 1, "token exchange ran");
+        assert_eq!(
+            provider_client.cleanup_calls(),
+            1,
+            "token material must be cleaned up on completion failure"
+        );
+        assert!(
+            binding_store.bindings().is_empty(),
+            "identity binding written by the hook must be rolled back when completion fails"
+        );
     }
 }
