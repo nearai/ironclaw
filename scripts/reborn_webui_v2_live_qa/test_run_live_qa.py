@@ -1081,10 +1081,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_wait_for_assistant_reply(_page, **_kwargs):
             self.assertEqual(
                 _kwargs["required_text"],
-                ["slack", "dm|delivery|target", "available|configured|ready"],
+                ["slack", "dm|delivery|target|connected"],
             )
             return run_live_qa.AssistantReplyWaitResult(
-                text_excerpt="Slack DM delivery target is available",
+                text_excerpt="Slack is connected",
                 semantic_judge_used=False,
                 semantic_judge_reason="literal_required_text_matched",
             )
@@ -1134,14 +1134,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["baseline_capability_statuses"], baseline)
         self.assertEqual(result.details["capability_statuses"], stale)
-        self.assertIn(
-            "Do not install, activate, authenticate, or connect the Slack extension",
-            result.details["chat_connect_prompt"],
-        )
-        self.assertEqual(
-            result.details["text_excerpt"],
-            "Slack DM delivery target is available",
-        )
+        self.assertEqual(result.details["text_excerpt"], "Slack is connected")
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
         counts = run_live_qa._completed_capability_counts(
@@ -1255,9 +1248,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_routine["prompt"],
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
         )
-        self.assertIn("Use UTC for timestamps", captured_routine["prompt"])
-        self.assertIn("Do not ask follow-up questions", captured_routine["prompt"])
-        self.assertIn("Create the trigger now", captured_routine["prompt"])
         package_ids = [
             extension["package_id"] for extension in captured_routine["extensions"]
         ]
