@@ -260,6 +260,18 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ steps.bucket-settings.outputs.sccache_dist_enabled == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          auth-token: ${{ steps.bucket-settings.outputs.sccache_dist_enabled == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Run crate tests
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}

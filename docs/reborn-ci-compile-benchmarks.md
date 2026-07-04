@@ -48,7 +48,7 @@ mostly compile/link/setup time, with one notable runtime-heavy exception:
 | H2 | Split compile-heavy buckets by dependency shape instead of package count. | Lower max bucket duration if closures are separable. | Not started | Pending. |
 | H3 | Move `host_runtime_services.rs` out of the normal `host-runtime` bucket. | Reduce the slowest bucket and isolate the runtime-heavy WASM service tests. | Not started | Pending. |
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Not started | Pending. |
-| H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | In progress | Pending CI benchmark. |
+| H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -115,9 +115,29 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending
-- Status: pending
-- Wall clock: pending
-- Crate bucket job count: pending
-- Slowest bucket: pending
-- Decision: pending
+- Workflow run: [`28719569749`](https://github.com/nearai/ironclaw/actions/runs/28719569749)
+- Status: success
+- Wall clock: `9m45s` (`2026-07-04T21:02:40Z` to `2026-07-04T21:12:25Z`)
+- Crate bucket job count: `12`
+- Slowest bucket: `host-runtime` at `535s`
+- Decision: reject. Removing OVH sccache from crate buckets did not meet either
+  acceptance criterion and made the critical path worse.
+
+Comparison against baseline:
+
+| Metric | Baseline | H5 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `9m45s` | `+70s` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `535s` | `+62s` |
+| `composition-core` | `419s` | `441s` | `+22s` |
+| `reborn-core` | `367s` | `465s` | `+98s` |
+| `webui-ingress` | `334s` | `438s` | `+104s` |
+| `wasm-sandbox` | `307s` | `408s` | `+101s` |
+
+Interpretation:
+
+OVH sccache is not producing a 30-50% win overall, but fully removing it from
+crate buckets made this benchmark worse. The current evidence says the OVH path
+still helps enough on repeated Reborn crate builds that removal should not be
+merged as a speed optimization.
