@@ -1,4 +1,0 @@
-self-hosted-runner:
-  labels:
-    - ovh
-    - trusted-pr
