@@ -5048,6 +5048,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_migration"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "deadpool-postgres",
+ "ironclaw",
+ "ironclaw_common",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_memory",
+ "ironclaw_memory_native",
+ "ironclaw_reborn_composition",
+ "ironclaw_reborn_identity",
+ "ironclaw_secrets",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "libsql",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_reborn_openai_compat"
 version = "0.1.0"
 dependencies = [

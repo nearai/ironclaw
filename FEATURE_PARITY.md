@@ -712,6 +712,18 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 | Inferred follow-up commitments | ✅ | ❌ | P3 | Heartbeat-delivered reminders; opt-in batched extraction |
 
+**State migration (v1/engine-v2 → Reborn):** `crates/ironclaw_reborn_migration`
+converts persisted automations. Cron routines and cron missions convert to
+Reborn `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
+Because Reborn's `TriggerSourceKind` is `Schedule`-only, **event / system-event /
+webhook / manual routines and non-cron mission cadences have no `TriggerRecord`
+target** and are recorded in the migration manifest rather than converted — even
+where the runtime supports the *behavior* via hooks/`event_emit`, the durable
+automation row does not carry over. Guardrails, notify config, run counters,
+`routine_runs` history (no public run-history insert), and mission-only fields
+(focus/approach/success-criteria) likewise have no target. See the crate's
+CLAUDE.md for the full mapping + gap catalog.
+
 ### Owner: _Unassigned_
 
 ---
