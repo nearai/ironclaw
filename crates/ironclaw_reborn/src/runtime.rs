@@ -208,9 +208,8 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
 
 fn default_disabled_capability_ids() -> Vec<CapabilityId> {
     vec![
-        // SAFETY: the capability id is a crate-owned static literal.
         CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-            .expect("static spawn_subagent capability id must be valid"),
+            .expect("static spawn_subagent capability id must be valid"), // safety: crate-owned static dotted id.
     ]
 }
 
@@ -1363,9 +1362,9 @@ mod tests {
     #[tokio::test]
     async fn scheduled_trigger_mutators_stay_denied_when_global_deny_list_is_emptied() {
         // Regression for the footgun described in the plan: emptying
-        // DISABLED_CAPABILITY_IDS (the documented spawn_subagent re-enable
-        // toggle) must never silently re-enable the trigger mutators for a
-        // scheduled fire.
+        // the global disabled-capability list (the documented spawn_subagent
+        // re-enable toggle) must never silently re-enable the trigger mutators
+        // for a scheduled fire.
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
         });

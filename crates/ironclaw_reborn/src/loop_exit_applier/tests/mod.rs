@@ -12,11 +12,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CheckpointStateStore, GateRef, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
-    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
-    LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError, TurnId, TurnRunId,
-    TurnScope, TurnStateStore, TurnStatus, run_profile::LoopRunContext,
+    LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopGateRef,
+    LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    run_profile::LoopRunContext,
 };
 
 use super::{
@@ -1178,6 +1178,7 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
     let expected_gate_ref = gate_ref.as_str().to_string();
     let exit = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::AwaitDependentRun,
+        blocked_activity_id: None,
         gate_ref,
         credential_requirements: Vec::new(),
         checkpoint_id,
@@ -1274,6 +1275,7 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
     );
     let exit = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::AwaitDependentRun,
+        blocked_activity_id: None,
         gate_ref,
         credential_requirements: Vec::new(),
         checkpoint_id,

@@ -574,11 +574,10 @@ impl AwaitDependentRunEvidenceStore
         run_id: TurnRunId,
         gate_ref: &LoopGateRef,
     ) -> Result<bool, TurnError> {
-        let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|reason| {
-            TurnError::InvalidRequest {
+        let gate_ref =
+            GateRef::new(gate_ref.as_str()).map_err(|reason| TurnError::InvalidRequest {
                 reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
-            }
-        })?;
+            })?;
         let state = self
             .state_for_gate(&gate_ref)
             .map_err(|error| TurnError::Unavailable {
