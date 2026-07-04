@@ -194,8 +194,16 @@ fn rejects_host_ingress_public_webhook_without_webhook_signature() {
     // weaken the descriptor's built-in verification requirement.
     let raw = manifest(&host_ingress_fragment("telegram_bot_token", "bearer_token"));
     let err = parse(&raw).unwrap_err();
+    // The invalid descriptor is rejected while deserializing the section, which
+    // may surface either as a stringified `Manifest` error (via the host-api
+    // contract validator) or as a typed `ManifestSectionParse` (via the final
+    // projection) depending on which projection runs first — accept both so the
+    // test pins the fail-closed behavior, not the error-routing path.
     assert!(
-        matches!(err, RegistryError::Manifest(_)),
+        matches!(
+            err,
+            RegistryError::Manifest(_) | RegistryError::ManifestSectionParse { .. }
+        ),
         "expected the host_api listener/auth invariant to reject, got {err:?}"
     );
 }
