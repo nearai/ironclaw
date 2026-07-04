@@ -57,7 +57,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H3 | Move the runtime-heavy host WASM contract tests out of the normal `host-runtime` bucket. | Reduce the slowest bucket and isolate slow test execution. | Evidence review | Rejected as a compile-time optimization: `github_wasm_runtime_contract.rs` takes `142.73s`, but the bucket spends about `5m21s` compiling before tests start. Splitting would add a job and duplicate compile. |
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Evidence review | Still the best compile-time lever, but no safe duplicate coverage was found for removing `webui-v2-beta` / `slack-v2-host-beta` from Reborn crate tests. |
 | H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
-| H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Running | Pending CI result. |
+| H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -260,4 +260,28 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28720040658`](https://github.com/nearai/ironclaw/actions/runs/28720040658)
+- Status: success
+- Wall clock: `8m49s` (`2026-07-04T21:22:00Z` to `2026-07-04T21:30:49Z`)
+- Crate bucket job count: `12`
+- Slowest bucket: `host-runtime` at `475s`
+- Decision: reject. This did not meet either acceptance criterion.
+
+Comparison against baseline:
+
+| Metric | Baseline | H6 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m49s` | `+14s` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `475s` | `+2s` |
+| `composition-core` | `419s` | `379s` | `-40s` |
+| `reborn-core` | `367s` | `426s` | `+59s` |
+| `webui-ingress` | `334s` | `344s` | `+10s` |
+| `wasm-sandbox` | `307s` | `293s` | `-14s` |
+
+Interpretation:
+
+Disabling incremental globally helped `composition-core` and `wasm-sandbox`, but
+it made `reborn-core`, `webui-ingress`, and the overall workflow slower. Keeping
+the narrower existing composition-only incremental disable remains the better
+shape.
