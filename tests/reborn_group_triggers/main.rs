@@ -24,6 +24,8 @@ mod reborn_support;
 mod support;
 
 mod scenario_trigger_persists_after_reopen;
+mod scenario_trigger_self_create_denied;
+mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -46,23 +48,90 @@ async fn triggers_group_e2e() {
         scenario_trigger_persists_after_reopen::run(&g).await,
     );
 
-    // TODO(triggered-turn follow-ups): coverage intentionally left OUT of this
-    // binary because it needs a harness seam that does not exist yet — a way to
-    // submit a turn carrying `TurnOriginKind::ScheduledTrigger` (the
-    // `TrustedTriggerFireSubmitter` path), not the direct-chat submit this group
-    // uses. Add these only once that seam lands; do not hand-roll a weaker
-    // stand-in:
-    //   - a triggered turn that raises a real `BlockedApproval` gate mid-fire →
-    //     approve/deny → resume;
-    //   - assert a triggered fire propagates `TurnOriginKind::ScheduledTrigger`
-    //     end to end;
-    //   - triggered run → outbound delivery sink got the payload + reply target.
-    // What is ALREADY covered elsewhere (do NOT duplicate here): the one-shot
-    // Once fire → `Completed` derivation lives in
-    // `crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs` +
-    // `crates/ironclaw_triggers/tests/repository_contract.rs`; the trigger →
-    // Slack outbound-delivery leg lives in the trigger-delivery-hook tests in
-    // `crates/ironclaw_reborn_composition/src/slack_host_beta.rs`.
+    // Triggered-turn coverage map (via `RebornIntegrationHarness::submit_triggered_turn`,
+    // E-TRIGGERED-SUBMIT) — do NOT duplicate any of this here:
+    //   - `TurnOriginKind::ScheduledTrigger` propagation (with a discriminating
+    //     interactive-origin `Inbound` contrast arm) —
+    //     `tests/reborn_integration_triggered_submit.rs`. Flat single-thread
+    //     test, so it doesn't belong in this multi-thread group binary.
+    //   - triggered fire → real `BlockedApproval` gate → approve/deny → resume —
+    //     `triggered_gate_group` below (`scenario_triggered_gate::{run_approve,run_deny}`),
+    //     driven through `submit_triggered_turn_scripted`.
+    //   - one-shot `Once` fire → `Completed` derivation —
+    //     `crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs` +
+    //     `crates/ironclaw_triggers/tests/repository_contract.rs`.
+    //   - triggered run completes + final reply persists in the trigger's own
+    //     thread (the state the production push leg reads) —
+    //     `triggered_run_completes_and_persists_reply_in_trigger_thread` in
+    //     `tests/reborn_integration_triggered_submit.rs`.
+    //   - the trigger → Slack outbound-delivery leg —
+    //     `crates/ironclaw_reborn_composition/src/slack_host_beta.rs`.
+    //
+    // Still BLOCKED at int tier: the PUSH half (triggered run → outbound
+    // delivery sink). `deliver_triggered_run` is a PRIVATE fn in the Slack
+    // services-shell (`slack_delivery.rs`), reachable only via a detached
+    // `tokio::spawn` entry (`PostSubmitDeliveryHook`) not wired into any
+    // harness turn lifecycle by construction — covered instead by
+    // `slack_delivery.rs`'s own `#[cfg(test)]` module +
+    // `product_workflow/tests/outbound_delivery_contract.rs`. Requires a
+    // services-shell disposition, not an authorable harness seam; do not
+    // reconstruct it here.
+
+    // C-DENYEDGE row 4: a scheduled-trigger fire must not be able to create
+    // its own follow-up trigger. Uses THIS group's `triggers()` capability
+    // port (trigger_create is wired) driven through a triggered-origin run
+    // (`submit_triggered_turn_scripted`), independent of `verbs_lifecycle`'s
+    // own trigger name/thread.
+    report.record(
+        "trigger_self_create_denied",
+        scenario_trigger_self_create_denied::run(&g).await,
+    );
+
+    report.assert_all_passed();
+}
+
+/// Triggered-origin runs raise, park on, and resume from REAL approval gates
+/// (mid-fire gate → approve/deny → resume), exactly like interactive runs.
+///
+/// Lives in this binary (not `reborn_group_approvals`) because the scenario's
+/// subject is the TRIGGERED submit wire, not the approval machinery — the
+/// approval arms mirror `reborn_group_approvals/scenario_gate_then_{approve,deny}`
+/// over the trusted-trigger origin. Each arm gets its OWN `live_approvals`
+/// group (see `scenario_triggered_gate` docs), so this is a separate
+/// `#[tokio::test]` rather than more scenarios on the verbs group above (the
+/// `triggers()` group has auto-approve ENABLED — a gate can never raise there).
+#[tokio::test]
+async fn triggered_gate_group() {
+    let mut report = ScenarioReport::new();
+
+    let g_approve = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("approve-arm group builds");
+    report.record(
+        "triggered_gate_approve",
+        scenario_triggered_gate::run_approve(&g_approve).await,
+    );
+
+    let g_deny = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("deny-arm group builds");
+    report.record(
+        "triggered_gate_deny",
+        scenario_triggered_gate::run_deny(&g_deny).await,
+    );
+
+    // C-DENYEDGE row 1: a resume for the right run_id but a mutated
+    // (wrong-tenant) TurnScope must be rejected with ScopeNotFound, and the
+    // gate must remain live/resolvable afterward. Own group: mutating the
+    // approval store mid-scenario should not be attributed to the approve/
+    // deny arms above.
+    let g_wrong_scope = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("wrong-scope-arm group builds");
+    report.record(
+        "triggered_gate_wrong_scope_resume_rejected",
+        scenario_triggered_gate::run_wrong_scope_resume_rejected(&g_wrong_scope).await,
+    );
 
     report.assert_all_passed();
 }

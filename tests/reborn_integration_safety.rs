@@ -8,9 +8,6 @@
 //! `assert_system_prompt_contains` assertion actually discriminates on real
 //! content rather than passing vacuously.
 
-// The support tree is large and shared; a single-test file exercises only a
-// slice of it, so suppress dead-code warnings on the includes (matches
-// `reborn_integration_greeting.rs`).
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;

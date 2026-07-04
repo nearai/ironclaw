@@ -17,9 +17,6 @@
 //!
 //! Security: the token is a synthetic test fixture, never a real credential.
 
-// The support tree is large and shared; a single-test file exercises only a
-// slice of it, so suppress dead-code warnings on the includes (matches
-// `reborn_integration_greeting.rs`).
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
 mod reborn_support;
@@ -52,9 +49,7 @@ async fn injects_credential_onto_github_egress() {
         .assert_reply_contains("done")
         .await
         .expect("reply finalized in thread history");
-    // The synthetic access token was injected onto the outbound request as a
-    // Bearer credential by the host egress pipeline — proving injection reaches
-    // the wire, not just the authorizer's obligation.
+    // Proves injection reached the wire, not just the authorizer's obligation.
     harness
         .assert_network_egress_header_contains(
             "api.github.com/repos/nearai/ironclaw",
@@ -66,7 +61,7 @@ async fn injects_credential_onto_github_egress() {
 
     // Negative-path coverage on the SAME captured request: a regression that
     // ignored the url/header-name/value inputs must not let this assertion
-    // pass vacuously (review comment on PR #5483).
+    // pass vacuously.
     let wrong_url = harness
         .assert_network_egress_header_contains(
             "api.github.com/repos/nonexistent/repo",

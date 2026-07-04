@@ -219,6 +219,18 @@ mod tests {
     }
 
     #[test]
+    fn chat_send_keeps_thread_cache_import_wired() {
+        // A main-merge conflict resolution once dropped this import while
+        // keeping the call: every WebChat v2 send then failed in the browser
+        // with `ReferenceError: touchThreadInCache is not defined`. The JS
+        // unit harness injects stubs for unknown identifiers, so only a
+        // source-level pin (and the Playwright smoke) catches a re-drop.
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("import { touchThreadInCache } from \"../lib/thread-cache.js\""));
+        assert!(use_chat.contains("touchThreadInCache({"));
+    }
+
+    #[test]
     fn markdown_code_blocks_keep_horizontal_scroll_local_to_block() {
         let renderer = asset_text("js/pages/chat/components/markdown-renderer.js");
         assert!(renderer.contains("wrap.className = \"markdown-code-frame\";"));
@@ -264,6 +276,10 @@ mod tests {
         assert!(!chat.contains("channelConnectAction"));
         assert!(!chat.contains("dismissChannelConnectAction"));
 
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(!use_chat.contains("resolveConnectAction"));
+        assert!(!use_chat.contains("channel_connect_action"));
+
         let picker = asset_text("js/components/slack-channel-picker.js");
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
@@ -283,10 +299,60 @@ mod tests {
         assert!(channels_tab.contains("action=${action.action}"));
 
         let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
-        assert!(regression.contains(
-            "slash connect text submits to the model without fetching connectable channels"
-        ));
-        assert!(regression.contains("ordinary Slack chat prompts submit to the model"));
+        assert!(regression.contains("connect-like prompts submit to the model"));
+        assert!(!regression.contains("channel connect requests return an action"));
+    }
+
+    #[test]
+    fn channel_connection_gate_rides_the_auth_rail() {
+        // The channel-connection-events module keeps only its display/notify
+        // half — the connect broadcast used for cross-tab cache invalidation.
+        // The waiter/continuation machinery (the historical-panel bug) is gone:
+        // pairing gates now block/resume on the standard auth-gate rail.
+        let events = asset_text("js/lib/channel-connection-events.js");
+        assert!(events.contains("notifyChannelConnected"));
+        assert!(events.contains("subscribeChannelConnected"));
+        assert!(events.contains("BroadcastChannel"));
+        assert!(!events.contains("channelConnectionContinuationMessage"));
+        assert!(!events.contains("rememberChannelConnectionWaiter"));
+        assert!(!events.contains("resumeWaitingChannelConnections"));
+        assert!(!events.contains("ironclaw:channel-connection:waiting:v1"));
+
+        // gates.js recognizes the challenge kinds (manual_token / oauth_url)
+        // that ALL auth gates use, and normalizes the optional channel
+        // `connection` context onto the pending gate.
+        let gates = asset_text("js/pages/chat/lib/gates.js");
+        assert!(gates.contains("manual_token"));
+        assert!(gates.contains("oauth_url"));
+        assert!(gates.contains("connectionFromContext"));
+
+        // useChat keeps a cache-invalidation-only channel-connected subscription
+        // and a redeem-only pairing submit that does NOT call resolveGate (the
+        // backend resumes the parked turn). All waiter/derive heuristics are gone.
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("subscribeChannelConnected"));
+        assert!(use_chat.contains("submitChannelConnectionPairing"));
+        assert!(!use_chat.contains("connectionEventMatchesOnboarding"));
+        assert!(!use_chat.contains("resumeOnboardingAfterChannelConnected"));
+        assert!(!use_chat.contains("rememberChannelConnectionWaiter"));
+        assert!(!use_chat.contains("forgetChannelConnectionWaiter"));
+        assert!(!use_chat.contains("channelConnectionRequirementFromCard"));
+        assert!(!use_chat.contains("pendingOnboarding"));
+        assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
+
+        // chat.js renders the pairing card off a manual_token gate carrying a
+        // connection, on the same auth-gate switch as the token / oauth cards.
+        let chat = asset_text("js/pages/chat/chat.js");
+        assert!(chat.contains("OnboardingPairingCard"));
+        assert!(chat.contains("isChannelPairingGate"));
+        assert!(chat.contains("submitChannelConnectionPairing"));
+
+        let slack_pairing = asset_text("js/lib/slack-pairing-api.js");
+        assert!(slack_pairing.contains("notifyChannelConnected"));
+        assert!(slack_pairing.contains("sourceThreadId: options.threadId || null"));
+
+        let generic_pairing = asset_text("js/pages/extensions/lib/pairing-api.js");
+        assert!(generic_pairing.contains("notifyChannelConnected"));
     }
 
     #[test]

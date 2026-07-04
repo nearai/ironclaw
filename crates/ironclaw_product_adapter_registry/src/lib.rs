@@ -21,7 +21,9 @@ use ironclaw_extensions::{
     HostApiManifestContext, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog};
+use ironclaw_host_api::{
+    ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId,
+};
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
     ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
@@ -68,6 +70,44 @@ pub fn product_adapter_sections(
     project_product_adapter_sections(record.raw_toml(), record.manifest())
 }
 
+/// A host-ingress route declared by a ProductAdapter manifest section, paired
+/// with the credential handles that verify it.
+///
+/// The route itself is the host-owned [`IngressRouteDescriptor`] vocabulary
+/// (`ironclaw_host_api` owns route/policy validation, including the fail-closed
+/// floor that a `PublicWebhook` listener must require `WebhookSignature`). That
+/// descriptor deliberately carries **no** credential binding — host_api is
+/// route/policy vocabulary only. The manifest layer is therefore where "which
+/// credential handle verifies this route" is declared, and this crate makes it
+/// credential-coherent against the section's `required_credentials`
+/// (see [`ProductAdapterHostApiSection::validate`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIngressRoute {
+    descriptor: IngressRouteDescriptor,
+    credential_handles: Vec<EgressCredentialHandle>,
+}
+
+impl HostIngressRoute {
+    /// The host-owned, already-validated ingress route/policy descriptor.
+    pub fn descriptor(&self) -> &IngressRouteDescriptor {
+        &self.descriptor
+    }
+
+    /// Credential handles that verify this route. Every handle is guaranteed to
+    /// be declared in the owning section's `required_credentials`; an
+    /// auth-required route names at least one, and a public (no-auth) route
+    /// names none.
+    ///
+    /// The handle type is [`EgressCredentialHandle`] — the single credential-
+    /// handle newtype `ironclaw_product_adapters` owns. It is reused here rather
+    /// than mirrored into an ingress-specific type (per the type-placement
+    /// rule); its `Display` renders only the handle string, so no "egress"
+    /// wording leaks into ingress error messages.
+    pub fn credential_handles(&self) -> &[EgressCredentialHandle] {
+        &self.credential_handles
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductAdapterHostApiSection {
     adapter_id: ProductAdapterId,
@@ -77,6 +117,7 @@ pub struct ProductAdapterHostApiSection {
     auth_requirement: AuthRequirement,
     declared_egress: Vec<DeclaredEgressTarget>,
     required_credentials: Vec<EgressCredentialHandle>,
+    host_ingress: Vec<HostIngressRoute>,
 }
 
 impl ProductAdapterHostApiSection {
@@ -114,6 +155,14 @@ impl ProductAdapterHostApiSection {
             .into_iter()
             .map(|c| c.handle)
             .collect();
+        let host_ingress = raw
+            .host_ingress
+            .into_iter()
+            .map(|route| HostIngressRoute {
+                descriptor: route.descriptor,
+                credential_handles: route.credential_handles,
+            })
+            .collect();
         let projected = Self {
             adapter_id,
             section,
@@ -122,6 +171,7 @@ impl ProductAdapterHostApiSection {
             auth_requirement,
             declared_egress: raw.egress,
             required_credentials,
+            host_ingress,
         };
         projected.validate()?;
         Ok(projected)
@@ -149,6 +199,14 @@ impl ProductAdapterHostApiSection {
         &self.required_credentials
     }
 
+    /// Host-ingress routes this ProductAdapter section declares. Each carries a
+    /// host-owned [`IngressRouteDescriptor`] and its verifying credential
+    /// handles; the serve layer projects these into mounted routes. Empty for
+    /// sections that declare no ingress (the common case today).
+    pub fn host_ingress(&self) -> &[HostIngressRoute] {
+        &self.host_ingress
+    }
+
     fn validate(&self) -> Result<(), RegistryError> {
         validate_auth_requirement(&self.auth_requirement)?;
         let mut required = BTreeSet::new();
@@ -170,6 +228,50 @@ impl ProductAdapterHostApiSection {
             }
             if !pairs.insert((target.host.clone(), target.credential_handle.clone())) {
                 return Err(RegistryError::DuplicateEgressTarget);
+            }
+        }
+        // Host-ingress credential coherence, fail closed. A route's declared
+        // verifying credentials must line up with whether it is actually
+        // authenticated, and every named handle must be declared in
+        // `required_credentials` (mirroring the egress rule above, so ingress
+        // handles flow into the same declared set installation bindings are
+        // validated against). Route ids stay distinct within a section so a
+        // mounted route can be addressed unambiguously.
+        let mut route_ids: BTreeSet<&IngressRouteId> = BTreeSet::new();
+        for route in &self.host_ingress {
+            let route_id = route.descriptor.route_id();
+            if !route_ids.insert(route_id) {
+                return Err(RegistryError::DuplicateIngressRoute {
+                    route_id: route_id.clone(),
+                });
+            }
+            match route.descriptor.policy().auth() {
+                // An auth-required route with no verifying credential is a route
+                // nothing could authenticate — reject it.
+                IngressAuthPolicy::Required { .. } => {
+                    if route.credential_handles.is_empty() {
+                        return Err(RegistryError::IngressRouteMissingCredential {
+                            route_id: route_id.clone(),
+                        });
+                    }
+                }
+                // A public (no-auth) route is verified by nothing, so declaring a
+                // credential handle on it is incoherent and misleading — a reader
+                // would assume the route is authenticated by that credential.
+                IngressAuthPolicy::Public { .. } => {
+                    if !route.credential_handles.is_empty() {
+                        return Err(RegistryError::PublicIngressRouteHasCredential {
+                            route_id: route_id.clone(),
+                        });
+                    }
+                }
+            }
+            for handle in &route.credential_handles {
+                if !required.contains(handle) {
+                    return Err(RegistryError::UndeclaredIngressCredentialHandle {
+                        handle: handle.clone(),
+                    });
+                }
             }
         }
         Ok(())
@@ -344,6 +446,16 @@ pub enum RegistryError {
     DuplicateEgressTarget,
     #[error("egress references undeclared credential handle {handle}")]
     UndeclaredEgressCredentialHandle { handle: EgressCredentialHandle },
+    #[error("host-ingress route references undeclared credential handle {handle}")]
+    UndeclaredIngressCredentialHandle { handle: EgressCredentialHandle },
+    #[error("auth-required host-ingress route {route_id} declares no verifying credential handle")]
+    IngressRouteMissingCredential { route_id: IngressRouteId },
+    #[error(
+        "public host-ingress route {route_id} declares a verifying credential handle but is not authenticated"
+    )]
+    PublicIngressRouteHasCredential { route_id: IngressRouteId },
+    #[error("duplicate host-ingress route {route_id}")]
+    DuplicateIngressRoute { route_id: IngressRouteId },
     #[error("installation references unknown extension manifest {extension_id}")]
     UnknownManifest { extension_id: ExtensionId },
     #[error("installation binds undeclared credential handle {handle}")]
@@ -656,6 +768,22 @@ struct RawProductAdapterSection {
     required_credentials: Vec<RawProductAdapterCredential>,
     #[serde(default)]
     egress: Vec<DeclaredEgressTarget>,
+    #[serde(default)]
+    host_ingress: Vec<RawHostIngressRoute>,
+}
+
+/// Manifest shape for a declared host-ingress route: the full host-owned
+/// [`IngressRouteDescriptor`] (validated by `ironclaw_host_api`'s own
+/// `Deserialize` — `deny_unknown_fields`, dotted route id, absolute path, and
+/// all policy cross-field invariants) plus the credential handles that verify
+/// it. Credential coherence against `required_credentials` is enforced in
+/// [`ProductAdapterHostApiSection::validate`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHostIngressRoute {
+    descriptor: IngressRouteDescriptor,
+    #[serde(default)]
+    credential_handles: Vec<EgressCredentialHandle>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -705,5 +833,208 @@ impl RawProductAdapterAuth {
         };
         validate_auth_requirement(&requirement)?;
         Ok(requirement)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for host-ingress credential coherence — the novel logic
+    //! this crate adds on top of host_api's already-validated ingress
+    //! descriptor. Descriptors are built in Rust (not TOML text) so these
+    //! cases are robust to serde renames; the wire path is covered end-to-end
+    //! in `tests/manifest_ingestion.rs`.
+    use super::*;
+    use ironclaw_host_api::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthScheme,
+        IngressJustification, IngressPolicy, IngressPolicyParts, IngressScopeSource, ListenerClass,
+        NetworkMethod, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use serde::Serialize;
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    /// A fail-closed public-webhook descriptor mirroring the values Slack's
+    /// `slack_events_policy()` uses, parameterized by route id.
+    fn webhook_descriptor(route_id: &str) -> IngressRouteDescriptor {
+        let policy = IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::PublicWebhook,
+            auth: IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::WebhookSignature],
+            },
+            scope_source: IngressScopeSource::HostResolved,
+            body_limit: BodyLimitPolicy::Limited {
+                max_bytes: NonZeroU64::new(262_144).expect("nonzero"),
+            },
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::Global,
+                max_requests: NonZeroU32::new(600).expect("nonzero"),
+                window_seconds: NonZeroU32::new(60).expect("nonzero"),
+            },
+            cors: CorsPolicy::NotApplicable,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        })
+        .expect("policy validates");
+        IngressRouteDescriptor::new(
+            route_id,
+            NetworkMethod::Post,
+            "/webhooks/telegram/updates",
+            policy,
+        )
+        .expect("descriptor validates")
+    }
+
+    /// A valid public (no-auth) route, mirroring the SSO login mount's policy
+    /// combination (LocalGateway + Public + PublicRoute + NoEffect).
+    fn public_descriptor(route_id: &str) -> IngressRouteDescriptor {
+        let policy = IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Public {
+                justification: IngressJustification::new("ingress", "public test route")
+                    .expect("justification"),
+            },
+            scope_source: IngressScopeSource::PublicRoute,
+            body_limit: BodyLimitPolicy::Limited {
+                max_bytes: NonZeroU64::new(4096).expect("nonzero"),
+            },
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerIp,
+                max_requests: NonZeroU32::new(60).expect("nonzero"),
+                window_seconds: NonZeroU32::new(60).expect("nonzero"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("public policy validates");
+        IngressRouteDescriptor::new(route_id, NetworkMethod::Post, "/public/callback", policy)
+            .expect("descriptor validates")
+    }
+
+    #[derive(Serialize)]
+    struct RouteFixture {
+        descriptor: IngressRouteDescriptor,
+        credential_handles: Vec<String>,
+    }
+
+    /// Build a ProductAdapter section `toml::Value` with a valid base and the
+    /// given host-ingress routes, then run it through the real projection.
+    fn project(routes: Vec<RouteFixture>) -> Result<ProductAdapterHostApiSection, RegistryError> {
+        let mut value: toml::Value = toml::from_str(
+            r#"
+surface_kind = "external_channel"
+[auth]
+kind = "shared_secret_header"
+header_name = "X-Telegram-Bot-Api-Secret-Token"
+[capabilities]
+flags = ["inbound_messages"]
+[[required_credentials]]
+handle = "telegram_bot_token"
+"#,
+        )
+        .expect("base section parses");
+        let host_ingress = toml::Value::try_from(routes).expect("routes serialize");
+        value
+            .as_table_mut()
+            .expect("section is a table")
+            .insert("host_ingress".to_string(), host_ingress);
+
+        let extension_id = ExtensionId::new("telegram-v2").expect("extension id");
+        let section = ManifestSectionPath::new("product_adapter.inbound").expect("section path");
+        ProductAdapterHostApiSection::from_value(&extension_id, section, value)
+    }
+
+    fn route(route_id: &str, credential_handles: &[&str]) -> RouteFixture {
+        RouteFixture {
+            descriptor: webhook_descriptor(route_id),
+            credential_handles: credential_handles.iter().map(|h| h.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn host_ingress_route_projects_descriptor_and_handles() {
+        let section = project(vec![route("telegram.updates", &["telegram_bot_token"])])
+            .expect("valid section projects");
+        assert_eq!(section.host_ingress().len(), 1);
+        let projected = &section.host_ingress()[0];
+        assert_eq!(
+            projected.descriptor().route_id().as_str(),
+            "telegram.updates"
+        );
+        assert_eq!(
+            projected.descriptor().route_pattern().as_str(),
+            "/webhooks/telegram/updates"
+        );
+        assert_eq!(projected.credential_handles().len(), 1);
+        assert_eq!(
+            projected.credential_handles()[0].as_str(),
+            "telegram_bot_token"
+        );
+    }
+
+    #[test]
+    fn host_ingress_undeclared_credential_handle_rejected() {
+        let err = project(vec![route("telegram.updates", &["not_declared_token"])])
+            .expect_err("undeclared handle must reject");
+        assert!(
+            matches!(err, RegistryError::UndeclaredIngressCredentialHandle { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn host_ingress_auth_required_route_needs_credential() {
+        // Fail closed: an auth-required route with no verifying credential
+        // handle must reject, not mount a route nothing can authenticate.
+        let err = project(vec![route("telegram.updates", &[])])
+            .expect_err("auth-required route without a credential must reject");
+        assert!(
+            matches!(err, RegistryError::IngressRouteMissingCredential { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn host_ingress_duplicate_route_id_rejected() {
+        let err = project(vec![
+            route("telegram.updates", &["telegram_bot_token"]),
+            route("telegram.updates", &["telegram_bot_token"]),
+        ])
+        .expect_err("duplicate route id must reject");
+        assert!(
+            matches!(err, RegistryError::DuplicateIngressRoute { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn host_ingress_public_route_must_not_declare_credentials() {
+        // Fail closed on the dual of the auth-required rule: a public (no-auth)
+        // route is verified by nothing, so declaring a credential handle on it
+        // is incoherent and would mislead a reader into assuming it is
+        // authenticated.
+        let err = project(vec![RouteFixture {
+            descriptor: public_descriptor("public.callback"),
+            credential_handles: vec!["telegram_bot_token".to_string()],
+        }])
+        .expect_err("public route with a credential handle must reject");
+        assert!(
+            matches!(err, RegistryError::PublicIngressRouteHasCredential { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn host_ingress_public_route_without_credentials_projects() {
+        // The complement: a public route that declares no credentials is valid.
+        let section = project(vec![RouteFixture {
+            descriptor: public_descriptor("public.callback"),
+            credential_handles: vec![],
+        }])
+        .expect("public route with no credentials projects");
+        assert_eq!(section.host_ingress().len(), 1);
     }
 }

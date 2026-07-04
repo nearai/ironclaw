@@ -115,6 +115,43 @@ async fn calendar_handler_integration_tests() {
     );
 }
 
+// C-WIREFMT: format-matrix coverage for the empty-body (HTTP 204) framing of
+// `response_body_json` in handlers.rs. Google's events.delete legitimately
+// returns a 204 with no body on every live call, but no existing test drove
+// that branch through a real capability handler.
+#[tokio::test]
+async fn calendar_delete_event_handles_empty_204_response() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::empty(204),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DELETE_EVENT_CAPABILITY_ID,
+        json!({"calendar_id":"primary","event_id":"evt-1"}),
+        egress.clone(),
+    )
+    .await;
+
+    // response_body_json maps the empty body to Value::Null instead of erroring;
+    // a mutation that made it reject empty bodies would flip this assertion.
+    assert_eq!(output["status"], 204);
+    assert_eq!(output["body"], serde_json::Value::Null);
+    assert_eq!(output["redaction_applied"], true);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Delete);
+    assert!(requests[0].url.contains("/events/evt-1"));
+}
+
 #[tokio::test]
 async fn calendar_create_event_does_not_forward_list_query_fields() {
     let scope = scope();

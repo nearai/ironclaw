@@ -1182,7 +1182,7 @@ Per `.claude/rules/architecture.md`, `.claude/rules/testing.md`, `crates/ironcla
 
 **Replay / harness:**
 - `scripts/replay-snap.sh review|accept|test|record <name>` for trace coverage on a thread that crosses the compaction threshold.
-- `scripts/trace-coverage.sh` for replay evidence.
+- `scripts/replay-snap.sh test` for replay evidence.
 
 ## 16. Migration notes
 

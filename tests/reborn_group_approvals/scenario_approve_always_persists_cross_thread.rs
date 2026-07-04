@@ -37,13 +37,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
-    // `submit_turn` waits for `Completed`; it would time out if thread B blocked
-    // on a gate (i.e. if thread A's setting had not crossed the thread boundary).
+    // `submit_turn` waits for `Completed` (see module doc's non-vacuity note).
     user.submit_turn("write the auto file").await?;
-    // The auto-approved write actually ran (no gate) AND PERSISTED: the real
-    // file on disk holds the written content — proving thread A's auto-approve
-    // setting crossed the thread boundary AND the write took effect, not just
-    // that the scripted reply was emitted.
+    // The write also PERSISTED to disk, not merely that the scripted reply
+    // was emitted.
     user.assert_workspace_file_contains("auto.txt", "auto-approved")
         .await?;
     Ok(())

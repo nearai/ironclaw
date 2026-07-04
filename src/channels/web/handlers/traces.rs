@@ -660,7 +660,7 @@ mod tests {
     use crate::channels::web::auth::UserIdentity;
     use crate::trace_contribution::{
         DeterministicTraceRedactor, LocalTraceSubmissionStatus, RawTraceContribution,
-        TraceCreditEvent, TraceCreditEventKind, TraceQueueWarningKind, TraceRedactor,
+        TraceCreditEvent, TraceCreditEventKind, TraceQueueWarningKind,
         queue_trace_envelope_for_scope, trace_contribution_dir_for_scope,
         write_trace_policy_for_scope,
     };

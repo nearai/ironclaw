@@ -10,6 +10,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
+    slack_channel_connection::slack_channel_connection_facade,
     webui::build_webui_services_with_connectable_channels,
 };
 
@@ -57,10 +58,19 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
+    let channel_connection = slack_mounts.map(slack_channel_connection_facade);
+    // Fill the extension-lifecycle handler's late-binding facade slot so an
+    // inbound-channel activation can gate on the caller's channel connection.
+    // Idempotent; shares the same facade the WebUI connectable-channel surface
+    // uses.
+    if let Some(facade) = channel_connection.as_ref() {
+        runtime.set_channel_connection_facade(Arc::clone(facade));
+    }
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
         connectable_channels,
+        channel_connection,
         outbound_delivery_target_providers,
     )
 }
@@ -79,6 +89,7 @@ fn build_webui_services_with_slack_connectable_channel(
             TenantId::new("tenant:test").expect("tenant"),
             UserId::new("user:operator").expect("operator"),
         ),
+        None,
         Vec::new(),
     )
 }
@@ -130,11 +141,15 @@ fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInf
         strategy: RebornChannelConnectStrategy::InboundProofCode,
         action: RebornChannelConnectAction {
             title: "Slack account connection".to_string(),
-            instructions: "Message the Slack app, then enter the code here.".to_string(),
+            instructions:
+                "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
+                    .to_string(),
             input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
             success_message: "Slack account connected.".to_string(),
-            error_message: "Invalid or expired Slack pairing code.".to_string(),
+            error_message:
+                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+                    .to_string(),
         },
         command_aliases: vec![
             "slack".to_string(),
@@ -197,6 +212,33 @@ mod tests {
     }
 
     #[test]
+    fn slack_requirement_copy_matches_connectable_descriptor() {
+        // The in-chat connect requirement (built in extension_lifecycle) and the
+        // Settings connectable-channels descriptor must read identically for Slack.
+        // Enforce that invariant here so the two copies can never silently drift.
+        let descriptor = slack_inbound_proof_code_connectable_channel();
+        let requirement =
+            crate::extension_lifecycle::channel_connection_requirement("slack", "Slack");
+
+        assert_eq!(requirement.channel, descriptor.channel);
+        assert_eq!(requirement.instructions, descriptor.action.instructions);
+        assert_eq!(
+            requirement.input_placeholder,
+            descriptor.action.input_placeholder
+        );
+        assert_eq!(requirement.submit_label, descriptor.action.submit_label);
+        assert_eq!(requirement.error_message, descriptor.action.error_message);
+        // The requirement's `strategy` string must be the descriptor strategy's
+        // wire value (what the Settings UI branches on).
+        let strategy_wire = serde_json::to_value(descriptor.strategy)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .expect("strategy serializes to a string");
+        assert_eq!(requirement.strategy, descriptor.strategy);
+        assert_eq!(strategy_wire, "inbound_proof_code");
+    }
+
+    #[test]
     fn slack_inbound_proof_code_connectable_channel_matches_pairing_copy() {
         let channel = slack_inbound_proof_code_connectable_channel();
 
@@ -208,6 +250,14 @@ mod tests {
         assert_eq!(
             channel.action.input_placeholder,
             "Enter Slack pairing code..."
+        );
+        assert_eq!(
+            channel.action.instructions,
+            "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
+        );
+        assert_eq!(
+            channel.action.error_message,
+            "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
         );
         assert_eq!(
             channel.command_aliases,

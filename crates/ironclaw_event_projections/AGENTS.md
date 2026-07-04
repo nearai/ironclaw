@@ -16,7 +16,7 @@
 - Projection service traits and their replay implementations: `EventProjectionService` / `ReplayEventProjectionService` and `AuditProjectionService` / `ReplayAuditProjectionService`.
 - The transport-agnostic consumer facade `EventStreamManager` (the entry point product transports enter through) and its resume results `RuntimeStreamResume` / `AuditStreamResume`.
 - Scoped request/cursor/snapshot/replay vocabulary: `ProjectionScope`, `ProjectionRequest`/`ProjectionCursor`/`ProjectionSnapshot`/`ProjectionReplay` and the audit variants (`AuditProjectionRequest`/`AuditProjectionCursor`/`AuditProjectionSnapshot`/`AuditProjectionReplay`/`AuditProjectionEntry`) — all reads carry explicit stream and read-scope filters.
-- Read-model DTOs: `ThreadTimeline`/`TimelineEntry`/`TimelineEntryKind`, `RunStatusProjection`/`RunProjectionStatus`, and `MemoryAuditProjectionMetadata`/`AuditProjectionStage`; plus the `DurableMemoryAuditSink`.
+- Read-model DTOs: `ThreadTimeline`/`TimelineEntry`/`TimelineEntryKind`, `RunStatusProjection`/`RunProjectionStatus`, and `MemoryAuditProjectionMetadata` (audit entries carry the shared `ironclaw_host_api::AuditStage`); plus the `DurableMemoryAuditSink`.
 - Projection contract tests for extension lifecycle, memory prompt safety, significant memory events, and replay behavior.
 
 ## Do Not Move In Here

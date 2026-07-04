@@ -156,6 +156,7 @@ test("gateFromEvent keeps modern auth prompts without challenge kind off token c
       kind: "auth_required",
       gateKind: "auth",
       challengeKind: "other",
+      connection: null,
       runId: "run-auth",
       gateRef: "gate:auth",
       invocationId: null,
@@ -169,7 +170,7 @@ test("gateFromEvent keeps modern auth prompts without challenge kind off token c
   );
 });
 
-test("gateFromEvent preserves explicit oauth prompts without authorization URL", () => {
+test("gateFromEvent passes the oauth_url challenge kind through unchanged", () => {
   const { gateFromEvent } = loadGates();
 
   assert.deepEqual(
@@ -178,6 +179,7 @@ test("gateFromEvent preserves explicit oauth prompts without authorization URL",
       auth_request_ref: "gate:auth",
       headline: "Authentication required",
       body: "Google authentication required",
+      // Stable wire value for a browser OAuth relay challenge.
       challenge_kind: "oauth_url",
       provider: "google",
     })),
@@ -185,6 +187,7 @@ test("gateFromEvent preserves explicit oauth prompts without authorization URL",
       kind: "auth_required",
       gateKind: "auth",
       challengeKind: "oauth_url",
+      connection: null,
       runId: "run-auth",
       gateRef: "gate:auth",
       invocationId: null,
@@ -198,9 +201,11 @@ test("gateFromEvent preserves explicit oauth prompts without authorization URL",
   );
 });
 
-test("gateFromEvent preserves legacy auth prompts as manual token prompts", () => {
+test("gateFromEvent defaults, passes through challenge kinds, and carries channel-pairing connection context", () => {
   const { gateFromEvent } = loadGates();
 
+  // Missing challenge_kind on a legacy prompt defaults to the paste-a-secret
+  // kind.
   assert.equal(
     gateFromEvent("auth_required", {
       turn_run_id: "run-auth",
@@ -208,4 +213,67 @@ test("gateFromEvent preserves legacy auth prompts as manual token prompts", () =
     }).challengeKind,
     "manual_token",
   );
+
+  // The `manual_token` value passes through unchanged.
+  assert.equal(
+    gateFromEvent("auth_required", {
+      turn_run_id: "run-auth",
+      auth_request_ref: "gate:auth",
+      challenge_kind: "manual_token",
+    }).challengeKind,
+    "manual_token",
+  );
+
+  // A channel-pairing gate rides the manual_token rail and carries a normalized
+  // connection requirement for the pairing card.
+  const pairing = gateFromEvent("auth_required", {
+    turn_run_id: "run-pair",
+    auth_request_ref: "gate:pair",
+    challenge_kind: "manual_token",
+    connection: {
+      channel: "slack",
+      strategy: "inbound_proof_code",
+      instructions: "Message the app for a pairing code.",
+      input_placeholder: "Enter code",
+      submit_label: "Connect",
+      error_message: "Invalid code.",
+    },
+  });
+  assert.equal(pairing.challengeKind, "manual_token");
+  assert.deepEqual(plain(pairing.connection), {
+    channel: "slack",
+    strategy: "inbound_proof_code",
+    instructions: "Message the app for a pairing code.",
+    inputPlaceholder: "Enter code",
+    submitLabel: "Connect",
+    errorMessage: "Invalid code.",
+  });
+});
+
+test("gateFromProjectionGate normalizes the connection context from auth_context", () => {
+  const { gateFromProjectionGate } = loadGates();
+
+  const gate = gateFromProjectionGate({
+    run_id: "run-1",
+    gate_kind: "auth",
+    gate_ref: "gate:pair",
+    auth_context: {
+      challenge_kind: "manual_token",
+      connection: {
+        channel: "slack",
+        input_placeholder: "Enter code",
+        submit_label: "Connect",
+      },
+    },
+  });
+
+  assert.equal(gate.challengeKind, "manual_token");
+  assert.deepEqual(plain(gate.connection), {
+    channel: "slack",
+    strategy: null,
+    instructions: null,
+    inputPlaceholder: "Enter code",
+    submitLabel: "Connect",
+    errorMessage: null,
+  });
 });
