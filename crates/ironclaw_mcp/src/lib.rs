@@ -720,10 +720,18 @@ where
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
         let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
-        let tool_call_params = serde_json::json!({
+        let mut tool_call_params = serde_json::json!({
             "name": tool_name,
             "arguments": request.input.clone(),
         });
+        // Whole-object assignment is safe: `tool_call_params` is built just
+        // above with only `name`/`arguments`, so there is no other `_meta`
+        // producer to merge with. Revisit (merge like the legacy engine's
+        // `inject_meta_context`) if trace-context propagation ever starts
+        // writing `params._meta` upstream of this point.
+        if let Some(meta) = sep414_meta_context(&request.scope) {
+            tool_call_params["_meta"] = meta;
+        }
         let tool_call_id = self.next_request_id();
         let tool_call_plan = self.plan_json_rpc(
             &request,
@@ -1211,6 +1219,27 @@ fn json_rpc_initialize_params() -> Value {
     })
 }
 
+/// SEP-414 context propagation: the trusted caller scope, stamped into
+/// `params._meta` of a `tools/call` so the MCP server can correlate the call
+/// with the thread it serves.
+///
+/// Mirrors the legacy engine's `inject_meta_context` (same `io.ironclaw/*`
+/// keys, same skip-when-no-thread rule) so servers written against that
+/// contract — e.g. the agent.market broker — work unchanged against Reborn.
+/// `ResourceScope` is stamped host-side from verified identity (see the
+/// SECURITY note on the struct); the model only ever controls `arguments`,
+/// so a server may treat these keys as authenticated context. Calls outside
+/// a thread (discovery, system maintenance) carry no `_meta` — servers that
+/// require thread context reject those instead of mis-attributing them.
+fn sep414_meta_context(scope: &ResourceScope) -> Option<serde_json::Value> {
+    let thread_id = scope.thread_id.as_ref()?;
+    Some(serde_json::json!({
+        "io.ironclaw/threadId": thread_id.as_str(),
+        "io.ironclaw/userId": scope.user_id.as_str(),
+        "io.ironclaw/invocationId": scope.invocation_id.to_string(),
+    }))
+}
+
 fn mcp_tool_name(provider: &ExtensionId, capability_id: &CapabilityId) -> String {
     let prefix = format!("{}.", provider.as_str());
     capability_id
@@ -1546,6 +1575,46 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn thread_scope(thread: Option<&str>) -> ResourceScope {
+        ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
+            user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: thread.map(|t| ironclaw_host_api::ThreadId::new(t).unwrap()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
+    }
+
+    /// SEP-414: a thread-scoped call stamps the trusted scope into `_meta`
+    /// under the same `io.ironclaw/*` keys the legacy engine uses.
+    #[test]
+    fn sep414_meta_context_sets_keys_for_thread_scoped_calls() {
+        let scope = thread_scope(Some("thread-42"));
+        let meta = sep414_meta_context(&scope).expect("thread scope must produce _meta");
+        assert_eq!(
+            meta.get("io.ironclaw/threadId").and_then(Value::as_str),
+            Some("thread-42")
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/userId").and_then(Value::as_str),
+            Some("user-a")
+        );
+        assert_eq!(
+            meta.get("io.ironclaw/invocationId").and_then(Value::as_str),
+            Some(scope.invocation_id.to_string().as_str())
+        );
+    }
+
+    /// Calls outside a thread (discovery, system maintenance) must carry no
+    /// `_meta` at all — a server requiring thread context rejects them
+    /// instead of receiving a fabricated id.
+    #[test]
+    fn sep414_meta_context_is_absent_without_a_thread() {
+        assert_eq!(sep414_meta_context(&thread_scope(None)), None);
+    }
 
     #[test]
     fn mcp_auth_context_preserves_product_auth_oauth_setup() {

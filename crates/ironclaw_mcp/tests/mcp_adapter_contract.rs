@@ -159,6 +159,70 @@ async fn mcp_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error(
     assert!(rendered.contains("runtime_http_egress_panicked"));
 }
 
+/// SEP-414: a thread-scoped `tools/call` carries the host-stamped context in
+/// `params._meta` — and only there. A hostile model cannot displace it: a
+/// `_meta` key inside the tool arguments stays nested under
+/// `params.arguments._meta`. Setup requests (`initialize`, the `initialized`
+/// notification) stay unstamped — a deliberate divergence from the legacy
+/// engine (Reborn discovery/setup calls are not thread-correlated; the known
+/// consumer reads `_meta` at `tools/call` time only).
+#[tokio::test]
+async fn concrete_mcp_http_client_stamps_sep414_meta_on_thread_scoped_tools_call() {
+    let mut scope = sample_scope();
+    scope.thread_id = Some(ThreadId::new("thread-42").unwrap());
+    let plan = host_http_plan();
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(plan.clone());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: scope.clone(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            // A model smuggling `_meta` through its own arguments…
+            input: json!({"query": "ironclaw", "_meta": {"io.ironclaw/threadId": "forged"}}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "initialize, initialized notification, tools/call"
+    );
+
+    assert_eq!(
+        json_rpc_param(&requests[2].body, "_meta"),
+        json!({
+            "io.ironclaw/threadId": "thread-42",
+            "io.ironclaw/userId": "user1",
+            "io.ironclaw/invocationId": scope.invocation_id.to_string(),
+        }),
+        "tools/call must carry the host-stamped SEP-414 context"
+    );
+    // …lands nested inside `arguments`, never at the params level.
+    assert_eq!(
+        json_rpc_param(&requests[2].body, "arguments")["_meta"],
+        json!({"io.ironclaw/threadId": "forged"}),
+        "model-supplied _meta must stay inside arguments"
+    );
+    assert_eq!(
+        json_rpc_param(&requests[0].body, "_meta"),
+        serde_json::Value::Null,
+        "initialize must stay unstamped (pinned divergence from legacy)"
+    );
+}
+
 #[tokio::test]
 async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
     let scope = sample_scope();
