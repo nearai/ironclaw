@@ -180,7 +180,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "strategy": "inbound_proof_code",
                         "action": {
                             "title": "Slack account connection",
-                            "instructions": "Message the Slack app, then enter the code here.",
+                            "instructions": (
+                                "Message the IronClaw Reborn app in Slack to get a "
+                                "pairing code, then paste it here."
+                            ),
                         },
                     },
                 ]
@@ -259,7 +262,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
         self.assertIn("Slack account connection", observed_expectations)
-        self.assertIn("Message the Slack app", observed_expectations)
+        self.assertIn("pairing code", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
         self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
@@ -269,6 +272,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             result.details["slack_connect_title"],
             "Slack account connection",
+        )
+
+    def test_slack_connect_instruction_validation_accepts_pairing_copy(self):
+        self.assertTrue(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Message the Slack app, then enter the code here."
+            )
+        )
+        self.assertTrue(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Message the IronClaw Reborn app in Slack to get a pairing code, "
+                "then paste it here."
+            )
+        )
+        self.assertFalse(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Connect the channel from settings."
+            )
         )
 
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):
@@ -1183,7 +1204,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         package_ids = [
             extension["package_id"] for extension in captured_routine["extensions"]
         ]
-        self.assertEqual(package_ids, ["slack", "google-drive", "google-sheets"])
+        self.assertEqual(package_ids, ["google-drive", "google-sheets"])
         self.assertEqual(
             captured_routine["extra_details"]["bug_log_sheet_fixture"]["spreadsheet_id"],
             "sheet-123",

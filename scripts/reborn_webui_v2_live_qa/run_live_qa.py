@@ -136,7 +136,7 @@ Expected results: Routine created""",
 Expected result: Slack is connected""",
     "qa_3b_endpoint_status_live_chat": """In WebUI, ask IronClaw "check if near.ai returns a 200 status."
 Expected result: IronClaw reports the endpoint's current HTTP status""",
-    "qa_3c_endpoint_status_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, ping [endpoint URL] checking if it returns a 200 status and send result in a DM in slack"
+    "qa_3c_endpoint_status_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, ping [endpoint URL] checking if it returns a 200 status and send result in a DM in slack. Do not install, activate, authenticate, or connect the Slack extension; the Slack DM delivery target is already configured. Before calling trigger_create, call builtin__outbound_delivery_targets_list, then call builtin__outbound_delivery_target_set with the Slack target id returned by the list tool."
 Expected result: Routine created""",
     "qa_4a_gmail_connect": """In WebUI, ask IronClaw "connect to Gmail." Go through the flow w/ Gmail.
 Expected result: Gmail is connected""",
@@ -144,7 +144,7 @@ Expected result: Gmail is connected""",
 Expected result: GitHub is connected""",
     "qa_4c_github_release_live_chat": """In WebUI, ask IronClaw "summarize the latest release from https://github.com/nearai/ironclaw."
 Expected result: summary of the most recent release""",
-    "qa_4d_github_release_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack message summarizing any new ones."
+    "qa_4d_github_release_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack message summarizing any new ones. Do not call GitHub auth, Slack auth, Slack install, Slack activate, or connector auth tools now. Before calling trigger_create, call builtin__outbound_delivery_targets_list, then call builtin__outbound_delivery_target_set with the Slack target id returned by the list tool."
 Expected result: Routine created""",
     "qa_5a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the auth flow.
 Expected result: Slack is connected""",
@@ -162,11 +162,11 @@ Expected result: Google Sheets is connected""",
 Expected result: ABC sheet has new rows for each near.ai inbound email""",
     "qa_6d_gmail_to_sheet_routine": """In WebUI, ask IronClaw, "Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC."
 Expected result: Routine created""",
-    "qa_7a_slack_product_channel_connect": """In WebUI, ask IronClaw "connect to Slack, using channel #product." Go through the flow
-Expected result: Slack channel is connected""",
+    "qa_7a_slack_product_channel_connect": """In WebUI, ask IronClaw "connect to Slack for my configured DM delivery target." Go through the flow
+Expected result: Slack DM delivery target is connected""",
     "qa_7b_sheets_connect": """In WebUI, ask IronClaw "connect to Google Sheets." Go through the auth flow.
 Expected result: Google Sheets is connected""",
-    "qa_7c_slack_bug_logger_routine": """In WebUI, ask IronClaw "whenever I send a slack message starting with 'bug:', add it as a row to my bug logging Google Sheet."
+    "qa_7c_slack_bug_logger_routine": """In WebUI, ask IronClaw "whenever I send a slack message starting with 'bug:', add it as a row to my bug logging Google Sheet. Do not install, activate, authenticate, connect, or call Slack tools now; the Slack DM ingress is already configured by the host."
 Expected result: Routine/trigger created""",
     "qa_7d_slack_bug_message_trigger": """In Slack, send a message starting with "bug:"
 Expected result: Routine created""",
@@ -174,7 +174,7 @@ Expected result: Routine created""",
 Expected result: Slack is connected""",
     "qa_8b_hn_keyword_live_chat": """In WebUI, ask IronClaw "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'."
 Expected result: IronClaw reports any matching HN posts""",
-    "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack."
+    "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack. Do not install, activate, authenticate, connect, or call Slack tools now; the Slack DM delivery target is already configured. Before calling trigger_create, call builtin__outbound_delivery_targets_list, then call builtin__outbound_delivery_target_set with the Slack target id returned by the list tool."
 Expected result: Routine created""",
 }
 
@@ -1929,6 +1929,11 @@ def _slack_preflight(ctx: LiveQaContext) -> dict[str, object]:
     return slack
 
 
+def _slack_connect_instructions_look_valid(instructions: str) -> bool:
+    text = instructions.lower()
+    return "message the slack app" in text or ("slack" in text and "pairing code" in text)
+
+
 async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1978,10 +1983,10 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         if not title:
             raise AssertionError(f"Slack connect action title missing: {personal!r}")
         instructions = str(action_body.get("instructions") or "")
-        if "Message the Slack app" not in instructions:
+        if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
         await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Message the Slack app", timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("pairing code", timeout=15000)  # type: ignore[attr-defined]
         observed["slack_display_name"] = personal.get("display_name")
         observed["slack_connect_title"] = title
         observed["slack_connect_instructions"] = instructions
@@ -3509,11 +3514,6 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             required_text=["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
             prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
             extensions=[
-                {
-                    "package_id": "slack",
-                    "display_name": "Slack",
-                    "required_tools": [],
-                },
                 {
                     "package_id": "google-drive",
                     "display_name": "Google Drive",
