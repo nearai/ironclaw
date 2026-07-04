@@ -12,15 +12,6 @@ set -euo pipefail
 
 test_timeout="${REBORN_GROUP_TEST_TIMEOUT:-28m}"
 
-run_focused_test() {
-  local description="$1"
-  shift
-
-  echo "::group::${description}"
-  timeout --signal=INT --kill-after=30s "${test_timeout}" "$@"
-  echo "::endgroup::"
-}
-
 # The directory basename is `group_<x>`; the `[[test]]` `name` field is
 # `reborn_group_<x>` (see Cargo.toml) — the two differ by the `reborn_` prefix,
 # so rewrite it explicitly rather than assuming dir basename == test name (e.g.
@@ -43,52 +34,8 @@ if [ "${#test_names[@]}" -eq 0 ]; then
 fi
 
 for test_name in "${test_names[@]}"; do
-  run_focused_test "cargo test --test ${test_name} --features libsql" \
+  echo "::group::cargo test --test ${test_name} --features libsql"
+  timeout --signal=INT --kill-after=30s "${test_timeout}" \
     cargo test --test "${test_name}" --features libsql -- --nocapture
+  echo "::endgroup::"
 done
-
-# Keep libSQL persistence coverage after the broad crate buckets drop their
-# libSQL feature flags. These are the feature-gated tests that otherwise stop
-# running when `ironclaw_host_runtime` and `ironclaw_reborn` avoid the libSQL
-# compile graph in their all-targets buckets.
-run_focused_test \
-  "cargo test -p ironclaw_host_runtime --features test-support,libsql --test first_party_builtin_tools builtin_coding_blocks_sensitive_resolved_libsql_paths" \
-  cargo test -p ironclaw_host_runtime --features test-support,libsql \
-    --test first_party_builtin_tools \
-    builtin_coding_blocks_sensitive_resolved_libsql_paths \
-    -- --nocapture
-
-for test_name in \
-  production_root_filesystem_selection_accepts_libsql_root_filesystem \
-  production_turn_state_selection_accepts_filesystem_turn_state_store \
-  production_turn_coordinator_uses_configured_store_and_notifier \
-  production_turn_coordinator_requires_explicit_run_profile_resolver \
-  host_runtime_services_preserves_combined_store_after_root_filesystem_selection
-do
-  run_focused_test \
-    "cargo test -p ironclaw_host_runtime --features test-support,libsql --test host_runtime_services_contract ${test_name}" \
-    cargo test -p ironclaw_host_runtime --features test-support,libsql \
-      --test host_runtime_services_contract \
-      "${test_name}" \
-      -- --nocapture
-done
-
-run_focused_test \
-  "cargo test -p ironclaw_host_runtime --features test-support,libsql --test reborn_durable_restart_integration approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once" \
-  cargo test -p ironclaw_host_runtime --features test-support,libsql \
-    --test reborn_durable_restart_integration \
-    approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once \
-    -- --nocapture
-
-run_focused_test \
-  "cargo test -p ironclaw_reborn --features libsql-secrets --test secrets" \
-  cargo test -p ironclaw_reborn --features libsql-secrets \
-    --test secrets \
-    -- --nocapture
-
-run_focused_test \
-  "cargo test -p ironclaw_reborn --features libsql-restart-tests --test loop_driver_host turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen" \
-  cargo test -p ironclaw_reborn --features libsql-restart-tests \
-    --test loop_driver_host \
-    turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
-    -- --nocapture

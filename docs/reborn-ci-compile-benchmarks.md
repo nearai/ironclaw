@@ -62,7 +62,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
-| H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Running | Benchmark branch now removes broad `libsql`/`libsql-secrets` feature flags and runs the exact skipped libSQL tests in `run-reborn-group-tests.sh`; CI result pending. |
+| H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -565,4 +565,33 @@ Focused replacement coverage now run by
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28721862670`](https://github.com/nearai/ironclaw/actions/runs/28721862670)
+- Status: success
+- Wall clock: `9m50s` (`2026-07-04T22:36:17Z` to `2026-07-04T22:46:07Z`)
+- Total Reborn jobs: `28`
+- Crate bucket job count: `12`
+- Decision: reject and revert. The broad feature reduction did not reduce the
+  actual long-pole bucket durations, and the focused libSQL work increased the
+  group job from `5m24s` baseline to `6m59s`.
+
+Comparison against baseline:
+
+| Metric | Baseline | H11 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `9m50s` | `+1m15s` |
+| Total Reborn jobs | `28` | `28` | `0` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `547s` | `+74s` |
+| `composition-core` | `419s` | `438s` | `+19s` |
+| `reborn-core` | `367s` | `392s` | `+25s` |
+| `webui-ingress` | `334s` | `303s` | `-31s` |
+| `wasm-sandbox` | `307s` | `360s` | `+53s` |
+| Reborn group tests | `324s` | `419s` | `+95s` |
+
+Interpretation:
+
+This disproves the simple libSQL-split version of H11. Even though the
+dependency graph is smaller on paper for `host-runtime` and `reborn-core`, CI
+did not translate that into shorter buckets. The moved focused tests also made
+the existing group job heavier, so this does not meet either acceptance
+criterion.
