@@ -48,7 +48,7 @@ mostly compile/link/setup time, with one notable runtime-heavy exception:
 | H2 | Split compile-heavy buckets by dependency shape instead of package count. | Lower max bucket duration if closures are separable. | Not started | Pending. |
 | H3 | Move `host_runtime_services.rs` out of the normal `host-runtime` bucket. | Reduce the slowest bucket and isolate the runtime-heavy WASM service tests. | Not started | Pending. |
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Not started | Pending. |
-| H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Not started | Pending. |
+| H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | In progress | Pending CI benchmark. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -95,3 +95,29 @@ Removing `--all-targets` helped some buckets, but it made `composition-core`
 slower and did not reduce overall wall clock. The result is within normal CI
 variance for several buckets and does not justify weakening or changing the
 crate-test target selection.
+
+## H5: Remove OVH sccache From Crate Buckets
+
+Change under test:
+
+- Remove `./.github/actions/setup-sccache-dist` from the `crate-tests` job only.
+- Keep `Swatinem/rust-cache` and every `cargo test` command unchanged.
+- Keep OVH sccache in root tests, group tests, QA fixtures, and coverage lanes
+  so this benchmark isolates the crate bucket path.
+
+Why this is safe to test:
+
+- This is a benchmark branch, not a production removal.
+- It does not reduce test coverage.
+- It directly tests whether the Redis/SSH/sccache setup and remote cache reads
+  are helping the crate buckets enough to justify the OVH dependency.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending
+- Status: pending
+- Wall clock: pending
+- Crate bucket job count: pending
+- Slowest bucket: pending
+- Decision: pending
