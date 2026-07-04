@@ -38,9 +38,9 @@ use ironclaw_product_workflow::{
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetAutomationResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
@@ -254,6 +254,7 @@ struct StubServices {
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    get_automation_calls: Mutex<Vec<String>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
     delete_automation_calls: Mutex<Vec<String>>,
@@ -762,6 +763,21 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )],
+            scheduler_enabled: true,
+        })
+    }
+
+    async fn get_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornGetAutomationResponse, RebornServicesError> {
+        self.get_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id.clone());
+        Ok(RebornGetAutomationResponse {
+            automation: automation_info(&automation_id, "Fired once", "0 9 * * *"),
             scheduler_enabled: true,
         })
     }
@@ -2243,6 +2259,32 @@ async fn delete_automation_dispatches_path_id_to_facade() {
             .lock()
             .expect("lock")
             .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn get_automation_dispatches_path_id_and_returns_automation() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("get request"),
+        )
+        .await
+        .expect("get oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["automation"]["automation_id"], "automation-alpha");
+    assert_eq!(body["scheduler_enabled"], true);
+    assert_eq!(
+        services.get_automation_calls.lock().expect("lock").clone(),
         vec!["automation-alpha".to_string()]
     );
 }

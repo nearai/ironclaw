@@ -71,6 +71,9 @@ export function useAutomations(includeCompleted = false) {
   const schedulerEnabled = query.data?.scheduler_enabled !== false;
   const invalidateAutomations = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["automations"] });
+    // Also refresh any open by-id detail query (see useAutomation) so a
+    // pause/resume/delete from the full-screen detail view reflects immediately.
+    queryClient.invalidateQueries({ queryKey: ["automation"] });
   }, [queryClient]);
   const pauseMutation = useMutation({
     mutationFn: (automationId) => pauseAutomation({ automationId }),

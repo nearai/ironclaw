@@ -1096,3 +1096,83 @@ async fn automation_facade_default_excludes_completed_automations() {
         "completed trigger must be excluded by default; got: {ids:?}"
     );
 }
+
+#[tokio::test]
+async fn get_automation_resolves_completed_automation_excluded_from_list() {
+    // Regression for the detail-page deep-link bug: a completed one-shot is
+    // excluded from the default list, but a by-id lookup must still resolve it.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let completed_id = TriggerId::new();
+    let completed = make_record(
+        completed_id,
+        &c,
+        TriggerState::Completed,
+        "Fired once",
+        "0 9 * * *",
+    );
+    repo.upsert_trigger(completed)
+        .await
+        .expect("upsert completed");
+
+    let facade = RebornAutomationProductFacade::new(repo);
+
+    let listed = facade
+        .list_automations(c.clone(), automation_list_request(25, 0))
+        .await
+        .expect("list automations");
+    assert!(
+        !listed
+            .iter()
+            .any(|a| a.automation_id == completed_id.to_string()),
+        "completed automation must be excluded from the default list"
+    );
+
+    let resolved = facade
+        .get_automation(c, completed_id.to_string(), 25)
+        .await
+        .expect("get automation")
+        .expect("completed automation must resolve by id");
+    assert_eq!(resolved.automation_id, completed_id.to_string());
+}
+
+#[tokio::test]
+async fn get_automation_rejects_automation_owned_by_another_caller() {
+    // `get_trigger` scopes by tenant + id only; the facade must still apply the
+    // full caller-ownership predicate, so another user's automation resolves to
+    // None (→ 404) rather than leaking across the scope boundary.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let other_agent = AgentId::new("agent-beta").expect("valid agent");
+    let foreign_id = TriggerId::new();
+    let mut foreign = make_record(
+        foreign_id,
+        &c,
+        TriggerState::Scheduled,
+        "Someone else's",
+        "0 9 * * *",
+    );
+    foreign.agent_id = Some(other_agent);
+    repo.upsert_trigger(foreign).await.expect("upsert foreign");
+
+    let facade = RebornAutomationProductFacade::new(repo);
+    let resolved = facade
+        .get_automation(c, foreign_id.to_string(), 0)
+        .await
+        .expect("get automation");
+    assert!(
+        resolved.is_none(),
+        "an automation outside the caller scope must resolve to None (404), not leak"
+    );
+}
+
+#[tokio::test]
+async fn get_automation_returns_none_for_unknown_id() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let facade = RebornAutomationProductFacade::new(repo);
+    let resolved = facade
+        .get_automation(caller(), TriggerId::new().to_string(), 0)
+        .await
+        .expect("get automation");
+    assert!(resolved.is_none(), "unknown id must resolve to None");
+}

@@ -25,6 +25,7 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_GET_AUTOMATION: &str = "webui.v2.get_automation";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
@@ -114,6 +115,9 @@ pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
 pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
+// GET shares the delete path; axum + the descriptor matcher disambiguate by
+// method (as `/threads` already does for GET list vs POST create).
+pub const WEBUI_V2_PATTERN_GET_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
@@ -195,6 +199,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         list_automations_descriptor(),
+        get_automation_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
         delete_automation_descriptor(),
@@ -690,6 +695,20 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn get_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_AUTOMATION,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_AUTOMATION,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

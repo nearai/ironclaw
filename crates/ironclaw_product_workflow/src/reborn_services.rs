@@ -118,12 +118,12 @@ pub use types::{
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetAutomationResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -679,6 +679,37 @@ pub trait AutomationProductFacade: Send + Sync {
         _automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
+    }
+
+    /// Resolve a single automation by id, caller-scoped, with **no** listing
+    /// filter — completed one-shots and automations past the list page cap are
+    /// returned so a deep link to the detail page always resolves an automation
+    /// the caller owns. Returns `Ok(None)` when no automation with that id is
+    /// visible to the caller (→ 404 at the facade boundary).
+    ///
+    /// The default body resolves from the completed-inclusive list, so any
+    /// facade gets correct behavior for free (bounded by the list page cap).
+    /// The production facade overrides this with a direct id lookup that is
+    /// O(1) and not bounded by that cap.
+    async fn get_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        run_limit: usize,
+    ) -> Result<Option<RebornAutomationInfo>, RebornServicesError> {
+        let automations = self
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+                    run_limit,
+                    include_completed: true,
+                },
+            )
+            .await?;
+        Ok(automations
+            .into_iter()
+            .find(|automation| automation.automation_id == automation_id))
     }
 
     /// Whether the background trigger poller (scheduler) is running.
@@ -1965,6 +1996,19 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    /// Resolve a single automation by id for the full-screen detail view /
+    /// deep link. Unlike [`list_automations`](Self::list_automations) this has
+    /// no completed-state or page-cap filter, so a deep link always resolves an
+    /// automation the caller owns; an id the caller does not own is a `404`.
+    async fn get_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornGetAutomationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn pause_automation(
         &self,
@@ -3821,6 +3865,36 @@ impl RebornServicesApi for RebornServices {
             .await?;
         Ok(RebornListAutomationsResponse {
             automations,
+            scheduler_enabled,
+        })
+    }
+
+    async fn get_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornGetAutomationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let run_limit = clamp_automation_run_limit(None);
+        let scheduler_enabled = self.automation_facade.scheduler_enabled();
+        let automation = self
+            .automation_facade
+            .get_automation(caller, automation_id, run_limit)
+            .await?
+            // An id the caller does not own (or that does not exist) is a 404,
+            // not a filtered-out row — deliberately indistinguishable so the
+            // route cannot be used as an existence oracle for other tenants.
+            .ok_or_else(|| {
+                RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+            })?;
+        Ok(RebornGetAutomationResponse {
+            automation,
             scheduler_enabled,
         })
     }

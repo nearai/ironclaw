@@ -222,8 +222,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             post(handlers::resume_automation),
         )
         .route(
+            // GET (get_automation) and DELETE (delete_automation) share this
+            // path; the same-path/different-method pair is one axum route entry.
             WEBUI_V2_PATTERN_DELETE_AUTOMATION,
-            delete(handlers::delete_automation),
+            delete(handlers::delete_automation).get(handlers::get_automation),
         )
         .route(WEBUI_V2_PATTERN_TRACE_CREDITS, get(handlers::trace_credits))
         .route(

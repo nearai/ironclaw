@@ -239,6 +239,13 @@ export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }
 
+export function getAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`);
+}
+
 export function pauseAutomation({ automationId } = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));

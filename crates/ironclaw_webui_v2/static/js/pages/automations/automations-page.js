@@ -3,6 +3,7 @@ import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AutomationDetailPage } from "./components/automation-detail-page.js";
 import { AutomationsList } from "./components/automations-list.js";
+import { useAutomation } from "./hooks/useAutomation.js";
 import { useAutomations } from "./hooks/useAutomations.js";
 import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
@@ -13,6 +14,18 @@ export function AutomationsPage() {
   const includeCompleted = filter === "completed";
   const automationsState = useAutomations(includeCompleted);
   const deliveryState = useOutboundDeliveryDefaults();
+
+  // Detail view resolution. Hooks must run unconditionally, so `useAutomation`
+  // is always called (it no-ops when there is no `automationId`). Seed it with
+  // the list row when present so popping out of the list modal paints instantly;
+  // the by-id fetch then resolves completed / beyond-the-page automations the
+  // list cannot.
+  const detailSeed = automationId
+    ? automationsState.automations.find(
+        (item) => item.automation_id === automationId
+      ) || null
+    : null;
+  const detailState = useAutomation(automationId, { seed: detailSeed });
 
   // Data stays fresh on its own: a base poll plus a smart timer that pulls
   // near-due and in-progress automations forward (see useAutomations), so there
@@ -25,14 +38,10 @@ export function AutomationsPage() {
   // Full-screen, persistent detail view for a single automation. Reached by
   // popping out of the list's detail modal or by deep link.
   if (automationId) {
-    const automation =
-      automationsState.automations.find(
-        (item) => item.automation_id === automationId
-      ) || null;
     return html`<${AutomationDetailPage}
-      automation=${automation}
-      isLoading=${automationsState.isLoading}
-      error=${automationsState.error}
+      automation=${detailState.automation}
+      isLoading=${detailState.isLoading}
+      error=${detailState.error}
       isMutating=${automationsState.isMutating}
       onPauseAutomation=${automationsState.pauseAutomation}
       onResumeAutomation=${automationsState.resumeAutomation}
