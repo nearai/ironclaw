@@ -1020,7 +1020,11 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // GitHub Actions Linux runners, and especially llvm-cov instrumented
+        // runs, can spend more than 10s in the real host-runtime/WASM path
+        // before persisting the next turn status. This helper is a state wait,
+        // not a performance assertion; terminal failures still fail fast below.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let state = self
                 .turn_store
