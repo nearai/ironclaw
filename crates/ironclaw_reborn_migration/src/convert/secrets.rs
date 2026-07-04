@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use ironclaw::secrets::{SecretsCrypto, create_secrets_store};
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle};
 use ironclaw_secrets::SecretMaterial;
 
 use crate::error::MigrationError;
@@ -153,18 +153,13 @@ async fn migrate_one(
     };
     // A malformed source user id is a per-item loss, not a run abort: skip this
     // secret and keep migrating the rest.
-    let user = match UserId::new(user_id) {
-        Ok(user) => user,
-        Err(e) => {
-            report.record_loss(
-                Domain::Secret,
-                format!("{user_id}:{name}"),
-                "user_id",
-                LossReason::Unparseable,
-                format!("v1 secret user id is not a valid Reborn UserId (skipped): {e}"),
-            );
-            return Ok(());
-        }
+    let Some(user) = report.valid_user_id(
+        Domain::Secret,
+        format!("{user_id}:{name}"),
+        "user_id",
+        user_id,
+    ) else {
+        return Ok(());
     };
 
     if options.dry_run {

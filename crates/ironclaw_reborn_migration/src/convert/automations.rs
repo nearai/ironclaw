@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use ironclaw::agent::routine::{Routine, RoutineAction, Trigger};
-use ironclaw_host_api::{ProjectId, UserId};
+use ironclaw_host_api::ProjectId;
 use ironclaw_triggers::{TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState};
 use uuid::Uuid;
 
@@ -130,18 +130,10 @@ async fn convert_routine(
     record_routine_field_losses(report, &source_id, &routine, is_cron);
 
     // A malformed source user id is a per-item loss, not a run abort.
-    let creator_user_id = match UserId::new(&routine.user_id) {
-        Ok(user_id) => user_id,
-        Err(e) => {
-            report.record_loss(
-                Domain::Routine,
-                &source_id,
-                "user_id",
-                LossReason::Unparseable,
-                format!("v1 routine user id is not a valid Reborn UserId (trigger skipped): {e}"),
-            );
-            return Ok(());
-        }
+    let Some(creator_user_id) =
+        report.valid_user_id(Domain::Routine, &source_id, "user_id", &routine.user_id)
+    else {
+        return Ok(());
     };
 
     let record = TriggerRecord {
@@ -396,51 +388,42 @@ async fn convert_mission(
                     };
                     // A malformed mission owner id is a per-item loss (the
                     // trigger is skipped); mission threads below still validate
-                    // their own owner independently.
-                    match UserId::new(&owner) {
-                        Ok(creator_user_id) => {
-                            let record = TriggerRecord {
-                                trigger_id: ironclaw_triggers::TriggerId::new(),
-                                tenant_id: tgt.tenant_id.clone(),
-                                creator_user_id,
-                                agent_id: Some(tgt.agent_id.clone()),
-                                project_id: Option::<ProjectId>::None,
-                                name: mission.name.clone(),
-                                source: TriggerSourceKind::Schedule,
-                                schedule,
-                                prompt: if mission.goal.trim().is_empty() {
-                                    mission.name.clone()
-                                } else {
-                                    mission.goal.clone()
-                                },
-                                state,
-                                next_run_at: mission.next_fire_at.unwrap_or(mission.created_at),
-                                last_run_at: None,
-                                last_fired_slot: None,
-                                last_status: None,
-                                active_fire_slot: None,
-                                active_run_ref: None,
-                                created_at: mission.created_at,
-                            };
-                            if !options.dry_run {
-                                tgt.trigger_repo.upsert_trigger(record).await.map_err(|e| {
-                                    MigrationError::WriteTarget {
-                                        domain: format!("trigger for {source_id}"),
-                                        reason: e.to_string(),
-                                    }
-                                })?;
-                            }
+                    // their own owner independently. Loss recorded by the helper.
+                    if let Some(creator_user_id) =
+                        report.valid_user_id(Domain::Mission, &source_id, "user_id", &owner)
+                    {
+                        let next_run_at = mission_next_run_at(report, &source_id, mission);
+                        let record = TriggerRecord {
+                            trigger_id: ironclaw_triggers::TriggerId::new(),
+                            tenant_id: tgt.tenant_id.clone(),
+                            creator_user_id,
+                            agent_id: Some(tgt.agent_id.clone()),
+                            project_id: Option::<ProjectId>::None,
+                            name: mission.name.clone(),
+                            source: TriggerSourceKind::Schedule,
+                            schedule,
+                            prompt: if mission.goal.trim().is_empty() {
+                                mission.name.clone()
+                            } else {
+                                mission.goal.clone()
+                            },
+                            state,
+                            next_run_at,
+                            last_run_at: None,
+                            last_fired_slot: None,
+                            last_status: None,
+                            active_fire_slot: None,
+                            active_run_ref: None,
+                            created_at: mission.created_at,
+                        };
+                        if !options.dry_run {
+                            tgt.trigger_repo.upsert_trigger(record).await.map_err(|e| {
+                                MigrationError::WriteTarget {
+                                    domain: format!("trigger for {source_id}"),
+                                    reason: e.to_string(),
+                                }
+                            })?;
                         }
-                        Err(e) => report.record_loss(
-                            Domain::Mission,
-                            &source_id,
-                            "user_id",
-                            LossReason::Unparseable,
-                            format!(
-                                "mission owner user id is not a valid Reborn UserId \
-                                 (trigger skipped): {e}"
-                            ),
-                        ),
                     }
                 }
                 Err(e) => report.record_loss(
@@ -519,6 +502,35 @@ async fn convert_mission(
     }
 
     Ok(())
+}
+
+/// The trigger's `next_run_at` for a migrated mission. A mission with an
+/// explicit `next_fire_at` uses it; otherwise the fallback is the **migration
+/// time**, not `mission.created_at` — the latter can be the `epoch_fallback`
+/// synthesized when a drifted blob omits `created_at`, which would produce a
+/// `1970`-dated, immediately-due trigger. The synthesized fallback is recorded
+/// as a `Degraded` loss so it is never silent.
+fn mission_next_run_at(
+    report: &mut MigrationReport,
+    source_id: &str,
+    mission: &Mission,
+) -> chrono::DateTime<chrono::Utc> {
+    match mission.next_fire_at {
+        Some(next_fire_at) => next_fire_at,
+        None => {
+            report.record_loss(
+                Domain::Mission,
+                source_id,
+                "next_fire_at",
+                LossReason::Degraded,
+                "mission had no next_fire_at; the trigger's next run was synthesized to the \
+                 migration time (mission created_at may be an epoch fallback, which would make \
+                 the trigger immediately due)"
+                    .to_string(),
+            );
+            chrono::Utc::now()
+        }
+    }
 }
 
 fn record_mission_field_losses(report: &mut MigrationReport, source_id: &str, mission: &Mission) {

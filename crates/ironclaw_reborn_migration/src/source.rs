@@ -114,9 +114,15 @@ impl V1Source {
 /// True when a DB error string denotes an absent table/relation, the one case
 /// [`V1Source::distinct_user_ids_in`] tolerates. Covers SQLite/libSQL
 /// (`no such table`) and PostgreSQL (`relation "…" does not exist`).
+///
+/// Deliberately narrow: a bare `does not exist` also matches PostgreSQL's
+/// *column*-not-found message (`column "…" does not exist`), so requiring
+/// `relation` keeps a schema drift on a real table from being downgraded to an
+/// empty user set — exactly the silent-drop class this converter guards against.
 pub(crate) fn is_missing_table_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("no such table") || lower.contains("does not exist")
+    lower.contains("no such table")
+        || (lower.contains("relation") && lower.contains("does not exist"))
 }
 
 fn source_to_config(source: &SourceDb) -> DatabaseConfig {

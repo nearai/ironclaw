@@ -69,22 +69,10 @@ async fn migrate_user_identities(
         // Consistent with `migrate_channel_identities` below: a malformed source
         // user id skips that user's identities but is recorded, not dropped
         // silently.
-        let host_user = match UserId::new(&user) {
-            Ok(host_user) => host_user,
-            Err(e) => {
-                report.record_loss(
-                    Domain::Identity,
-                    format!("user:{user}"),
-                    "user_id",
-                    LossReason::Unparseable,
-                    format!(
-                        "v1 user id is not a valid Reborn UserId; \
-                         {} identity/identities for this user were skipped: {e}",
-                        identities.len()
-                    ),
-                );
-                continue;
-            }
+        let Some(host_user) =
+            report.valid_user_id(Domain::Identity, format!("user:{user}"), "user_id", &user)
+        else {
+            continue;
         };
         let resolver = tgt.identity_store(host_user);
 
@@ -154,14 +142,9 @@ async fn migrate_channel_identities(
     let rows = read_channel_identities(src, report).await?;
     for (owner_id, channel, external_id) in rows {
         let source_id = format!("channel_identity:{channel}:{external_id}");
-        let Ok(host_user) = UserId::new(&owner_id) else {
-            report.record_loss(
-                Domain::Identity,
-                &source_id,
-                "owner_id",
-                LossReason::Unparseable,
-                "invalid owner user id".to_string(),
-            );
+        let Some(host_user) =
+            report.valid_user_id(Domain::Identity, &source_id, "owner_id", &owner_id)
+        else {
             continue;
         };
         let (Ok(provider_kind), Ok(subject)) = (

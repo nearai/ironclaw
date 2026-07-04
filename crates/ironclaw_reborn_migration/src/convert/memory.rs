@@ -9,7 +9,7 @@
 //! a loss). Version history (`memory_document_versions`) has no Reborn target
 //! and is recorded as a loss.
 
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
 use ironclaw_memory::{DocumentMetadata, MemoryInvocation, MemoryServiceWriteRequest};
 
 use crate::error::MigrationError;
@@ -42,21 +42,10 @@ pub(crate) async fn run(
             }
 
             // A malformed source user id is a per-item loss, not a run abort.
-            let user = match UserId::new(doc.user_id.clone()) {
-                Ok(user) => user,
-                Err(e) => {
-                    report.record_loss(
-                        Domain::Memory,
-                        doc.path.clone(),
-                        "user_id",
-                        LossReason::Unparseable,
-                        format!(
-                            "v1 memory document user id is not a valid Reborn UserId \
-                             (document skipped): {e}"
-                        ),
-                    );
-                    continue;
-                }
+            let Some(user) =
+                report.valid_user_id(Domain::Memory, doc.path.clone(), "user_id", &doc.user_id)
+            else {
+                continue;
             };
 
             if options.dry_run {

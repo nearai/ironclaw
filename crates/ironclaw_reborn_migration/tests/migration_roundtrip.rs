@@ -487,9 +487,10 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         // (action + guardrails/notify/counters + routine_runs); each non-cron
         // routine records 1 trigger-source loss + 2 field losses. 6 × 3 = 18.
         (Domain::Routine, 18),
-        // daily-digest: mission_only_fields + status.failed (2); on-deploy:
-        // cadence.on_event (1). No orphan threads (the blob is referenced).
-        (Domain::Mission, 3),
+        // daily-digest: mission_only_fields + status.failed + next_fire_at
+        // (the fixture mission has no next_fire_at → synthesized) = 3;
+        // on-deploy: cadence.on_event (1). No orphan threads (blob referenced).
+        (Domain::Mission, 4),
         // fixture seeds no jobs → the job converter records nothing.
         (Domain::Job, 0),
         // single unconditional memory_document_versions gap.
@@ -565,9 +566,16 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         installation_doc.contains("openai_api_key"),
         "installation record must carry the allowed_secrets credential binding; got: {installation_doc}"
     );
+    // Match the exact serialized `ExtensionActivationState` token (snake_case
+    // JSON value), not a loose substring, so a future `*_enabled`/`disabled`
+    // state can't pass by accident.
     assert!(
-        installation_doc.to_ascii_lowercase().contains("enabled"),
+        installation_doc.contains("\"enabled\""),
         "an Active v1 tool must migrate to Enabled activation; got: {installation_doc}"
+    );
+    assert!(
+        !installation_doc.contains("\"disabled\""),
+        "the migrated installation must not be Disabled; got: {installation_doc}"
     );
 
     // On-disk durability of the deferred domains (fresh connection).
