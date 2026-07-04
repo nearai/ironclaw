@@ -292,7 +292,15 @@ ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
+# `webui-v2-beta` puts `ironclaw_webui_v2` + `ironclaw_reborn_identity` on the
+# int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
+# feature unification compiles them into every int-tier build, behaviorally
+# inert for suites that never call them.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta"] }
+# Direct dev-dep: composition deliberately does NOT re-export the bare
+# `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
+# drives the bare router, not the `webui_v2_app` wrapper.
+ironclaw_webui_v2 = { path = "crates/ironclaw_webui_v2", version = "0.1.0", features = ["webui-v2-beta"] }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
@@ -443,6 +451,10 @@ name = "reborn_integration_http_matcher"
 path = "tests/integration/http_matcher.rs"
 
 [[test]]
+name = "reborn_integration_identity_resolution_smoke"
+path = "tests/integration/identity_resolution_smoke.rs"
+
+[[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
 
@@ -501,6 +513,10 @@ path = "tests/integration/triggered_submit.rs"
 [[test]]
 name = "reborn_integration_web_access"
 path = "tests/integration/web_access.rs"
+
+[[test]]
+name = "reborn_integration_webui_v2_router_smoke"
+path = "tests/integration/webui_v2_router_smoke.rs"
 
 [[test]]
 name = "e2e_thread_scheduling"

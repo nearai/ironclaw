@@ -3960,6 +3960,7 @@ dependencies = [
  "ironclaw_tui",
  "ironclaw_turns",
  "ironclaw_wasm",
+ "ironclaw_webui_v2",
  "json5",
  "jsonschema",
  "jsonwebtoken",
