@@ -2,331 +2,190 @@
 //! (see ironclaw#2201).
 //!
 //! The canonical path is `/api/v1/responses`; the legacy `/v1/responses`
-//! path is retained as an alias for backward compatibility. Both must
-//! reach `create_response_handler` / `get_response_handler` and produce
-//! identical behavior.
-//!
-//! These tests drive the full router via `start_server` rather than
-//! calling the handler in isolation — per `.claude/rules/testing.md`
-//! ("Test Through the Caller, Not Just the Helper"), the regression
-//! coverage has to exercise the router wiring, otherwise a future
-//! rename / removal of one path silently loses the coverage.
+//! path is retained as an alias for backward compatibility. Both must reach
+//! the Reborn OpenAI-compatible router. These tests intentionally drive the
+//! router rather than the retired v1 gateway router, which no longer owns the
+//! Responses API surface.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ironclaw::channels::web::auth::MultiAuthState;
-use ironclaw::channels::web::platform::router::start_server;
-use ironclaw::channels::web::platform::state::GatewayState;
-use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
-use tokio::sync::oneshot;
+use async_trait::async_trait;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
+use axum::response::Response;
+use http_body_util::BodyExt;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_adapters::{AuthRequirement, FakeProductWorkflow, ProtocolAuthEvidence};
+use ironclaw_reborn_openai_compat::{
+    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
+    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+};
+use ironclaw_turns::TurnRunId;
+use serde_json::{Value, json};
+use tower::ServiceExt;
 
 const AUTH_TOKEN: &str = "test-responses-api-token";
 
-/// RAII guard that shuts the gateway test server down when dropped,
-/// even on early returns or panics. Without this, every `#[tokio::test]`
-/// would leak its spawned `axum::serve` task for the remainder of the
-/// test process.
-struct ServerGuard {
-    shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            // Best-effort: the receiver may already be gone if the
-            // serve task exited for another reason. Either way, we've
-            // released our half of the channel.
-            let _ = tx.send(());
-        }
-    }
-}
-
-async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, ServerGuard) {
-    let state = TestGatewayBuilder::new().user_id("test-user").build();
-    let auth = MultiAuthState::single(AUTH_TOKEN.to_string(), "test-user".to_string());
-    let addr: SocketAddr = "127.0.0.1:0"
-        .parse()
-        .expect("hard-coded address must parse");
-    let bound = start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("start gateway test server");
-    let shutdown = state.shutdown_tx.write().await.take();
-    (bound, state, ServerGuard { shutdown })
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("build test http client")
-}
-
-/// POST `/api/v1/responses` must route to `create_response_handler` —
-/// not 404. We send a deliberately invalid `model` so the handler
-/// short-circuits with 400 before touching the agent loop; the important
-/// assertion is "the route exists".
+/// POST `/api/v1/responses` must route to the Reborn Responses handler, not
+/// the router fallback. An empty model is rejected by the handler with a JSON
+/// OpenAI-compatible validation error, proving the route exists.
 #[tokio::test]
 async fn canonical_post_path_routes_to_handler() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
-            "model": "not-a-real-model",
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
+            "model": "",
             "input": "hello",
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses");
+        })),
+    )
+    .await;
 
-    // The handler rejects non-"default" models with 400, which proves the
-    // request reached `create_response_handler` rather than the router's
-    // fallback 404. A 404 here would mean the route isn't registered.
-    assert_eq!(
-        resp.status(),
-        400,
-        "expected 400 from handler, got {}: {}",
-        resp.status(),
-        resp.text().await.unwrap_or_default()
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("model")).await;
 }
 
-/// Legacy alias `POST /v1/responses` must still route to the same
-/// handler (backward compatibility with clients that were configured
-/// against the pre-#2201 path).
+/// Legacy alias `POST /v1/responses` must still route to the same handler.
 #[tokio::test]
 async fn legacy_post_path_still_routes_to_handler() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
-            "model": "not-a-real-model",
+    let response = send(
+        Method::POST,
+        "/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
+            "model": "",
             "input": "hello",
-        }))
-        .send()
-        .await
-        .expect("POST /v1/responses");
+        })),
+    )
+    .await;
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "legacy path must reach handler, got {}: {}",
-        resp.status(),
-        resp.text().await.unwrap_or_default()
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("model")).await;
 }
 
-/// GET `/api/v1/responses/{id}` with a malformed id must return 400
-/// from the handler (invalid response ID) — proving the route is
-/// registered and the path parameter is reaching the handler.
+/// GET `/api/v1/responses/{id}` with a malformed id must return the handler's
+/// JSON error, not an empty router fallback 404.
 #[tokio::test]
 async fn canonical_get_path_routes_to_handler() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses/not_a_valid_id", addr);
+    let response = send(
+        Method::GET,
+        "/api/v1/responses/not_a_valid_id",
+        Some(AUTH_TOKEN),
+        None,
+    )
+    .await;
 
-    let resp = client()
-        .get(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .send()
-        .await
-        .expect("GET /api/v1/responses/{id}");
-
-    assert_eq!(
-        resp.status(),
-        400,
-        "expected 400 from handler for malformed id, got {}: {}",
-        resp.status(),
-        resp.text().await.unwrap_or_default()
-    );
+    assert_json_error(response, StatusCode::NOT_FOUND, Some("response_id")).await;
 }
 
-/// GET `/v1/responses/{id}` (legacy alias) must also route to the same
-/// handler.
+/// GET `/v1/responses/{id}` (legacy alias) must also route to the handler.
 #[tokio::test]
 async fn legacy_get_path_still_routes_to_handler() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/v1/responses/not_a_valid_id", addr);
+    let response = send(
+        Method::GET,
+        "/v1/responses/not_a_valid_id",
+        Some(AUTH_TOKEN),
+        None,
+    )
+    .await;
 
-    let resp = client()
-        .get(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .send()
-        .await
-        .expect("GET /v1/responses/{id}");
-
-    assert_eq!(
-        resp.status(),
-        400,
-        "legacy path must reach handler, got {}: {}",
-        resp.status(),
-        resp.text().await.unwrap_or_default()
-    );
+    assert_json_error(response, StatusCode::NOT_FOUND, Some("response_id")).await;
 }
 
-/// Both paths must enforce bearer-token auth. A missing token should
-/// return 401, not 404 (which would indicate the route is missing).
+/// Both create paths must enforce an authenticated caller before processing.
 #[tokio::test]
 async fn both_paths_require_auth() {
-    let (addr, _state, _guard) = start_test_server().await;
-
     for path in ["/api/v1/responses", "/v1/responses"] {
-        let url = format!("http://{}{}", addr, path);
-        let resp = client()
-            .post(&url)
-            .json(&serde_json::json!({ "model": "default", "input": "hi" }))
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("POST {path}: {e}"));
-        assert_eq!(
-            resp.status(),
-            401,
-            "{path} should return 401 without a token, got {}",
-            resp.status()
-        );
+        let response = send(
+            Method::POST,
+            path,
+            None,
+            Some(json!({ "model": "default", "input": "hi" })),
+        )
+        .await;
+        assert_json_error(response, StatusCode::UNAUTHORIZED, None).await;
     }
 }
 
-/// `tools: [{type: "function", ...}]` is the externally-provided-tools
-/// surface. POST handler must accept the field instead of rejecting with
-/// 400 — the agent's reply is delivered asynchronously, but the request
-/// validation has to clear. We use an obviously bad tool definition
-/// (missing `name`) to assert the dedicated 400 path: this proves both
-/// "the tools field is parsed" and "validation kicks in".
+/// A malformed external-tool declaration must be rejected by request
+/// validation. The important prefix regression is that the request reaches the
+/// Responses validator rather than a route fallback.
 #[tokio::test]
 async fn missing_tool_name_returns_validation_error() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
             "model": "default",
             "input": "hi",
             "tools": [
                 {"type": "function", "description": "nameless"}
             ]
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses with malformed tool");
+        })),
+    )
+    .await;
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "expected 400 from external-tool validator, got {}",
-        resp.status()
-    );
-    let body = resp.text().await.unwrap_or_default();
-    assert!(
-        body.contains("name"),
-        "validation error should mention the missing 'name' field, got: {body}"
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("tools")).await;
 }
 
-/// Unsupported tool types (e.g. `web_search`) must be rejected by the
-/// validator with a clear 400 — not silently accepted, since the engine
-/// doesn't honour them.
+/// Unsupported tool types must also be rejected by the Responses validator.
 #[tokio::test]
 async fn unsupported_tool_type_returns_validation_error() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
             "model": "default",
             "input": "hi",
             "tools": [
                 {"type": "web_search", "name": "search"}
             ]
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses with unsupported tool type");
+        })),
+    )
+    .await;
 
-    assert_eq!(resp.status(), 400);
-    let body = resp.text().await.unwrap_or_default();
-    assert!(
-        body.contains("web_search"),
-        "validation error should mention the unsupported tool type, got: {body}"
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("tools")).await;
 }
 
-/// `instructions` is a per-request system/developer message (OpenAI Responses
-/// API spec). The handler used to reject it with 400; it must now accept it
-/// and route the request into the agent loop. We assert the request clears
-/// the synchronous validation gate by asking for a malformed `model` so the
-/// handler short-circuits with a 400 whose message is about `model`, not
-/// about `instructions`. A 400 mentioning `instructions` would mean the
-/// rejection regressed.
+/// `instructions` is part of the Responses API request shape. It must not be
+/// rejected as an unknown field; the empty model should be the validation error.
 #[tokio::test]
 async fn instructions_field_is_accepted() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
-            "model": "not-a-real-model",
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
+            "model": "",
             "input": "hi",
             "instructions": "You are a terse assistant. Always reply in one sentence.",
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses with instructions");
+        })),
+    )
+    .await;
 
-    assert_eq!(resp.status(), 400);
-    let body = resp.text().await.unwrap_or_default();
+    let body = assert_json_error(response, StatusCode::BAD_REQUEST, Some("model")).await;
     assert!(
-        !body.contains("instructions"),
-        "instructions must no longer be rejected, got: {body}"
-    );
-    assert!(
-        body.contains("Model selection"),
-        "expected the model rejection to be the reason for 400, got: {body}"
+        !body.to_string().contains("instructions"),
+        "instructions must not be the rejection reason, got: {body}"
     );
 }
 
-/// External tools require engine v2: when the engine is not initialized
-/// the handler must reject the request with a clear 4xx instead of
-/// silently degrading. The path-prefix gateway boots without engine v2
-/// (no `init_engine` call, so the `ExternalToolCatalog` is absent), and
-/// the handler keys off catalog presence rather than reading env vars
-/// directly — so this test exercises the no-engine branch by virtue of
-/// what `TestGatewayBuilder` actually wires up. No process-global env
-/// mutation required.
-/// `function_call_output` items are a resume signal: they must be
-/// matched against a pending external-tool gate for the resolved
-/// thread. Without one (e.g. because the caller fabricates a
-/// `previous_response_id` or the gate already expired), the handler
-/// must reject with 400 instead of silently sending the resume into a
-/// fresh thread.
+/// A `function_call_output` continuation without an authorized previous
+/// response must be rejected by the handler, not missed by the router.
 #[tokio::test]
 async fn resume_without_pending_gate_returns_400() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
-
-    // Synthesize a wire-valid previous_response_id (resp_<32hex><32hex>)
-    // that names a thread the gateway has never seen. The handler
-    // accepts the format, looks for a pending gate, finds none, and
-    // must respond 400 — not silently drop the function_call_output
-    // and start a fresh turn against the thread.
     let fake_prev = format!("resp_{}{}", "0".repeat(32), "1".repeat(32));
-
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
             "model": "default",
             "previous_response_id": fake_prev,
             "input": [
@@ -336,99 +195,23 @@ async fn resume_without_pending_gate_returns_400() {
                     "output": "irrelevant"
                 }
             ]
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses resume w/o pending gate");
+        })),
+    )
+    .await;
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "expected 400 for resume without pending gate, got {}",
-        resp.status()
-    );
-    let body = resp.text().await.unwrap_or_default();
-    assert!(
-        body.contains("pending"),
-        "rejection should mention the missing pending gate, got: {body}"
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("input")).await;
 }
 
-/// A caller-supplied tool name that shadows a registered (built-in
-/// or extension) action must be rejected at request validation with
-/// 400. Without this check, the catalog short-circuit in
-/// `EffectBridgeAdapter::execute_action` would silently route the
-/// LLM's call to caller-side execution — even though the LLM saw
-/// the *internal* tool's description in its action surface, since
-/// `available_action_inventory` dedupes the opposite way (internal
-/// wins). That's a confused-deputy surface where the caller can
-/// craft any output and the LLM treats it as the trusted internal
-/// tool's reply.
+/// Caller-supplied external tools are fail-closed until the host wires the
+/// external-tool store/resume ports. Shadowing against host capabilities is
+/// enforced later by composition when that surface is enabled.
 #[tokio::test]
-async fn external_tool_name_shadowing_registered_action_is_rejected() {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use ironclaw::context::JobContext;
-    use ironclaw::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
-
-    /// Stand-in for a registered built-in. Production tools have
-    /// the same name shape (`shell`, `memory_write`, etc.); this
-    /// tool deliberately uses a unique name so the test isn't
-    /// affected by which built-ins the harness happens to register.
-    struct StandInTool;
-
-    #[async_trait]
-    impl Tool for StandInTool {
-        fn name(&self) -> &str {
-            "stand_in_tool"
-        }
-        fn description(&self) -> &str {
-            "stand-in for a registered tool — used for collision tests"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(
-            &self,
-            _params: serde_json::Value,
-            _ctx: &JobContext,
-        ) -> Result<ToolOutput, ToolError> {
-            Ok(ToolOutput::success(
-                serde_json::json!({"ok": true}),
-                std::time::Duration::from_millis(0),
-            ))
-        }
-    }
-
-    // Spin up a gateway with a registry that contains a known tool
-    // name, so the validation check has something to collide with.
-    let registry = Arc::new(ToolRegistry::new());
-    registry.register(Arc::new(StandInTool)).await;
-
-    let state = ironclaw::channels::web::test_helpers::TestGatewayBuilder::new()
-        .user_id("test-user")
-        .tool_registry(registry)
-        .build();
-    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
-        AUTH_TOKEN.to_string(),
-        "test-user".to_string(),
-    );
-    let addr: SocketAddr = "127.0.0.1:0"
-        .parse()
-        .expect("hard-coded address must parse");
-    let bound =
-        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
-            .await
-            .expect("start gateway test server");
-    let shutdown = state.shutdown_tx.write().await.take();
-    let _guard = ServerGuard { shutdown };
-
-    let url = format!("http://{}/api/v1/responses", bound);
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
+async fn caller_supplied_tools_are_rejected_when_external_tools_are_unwired() {
+    let response = send(
+        Method::POST,
+        "/api/v1/responses",
+        Some(AUTH_TOKEN),
+        Some(json!({
             "model": "default",
             "input": "hi",
             "tools": [
@@ -439,51 +222,166 @@ async fn external_tool_name_shadowing_registered_action_is_rejected() {
                     "parameters": {"type": "object"}
                 }
             ]
-        }))
-        .send()
-        .await
-        .expect("POST /api/v1/responses with shadowing tool name");
+        })),
+    )
+    .await;
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "shadowing tool name must be rejected, got {}",
-        resp.status()
-    );
-    let body = resp.text().await.unwrap_or_default();
-    assert!(
-        body.contains("stand_in_tool"),
-        "rejection should name the colliding tool, got: {body}"
-    );
-    assert!(
-        body.to_ascii_lowercase().contains("shadow")
-            || body.to_ascii_lowercase().contains("built-in"),
-        "rejection should explain why (shadow / built-in), got: {body}"
-    );
+    assert_json_error(response, StatusCode::BAD_REQUEST, Some("tools")).await;
 }
 
-/// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
-/// must also enforce bearer-token auth. A missing token should return 401,
-/// not 404 — the auth middleware has to apply to legacy aliases as well.
+/// Both GET item paths must also enforce authentication before id parsing.
 #[tokio::test]
 async fn both_get_paths_require_auth() {
-    let (addr, _state, _guard) = start_test_server().await;
-
     for path in [
         "/api/v1/responses/not_a_valid_id",
         "/v1/responses/not_a_valid_id",
     ] {
-        let url = format!("http://{}{}", addr, path);
-        let resp = client()
-            .get(&url)
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
-        assert_eq!(
-            resp.status(),
-            401,
-            "{path} should return 401 without a token, got {}",
-            resp.status()
-        );
+        let response = send(Method::GET, path, None, None).await;
+        assert_json_error(response, StatusCode::UNAUTHORIZED, None).await;
+    }
+}
+
+async fn send(
+    method: Method,
+    path: &str,
+    auth_token: Option<&str>,
+    body: Option<Value>,
+) -> Response {
+    let mut router = test_router();
+    // Host auth middleware injects this extension before the route fragment.
+    // The composition mount test covers the bearer-token middleware itself.
+    if auth_token == Some(AUTH_TOKEN) {
+        router = router.layer(axum::Extension(caller()));
+    }
+
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(token) = auth_token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let body = if let Some(body) = body {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+        Body::from(body.to_string())
+    } else {
+        Body::empty()
+    };
+
+    router
+        .oneshot(builder.body(body).expect("request"))
+        .await
+        .expect("route response")
+}
+
+fn test_router() -> axum::Router {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader),
+    );
+    openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+}
+
+fn caller() -> OpenAiCompatAuthenticatedCaller {
+    OpenAiCompatAuthenticatedCaller::new(
+        OpenAiCompatActorScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("test-user").expect("user"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+        ),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "test-user",
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
+    )
+    .expect("caller")
+}
+
+async fn assert_json_error(
+    response: Response,
+    expected_status: StatusCode,
+    expected_param: Option<&str>,
+) -> Value {
+    assert_eq!(
+        response.status(),
+        expected_status,
+        "expected {expected_status}, got {}",
+        response.status()
+    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&body).expect("json error body");
+    assert_eq!(
+        body["error"]["param"].as_str(),
+        expected_param,
+        "unexpected error body: {body}"
+    );
+    body
+}
+
+struct StaticResponsesReader;
+
+#[async_trait]
+impl OpenAiResponsesProjectionReader for StaticResponsesReader {
+    async fn wait_for_response_completion(
+        &self,
+        request: OpenAiResponseWaitRequest,
+    ) -> Result<OpenAiResponseProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
+    {
+        Ok(OpenAiResponseProjection::new(completed_response(
+            request.public_id,
+            request.requested_model,
+        ))
+        .with_internal_refs(
+            OpenAiCompatInternalRefs::new(
+                OpenAiCompatProductActionRef::new("product-action:response").expect("action"),
+            )
+            .with_turn_run_ref(
+                OpenAiCompatTurnRunRef::new(TurnRunId::new().to_string()).expect("run"),
+            )
+            .with_projection_ref(
+                OpenAiCompatProjectionRef::new("projection:response").expect("projection"),
+            ),
+        ))
+    }
+
+    async fn read_response(
+        &self,
+        request: OpenAiResponseReadRequest,
+    ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError> {
+        Ok(completed_response(
+            request.public_id,
+            request
+                .requested_model
+                .unwrap_or_else(|| "default".to_string()),
+        ))
+    }
+}
+
+fn completed_response(id: OpenAiResponseId, model: String) -> OpenAiResponseObject {
+    OpenAiResponseObject {
+        id,
+        object: "response".to_string(),
+        created_at: 1_777_777_777,
+        status: OpenAiResponseStatus::Completed,
+        model,
+        output: vec![OpenAiResponseOutputItem::Message {
+            id: "msg_1".to_string(),
+            status: Some(OpenAiResponseOutputItemStatus::Completed),
+            role: OpenAiResponsesMessageRole::Assistant,
+            content: json!([{"type": "output_text", "text": "ok"}]),
+        }],
+        error: None,
+        incomplete_details: None,
+        usage: Some(OpenAiResponseUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+        }),
     }
 }

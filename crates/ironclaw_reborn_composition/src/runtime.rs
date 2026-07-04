@@ -5098,6 +5098,9 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "root-llm-provider")]
     struct RuntimeEnvGuard {
+        // Serializes tokio tests that mutate the runtime env overlay. The
+        // set/remove helpers lock only the separate override map, not
+        // ENV_MUTEX, so restoration can safely run while this guard is held.
         _async_lock: tokio::sync::MutexGuard<'static, ()>,
         _env_lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<(&'static str, Option<String>)>,
@@ -5137,6 +5140,13 @@ output_schema_ref = "schemas/write.output.json"
                 match previous {
                     Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
                     None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                }
+                if !std::thread::panicking() {
+                    debug_assert_eq!(
+                        ironclaw_common::env_helpers::env_or_override(name),
+                        previous.clone(),
+                        "RuntimeEnvGuard failed to restore {name}"
+                    );
                 }
             }
         }

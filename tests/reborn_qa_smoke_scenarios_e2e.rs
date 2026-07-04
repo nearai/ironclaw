@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -16,6 +19,10 @@ use ironclaw_loop_support::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
 };
 use ironclaw_turns::TurnStatus;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::{
+    RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
+};
 use reborn_support::{
     config::WaitConfig,
     extension_surface::{
@@ -24,10 +31,7 @@ use reborn_support::{
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     },
     github as github_support,
-    harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
-    model_replay::{
-        RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
-    },
+    harness::RecordingTestCapabilityPort,
 };
 
 const COVERED_QA_SCENARIOS: &[&str] = &[
@@ -57,7 +61,7 @@ const COVERED_QA_SCENARIOS: &[&str] = &[
 
 #[test]
 fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
-    reborn_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
+    parity_qa_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
 }
 
 #[tokio::test]

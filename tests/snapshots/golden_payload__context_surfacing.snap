@@ -1,5 +1,5 @@
 ---
-source: tests/support/reborn/golden.rs
+source: tests/integration/support/golden.rs
 assertion_line: 128
 ---
 ===== inference call 0 =====

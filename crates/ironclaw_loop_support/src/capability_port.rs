@@ -5265,6 +5265,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_tool_call_registration_accepts_password_and_traceback_reasoning_text() {
+        // W4-PROVIDER-VALIDATE (#5001 caller gap): the crude
+        // `SENSITIVE_PROVIDER_TEXT_MARKERS` substring scan on provider
+        // reasoning/response_reasoning/signature text was removed in favor of
+        // the entropy-based `LeakDetector` (#5001, PinchBench bucket D) --
+        // bare English words like "password"/"traceback" in legitimate
+        // analysis reasoning must be ACCEPTED, not rejected (the old scan
+        // false-positived on exactly this kind of text and drove
+        // retry/give-up loops). `capability_port/provider_validation.rs`'s
+        // own unit test pins this at the private free-function level
+        // (`validate_provider_tool_call` called directly); this drives it
+        // through the REAL production caller instead --
+        // `LoopCapabilityPort::validate_provider_tool_call` /
+        // `register_provider_tool_call` / `invoke_capability` on
+        // `HostRuntimeLoopCapabilityPort`, the same port the agent loop
+        // calls -- per the test-through-the-caller rule.
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-password-traceback",
+        )
+        .await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let mut call = provider_tool_call();
+        call.response_reasoning = Some(
+            "provider error included a traceback; the user's password had expired".to_string(),
+        );
+        call.reasoning =
+            Some("checked the traceback output for a leaked password field".to_string());
+        call.signature = Some("password-traceback-review".to_string());
+
+        port.validate_provider_tool_call(&call)
+            .expect("password/traceback reasoning text must be accepted, not rejected (#5001)");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .expect("password/traceback reasoning text must register, not be staged as a failure");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("accepted call should dispatch, not error");
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "expected a real Completed dispatch (proving the call was genuinely accepted, not \
+             silently downgraded to a model-visible failure), got {outcome:?}"
+        );
+        assert_eq!(runtime.take_requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn provider_tool_call_registration_rejects_capability_remap_for_same_input() {
         let first_capability_id = CapabilityId::new("demo.a__b").expect("valid capability id");
         let remapped_capability_id = CapabilityId::new("demo.a.b").expect("valid capability id");

@@ -61,8 +61,6 @@ use ironclaw_resources::{
     FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "postgres")]
-use std::env::{self, VarError};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -2010,10 +2008,10 @@ pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
 
 #[cfg(feature = "postgres")]
 fn optional_env_var(name: &str) -> Result<Option<String>, String> {
-    match env::var(name) {
+    match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
     }
 }
 

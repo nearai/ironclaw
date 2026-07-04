@@ -1831,7 +1831,7 @@ Existing parity harness in this repo:
 
 - `crates/ironclaw_hooks_parity/tests/parity_matrix.rs` — hooks-tier behavioral parity matrix.
 - `tests/reborn_wrong_scope_access_isolation_parity.rs` — cross-scope isolation parity at integration test tier.
-- `tests/support_unit_tests.rs` and `tests/support/reborn/product_workflow.rs` — `RebornProductWorkflowHarness` / `FilesystemIdempotencyLedger` parity helpers with `filesystem_temp` + `filesystem_shared_backend` constructors.
+- `tests/support_unit_tests.rs` and `tests/integration/support/product_workflow.rs` — `RebornProductWorkflowHarness` / `FilesystemIdempotencyLedger` parity helpers with `filesystem_temp` + `filesystem_shared_backend` constructors.
 
 Subagent store parity tests do **not** belong in `ironclaw_hooks_parity` (hooks-specific contract). Correct location:
 
