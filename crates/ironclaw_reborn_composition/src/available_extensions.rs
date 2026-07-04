@@ -1843,6 +1843,20 @@ pub(crate) fn imported_extension_package(
         .into_iter()
         .map(|(path, bytes)| bytes_asset(&path, &bytes))
         .collect();
+    // A wasm bundle MUST ship the module its manifest declares. Without this
+    // check a bundle that omits the module would import "successfully", then a
+    // tenant-wide replace would prune the still-live previous module (it is not
+    // in the new bundle's keep-set) leaving every dispatch failing, and the
+    // next restart would fail the whole runtime build on the missing file.
+    // Reject at import instead, before anything is materialized.
+    if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime
+        && !assets.iter().any(|asset| asset.path == module.as_str())
+    {
+        return Err(map_binding_error(format!(
+            "imported bundle declares wasm module `{}` but does not contain it",
+            module.as_str()
+        )));
+    }
     let package = with_wasm_bundle_digest_from_assets(package, &assets);
     Ok(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
@@ -1856,7 +1870,25 @@ pub(crate) fn imported_extension_package(
     })
 }
 
-fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
+/// True when the package's wasm module asset is read from disk (`Filesystem`)
+/// rather than carried inline from the binary (`Bytes`). First-party bundled
+/// packages inline their module bytes; imported and filesystem-discovered
+/// packages point at the on-disk file. Restart migration uses this to tell a
+/// genuine first-party binary upgrade (safe to migrate the stored manifest
+/// hash) from an imported extension whose on-disk manifest disagrees with its
+/// stored hash — which is only reachable via a torn/corrupt replace and must
+/// fail closed instead of blessing v2 metadata over stale module bytes.
+pub(crate) fn has_disk_sourced_module(package: &AvailableExtensionPackage) -> bool {
+    let ExtensionRuntime::Wasm { module } = &package.package.manifest.runtime else {
+        return false;
+    };
+    package.assets.iter().any(|asset| {
+        asset.path == module.as_str()
+            && matches!(asset.content, AvailableExtensionAssetContent::Filesystem(_))
+    })
+}
+
+pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
         "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID

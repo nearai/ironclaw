@@ -842,7 +842,7 @@ registerPack("ja", {
   "ext.registry.importing": "インポート中…",
   "ext.registry.importSuccess": "ツールをインポートしました — レジストリからインストールしてください。",
   "ext.registry.importFailed": "インポートに失敗しました",
-  "ext.registry.importReplaceConfirm": "このツールは既にインストールされています。テナント全体で置き換えますか？アクティブだった場合はアクティブのままで、ユーザーの資格情報と権限は保持され、更新されたツールはすぐに有効になります。",
+  "ext.registry.importReplaceConfirm": "このツールは既にインストールされています。このバージョンでテナント全体に置き換えますか？現在のインストール（存在する場合はチームメンバーのプライベートなコピーを含む）が置き換えられ、その後アクティブ化が必要になる場合があります。",
   "ext.registry.importConflict": "インポートをキャンセルしました — ツールは既にインストールされています。",
   "extensions.scope.shared": "共有",
   "extensions.scope.private": "自分",

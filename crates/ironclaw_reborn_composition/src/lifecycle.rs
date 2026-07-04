@@ -523,8 +523,20 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
             });
         };
         let caller = lifecycle_resource_scope(&context)?.user_id;
+        // Build the same activation credential gate the `activate` verb uses so a
+        // Replace of an ENABLED install can refuse a v2 that adds unsatisfied
+        // product-auth credentials (instead of republishing an unusable surface).
+        let credential_gate = match (&context, &self.credential_accounts) {
+            (LifecycleProductContext::Surface(_), Some(credential_accounts)) => {
+                Some(RuntimeExtensionActivationCredentialGate::new(
+                    lifecycle_resource_scope(&context)?,
+                    Arc::clone(credential_accounts),
+                ))
+            }
+            _ => None,
+        };
         extension_management
-            .import_bundle(&bundle, mode, &caller)
+            .import_bundle(&bundle, mode, credential_gate.as_ref(), &caller)
             .await
     }
 }

@@ -922,7 +922,7 @@ registerPack("en", {
   "ext.registry.importSuccess": "Tool imported — install it from the registry.",
   "ext.registry.importFailed": "Import failed",
   "ext.registry.importReplaceConfirm":
-    "This tool is already installed. Replace it for the whole tenant? It stays active if it was active, users keep their credentials and permissions, and the updated tools go live immediately.",
+    "This tool is already installed. Replace it for the whole tenant with this version? This replaces the current install — including a teammate's private copy, if there is one — which may need to be activated afterward.",
   "ext.registry.importConflict": "Import cancelled — the tool is already installed.",
 
   // Chat — history

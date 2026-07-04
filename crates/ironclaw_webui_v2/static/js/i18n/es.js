@@ -842,7 +842,7 @@ registerPack("es", {
   "ext.registry.importing": "Importando…",
   "ext.registry.importSuccess": "Herramienta importada: instálala desde el registro.",
   "ext.registry.importFailed": "Error al importar",
-  "ext.registry.importReplaceConfirm": "Esta herramienta ya está instalada. ¿Reemplazarla para todo el inquilino? Permanece activa si lo estaba, los usuarios conservan sus credenciales y permisos, y las herramientas actualizadas se activan de inmediato.",
+  "ext.registry.importReplaceConfirm": "Esta herramienta ya está instalada. ¿Reemplazarla para todo el inquilino por esta versión? Esto reemplaza la instalación actual, incluida la copia privada de un compañero si la hay, que puede necesitar activarse después.",
   "ext.registry.importConflict": "Importación cancelada: la herramienta ya está instalada.",
   "extensions.scope.shared": "compartida",
   "extensions.scope.private": "propia",

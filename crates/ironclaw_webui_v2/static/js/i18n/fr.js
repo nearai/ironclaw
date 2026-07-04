@@ -842,7 +842,7 @@ registerPack("fr", {
   "ext.registry.importing": "Importation…",
   "ext.registry.importSuccess": "Outil importé — installez-le depuis le registre.",
   "ext.registry.importFailed": "Échec de l'importation",
-  "ext.registry.importReplaceConfirm": "Cet outil est déjà installé. Le remplacer pour tout le locataire ? Il reste actif s'il l'était, les utilisateurs conservent leurs identifiants et autorisations, et les outils mis à jour sont disponibles immédiatement.",
+  "ext.registry.importReplaceConfirm": "Cet outil est déjà installé. Le remplacer pour tout le locataire par cette version ? Cela remplace l'installation actuelle, y compris la copie privée d'un collègue le cas échéant, qui devra peut-être être activée ensuite.",
   "ext.registry.importConflict": "Importation annulée — l'outil est déjà installé.",
   "extensions.scope.shared": "partagé",
   "extensions.scope.private": "à moi",

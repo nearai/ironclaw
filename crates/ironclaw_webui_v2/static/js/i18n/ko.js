@@ -842,7 +842,7 @@ registerPack("ko", {
   "ext.registry.importing": "가져오는 중…",
   "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
   "ext.registry.importFailed": "가져오기 실패",
-  "ext.registry.importReplaceConfirm": "이 도구는 이미 설치되어 있습니다. 전체 테넌트에 대해 교체하시겠습니까? 활성 상태였다면 활성 상태로 유지되고, 사용자의 자격 증명과 권한은 유지되며, 업데이트된 도구가 즉시 적용됩니다.",
+  "ext.registry.importReplaceConfirm": "이 도구는 이미 설치되어 있습니다. 이 버전으로 전체 테넌트에 대해 교체하시겠습니까? 현재 설치(있는 경우 팀원의 개인 사본 포함)가 교체되며, 이후 활성화가 필요할 수 있습니다.",
   "ext.registry.importConflict": "가져오기가 취소되었습니다 — 도구가 이미 설치되어 있습니다.",
   "extensions.scope.shared": "공유됨",
   "extensions.scope.private": "내 것",

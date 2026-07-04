@@ -842,7 +842,7 @@ registerPack("zh-CN", {
   "ext.registry.importing": "正在导入…",
   "ext.registry.importSuccess": "工具已导入 — 请从注册表安装。",
   "ext.registry.importFailed": "导入失败",
-  "ext.registry.importReplaceConfirm": "此工具已安装。要为整个租户替换它吗？如果它处于活动状态，则保持活动状态，用户保留其凭据和权限，更新后的工具立即生效。",
+  "ext.registry.importReplaceConfirm": "此工具已安装。要用此版本为整个租户替换它吗？这将替换当前安装（如果有，也包括同事的私有副本），之后可能需要激活。",
   "ext.registry.importConflict": "导入已取消 — 该工具已安装。",
   "extensions.scope.shared": "共享",
   "extensions.scope.private": "我的",

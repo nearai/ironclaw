@@ -26,8 +26,9 @@ mod hosted_mcp_test_support;
 
 use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, ExtensionAssetStash,
-    extension_asset_paths, imported_extension_package, list_extension_files,
-    materialize_available_extension, materialize_extension_for_replace, visible_capability_ids,
+    extension_asset_paths, has_disk_sourced_module, imported_extension_package,
+    list_extension_files, materialize_available_extension, materialize_extension_for_replace,
+    visible_capability_ids,
 };
 use crate::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -137,6 +138,7 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
         }
     })?;
     let mut files = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
     let mut total_bytes = 0usize;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|error| {
@@ -162,6 +164,20 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
         {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
+            });
+        }
+        // Defense in depth against duplicate entry names (`zip -g` / archive
+        // concat). The advertised bundle digest is taken from the FIRST matching
+        // asset while materialization keeps the LAST write on disk; if both ever
+        // reached the catalog the two would disagree and the compiled-module
+        // cache would miss forever. The current `zip` reader collapses duplicate
+        // names to a single last-wins entry (see the
+        // `unzip_extension_bundle_collapses_duplicate_entry_names` canary), so
+        // this guard does not fire today — but it fails closed rather than depend
+        // on that reader behavior surviving a version bump.
+        if !seen_names.insert(name.clone()) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle contains a duplicate entry: {name}"),
             });
         }
         // `take(allowance + 1)` bounds what a hostile entry can buffer: the
@@ -593,6 +609,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         bundle: &[u8],
         mode: ExtensionImportMode,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let files = unzip_extension_bundle(bundle)?;
@@ -657,7 +674,7 @@ impl RebornLocalExtensionManagementPort {
                 ),
             }),
             ExtensionImportMode::Replace => {
-                self.replace_installed_bundle(&mut catalog, package, existing)
+                self.replace_installed_bundle(&mut catalog, package, existing, credential_gate)
                     .await
             }
         }
@@ -680,6 +697,7 @@ impl RebornLocalExtensionManagementPort {
         catalog: &mut AvailableExtensionCatalog,
         package: AvailableExtensionPackage,
         existing: ExtensionInstallation,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let extension_id = package.package.id.clone();
         let package_ref = package.package_ref.clone();
@@ -732,6 +750,46 @@ impl RebornLocalExtensionManagementPort {
                     extension_id.as_str()
                 ),
             })?;
+
+        // A hot-replace of an ENABLED install republishes the new capability set
+        // straight into the active registry — bypassing the activation credential
+        // gate the `activate` verb runs. A v2 that ADDS a required product-auth
+        // credential the tenant hasn't configured would therefore go live
+        // tenant-wide with unsatisfiable capabilities (every dispatch failing
+        // credential staging), and the Enabled record would re-publish the same
+        // broken surface on the next restart with no setup prompt ever shown.
+        // Mirror the activate gate BEFORE any destructive step and fail closed:
+        // configure the credentials (or deactivate) first, then replace.
+        if was_enabled {
+            let requirements = package_runtime_credential_auth_requirements(&package.package);
+            if !requirements.is_empty() {
+                let satisfied = match credential_gate {
+                    Some(gate) => gate
+                        .missing_requirements(requirements)
+                        .await
+                        .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!(
+                                "extension {} product auth credential state is invalid: {error:?}",
+                                extension_id.as_str()
+                            ),
+                        })?
+                        .is_empty(),
+                    // No credential-account service wired: we cannot confirm the
+                    // new requirements are satisfied, so fail closed rather than
+                    // publish an unsatisfiable surface.
+                    None => false,
+                };
+                if !satisfied {
+                    return Err(ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!(
+                            "extension {} v{} requires product auth credentials that are not configured; configure them or deactivate the extension before replacing the enabled install",
+                            extension_id.as_str(),
+                            new_version
+                        ),
+                    });
+                }
+            }
+        }
 
         // 1. Files: capture the prune baseline and the byte stash, then write
         //    with restore-on-failure semantics (never the delete-what-we-wrote
@@ -908,6 +966,22 @@ impl RebornLocalExtensionManagementPort {
         let extension_id = package.package.id.clone();
         let package_ref = package.package_ref.clone();
 
+        // Verify the new bundle can take the slot BEFORE the destructive
+        // eviction. `register_lifecycle_package` re-validates after eviction, but
+        // by then the user's working install is already deregistered/unpublished
+        // — a capability-id collision against ANOTHER extension (extension ids
+        // may contain dots, so `a` v2 declaring `a.b.tool` collides with an
+        // installed `a.b`) would then leave the user's tool dead with no way to
+        // retry. `validate_replacement` runs the same collision check the swap
+        // would, excluding the v1 package about to be superseded, so a colliding
+        // bundle is rejected while the private install is still intact.
+        {
+            let lifecycle = self.lifecycle_service.lock().await;
+            lifecycle
+                .validate_replacement(&package.package)
+                .map_err(map_extension_error)?;
+        }
+
         self.evict_private_installation(&extension_id, &existing)
             .await?;
         let plan = prepare_install(&package, InstallationOwner::Tenant)?;
@@ -926,7 +1000,21 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
-        if let Err(error) = self.persist_install_plan(plan).await {
+        // Persist the fresh tenant records with the SAME atomic call the
+        // tenant-owned arm uses. `persist_install_plan` would upsert the manifest
+        // first, and the in-memory store validates EVERY stored installation of
+        // this id against the new manifest — the just-evicted private row still
+        // exists (eviction only flips it to Disabled) with the v1 hash, so it
+        // fails `ManifestHashMismatch` against the v2 manifest for any real
+        // upgrade. `upsert_manifest_and_installation` validates only the new
+        // (manifest, installation) pair and overwrites the same-id row, flipping
+        // the owner User -> Tenant in one step.
+        if let Err(error) = self
+            .installation_store
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
+            .await
+            .map_err(map_extension_installation_error)
+        {
             if let Err(restore_error) = stash.restore(self.filesystem.as_ref()).await {
                 return Err(compensation_failure(
                     "extension replace-over-private persistence failed and file restore failed",
@@ -1871,6 +1959,20 @@ async fn migrate_host_bundled_manifest_hash(
         return Err(hash_error);
     }
 
+    // Imported zip bundles are recorded as `HostBundled` too, but they are NOT
+    // first-party: their module is read from disk, whereas a genuine first-party
+    // bundled extension carries its module inline from the binary. A clean
+    // import/replace always commits the record hash to match the on-disk
+    // manifest, so a mismatch reaching here for a disk-sourced module means the
+    // on-disk tree is torn or corrupt — e.g. a crash between the manifest and
+    // module writes of a replace left a v2-manifest over v1-module chimera.
+    // Only in-binary (inline) packages legitimately migrate on an upgrade; fail
+    // closed for disk-sourced ones rather than bless v2 metadata over stale
+    // module bytes.
+    if has_disk_sourced_module(available) {
+        return Err(hash_error);
+    }
+
     // For host-bundled (first-party) extensions, a manifest hash mismatch means
     // the binary was updated and the bundled manifest changed. Migrate the stored
     // records to the new hash while preserving activation state and bindings.
@@ -2184,6 +2286,51 @@ mod tests {
         assert!(
             format!("{error}").contains("unsafe path"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// Fix F canary: the `imported_extension_package` digest is taken from the
+    /// FIRST matching asset while materialization writes the LAST — if the zip
+    /// reader ever surfaced BOTH copies of a duplicate name, the advertised
+    /// digest and the on-disk bytes would disagree and the compiled-module cache
+    /// would miss forever. Today's `zip` reader collapses a duplicate name to a
+    /// single LAST-wins entry, so the two always agree; this test locks that
+    /// reader guarantee. If a version bump ever changes it, this fails and the
+    /// `unzip_extension_bundle` duplicate guard becomes the live safety net.
+    #[test]
+    fn unzip_extension_bundle_collapses_duplicate_entry_names() {
+        // The zip WRITER refuses to emit duplicate names, but `zip -g` / archive
+        // concatenation produce them in the wild. Forge one: write two entries
+        // with SAME-LENGTH names, then byte-patch the second name to collide with
+        // the first (equal length keeps every header offset valid).
+        let mut bundle = zip_bundle(&[
+            ("wasm/dupe.a", b"first".as_slice()),
+            ("wasm/dupe.b", b"second".as_slice()),
+        ]);
+        let needle = b"wasm/dupe.b";
+        let replacement = b"wasm/dupe.a";
+        assert_eq!(needle.len(), replacement.len());
+        for start in 0..bundle.len().saturating_sub(needle.len()) {
+            if &bundle[start..start + needle.len()] == needle {
+                bundle[start..start + needle.len()].copy_from_slice(replacement);
+            }
+        }
+        let files = unzip_extension_bundle(&bundle).expect("forged duplicate parses");
+        let dupes: Vec<_> = files
+            .iter()
+            .filter(|(name, _)| name == "wasm/dupe.a")
+            .collect();
+        assert_eq!(
+            dupes.len(),
+            1,
+            "reader must collapse a duplicate name to a single entry, got {dupes:?}"
+        );
+        // Last-wins: the surviving entry carries the SECOND copy's bytes, which is
+        // exactly what materialization would write — so digest and disk agree.
+        assert_eq!(
+            dupes[0].1.as_slice(),
+            b"second",
+            "the surviving entry must be the last write"
         );
     }
 
@@ -2590,6 +2737,314 @@ mod tests {
             .collect()
     }
 
+    /// Zip a replace-test bundle for an arbitrary id + capability set, emitting
+    /// the schema files each capability's manifest references so the bundle is
+    /// self-consistent for ids/caps outside the fixed `one`/`two` set.
+    fn replace_bundle_for(id: &str, version: &str, caps: &[&str], module: &[u8]) -> Vec<u8> {
+        let manifest = replace_test_manifest(id, version, caps);
+        let mut owned: Vec<(String, Vec<u8>)> = vec![
+            ("manifest.toml".to_string(), manifest.into_bytes()),
+            ("wasm/tool.wasm".to_string(), module.to_vec()),
+        ];
+        for cap in caps {
+            owned.push((format!("schemas/{cap}.input.json"), b"{}".to_vec()));
+            owned.push((format!("schemas/{cap}.output.json"), b"{}".to_vec()));
+        }
+        let refs: Vec<(&str, &[u8])> = owned
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect();
+        zip_bundle(&refs)
+    }
+
+    /// A replace-test manifest whose first capability declares a REQUIRED
+    /// product-auth credential (`use_secret` effect + `product_auth_account`
+    /// source) — used to exercise the credential gate on an enabled replace.
+    fn replace_test_manifest_with_credential(id: &str, version: &str) -> String {
+        format!(
+            "schema_version = \"reborn.extension_manifest.v2\"\n\
+             id = \"{id}\"\n\
+             name = \"Replace Test\"\n\
+             version = \"{version}\"\n\
+             description = \"Replace test fixture\"\n\
+             trust = \"first_party_requested\"\n\n\
+             [runtime]\n\
+             kind = \"wasm\"\n\
+             module = \"wasm/tool.wasm\"\n\n\
+             [[capabilities]]\n\
+             id = \"{id}.one\"\n\
+             description = \"Capability one\"\n\
+             effects = [\"dispatch_capability\", \"use_secret\"]\n\
+             default_permission = \"allow\"\n\
+             visibility = \"model\"\n\
+             input_schema_ref = \"schemas/one.input.json\"\n\
+             output_schema_ref = \"schemas/one.output.json\"\n\
+             runtime_credentials = [ {{ handle = \"github_runtime_token\", source = {{ type = \"product_auth_account\", provider = \"github\" }}, audience = {{ scheme = \"https\", host_pattern = \"api.github.com\" }}, target = {{ type = \"header\", name = \"authorization\", prefix = \"Bearer \" }} }} ]\n\n\
+             [[capabilities]]\n\
+             id = \"{id}.two\"\n\
+             description = \"Capability two\"\n\
+             effects = [\"dispatch_capability\"]\n\
+             default_permission = \"allow\"\n\
+             visibility = \"model\"\n\
+             input_schema_ref = \"schemas/two.input.json\"\n\
+             output_schema_ref = \"schemas/two.output.json\"\n"
+        )
+    }
+
+    /// Fix A: an imported bundle that DECLARES a wasm module but omits it from
+    /// the zip must be rejected at import — before this check the missing file
+    /// silently imports, a later replace prunes the live previous module, and the
+    /// next restart fails the whole runtime build on the absent file.
+    #[tokio::test]
+    async fn import_rejects_bundle_missing_declared_wasm_module() {
+        let (_dir, _root, port, _registry, _store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let manifest = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        // manifest.toml + schemas, but deliberately NO wasm/tool.wasm entry.
+        let bundle = zip_bundle(&[
+            ("manifest.toml", manifest.as_bytes()),
+            ("schemas/one.input.json", b"{}".as_slice()),
+            ("schemas/one.output.json", b"{}".as_slice()),
+        ]);
+        let error = port
+            .import_bundle(&bundle, ExtensionImportMode::Add, None, &admin)
+            .await
+            .expect_err("a bundle missing its declared module must be rejected");
+        assert!(
+            matches!(&error, ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("wasm/tool.wasm") && reason.contains("does not contain")),
+            "expected missing-module rejection, got {error:?}"
+        );
+    }
+
+    /// Fix B: an admin replace over a member's PRIVATE (User-owned) install must
+    /// succeed and transfer the slot to the tenant — not fail closed with
+    /// `ManifestHashMismatch` (the pre-fix bug that upserted the manifest while
+    /// the evicted private row still carried the old hash).
+    #[tokio::test]
+    async fn import_replace_over_private_install_transfers_slot_to_tenant() {
+        let (_dir, _root, port, _registry, store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let member = UserId::new("member").expect("member");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            None,
+            &admin,
+        )
+        .await
+        .expect("v1 import into a vacant slot");
+        port.install(package_ref, &member)
+            .await
+            .expect("member installs v1 privately");
+        let before = store
+            .get_installation(&ExtensionInstallationId::new("replace-me").unwrap())
+            .await
+            .expect("store read")
+            .expect("installed");
+        assert!(
+            matches!(before.owner(), InstallationOwner::User { .. }),
+            "precondition: member owns the private slot"
+        );
+
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        let response = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Replace,
+                None,
+                &admin,
+            )
+            .await
+            .expect("admin replace over a private install must succeed");
+        assert_eq!(response.phase, LifecyclePhase::Installed);
+
+        let after = store
+            .get_installation(&ExtensionInstallationId::new("replace-me").unwrap())
+            .await
+            .expect("store read")
+            .expect("installed");
+        assert!(
+            after.owner().is_tenant(),
+            "the slot must transfer to the tenant, got {:?}",
+            after.owner()
+        );
+        assert_eq!(
+            after.activation_state(),
+            ExtensionActivationState::Installed,
+            "a fresh tenant install lands at Installed"
+        );
+    }
+
+    /// Fix E: when the replacement bundle's capability set collides with ANOTHER
+    /// installed extension, the replace over a private slot must be rejected
+    /// BEFORE the destructive eviction — the member's working install must
+    /// survive intact (not be evicted with no way to retry).
+    #[tokio::test]
+    async fn import_replace_over_private_install_rejects_capability_collision_without_evicting() {
+        let (_dir, _root, port, _registry, store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let member = UserId::new("member").expect("member");
+
+        // An installed sibling extension `alpha.beta` owns capability id
+        // `alpha.beta.tool`.
+        port.import_bundle(
+            &replace_bundle_for("alpha.beta", "0.1.0", &["tool"], b"\0asm\x01\0\0\0ab"),
+            ExtensionImportMode::Add,
+            None,
+            &admin,
+        )
+        .await
+        .expect("import sibling alpha.beta");
+        port.install(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "alpha.beta")
+                .expect("alpha.beta ref"),
+            &admin,
+        )
+        .await
+        .expect("install sibling alpha.beta");
+
+        // A member privately installs extension `alpha` v1 (capability alpha.one).
+        port.import_bundle(
+            &replace_bundle_for("alpha", "0.1.0", &["one"], b"\0asm\x01\0\0\0a1"),
+            ExtensionImportMode::Add,
+            None,
+            &admin,
+        )
+        .await
+        .expect("import alpha v1");
+        port.install(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "alpha").expect("alpha ref"),
+            &member,
+        )
+        .await
+        .expect("member installs alpha privately");
+
+        // v2 of `alpha` adds capability `beta.tool` -> id `alpha.beta.tool`,
+        // colliding with the installed sibling. The replace must be rejected
+        // before eviction.
+        let error = port
+            .import_bundle(
+                &replace_bundle_for(
+                    "alpha",
+                    "0.2.0",
+                    &["one", "beta.tool"],
+                    b"\0asm\x01\0\0\0a2",
+                ),
+                ExtensionImportMode::Replace,
+                None,
+                &admin,
+            )
+            .await
+            .expect_err("a colliding replace must be rejected");
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "expected an InvalidBindingRequest, got {error:?}"
+        );
+
+        let alpha = store
+            .get_installation(&ExtensionInstallationId::new("alpha").unwrap())
+            .await
+            .expect("store read")
+            .expect("member install must survive");
+        assert!(
+            matches!(alpha.owner(), InstallationOwner::User { .. }),
+            "the member's private install must NOT be evicted, owner={:?}",
+            alpha.owner()
+        );
+        assert_eq!(
+            alpha.activation_state(),
+            ExtensionActivationState::Installed,
+            "eviction would have set the row to Disabled; it must be untouched"
+        );
+    }
+
+    /// Fix D: replacing an ENABLED install with a v2 that adds a REQUIRED
+    /// product-auth credential — with no credential-account service wired to
+    /// confirm it — must fail closed rather than republish an unsatisfiable
+    /// surface (which would also re-publish broken on the next restart).
+    #[tokio::test]
+    async fn import_replace_enabled_install_requiring_unconfigured_credentials_is_rejected() {
+        let (_dir, _root, port, _registry, store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let admin = lifecycle_owner();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            None,
+            &admin,
+        )
+        .await
+        .expect("v1 import");
+        port.install(package_ref.clone(), &admin)
+            .await
+            .expect("install v1");
+        port.activate(package_ref, ExtensionActivationMode::Static, &admin)
+            .await
+            .expect("activate v1");
+
+        let v2 = replace_test_manifest_with_credential("replace-me", "0.2.0");
+        let error = port
+            .import_bundle(
+                &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+                ExtensionImportMode::Replace,
+                None,
+                &admin,
+            )
+            .await
+            .expect_err("enabled replace adding unconfigured credentials must be rejected");
+        assert!(
+            matches!(&error, ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("credential")),
+            "expected a credential rejection, got {error:?}"
+        );
+
+        // The live install is untouched: still v1, still Enabled, old caps.
+        let installation = store
+            .get_installation(&ExtensionInstallationId::new("replace-me").unwrap())
+            .await
+            .expect("store read")
+            .expect("installed");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Enabled,
+            "the enabled install must be untouched by a rejected replace"
+        );
+        let caps = active_capability_ids(
+            &port
+                .active_model_visible_capabilities()
+                .await
+                .expect("caps"),
+        );
+        assert!(
+            caps.contains("replace-me.one") && !caps.contains("replace-me.two"),
+            "v1's surface must remain published and v2 must not have gone live: {caps:?}"
+        );
+    }
+
     /// Import `mode=add` of an ALREADY-INSTALLED id must fail with the typed
     /// conflict (409) instead of the pre-#5459 silent clobber of the live
     /// extension's on-disk assets — and it must NOT overwrite those assets.
@@ -2605,6 +3060,7 @@ mod tests {
         port.import_bundle(
             &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
             ExtensionImportMode::Add,
+            None,
             &admin,
         )
         .await
@@ -2618,6 +3074,7 @@ mod tests {
             .import_bundle(
                 &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
                 ExtensionImportMode::Add,
+                None,
                 &admin,
             )
             .await
@@ -2659,6 +3116,7 @@ mod tests {
         port.import_bundle(
             &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
             ExtensionImportMode::Add,
+            None,
             &admin,
         )
         .await
@@ -2684,6 +3142,7 @@ mod tests {
             .import_bundle(
                 &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
                 ExtensionImportMode::Replace,
+                None,
                 &admin,
             )
             .await
@@ -2738,6 +3197,7 @@ mod tests {
         port.import_bundle(
             &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
             ExtensionImportMode::Add,
+            None,
             &admin,
         )
         .await
@@ -2749,6 +3209,7 @@ mod tests {
             .import_bundle(
                 &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
                 ExtensionImportMode::Replace,
+                None,
                 &admin,
             )
             .await
@@ -2793,6 +3254,7 @@ mod tests {
         port.import_bundle(
             &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
             ExtensionImportMode::Add,
+            None,
             &admin,
         )
         .await
@@ -2804,6 +3266,7 @@ mod tests {
             .import_bundle(
                 &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
                 ExtensionImportMode::Replace,
+                None,
                 &member,
             )
             .await
@@ -3741,6 +4204,73 @@ mod tests {
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_none()
+        );
+    }
+
+    /// Fix C: an IMPORTED extension (module read from disk, recorded as
+    /// `HostBundled`) whose on-disk manifest hash no longer matches its stored
+    /// record is only reachable via a torn/corrupt replace (a crash between the
+    /// manifest and module writes). Restart migration must fail closed rather
+    /// than bless the new manifest over possibly-stale module bytes — before this
+    /// fix, the shared `HostBundled` label silently migrated the chimera.
+    #[tokio::test]
+    async fn restore_imported_extension_rejects_torn_manifest_hash_mismatch() {
+        let changed_available = fixture_package_disk_sourced_module(
+            "Lifecycle fixture extension with changed manifest",
+        );
+        let package = changed_available.package.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![changed_available]);
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        // Imported bundles are recorded as HostBundled; the stored hash is the
+        // pre-replace (v1) hash, which no longer matches the on-disk manifest.
+        let manifest_record = fixture_manifest_record_with_source(
+            fixture_extension_manifest(),
+            ManifestSource::HostBundled,
+            Some("sha256:old".to_string()),
+        );
+        installation_store
+            .upsert_manifest(manifest_record)
+            .await
+            .expect("upsert manifest");
+        installation_store
+            .upsert_installation(fixture_installation(
+                Some("sha256:old".to_string()),
+                ExtensionActivationState::Enabled,
+            ))
+            .await
+            .expect("upsert installation");
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+
+        let error = restore_extension_lifecycle_state(
+            &catalog,
+            &filesystem,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect_err("a torn imported-extension manifest mismatch must fail closed");
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "expected fail-closed InvalidBindingRequest, got {error:?}"
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&package.id)
+                .is_none(),
+            "a torn extension must not be published"
         );
     }
 
@@ -5666,6 +6196,24 @@ mod tests {
             &format!("description = \"{description}\""),
         );
         fixture_extension_package_from_manifest(&manifest)
+    }
+
+    /// Like [`fixture_extension_package_with_description`], but with the wasm
+    /// module asset pointed at an on-disk path (`Filesystem`) instead of inline
+    /// `Bytes` — i.e. an IMPORTED/filesystem-discovered package, as opposed to a
+    /// first-party in-binary one. Used to exercise the torn-replace fail-closed
+    /// path at restart.
+    fn fixture_package_disk_sourced_module(description: &str) -> AvailableExtensionPackage {
+        let mut package = fixture_extension_package_with_description(description);
+        for asset in &mut package.assets {
+            if asset.path == "wasm/fixture.wasm" {
+                asset.content = AvailableExtensionAssetContent::Filesystem(
+                    VirtualPath::new("/system/extensions/fixture/wasm/fixture.wasm")
+                        .expect("fixture module path"),
+                );
+            }
+        }
+        package
     }
 
     fn fixture_extension_manifest() -> &'static str {

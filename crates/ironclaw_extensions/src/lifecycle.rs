@@ -90,6 +90,16 @@ impl ExtensionLifecycleService {
         self.registry.get_extension(id).is_some() && !self.disabled_extensions.contains(id)
     }
 
+    /// Check whether `package` could atomically replace the currently-registered
+    /// package of the same id — capability collisions validated against OTHER
+    /// extensions, excluding the package being superseded — WITHOUT committing
+    /// the swap. Callers that must fail before a destructive pre-step (e.g. the
+    /// admin-wins eviction of a private install) use this so a bundle that would
+    /// not be insertable is rejected before the previous install is torn down.
+    pub fn validate_replacement(&self, package: &ExtensionPackage) -> Result<(), ExtensionError> {
+        self.registry.validate_replacement(package)
+    }
+
     pub async fn install(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
         self.registry.validate_insertable(&package)?;
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(

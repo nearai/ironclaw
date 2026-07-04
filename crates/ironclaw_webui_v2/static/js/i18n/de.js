@@ -842,7 +842,7 @@ registerPack("de", {
   "ext.registry.importing": "Wird importiert…",
   "ext.registry.importSuccess": "Tool importiert – installieren Sie es aus der Registry.",
   "ext.registry.importFailed": "Import fehlgeschlagen",
-  "ext.registry.importReplaceConfirm": "Dieses Tool ist bereits installiert. Für den gesamten Mandanten ersetzen? Es bleibt aktiv, wenn es aktiv war, Benutzer behalten ihre Anmeldedaten und Berechtigungen, und die aktualisierten Tools sind sofort verfügbar.",
+  "ext.registry.importReplaceConfirm": "Dieses Tool ist bereits installiert. Für den gesamten Mandanten durch diese Version ersetzen? Dabei wird die aktuelle Installation ersetzt – auch die private Kopie eines Teammitglieds, falls vorhanden –, die anschließend möglicherweise aktiviert werden muss.",
   "ext.registry.importConflict": "Import abgebrochen – das Tool ist bereits installiert.",
   "extensions.scope.shared": "geteilt",
   "extensions.scope.private": "eigene",
