@@ -1861,6 +1861,36 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
+            // The v1→Reborn migration tool is an intentional one-way bridge:
+            // it reads through the root `ironclaw` crate and writes through the
+            // Reborn state substrate + composition's `migration-support` seam.
+            // That bridge must stay a *state* converter — it must not grow
+            // direct deps on the serving/runtime/engine layers (gateway, engine,
+            // runtime lanes, dispatcher, webui) or it would quietly become a
+            // second live entry point into Reborn.
+            crate_name: "ironclaw_reborn_migration",
+            forbidden: vec![
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_network",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_event_store",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_scripts",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_product_workflow",
             forbidden: vec![
                 "ironclaw_dispatcher",
