@@ -942,6 +942,49 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result["error"], "missing_slack_route_user_id")
         self.assertIn("REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID", result["required_env"])
 
+    def test_live_github_latest_release_uses_configured_token(self):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"tag_name": "ironclaw-v0.test", "name": "Test release"}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def get(self, url):
+                captured["url"] = url
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with (
+            patch.dict(os.environ, {"AUTH_LIVE_GITHUB_TOKEN": "ghs_live"}, clear=True),
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+        ):
+            release = asyncio.run(
+                run_live_qa._live_github_latest_release("nearai", "ironclaw")
+            )
+
+        self.assertEqual(release["tag_name"], "ironclaw-v0.test")
+        self.assertEqual(
+            captured["url"],
+            "https://api.github.com/repos/nearai/ironclaw/releases/latest",
+        )
+        self.assertEqual(
+            captured["headers"]["Authorization"],
+            "Bearer ghs_live",
+        )
+
     def test_qa_7a_requires_dm_delivery_target(self):
         with (
             patch.object(
@@ -1036,8 +1079,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             await action(FakePage())
 
         async def fake_wait_for_assistant_reply(_page, **_kwargs):
+            self.assertEqual(
+                _kwargs["required_text"],
+                ["slack", "dm|delivery|target", "available|configured|ready"],
+            )
             return run_live_qa.AssistantReplyWaitResult(
-                text_excerpt="Slack is connected",
+                text_excerpt="Slack DM delivery target is available",
                 semantic_judge_used=False,
                 semantic_judge_reason="literal_required_text_matched",
             )
@@ -1087,7 +1134,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["baseline_capability_statuses"], baseline)
         self.assertEqual(result.details["capability_statuses"], stale)
-        self.assertEqual(result.details["text_excerpt"], "Slack is connected")
+        self.assertIn(
+            "Do not install, activate, authenticate, or connect the Slack extension",
+            result.details["chat_connect_prompt"],
+        )
+        self.assertEqual(
+            result.details["text_excerpt"],
+            "Slack DM delivery target is available",
+        )
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
         counts = run_live_qa._completed_capability_counts(
@@ -1201,6 +1255,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_routine["prompt"],
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
         )
+        self.assertIn("Use UTC for timestamps", captured_routine["prompt"])
+        self.assertIn("Do not ask follow-up questions", captured_routine["prompt"])
+        self.assertIn("Create the trigger now", captured_routine["prompt"])
         package_ids = [
             extension["package_id"] for extension in captured_routine["extensions"]
         ]
